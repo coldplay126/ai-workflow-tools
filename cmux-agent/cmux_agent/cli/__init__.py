@@ -12,6 +12,7 @@ from cmux_agent.cli.commands import (
     cmd_messages,
     cmd_register,
     cmd_send,
+    cmd_spawn,
     cmd_start,
     cmd_status,
     cmd_stop,
@@ -57,6 +58,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="역할 (기본: worker)",
     )
     p_reg.add_argument("--surface-id", help="cmux surface ID")
+
+    # spawn
+    p_spawn = sub.add_parser("spawn", help="새 worker 세션 생성")
+    p_spawn.add_argument("name", nargs="?", help="worker 이름 (기본: 다음 worker-N)")
+    p_spawn.add_argument("--provider", help="provider 이름 (기본: 설정 또는 claude)")
+    p_spawn.add_argument("--flags", default="", help="provider 실행 플래그")
 
     # agents
     p_agents = sub.add_parser("agents", help="등록된 agent 목록")
@@ -104,6 +111,7 @@ def main(argv: list[str] | None = None) -> None:
         "task": cmd_task,
         "stop": cmd_stop,
         "register": cmd_register,
+        "spawn": cmd_spawn,
         "agents": cmd_agents,
         "watch": cmd_watch,
         "status": cmd_status,

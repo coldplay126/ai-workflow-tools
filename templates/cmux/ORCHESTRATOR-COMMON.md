@@ -21,6 +21,26 @@
 
 dispatch 메시지에 별도 보고 형식을 지정하지 마라. worker는 자신의 에이전트 정의와 WORKER-COMMON.md를 따른다.
 
+## 동적 worker 생성
+작업 규모가 커서 병렬화가 유효하거나, 기존 worker 역할로 분절하기 어렵다면 controller에게 worker 생성을 요청한다.
+
+```json
+{
+  "type": "control",
+  "sender": "orchestrator",
+  "recipient": "controller",
+  "message": "<왜 worker가 필요한지>",
+  "action": "spawn_agent",
+  "agent": {
+    "name": "<worker-name 또는 생략>",
+    "provider": "claude|codex|gemini",
+    "flags": "<선택>"
+  }
+}
+```
+
+controller가 새 worker 이름을 result 메시지로 알려주면 그 worker에게 dispatch한다.
+
 ## 금지 사항
 - **직접 코드를 읽거나 분석하지 마라.** Read, Grep, Glob, Explore 도구를 사용하지 마라. 코드 분석은 worker의 역할이다.
 - **worker 결과를 직접 리뷰하지 마라.** 결과를 사용자에게 전달만 하라.

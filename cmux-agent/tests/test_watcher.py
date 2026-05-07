@@ -25,6 +25,16 @@ class TestValidateArtifact:
         }
         assert validate_artifact(data) is None
 
+    def test_valid_control(self):
+        data = {
+            "type": "control",
+            "sender": "orchestrator",
+            "recipient": "controller",
+            "message": "need another worker",
+            "action": "spawn_agent",
+        }
+        assert validate_artifact(data) is None
+
     def test_missing_fields(self):
         assert validate_artifact({"type": "dispatch"}) is not None
 

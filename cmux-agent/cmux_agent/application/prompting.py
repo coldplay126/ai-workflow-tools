@@ -27,6 +27,19 @@ ARTIFACT_FORMAT_RESULT = {
     "message": "<작업 결과 요약>",
 }
 
+ARTIFACT_FORMAT_CONTROL_SPAWN = {
+    "type": "control",
+    "sender": "orchestrator",
+    "recipient": "controller",
+    "message": "<왜 worker가 필요한지>",
+    "action": "spawn_agent",
+    "agent": {
+        "name": "<worker-name 또는 생략>",
+        "provider": "claude|codex|gemini",
+        "flags": "<선택>",
+    },
+}
+
 
 class PromptBuilder:
     """delivery 메시지, 주입 프롬프트, 프로토콜 파일을 생성한다."""
@@ -149,12 +162,15 @@ class PromptBuilder:
                 "분석, 계획, 작업 분해만 수행하세요.\n"
                 "직접 파일을 수정하거나 명령을 실행하지 마세요.\n"
                 f"worker에게 작업을 위임하려면 {self._outbox} 에 "
-                "dispatch artifact(JSON)를 생성하세요."
+                "dispatch artifact(JSON)를 생성하세요.\n"
+                "작업 크기나 분절 가능성상 worker가 더 필요하면 "
+                "control spawn_agent artifact(JSON)를 생성하세요."
             ),
             "workers": worker_list,
             "outbox_path": self._outbox,
             "inbox_path": f"{self._inbox_base}/orchestrator",
             "artifact_format": ARTIFACT_FORMAT_DISPATCH,
+            "control_format": ARTIFACT_FORMAT_CONTROL_SPAWN,
         }
 
     def build_initial_worker(self, name: str) -> dict:
@@ -258,6 +274,15 @@ class PromptBuilder:
                 + json.dumps(ARTIFACT_FORMAT_DISPATCH, ensure_ascii=False, indent=2)
                 + "\n```\n"
                 "\n"
+                "## 동적 worker 생성\n"
+                "- 작업 규모를 분석해 병렬화가 유효하면 새 worker를 요청한다.\n"
+                "- provider는 작업 성격에 맞게 `claude`, `codex`, `gemini` 중 선택한다.\n"
+                "- 새 worker가 생성되면 controller가 결과 메시지로 worker 이름을 알려준다.\n"
+                "\n"
+                "```json\n"
+                + json.dumps(ARTIFACT_FORMAT_CONTROL_SPAWN, ensure_ascii=False, indent=2)
+                + "\n```\n"
+                "\n"
                 "## 사용 가능한 worker\n"
                 f"{worker_list_str}\n"
                 "\n"
@@ -291,5 +316,9 @@ class PromptBuilder:
                 f"```json\n"
                 + json.dumps(fmt, ensure_ascii=False, indent=2)
                 + "\n```\n"
+                f"\n"
+                f"## 팀 작업\n"
+                f"- orchestrator가 명시적으로 허용한 경우 다른 worker에게 dispatch를 보낼 수 있다.\n"
+                f"- 이때 sender는 반드시 `{name}`으로 기록하고 recipient는 대상 worker 이름으로 기록한다.\n"
             )
             (base / f"{name.upper()}.md").write_text(worker_content, encoding="utf-8")

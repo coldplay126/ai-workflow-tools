@@ -29,6 +29,16 @@ uv run --project cli --no-editable awf analyze sample-api health --repo-root . -
 
 The Python package is `awf-cli`, and the console entrypoint is `awf`.
 
+## cmux-agent
+
+`cmux-agent` provides a visual multi-agent runtime on top of cmux. It creates a controller, an orchestrator, and configured workers, then routes JSON artifacts through `.agent/outbox` and `.agent/inbox`.
+
+The orchestrator can request dynamic workers by writing a `control` artifact with `action: "spawn_agent"`. You can also create one manually:
+
+```bash
+uv run --project cmux-agent cmux-agent spawn worker-api --provider codex
+```
+
 ## Claude Code Setup
 
 ```bash

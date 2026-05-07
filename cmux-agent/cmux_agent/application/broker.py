@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 
 from cmux_agent.application.prompting import PromptBuilder
+from cmux_agent.application.runtime import AgentRuntime
 from cmux_agent.domain.events import (
     artifact_detected,
     artifact_validation_failed,
@@ -36,6 +37,7 @@ class MessageBroker:
         prompt_builder: PromptBuilder,
         run_id: str,
         workspace_id: str | None = None,
+        runtime: AgentRuntime | None = None,
     ) -> None:
         self._store = store
         self._event_log = event_log
@@ -44,6 +46,7 @@ class MessageBroker:
         self._prompt = prompt_builder
         self._run_id = run_id
         self._workspace_id = workspace_id
+        self._runtime = runtime
 
     # -- ArtifactConsumer 프로토콜 구현 ------------------------------------
 
@@ -78,6 +81,10 @@ class MessageBroker:
             self._fs.move_to_failed(artifact_path)
             return
 
+        if msg_type_str == "control":
+            self._handle_control(sender=sender, artifact_path=artifact_path, payload=data)
+            return
+
         # recipient 확인
         recipient_agent = self._store.get_agent_by_name(self._run_id, recipient)
         if not recipient_agent:
@@ -110,6 +117,66 @@ class MessageBroker:
         )
 
     # -- 내부 라우팅 --------------------------------------------------------
+
+    def _handle_control(self, *, sender: str, artifact_path: Path, payload: dict) -> None:
+        action = str(payload.get("action", "") or "").strip()
+        if action != "spawn_agent":
+            self._event_log.append(
+                artifact_validation_failed(
+                    self._run_id, str(artifact_path), f"지원하지 않는 control action: {action or '-'}"
+                )
+            )
+            self._fs.move_to_failed(artifact_path)
+            return
+
+        if self._runtime is None:
+            self._event_log.append(
+                artifact_validation_failed(
+                    self._run_id, str(artifact_path), "runtime spawner unavailable"
+                )
+            )
+            self._fs.move_to_failed(artifact_path)
+            return
+
+        agent_data = payload.get("agent")
+        if not isinstance(agent_data, dict):
+            agent_data = {}
+        result = self._runtime.spawn_worker(
+            name=str(agent_data.get("name") or payload.get("agent_name") or "").strip() or None,
+            provider=str(agent_data.get("provider") or payload.get("provider") or "").strip() or None,
+            flags=str(agent_data.get("flags") or payload.get("flags") or "").strip() or None,
+        )
+
+        if not result.ok:
+            self._event_log.append(
+                artifact_validation_failed(
+                    self._run_id, str(artifact_path), result.error or "spawn_agent failed"
+                )
+            )
+            self._fs.move_to_failed(artifact_path)
+            return
+
+        response = {
+            "type": "result",
+            "sender": "controller",
+            "recipient": sender,
+            "message": f"spawned {result.name} ({result.provider})",
+            "context": {
+                "control_action": "spawn_agent",
+                "agent": {
+                    "name": result.name,
+                    "provider": result.provider,
+                    "surface_id": result.surface_id,
+                },
+            },
+        }
+        self._route_message(
+            sender="controller",
+            recipient=sender,
+            msg_type=MessageType.RESULT,
+            payload=response,
+            artifact_path=artifact_path,
+        )
 
     def _route_message(
         self,

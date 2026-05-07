@@ -13,6 +13,12 @@ from pathlib import Path
 
 from cmux_agent.application.broker import MessageBroker
 from cmux_agent.application.prompting import PromptBuilder
+from cmux_agent.application.runtime import (
+    AgentRuntime,
+    normalize_agent_entry,
+    parse_surface_ref,
+    provider_command,
+)
 from cmux_agent.application.watcher import ArtifactWatcher
 from cmux_agent.domain.events import agent_registered, run_created, run_status_changed
 from cmux_agent.domain.models import Agent, AgentRole, Run, RunStatus
@@ -29,9 +35,7 @@ def _normalize_agent_entry(entry: str | dict) -> dict:
 
     string이면 {"provider": entry}로 변환, dict면 그대로 반환.
     """
-    if isinstance(entry, str):
-        return {"provider": entry}
-    return dict(entry)
+    return normalize_agent_entry(entry)
 
 
 def _runtime_dir(cwd: str) -> Path:
@@ -173,10 +177,7 @@ def _parse_surface_ref(output: str) -> str | None:
 
     출력 형식: "OK surface:14 pane:13 workspace:5"
     """
-    for token in output.split():
-        if token.startswith("surface:"):
-            return token
-    return None
+    return parse_surface_ref(output)
 
 
 def _parse_workspace_ref(output: str) -> str | None:
@@ -295,18 +296,12 @@ def cmd_start(args: argparse.Namespace) -> None:
     # orchestrator, worker 탭에서 AI CLI 자동 실행 (설정 파일 기반)
     config = _load_config(cwd)
     time.sleep(0.5)
-    # provider 이름 → 실행 명령어 매핑 (nvm 버전 전환 대응)
-    _PROVIDER_COMMANDS = {
-        "codex": "npx @openai/codex",
-    }
     for agent in agents:
         if agent.role in (AgentRole.ORCHESTRATOR, AgentRole.WORKER) and agent.surface_id:
             entry = _normalize_agent_entry(config.get(agent.name, "claude"))
             provider = entry.get("provider", "claude")
             flags = entry.get("flags", "")
-            command = _PROVIDER_COMMANDS.get(provider, provider)
-            if flags:
-                command = f"{command} {flags}"
+            command = provider_command(provider, flags)
             cmux.send_text(
                 f"{command}\n",
                 surface_id=agent.surface_id,
@@ -352,16 +347,13 @@ def cmd_task(args: argparse.Namespace) -> None:
         and a.surface_id
         and cmux.is_surface_alive(a.surface_id)
     ]
-    if not active_names:
-        print("활성 worker가 없습니다.", file=sys.stderr)
-        sys.exit(1)
-
     prompt = (
         f"{request}\n"
         f"\n"
         f"위 작업을 분석하고, worker에게 위임하세요.\n"
+        f"작업 크기상 worker가 더 필요하거나 현재 worker가 부족하면 control spawn_agent artifact를 먼저 생성하세요.\n"
         f"{fs.outbox} 에 dispatch artifact(JSON)를 생성하세요.\n"
-        f"사용 가능한 worker: {', '.join(active_names)}"
+        f"사용 가능한 worker: {', '.join(active_names) if active_names else '(없음 - 필요 시 spawn_agent 요청)'}"
     )
 
     cmux.send_text(
@@ -437,6 +429,45 @@ def cmd_register(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# spawn
+# ---------------------------------------------------------------------------
+
+def cmd_spawn(args: argparse.Namespace) -> None:
+    fs = _get_fs()
+    store = _get_store(fs)
+    event_log = _get_event_log(fs)
+    cmux = CmuxAdapter()
+
+    run = store.get_active_run()
+    if not run:
+        print("활성 run이 없습니다.", file=sys.stderr)
+        sys.exit(1)
+
+    prompt_builder = PromptBuilder(str(fs.outbox), str(fs.inbox))
+    runtime = AgentRuntime(
+        store=store,
+        event_log=event_log,
+        fs=fs,
+        cmux=cmux,
+        prompt_builder=prompt_builder,
+        run_id=run.run_id,
+        workspace_id=run.workspace_id,
+        template_dir=_active_template_dir,
+        provider_config=_load_config(_active_cwd),
+    )
+    result = runtime.spawn_worker(
+        name=args.name,
+        provider=args.provider,
+        flags=args.flags,
+    )
+    if not result.ok:
+        print(f"worker 생성 실패: {result.error}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Worker 생성: {result.name} ({result.provider}) {result.surface_id or '-'}")
+
+
+# ---------------------------------------------------------------------------
 # agents
 # ---------------------------------------------------------------------------
 
@@ -481,6 +512,17 @@ def cmd_watch(args: argparse.Namespace) -> None:
         outbox_path=str(fs.outbox),
         inbox_base=str(fs.inbox),
     )
+    runtime = AgentRuntime(
+        store=store,
+        event_log=event_log,
+        fs=fs,
+        cmux=cmux,
+        prompt_builder=prompt_builder,
+        run_id=run.run_id,
+        workspace_id=run.workspace_id,
+        template_dir=_active_template_dir,
+        provider_config=_load_config(_active_cwd),
+    )
     broker = MessageBroker(
         store=store,
         event_log=event_log,
@@ -489,6 +531,7 @@ def cmd_watch(args: argparse.Namespace) -> None:
         prompt_builder=prompt_builder,
         run_id=run.run_id,
         workspace_id=run.workspace_id,
+        runtime=runtime,
     )
     watcher = ArtifactWatcher(fs.outbox, broker)
 

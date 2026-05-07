@@ -7,6 +7,7 @@ import pytest
 
 from cmux_agent.application.broker import MessageBroker
 from cmux_agent.application.prompting import PromptBuilder
+from cmux_agent.application.runtime import AgentRuntime
 from cmux_agent.domain.models import Agent, AgentRole, Message, MessageStatus, Run
 from cmux_agent.infrastructure.cmux import CmuxAdapter, CmuxResult
 from cmux_agent.infrastructure.event_log import EventLog
@@ -19,9 +20,32 @@ class FakeCmux(CmuxAdapter):
 
     def __init__(self):
         self.calls: list[tuple[str, dict]] = []
+        self._surface_seq = 3
 
     def _run(self, *args, timeout=10):
         self.calls.append(("_run", {"args": args}))
+        return CmuxResult(ok=True, stdout="", stderr="")
+
+    def new_surface(self, *, pane_id=None, workspace_id=None):
+        surface = f"surface:{self._surface_seq}"
+        self._surface_seq += 1
+        self.calls.append(("new_surface", {"workspace_id": workspace_id, "surface": surface}))
+        return CmuxResult(ok=True, stdout=f"OK {surface} pane:1 workspace:1", stderr="")
+
+    def rename_tab(self, title, *, surface_id=None, workspace_id=None):
+        self.calls.append(("rename_tab", {"title": title, "surface_id": surface_id, "workspace_id": workspace_id}))
+        return CmuxResult(ok=True, stdout="", stderr="")
+
+    def send_text(self, text, *, surface_id=None, workspace_id=None):
+        self.calls.append(("send_text", {"text": text, "surface_id": surface_id, "workspace_id": workspace_id}))
+        return CmuxResult(ok=True, stdout="", stderr="")
+
+    def notify(self, title: str, body: str = ""):
+        self.calls.append(("notify", {"title": title, "body": body}))
+        return CmuxResult(ok=True, stdout="", stderr="")
+
+    def log(self, message, *, level="info", source=None, workspace_id=None):
+        self.calls.append(("log", {"message": message, "level": level, "source": source, "workspace_id": workspace_id}))
         return CmuxResult(ok=True, stdout="", stderr="")
 
     def is_surface_alive(self, surface_id: str) -> bool:
@@ -53,9 +77,19 @@ def setup(tmp_path):
     ))
 
     prompt_builder = PromptBuilder(str(fs.outbox), str(fs.inbox))
+    runtime = AgentRuntime(
+        store=store,
+        event_log=event_log,
+        fs=fs,
+        cmux=cmux,
+        prompt_builder=prompt_builder,
+        run_id="run-1",
+        workspace_id="workspace:1",
+    )
     broker = MessageBroker(
         store=store, event_log=event_log, fs=fs,
         cmux=cmux, prompt_builder=prompt_builder, run_id="run-1",
+        workspace_id="workspace:1", runtime=runtime,
     )
     return broker, store, fs, event_log, cmux
 
@@ -143,3 +177,35 @@ class TestBrokerRouting:
         broker.handle_artifact(artifact_path, data)
 
         assert list(fs.failed.iterdir())
+
+    def test_control_spawn_agent_creates_worker(self, setup):
+        broker, store, fs, _, cmux = setup
+
+        artifact_path = fs.outbox / "spawn.json"
+        artifact_path.write_text("{}")
+
+        data = {
+            "type": "control",
+            "sender": "orchestrator",
+            "recipient": "controller",
+            "message": "need isolated implementation worker",
+            "action": "spawn_agent",
+            "agent": {"name": "worker-api", "provider": "codex"},
+        }
+        broker.handle_artifact(artifact_path, data)
+
+        worker = store.get_agent_by_name("run-1", "worker-api")
+        assert worker is not None
+        assert worker.role == AgentRole.WORKER
+        assert worker.surface_id == "surface:3"
+        assert (fs.inbox / "worker-api").exists()
+
+        inbox_files = list((fs.inbox / "orchestrator").iterdir())
+        assert len(inbox_files) == 1
+        payload = json.loads(inbox_files[0].read_text())
+        assert payload["result"] == "spawned worker-api (codex)"
+        assert any(call[0] == "new_surface" for call in cmux.calls)
+        assert any(
+            call[0] == "send_text" and "npx @openai/codex" in call[1]["text"]
+            for call in cmux.calls
+        )

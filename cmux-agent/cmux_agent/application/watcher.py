@@ -31,7 +31,7 @@ def validate_artifact(data: dict) -> str | None:
     missing = REQUIRED_FIELDS - set(data.keys())
     if missing:
         return f"필수 필드 누락: {missing}"
-    if data["type"] not in ("dispatch", "result"):
+    if data["type"] not in ("dispatch", "result", "control"):
         return f"알 수 없는 type: {data['type']}"
     return None
 

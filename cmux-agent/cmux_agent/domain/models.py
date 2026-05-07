@@ -28,6 +28,7 @@ class AgentRole(str, enum.Enum):
 class MessageType(str, enum.Enum):
     DISPATCH = "DISPATCH"
     RESULT = "RESULT"
+    CONTROL = "CONTROL"
 
 
 class MessageStatus(str, enum.Enum):
