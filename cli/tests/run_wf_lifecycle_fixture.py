@@ -12,13 +12,27 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 REVIEW_RESULT = ROOT / "cli" / "tests" / "fixtures" / "review-result.json"
 VERIFY_RESULT = ROOT / "cli" / "tests" / "fixtures" / "verify-result.json"
+WF_TEMPLATE_ROOT = ROOT / "claude" / "skills" / "wf-orchestrator" / "templates"
 
 
 def _prepare_temp_repo(temp_repo: Path) -> None:
     (temp_repo / "docs").mkdir(parents=True, exist_ok=True)
     shutil.copy2(ROOT / "docs" / "architecture" / "awf-cli-architecture.md", temp_repo / "docs" / "awf-cli-architecture.md")
-    shutil.copytree(ROOT / ".workflow", temp_repo / ".workflow")
-    (temp_repo / ".workflow" / "state.json").unlink(missing_ok=True)
+
+    wf_dir = temp_repo / ".workflow"
+    (wf_dir / "artifacts").mkdir(parents=True, exist_ok=True)
+    (wf_dir / "tmp").mkdir(parents=True, exist_ok=True)
+    shutil.copytree(WF_TEMPLATE_ROOT / "agent-cards", wf_dir / "agent-cards")
+    shutil.copy2(WF_TEMPLATE_ROOT / "provider-config.default.json", wf_dir / "provider-config.json")
+    (wf_dir / "artifacts" / "spec.md").write_text("# Spec\n\n- FR-001: Fixture requirement\n", encoding="utf-8")
+    (wf_dir / "artifacts" / "plan.md").write_text("# Plan\n\n- Implement fixture requirement\n", encoding="utf-8")
+    (wf_dir / "artifacts" / "tasks.md").write_text("# Tasks\n\n- [X] T001 Fixture task\n", encoding="utf-8")
+    (wf_dir / "artifacts" / "allowed-files.json").write_text(
+        json.dumps({"files": ["docs/awf-cli-architecture.md"]}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (wf_dir / "artifacts" / "impl-log.md").write_text("# Implementation Log\n\n- Fixture implementation complete\n", encoding="utf-8")
+
     config_path = temp_repo / ".awf.toml"
     config_path.write_text(
         "\n".join(
@@ -53,13 +67,23 @@ def _run_awf(repo_root: Path, *args: str, fixture_result: Path | None = None) ->
     )
 
 
+def _mark_prerequisites_passed(temp_repo: Path) -> None:
+    state_path = temp_repo / ".workflow" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["gates"]["G1"] = {"passed": True, "provider": "fixture", "provider_status": "completed"}
+    state["gates"]["G4"] = {"passed": True, "provider": "fixture", "provider_status": "completed"}
+    state["phases"]["plan"]["status"] = "completed"
+    state["phases"]["impl"]["status"] = "completed"
+    state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmp_dir_str:
         temp_repo = Path(tmp_dir_str) / "repo"
         temp_repo.mkdir(parents=True, exist_ok=True)
         _prepare_temp_repo(temp_repo)
 
-        initialized = _run_awf(temp_repo, "wf", "init", "Fixture lifecycle concept")
+        initialized = _run_awf(temp_repo, "wf", "init", "Fixture lifecycle concept covering review and verify gates")
         print(initialized.stdout, end="")
         if initialized.stderr:
             print(initialized.stderr, file=sys.stderr, end="")
@@ -76,6 +100,8 @@ def main() -> int:
         print(f"wf_before_phase={before_state.get('currentPhase')}")
         if before_state.get("currentPhase") != "plan":
             return 1
+
+        _mark_prerequisites_passed(temp_repo)
 
         reviewed = _run_awf(
             temp_repo,
