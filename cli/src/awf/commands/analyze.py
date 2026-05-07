@@ -19,7 +19,7 @@ from awf.core.analysis_prompt import (
     estimate_bundle_tokens,
 )
 from awf.core.analysis_fanout import analysis_scale, run_stage2_fanout, should_stage2_fanout
-from awf.core.analysis_files import collect_domain_files, hashes_changed, save_hashes_file
+from awf.core.analysis_files import collect_domain_files, hashes_changed, load_hashes_file, save_hashes_file
 from awf.core.judge import cross_secondary_candidates, explain_judge_reasons, synthesize_cross_stage2
 from awf.core.analysis_state import (
     ensure_ai_context_dirs,
@@ -362,6 +362,7 @@ def run_analyze(args: argparse.Namespace) -> int:
         data={"stage": "stage1", "description": "build analysis context and prompt"},
     )
 
+    previous_hashes = load_hashes_file(context)
     hashes_have_changed = hashes_changed(context, domain_files)
     hashes_path = save_hashes_file(context, domain_files)
     print(f"hashes_file: {hashes_path}")
@@ -415,27 +416,54 @@ def run_analyze(args: argparse.Namespace) -> int:
                 run_stage1_file_analyses,
                 save_stage1_file_analyses,
             )
-            from awf.core.analysis_files import compute_changed_files
+            from awf.core.analysis_files import compute_changed_files, compute_deleted_files
+            from awf.core.graph_builder import expand_stage1_targets_with_import_graph
 
             # K1: Incremental — only analyze changed files when previous results exist
             stage1_target_files = domain_files
             previous_analyses: list[dict] = []
             unchanged_paths: set[str] = set()
+            bypass_cache_paths: set[str] = set()
 
-            if resume.get("hashes_changed") and load_stage1_file_analyses(context):
-                changed_files, unchanged_files = compute_changed_files(context, domain_files)
-                previous_analyses = load_stage1_file_analyses(context)
-                unchanged_paths = {e["path"] for e in unchanged_files}
-                if changed_files:
-                    stage1_target_files = changed_files
+            cached_stage1_analyses = load_stage1_file_analyses(context)
+            if resume.get("hashes_changed") and cached_stage1_analyses:
+                previous_analyses = cached_stage1_analyses
+                changed_files, _unchanged_files = compute_changed_files(
+                    context,
+                    domain_files,
+                    saved_hashes=previous_hashes,
+                )
+                deleted_files = compute_deleted_files(
+                    context,
+                    domain_files,
+                    saved_hashes=previous_hashes,
+                )
+                graph_invalidation = expand_stage1_targets_with_import_graph(
+                    context,
+                    domain_files,
+                    changed_files,
+                    deleted_files,
+                )
+                unchanged_paths = {e["path"] for e in graph_invalidation.unchanged_files}
+                bypass_cache_paths = set(graph_invalidation.indirect_paths)
+                if graph_invalidation.target_files:
+                    stage1_target_files = graph_invalidation.target_files
                     print(
-                        f"stage1_incremental: {len(changed_files)} changed / {len(unchanged_files)} unchanged "
-                        f"(saving {len(unchanged_files)} provider calls)",
+                        f"stage1_incremental: {len(changed_files)} direct + "
+                        f"{len(graph_invalidation.indirect_paths)} graph-dependent / "
+                        f"{len(graph_invalidation.unchanged_files)} unchanged "
+                        f"(saving {len(graph_invalidation.unchanged_files)} provider calls)",
                         file=sys.stderr,
                     )
+                    if graph_invalidation.indirect_paths:
+                        print(
+                            "stage1_graph_invalidation: "
+                            f"{len(graph_invalidation.invalidating_paths)} invalidating path(s), "
+                            f"{len(graph_invalidation.indirect_paths)} reverse dependent(s)",
+                            file=sys.stderr,
+                        )
                 else:
-                    # All files have same hash but we're re-analyzing (e.g. config changed)
-                    stage1_target_files = domain_files
+                    stage1_target_files = []
 
             print(f"stage1_provider: {stage1_provider_name} (files={len(stage1_target_files)}, parallel={stage1_max_concurrent})", file=sys.stderr)
 
@@ -452,6 +480,7 @@ def run_analyze(args: argparse.Namespace) -> int:
                 max_concurrent=int(stage1_max_concurrent),
                 on_progress=_stage1_progress,
                 use_observation=use_observation,
+                bypass_cache_paths=bypass_cache_paths,
             )
 
             # Merge new + previous for unchanged files
@@ -462,8 +491,8 @@ def run_analyze(args: argparse.Namespace) -> int:
 
             analyses_path = save_stage1_file_analyses(context, file_analyses)
 
-            # Phase 0b: build the import graph for diagnostic visibility.
-            # No invalidation logic consumes this yet; failures are warnings only.
+            # Rebuild the import graph for the next incremental run.
+            # The current run consumes the previous graph before this point.
             try:
                 from awf.core.graph_builder import build_and_save_graph
 

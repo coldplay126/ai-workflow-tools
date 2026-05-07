@@ -9,8 +9,18 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from awf.core.analysis_files import compute_exports_hash
-from awf.core.graph_builder import build_and_save_graph, build_graph, graph_path_for
+from awf.core.analysis_files import (
+    compute_changed_files,
+    compute_exports_hash,
+    load_hashes_file,
+    save_hashes_file,
+)
+from awf.core.graph_builder import (
+    build_and_save_graph,
+    build_graph,
+    expand_stage1_targets_with_import_graph,
+    graph_path_for,
+)
 from awf.core.import_graph import ImportGraph
 from awf.core.imports import extract_imports_with_kinds
 
@@ -105,6 +115,9 @@ def _make_context(repo_root: Path) -> SimpleNamespace:
         github_root=repo_root,
         repo_root=repo_root,
         ai_context_dir=ai_dir,
+        service="fixture",
+        domain="domain",
+        mode="standard",
     )
 
 
@@ -115,6 +128,11 @@ def _write(p: Path, content: str) -> dict[str, str]:
         "path": str(p.relative_to(p.parents[1] if p.parents[1].name else p.parents[0])),
         "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
     }
+
+
+def _entry(repo_root: Path, rel_path: str) -> dict[str, str]:
+    path = repo_root / rel_path
+    return {"path": rel_path, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
 
 
 def test_build_graph_records_edges_between_known_files(tmp_path: Path):
@@ -212,3 +230,116 @@ def test_build_and_save_graph_handles_missing_files_gracefully(tmp_path: Path):
     assert out is not None
     payload = json.loads(out.read_text(encoding="utf-8"))
     assert payload["stats"]["node_count"] == 0
+
+
+def test_changed_file_comparison_can_use_snapshot_after_hashes_are_saved(tmp_path: Path):
+    source_path = tmp_path / "src" / "a.ts"
+    stable_path = tmp_path / "src" / "stable.ts"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text("export const a = 1;\n", encoding="utf-8")
+    stable_path.write_text("export const stable = true;\n", encoding="utf-8")
+
+    ctx = _make_context(tmp_path)
+    old_entries = [_entry(tmp_path, "src/a.ts"), _entry(tmp_path, "src/stable.ts")]
+    save_hashes_file(ctx, old_entries)
+    previous_hashes = load_hashes_file(ctx)
+
+    source_path.write_text("export const a = 2;\n", encoding="utf-8")
+    current_entries = [_entry(tmp_path, "src/a.ts"), _entry(tmp_path, "src/stable.ts")]
+    save_hashes_file(ctx, current_entries)
+
+    changed, unchanged = compute_changed_files(ctx, current_entries, saved_hashes=previous_hashes)
+    assert [entry["path"] for entry in changed] == ["src/a.ts"]
+    assert [entry["path"] for entry in unchanged] == ["src/stable.ts"]
+
+
+def test_graph_invalidation_adds_reverse_dependents_for_export_changes(tmp_path: Path):
+    types_path = tmp_path / "src" / "types.ts"
+    service_path = tmp_path / "src" / "service.ts"
+    controller_path = tmp_path / "src" / "controller.ts"
+    unrelated_path = tmp_path / "src" / "unrelated.ts"
+    types_path.parent.mkdir(parents=True, exist_ok=True)
+    types_path.write_text("export interface User { id: string }\n", encoding="utf-8")
+    service_path.write_text(
+        "import type { User } from './types';\nexport function svc(u: User) { return u.id; }\n",
+        encoding="utf-8",
+    )
+    controller_path.write_text("import { svc } from './service';\nexport function ctl() { return svc as unknown; }\n", encoding="utf-8")
+    unrelated_path.write_text("export const untouched = true;\n", encoding="utf-8")
+
+    ctx = _make_context(tmp_path)
+    old_entries = [
+        _entry(tmp_path, "src/types.ts"),
+        _entry(tmp_path, "src/service.ts"),
+        _entry(tmp_path, "src/controller.ts"),
+        _entry(tmp_path, "src/unrelated.ts"),
+    ]
+    build_graph(ctx, old_entries).save(graph_path_for(ctx), generated_at="2026-05-08T00:00:00Z")
+
+    types_path.write_text("export interface Account { id: string }\n", encoding="utf-8")
+    current_entries = [
+        _entry(tmp_path, "src/types.ts"),
+        _entry(tmp_path, "src/service.ts"),
+        _entry(tmp_path, "src/controller.ts"),
+        _entry(tmp_path, "src/unrelated.ts"),
+    ]
+
+    result = expand_stage1_targets_with_import_graph(
+        ctx,
+        current_entries,
+        changed_files=[current_entries[0]],
+    )
+
+    assert [entry["path"] for entry in result.target_files] == [
+        "src/types.ts",
+        "src/service.ts",
+        "src/controller.ts",
+    ]
+    assert set(result.indirect_paths) == {"src/service.ts", "src/controller.ts"}
+    assert result.invalidating_paths == ("src/types.ts",)
+    assert [entry["path"] for entry in result.unchanged_files] == ["src/unrelated.ts"]
+
+
+def test_graph_invalidation_keeps_dependents_cached_when_exports_unchanged(tmp_path: Path):
+    shared_path = tmp_path / "src" / "shared.ts"
+    consumer_path = tmp_path / "src" / "consumer.ts"
+    shared_path.parent.mkdir(parents=True, exist_ok=True)
+    shared_path.write_text("export const value = 1;\n", encoding="utf-8")
+    consumer_path.write_text("import { value } from './shared';\nexport const result = value;\n", encoding="utf-8")
+
+    ctx = _make_context(tmp_path)
+    old_entries = [_entry(tmp_path, "src/shared.ts"), _entry(tmp_path, "src/consumer.ts")]
+    build_graph(ctx, old_entries).save(graph_path_for(ctx), generated_at="2026-05-08T00:00:00Z")
+
+    shared_path.write_text("// implementation changed\nexport const value = 2;\n", encoding="utf-8")
+    current_entries = [_entry(tmp_path, "src/shared.ts"), _entry(tmp_path, "src/consumer.ts")]
+
+    result = expand_stage1_targets_with_import_graph(
+        ctx,
+        current_entries,
+        changed_files=[current_entries[0]],
+    )
+
+    assert [entry["path"] for entry in result.target_files] == ["src/shared.ts"]
+    assert result.indirect_paths == ()
+    assert [entry["path"] for entry in result.unchanged_files] == ["src/consumer.ts"]
+
+
+def test_graph_invalidation_without_previous_graph_uses_direct_changes_only(tmp_path: Path):
+    shared_path = tmp_path / "src" / "shared.ts"
+    consumer_path = tmp_path / "src" / "consumer.ts"
+    shared_path.parent.mkdir(parents=True, exist_ok=True)
+    shared_path.write_text("export interface User { id: string }\n", encoding="utf-8")
+    consumer_path.write_text("import { User } from './shared';\nexport const user = {} as User;\n", encoding="utf-8")
+
+    ctx = _make_context(tmp_path)
+    current_entries = [_entry(tmp_path, "src/shared.ts"), _entry(tmp_path, "src/consumer.ts")]
+    result = expand_stage1_targets_with_import_graph(
+        ctx,
+        current_entries,
+        changed_files=[current_entries[0]],
+    )
+
+    assert [entry["path"] for entry in result.target_files] == ["src/shared.ts"]
+    assert result.indirect_paths == ()
+    assert [entry["path"] for entry in result.unchanged_files] == ["src/consumer.ts"]

@@ -4,13 +4,14 @@ This is a deterministic post-Stage 1 step: it re-reads the files that were
 analyzed and produces an import graph by walking each file's imports and
 resolving them via `awf.core.imports.resolve_import_to_file`. No LLM calls.
 
-Phase 0 contract: the graph is written to disk for diagnostics and future
-invalidation logic, but no consumer reads it yet. Failures are reported as
-warnings and never break the analysis pipeline.
+Phase 0 contract: the graph is written to disk for diagnostics and used by
+Stage 1 incremental invalidation on the next run. Graph build failures are
+reported as warnings and never break the analysis pipeline.
 """
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
@@ -31,8 +32,94 @@ from awf.tools.file_ops import FileOpsToolset
 GRAPH_FILE_NAME = "import-graph.json"
 
 
+@dataclass(frozen=True)
+class Stage1GraphInvalidation:
+    target_files: list[dict[str, str]]
+    unchanged_files: list[dict[str, str]]
+    indirect_paths: tuple[str, ...]
+    invalidating_paths: tuple[str, ...]
+    deleted_paths: tuple[str, ...]
+
+
 def graph_path_for(context: AnalysisContext) -> Path:
     return context.ai_context_dir / ".tmp" / GRAPH_FILE_NAME
+
+
+def _current_exports_hash(context: AnalysisContext, entry: dict[str, str]) -> str:
+    rel_path = entry.get("path", "")
+    if not rel_path:
+        return ""
+    read_result = FileOpsToolset(context.github_root).read(rel_path)
+    if not read_result.ok:
+        return ""
+    return compute_exports_hash(read_result.output, detect_language(rel_path))
+
+
+def _public_surface_changed(
+    context: AnalysisContext,
+    entry: dict[str, str],
+    previous_node: GraphNode,
+) -> bool:
+    current_content_hash = str(entry.get("sha256", "") or "")
+    current_exports_hash = _current_exports_hash(context, entry)
+
+    if previous_node.exports_hash and current_exports_hash:
+        return previous_node.exports_hash != current_exports_hash
+
+    # Conservative fallback for languages or files where the baseline
+    # extractor cannot produce a stable exported-surface hash.
+    return previous_node.content_hash != current_content_hash
+
+
+def expand_stage1_targets_with_import_graph(
+    context: AnalysisContext,
+    current_entries: list[dict[str, str]],
+    changed_files: list[dict[str, str]],
+    deleted_files: Iterable[dict[str, str]] = (),
+) -> Stage1GraphInvalidation:
+    """Expand Stage 1 targets using the previous import graph.
+
+    Directly changed files are always re-analyzed. If a changed file's
+    exported surface changed (or the extractor cannot tell, so content hash is
+    used as a fallback), any reverse dependents from the previous graph are
+    also re-analyzed. Deleted files similarly invalidate their previous
+    dependents.
+    """
+    current_by_path = {entry["path"]: entry for entry in current_entries if "path" in entry}
+    direct_paths = {entry["path"] for entry in changed_files if "path" in entry}
+    invalidating_paths: set[str] = set()
+    indirect_paths: set[str] = set()
+    deleted_paths = {entry["path"] for entry in deleted_files if "path" in entry}
+
+    previous_graph = ImportGraph.load(graph_path_for(context))
+    if previous_graph is not None:
+        for entry in changed_files:
+            path = entry.get("path", "")
+            previous_node = previous_graph.nodes.get(path)
+            if previous_node and _public_surface_changed(context, entry, previous_node):
+                invalidating_paths.add(path)
+
+        for path in deleted_paths:
+            if path in previous_graph.nodes:
+                invalidating_paths.add(path)
+
+        for path in invalidating_paths:
+            indirect_paths.update(previous_graph.reverse_dependents(path, runtime_only=False))
+
+    indirect_paths.intersection_update(current_by_path)
+    indirect_paths.difference_update(direct_paths)
+
+    target_paths = direct_paths | indirect_paths
+    target_files = [entry for entry in current_entries if entry.get("path") in target_paths]
+    unchanged_files = [entry for entry in current_entries if entry.get("path") not in target_paths]
+
+    return Stage1GraphInvalidation(
+        target_files=target_files,
+        unchanged_files=unchanged_files,
+        indirect_paths=tuple(sorted(indirect_paths)),
+        invalidating_paths=tuple(sorted(invalidating_paths)),
+        deleted_paths=tuple(sorted(deleted_paths)),
+    )
 
 
 def build_graph(
