@@ -187,7 +187,7 @@ default = "claude-code"
 
 [provider.claude-code]
 command = "claude"
-flags = ["--print", "--permission-mode", "bypassPermissions"]
+flags = ["--print", "--permission-mode", "default"]
 
 [provider.claude-sdk]
 api_key_env = "ANTHROPIC_API_KEY"
@@ -234,7 +234,8 @@ yolo = false
 `codex`는 현재 `wf next --provider codex` 경로와 review/verify 검증에 맞춰져 있습니다.
 `openai`도 optional provider이지만 현재는 실운영 우선순위 밖의 experimental provider입니다.
 `analyze`와 `wf next`는 provider 실행 전에 `permissions`를 검사합니다. `claude-sdk`와 `openai`의 tool loop는 `tool:file.read`, `tool:file.glob`, `tool:file.grep`, `tool:git.diff`, `tool:git.log` 권한도 함께 검사합니다. 필요하면 `--yolo`로 일시 우회할 수 있습니다.
-`claude-code`는 sibling repo 접근을 위해 `--add-dir`를 함께 넘기며, 기본 timeout은 `AWF_CLAUDE_TIMEOUT_SEC`(기본 900초)로 제어합니다.
+`claude-code`는 기본적으로 Claude Code의 `default` permission mode를 사용합니다. 자동화 환경에서 권한 확인을 우회해야 할 때만 `--yolo`를 사용하면 `bypassPermissions`로 전환됩니다.
+`--add-dir`는 provider 시작 시간이 길어질 수 있어 기본값이 `off`입니다. 분석 대상이 prompt에 충분히 임베딩되지 않았고 외부 sibling repo 접근이 필요할 때만 `awf analyze ... --provider-add-dirs minimal` 또는 `full`을 사용합니다. `minimal`은 외부 project root만 제한적으로 추가하고, `AWF_PROVIDER_ADD_DIRS_MAX`로 개수를 제한할 수 있습니다.
 현재 실환경 기준으로 `claude-code` analyze는 small domain + standard mode에 더 적합하며, large/deep 분석은 timeout 가능성이 있습니다.
 현재 chat usage 리포트는 provider-native usage가 있으면 그 값을 우선 사용하고, 없으면 `len(text) // 4` 기반 estimated token으로 fallback합니다. cost는 optional provider pricing 설정 기반 estimated cost입니다.
 자연어 라우팅도 같은 원칙을 따른다:
@@ -249,7 +250,7 @@ chat compaction은 현재 다음 순서로 동작한다:
 - provider-assisted summary 우선
 - 실패 시 heuristic truncation summary fallback
 - manual compaction JSON 응답에는 `summary_mode = provider|heuristic|none`가 포함된다
-`codex`는 `AWF_CODEX_TIMEOUT_SEC`(기본 120초)로 제어하며, `wf next`와 `analyze`는 provider 실행 시작/종료 시 timeout과 경과 시간을 출력합니다.
+`codex`는 `AWF_CODEX_TIMEOUT_SEC`(기본 300초)로 제어하며, `wf next`와 `analyze`는 provider 실행 시작/종료 시 timeout과 경과 시간을 출력합니다. `wf next`의 plan/review/verify/test phase와 multi-agent quick/secondary Codex 실행은 read-only sandbox로 낮추고, 결과 파일 작성은 AWF CLI 호스트가 수행합니다.
 
 실운영 검증 순서:
 
@@ -284,11 +285,11 @@ PYTHONPATH=cli/src python3 cli/tests/run_judge_synthesis_fixture.py
 python3 cli/tests/run_analysis_fanout_fixture.py
 ```
 
-Tiered fixture E2E runner:
+Fixture E2E runners:
 
 ```bash
-bash cli/tests/run_tier1_fixture_e2e.sh
-bash cli/tests/run_tier2_fixture_e2e.sh
+bash cli/tests/run_core_fixture_e2e.sh
+bash cli/tests/run_tooling_fixture_e2e.sh
 bash cli/tests/run_all_fixture_e2e.sh
 ```
 

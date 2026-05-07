@@ -246,11 +246,11 @@ def run_multi_agent(
     if mode == "solo":
         result = _run_solo(primary_provider, prompt, cwd, timeouts, add_dirs)
     elif mode == "quick":
-        result = _run_quick(registry, prompt, cwd, timeouts, codex_reasoning=_codex_re)
+        result = _run_quick(registry, prompt, cwd, timeouts, add_dirs, codex_reasoning=_codex_re)
     elif mode == "precise":
         result = _run_precise(registry, primary_provider, prompt, cwd, timeouts, add_dirs, codex_reasoning=_codex_re)
     elif mode == "cross":
-        result = _run_cross(registry, prompt, cwd, timeouts, effort=_effort, codex_reasoning=_codex_re)
+        result = _run_cross(registry, prompt, cwd, timeouts, add_dirs, effort=_effort, codex_reasoning=_codex_re)
     elif mode == "critical":
         result = _run_critical(registry, primary_provider, prompt, cwd, timeouts, add_dirs, effort=_effort, codex_reasoning=_codex_re)
     else:
@@ -630,7 +630,12 @@ def _run_solo(primary_provider, prompt: str, cwd: str, timeouts: dict, add_dirs:
     )
 
 
-def _run_quick(registry, prompt: str, cwd: str, timeouts: dict, *, codex_reasoning: str | None = None) -> MultiAgentResult:
+def _force_codex_read_only(provider) -> None:
+    if hasattr(provider, "set_sandbox"):
+        provider.set_sandbox("read-only")
+
+
+def _run_quick(registry, prompt: str, cwd: str, timeouts: dict, add_dirs: list[str] | None, *, codex_reasoning: str | None = None) -> MultiAgentResult:
     """Quick mode: codex only (read-only, fast)."""
     codex = _get_codex_provider(registry, reasoning_effort=codex_reasoning)
     if not codex:
@@ -642,11 +647,13 @@ def _run_quick(registry, prompt: str, cwd: str, timeouts: dict, *, codex_reasoni
             judge_reason="codex provider unavailable — install codex or use a different mode",
         )
 
+    _force_codex_read_only(codex)
     print("mode: quick (codex read-only)", file=sys.stderr)
     result = run_agent(
         codex, _make_slave_prompt(prompt, "speed"), "speed", cwd,
         timeout_sec=timeouts.get("codex", 45),
         require_json=True,
+        add_dirs=add_dirs,
     )
     _print_agent_summary(result)
 
@@ -668,6 +675,7 @@ def _run_precise(registry, primary_provider, prompt: str, cwd: str, timeouts: di
         print("warning: codex not available for precise mode, running solo", file=sys.stderr)
         return _run_solo(primary_provider, prompt, cwd, timeouts, add_dirs)
 
+    _force_codex_read_only(codex)
     # Track cumulative timeout budget
     total_budget = sum(timeouts.values()) if timeouts else 210
     budget_start = time.monotonic()
@@ -679,6 +687,7 @@ def _run_precise(registry, primary_provider, prompt: str, cwd: str, timeouts: di
         codex, _make_slave_prompt(prompt, "precision"), "precision", cwd,
         timeout_sec=step1_timeout,
         require_json=True,
+        add_dirs=add_dirs,
         on_progress=_make_progress_callback("codex", "precision"),
     )
     _print_agent_summary(codex_result)
@@ -719,10 +728,12 @@ def _run_precise(registry, primary_provider, prompt: str, cwd: str, timeouts: di
     )
 
 
-def _run_cross(registry, prompt: str, cwd: str, timeouts: dict, *, effort: str | None = None, codex_reasoning: str | None = None) -> MultiAgentResult:
+def _run_cross(registry, prompt: str, cwd: str, timeouts: dict, add_dirs: list[str] | None, *, effort: str | None = None, codex_reasoning: str | None = None) -> MultiAgentResult:
     """Cross mode: codex + sonnet parallel → judge."""
     codex = _get_codex_provider(registry, reasoning_effort=codex_reasoning)
     sonnet = _get_sonnet_provider(registry, effort=effort)
+    if codex:
+        _force_codex_read_only(codex)
 
     available = []
     if codex:
@@ -749,7 +760,7 @@ def _run_cross(registry, prompt: str, cwd: str, timeouts: dict, *, effort: str |
         for name, provider, role, timeout in available:
             slave_prompt = _make_slave_prompt(prompt, role)
             progress_cb = _make_progress_callback(name, role)
-            future = pool.submit(run_agent, provider, slave_prompt, role, cwd, timeout_sec=timeout, require_json=True, on_progress=progress_cb)
+            future = pool.submit(run_agent, provider, slave_prompt, role, cwd, timeout_sec=timeout, require_json=True, add_dirs=add_dirs, on_progress=progress_cb)
             futures[future] = name
 
         for future in as_completed(futures):
@@ -807,11 +818,13 @@ def _run_critical(registry, primary_provider, prompt: str, cwd: str, timeouts: d
 
     # Step 1: Codex precision analysis
     if codex:
+        _force_codex_read_only(codex)
         print("mode: critical — step 1: codex precision analysis", file=sys.stderr)
         codex_result = run_agent(
             codex, _make_slave_prompt(prompt, "precision"), "precision", cwd,
             timeout_sec=timeouts.get("codex", 90),
             require_json=True,
+            add_dirs=add_dirs,
             on_progress=_make_progress_callback("codex", "precision"),
         )
         agents.append(codex_result)

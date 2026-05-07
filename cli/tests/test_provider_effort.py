@@ -1,5 +1,8 @@
 """Provider effort injection tests."""
 
+from types import SimpleNamespace
+from unittest import mock
+
 from awf.providers.claude_code import ClaudeCodeProvider
 from awf.providers.codex import CodexProvider
 
@@ -19,6 +22,11 @@ class TestClaudeCodeProviderEffort:
         assert provider.effort == "max"
         assert provider.command == "echo"
 
+    def test_set_permission_mode_replaces_existing_flag(self):
+        provider = ClaudeCodeProvider(command="echo", flags=["--print", "--permission-mode", "default"])
+        provider.set_permission_mode("bypassPermissions")
+        assert provider.flags == ["--print", "--permission-mode", "bypassPermissions"]
+
 
 class TestCodexProviderEffort:
     def test_default_no_reasoning_effort(self):
@@ -28,6 +36,28 @@ class TestCodexProviderEffort:
     def test_reasoning_effort_set(self):
         provider = CodexProvider(command="echo", flags=["exec"], reasoning_effort="xhigh")
         assert provider.reasoning_effort == "xhigh"
+
+    def test_set_sandbox_replaces_existing_flag(self):
+        provider = CodexProvider(command="echo", flags=["exec", "--sandbox", "workspace-write"])
+        provider.set_sandbox("read-only")
+        assert provider.flags == ["exec", "--sandbox", "read-only"]
+
+    def test_complete_passes_add_dirs_and_schema(self):
+        provider = CodexProvider(
+            command="codex",
+            flags=["exec", "--sandbox", "read-only"],
+            output_schema_path="/tmp/awf-schema.json",
+        )
+        completed = SimpleNamespace(returncode=0, stdout="{}", stderr="")
+        with mock.patch("awf.providers.codex.subprocess.run", return_value=completed) as run_mock:
+            result = provider.complete("prompt", cwd="/tmp/repo", add_dirs=["/tmp/docs"])
+
+        assert result.returncode == 0
+        cmd = run_mock.call_args.args[0]
+        assert cmd[:3] == ["codex", "exec", "--sandbox"]
+        assert ["--add-dir", "/tmp/docs"] == cmd[cmd.index("--add-dir"):cmd.index("--add-dir") + 2]
+        assert ["--output-schema", "/tmp/awf-schema.json"] == cmd[cmd.index("--output-schema"):cmd.index("--output-schema") + 2]
+        assert cmd[-1] == "-"
 
 
 class TestPhaseEffort:
@@ -76,6 +106,29 @@ class TestPhaseEffort:
 
         _apply_phase_effort(provider, provider_config, "plan")
         assert provider.reasoning_effort == "xhigh"
+
+    def test_apply_phase_sandbox_codex_read_only(self):
+        from awf.commands.wf import _apply_phase_sandbox
+
+        provider = CodexProvider(command="echo", flags=["exec", "--sandbox", "workspace-write"])
+        _apply_phase_sandbox(provider, "review")
+        assert provider.flags == ["exec", "--sandbox", "read-only"]
+
+    def test_apply_phase_sandbox_impl_write(self):
+        from awf.commands.wf import _apply_phase_sandbox
+
+        provider = CodexProvider(command="echo", flags=["exec", "--sandbox", "read-only"])
+        _apply_phase_sandbox(provider, "impl")
+        assert provider.flags == ["exec", "--sandbox", "workspace-write"]
+
+    def test_apply_workflow_output_schema_claude(self):
+        from awf.commands.wf import _apply_workflow_output_schema
+
+        provider = ClaudeCodeProvider(command="echo", flags=["--print"])
+        cleanup_path = _apply_workflow_output_schema(provider, "review")
+        assert cleanup_path is None
+        assert provider.json_schema is not None
+        assert '"status"' in provider.json_schema
 
     def test_apply_phase_effort_no_config(self):
         from awf.commands.wf import _apply_phase_effort

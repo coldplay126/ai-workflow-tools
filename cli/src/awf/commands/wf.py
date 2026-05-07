@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import uuid
@@ -13,6 +14,11 @@ from awf.core.event_processor import EventProcessor, run_complete_with_events
 from awf.core.event_sync_summary import summarize_event_sync
 from awf.core.gateway_runner import run_native_provider_task
 from awf.core.permissions import PermissionDeniedError, build_permission_ruleset, check_permission, provider_permission_name
+from awf.core.output_schemas import (
+    workflow_result_envelope_schema,
+    workflow_result_envelope_schema_json,
+    write_temp_schema_file,
+)
 from awf.core.progress import ProgressDisplay
 from awf.core.readiness import maybe_doctor_hint
 from awf.core.state_updater import WorkflowStateUpdater
@@ -68,6 +74,33 @@ def _run_provider_with_heartbeat(provider, prompt: str, cwd: str, label: str, *,
         source=getattr(provider, "name", "provider"),
         processor=processor,
     )
+
+
+_CODEX_READ_ONLY_PHASES = {"plan", "review", "verify", "test"}
+
+
+def _apply_provider_permission_mode(provider, *, yolo: bool) -> None:
+    if yolo and hasattr(provider, "set_permission_mode"):
+        provider.set_permission_mode("bypassPermissions")
+
+
+def _apply_phase_sandbox(provider, phase: str) -> None:
+    if not hasattr(provider, "set_sandbox"):
+        return
+    provider.set_sandbox("read-only" if phase in _CODEX_READ_ONLY_PHASES else "workspace-write")
+
+
+def _apply_workflow_output_schema(provider, phase: str) -> str | None:
+    if hasattr(provider, "output_schema_path") and not getattr(provider, "output_schema_path", None):
+        path = write_temp_schema_file(
+            workflow_result_envelope_schema(phase),
+            prefix=f"awf-wf-{phase}-schema-",
+        )
+        provider.output_schema_path = path
+        return path
+    if hasattr(provider, "json_schema") and not getattr(provider, "json_schema", None):
+        provider.json_schema = workflow_result_envelope_schema_json(phase)
+    return None
 
 
 def _workflow_replan_budget(state: dict) -> tuple[int, int]:
@@ -449,6 +482,8 @@ def run_wf_next(args: argparse.Namespace) -> int:
         try:
             provider = registry.get(candidate)
             _apply_phase_effort(provider, provider_config, phase)
+            _apply_phase_sandbox(provider, phase)
+            _apply_provider_permission_mode(provider, yolo=bool(getattr(args, "yolo", False)))
         except UnknownProviderError:
             continue
         try:
@@ -458,6 +493,7 @@ def run_wf_next(args: argparse.Namespace) -> int:
             continue
         selected_provider = candidate
         timeout_sec = getattr(provider, "timeout_sec", None)
+        schema_cleanup_path = _apply_workflow_output_schema(provider, phase)
         if timeout_sec is not None:
             print(f"provider_running: {candidate} (timeout: {timeout_sec}s)", file=sys.stderr)
         else:
@@ -493,19 +529,26 @@ def run_wf_next(args: argparse.Namespace) -> int:
                 provider_name=candidate,
             ),
         )
-        execution_mode_name = resolve_execution_mode(provider, native_task)
-        if execution_mode_name == "native":
-            print(f"provider_execution_mode: {candidate} native", file=sys.stderr)
-            result, elapsed = run_native_provider_task(provider=provider, task=native_task, processor=processor)
-        else:
-            result, elapsed = _run_provider_with_heartbeat(
-                provider,
-                prompt,
-                repo_root,
-                candidate,
-                processor=processor,
-                task_id=str(uuid.uuid4()),
-            )
+        try:
+            execution_mode_name = resolve_execution_mode(provider, native_task)
+            if execution_mode_name == "native":
+                print(f"provider_execution_mode: {candidate} native", file=sys.stderr)
+                result, elapsed = run_native_provider_task(provider=provider, task=native_task, processor=processor)
+            else:
+                result, elapsed = _run_provider_with_heartbeat(
+                    provider,
+                    prompt,
+                    repo_root,
+                    candidate,
+                    processor=processor,
+                    task_id=str(uuid.uuid4()),
+                )
+        finally:
+            if schema_cleanup_path:
+                try:
+                    os.unlink(schema_cleanup_path)
+                except FileNotFoundError:
+                    pass
         captured_output = result.stdout if (result.stdout or "").strip() else (result.stderr or "")
         result_path = save_workflow_result(
             args.repo_root,

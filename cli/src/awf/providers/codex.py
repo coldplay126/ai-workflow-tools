@@ -12,13 +12,14 @@ from awf.providers.subprocess_provider import SubprocessProvider
 
 class CodexProvider(SubprocessProvider):
     name = "codex"
-    capabilities = {ProviderCapability.COMPLETE}
+    capabilities = {ProviderCapability.COMPLETE, ProviderCapability.ADD_DIR}
 
     def __init__(
         self,
         command: Optional[str] = None,
         flags: Optional[list[str]] = None,
         reasoning_effort: Optional[str] = None,
+        output_schema_path: Optional[str] = None,
     ) -> None:
         resolved_command = command or os.environ.get("AWF_CODEX_COMMAND", "codex")
         if flags is not None:
@@ -29,6 +30,18 @@ class CodexProvider(SubprocessProvider):
         super().__init__(command=resolved_command, flags=resolved_flags)
         self.timeout_sec = int(os.environ.get("AWF_CODEX_TIMEOUT_SEC", "300"))
         self.reasoning_effort = reasoning_effort
+        self.output_schema_path = output_schema_path or os.environ.get("AWF_CODEX_OUTPUT_SCHEMA")
+
+    def set_sandbox(self, sandbox: str) -> None:
+        """Set or replace the codex exec sandbox flag."""
+        for index, flag in enumerate(self.flags):
+            if flag in {"--sandbox", "-s"} and index + 1 < len(self.flags):
+                self.flags[index + 1] = sandbox
+                return
+            if flag.startswith("--sandbox="):
+                self.flags[index] = f"--sandbox={sandbox}"
+                return
+        self.flags.extend(["--sandbox", sandbox])
 
     def complete(
         self,
@@ -46,6 +59,10 @@ class CodexProvider(SubprocessProvider):
             cmd = [self.command, *self.flags]
             if self.reasoning_effort:
                 cmd.extend(["-c", f"model_reasoning_effort={self.reasoning_effort}"])
+            for directory in add_dirs or []:
+                cmd.extend(["--add-dir", directory])
+            if self.output_schema_path:
+                cmd.extend(["--output-schema", self.output_schema_path])
             cmd.extend(["--output-last-message", output_path, "-"])
             try:
                 completed = subprocess.run(

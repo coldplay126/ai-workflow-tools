@@ -69,22 +69,26 @@ class ProviderRegistry:
         command = settings.get("command")
         flags = settings.get("flags")
         effort = settings.get("effort")
+        json_schema = settings.get("json_schema")
         return ClaudeCodeProvider(
             command=str(command) if command else None,
             flags=list(flags) if isinstance(flags, list) else None,
             effort=str(effort) if effort else None,
+            json_schema=str(json_schema) if json_schema else None,
         )
 
     def _create_claude_sonnet(self, config: AwfConfig) -> Provider:
         settings = config.provider_settings("claude-code")
         command = settings.get("command")
-        flags = ["--print", "--model", "sonnet", "--permission-mode", "bypassPermissions"]
+        flags = ["--print", "--model", "sonnet", "--permission-mode", "default"]
         effort = settings.get("effort")
+        json_schema = settings.get("json_schema")
         return ClaudeCodeProvider(
             command=str(command) if command else None,
             flags=flags,
             verbose=False,
             effort=str(effort) if effort else None,
+            json_schema=str(json_schema) if json_schema else None,
         )
 
     def _create_codex(self, config: AwfConfig) -> Provider:
@@ -92,10 +96,12 @@ class ProviderRegistry:
         command = settings.get("command")
         flags = settings.get("flags")
         reasoning_effort = settings.get("reasoning_effort")
+        output_schema_path = settings.get("output_schema_path")
         return CodexProvider(
             command=str(command) if command else None,
             flags=list(flags) if isinstance(flags, list) else None,
             reasoning_effort=str(reasoning_effort) if reasoning_effort else None,
+            output_schema_path=str(output_schema_path) if output_schema_path else None,
         )
 
     def _create_claude_sdk(self, config: AwfConfig) -> Provider:

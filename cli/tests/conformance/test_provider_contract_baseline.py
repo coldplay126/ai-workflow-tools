@@ -6,8 +6,8 @@ returns it as stdout. It supports a handful of environment-variable toggles
 exercise the structured error + usage paths required by §9.1.
 
 These tests exercise the five Tier 0 MUST cases listed in the provider contract
-(§9.1). Real-provider coverage lives in ``test_tier0_subprocess.py`` and
-``test_tier0_sdk.py`` under ``@pytest.mark.live``.
+(§9.1). Real-provider coverage lives in ``test_provider_contract_subprocess.py`` and
+``test_provider_contract_sdk.py`` under ``@pytest.mark.live``.
 """
 
 from __future__ import annotations

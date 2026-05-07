@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -149,20 +150,64 @@ def _supports_live_stage3(provider_name: str) -> bool:
     return provider_name in {"claude-code", "claude-sdk"}
 
 
-def _provider_add_dirs(context: AnalysisContext) -> list[str]:
-    add_dirs = {
-        str(context.docs_root),
-        str(context.ai_context_dir),
-    }
-    for directories in context.all_directories.values():
-        for directory in directories:
-            path = Path(directory).resolve()
-            add_dirs.add(str(path))
-            for parent in path.parents:
-                if parent.parent == context.github_root:
-                    add_dirs.add(str(parent))
-                    break
-    return sorted(add_dirs)
+def _apply_provider_permission_mode(provider, *, yolo: bool) -> None:
+    if yolo and hasattr(provider, "set_permission_mode"):
+        provider.set_permission_mode("bypassPermissions")
+
+
+def _is_under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _provider_add_dirs(context: AnalysisContext, mode: str) -> tuple[list[str], list[str]]:
+    if mode == "off":
+        return [], []
+
+    warnings: list[str] = []
+    repo_root = context.repo_root.resolve()
+    candidates: set[str] = set()
+
+    def add_external(path: Path) -> None:
+        resolved = path.resolve()
+        if resolved.exists() and not _is_under(resolved, repo_root):
+            candidates.add(str(resolved))
+
+    if mode == "minimal":
+        add_external(context.docs_root)
+        for directories in context.all_directories.values():
+            for directory in directories:
+                path = Path(directory).resolve()
+                root = path
+                for parent in path.parents:
+                    if parent.parent == context.github_root:
+                        root = parent
+                        break
+                add_external(root)
+    else:
+        add_external(context.docs_root)
+        add_external(context.ai_context_dir)
+        for directories in context.all_directories.values():
+            for directory in directories:
+                path = Path(directory).resolve()
+                add_external(path)
+                for parent in path.parents:
+                    if parent.parent == context.github_root:
+                        add_external(parent)
+                        break
+
+    add_dirs = sorted(candidates)
+    max_dirs = int(os.environ.get("AWF_PROVIDER_ADD_DIRS_MAX", "4"))
+    if mode == "minimal" and len(add_dirs) > max_dirs:
+        warnings.append(
+            f"warning: provider_add_dirs minimal found {len(add_dirs)} external roots; "
+            f"passing first {max_dirs}. Set --provider-add-dirs full or AWF_PROVIDER_ADD_DIRS_MAX to override."
+        )
+        add_dirs = add_dirs[:max_dirs]
+    return add_dirs, warnings
 
 
 def _resume_mode_label(resume: dict) -> str:
@@ -360,6 +405,7 @@ def run_analyze(args: argparse.Namespace) -> int:
     if file_count > 0 and stage1_provider_name:
         try:
             stage1_provider = registry.get(stage1_provider_name)
+            _apply_provider_permission_mode(stage1_provider, yolo=bool(getattr(args, "yolo", False)))
             stage1_max_concurrent = pipeline_config.get("stage_routing", {}).get(scale, {}).get("max_concurrent", 5)
 
             from awf.core.analysis_stage1 import (
@@ -564,6 +610,7 @@ def run_analyze(args: argparse.Namespace) -> int:
     provider_name = _resolve_stage_provider(args.provider, pipeline_config, "stage2", scale, config)
     try:
         provider = registry.get(provider_name)
+        _apply_provider_permission_mode(provider, yolo=bool(getattr(args, "yolo", False)))
     except UnknownProviderError:
         print(f"error: unsupported provider `{provider_name}` for stage2.", file=sys.stderr)
         return 2
@@ -599,10 +646,13 @@ def run_analyze(args: argparse.Namespace) -> int:
         source="cli",
         data={"stage": "stage1"},
     )
-    add_dirs = [] if provider_name in {"claude-code", "claude:sonnet"} else _provider_add_dirs(context)
+    add_dir_mode = str(getattr(args, "provider_add_dirs", "off") or "off")
+    add_dirs, add_dir_warnings = _provider_add_dirs(context, add_dir_mode)
+    for warning in add_dir_warnings:
+        print(warning, file=sys.stderr)
     print(
         "provider_context: "
-        f"cwd={context.repo_root} add_dirs={len(add_dirs)} prompt_chars={len(prompt)} "
+        f"cwd={context.repo_root} add_dirs={len(add_dirs)} add_dir_mode={add_dir_mode} prompt_chars={len(prompt)} "
         f"prompt_lines={len(prompt.splitlines())}",
         file=sys.stderr,
     )
@@ -631,6 +681,7 @@ def run_analyze(args: argparse.Namespace) -> int:
                     "prompt": prompt,
                     "mode": context.mode,
                     "execution_mode": execution_mode or "default",
+                    "add_dirs": add_dirs,
                 },
                 constraints=TaskConstraints(
                     timeout_sec=timeout_sec,
@@ -843,6 +894,7 @@ def run_analyze(args: argparse.Namespace) -> int:
                 if stage3_provider_name != provider_name:
                     try:
                         stage3_provider = registry.get(stage3_provider_name)
+                        _apply_provider_permission_mode(stage3_provider, yolo=bool(getattr(args, "yolo", False)))
                     except UnknownProviderError:
                         stage3_provider = provider
                         stage3_provider_name = provider_name
@@ -941,6 +993,7 @@ def run_analyze(args: argparse.Namespace) -> int:
                 continue
             try:
                 secondary_provider = registry.get(candidate)
+                _apply_provider_permission_mode(secondary_provider, yolo=bool(getattr(args, "yolo", False)))
             except UnknownProviderError:
                 continue
             try:

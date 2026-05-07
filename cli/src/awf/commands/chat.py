@@ -27,6 +27,11 @@ AUTO_COMPACT_MAX_MESSAGES = 6
 COMPACTION_KEEP_LAST = 4
 
 
+def _apply_provider_permission_mode(provider, *, yolo: bool) -> None:
+    if yolo and hasattr(provider, "set_permission_mode"):
+        provider.set_permission_mode("bypassPermissions")
+
+
 def _build_chat_prompt(messages: list[dict[str, str]]) -> str:
     from awf.core.spec_loader import load_prompt_optional
     header = load_prompt_optional("chat", "session-header")
@@ -289,6 +294,7 @@ def run_chat(args: argparse.Namespace) -> int:
                     provider_name = args.provider or session.provider or config.provider_name()
                     check_permission(ruleset, provider_permission_name(provider_name, config.raw.get("provider", {}).get("aliases")), "chat")
                     provider_for_compaction = ProviderRegistry(config).get(provider_name)
+                    _apply_provider_permission_mode(provider_for_compaction, yolo=bool(getattr(args, "yolo", False)))
                 except Exception:
                     provider_for_compaction = None
             if provider_for_compaction is not None:
@@ -306,6 +312,7 @@ def run_chat(args: argparse.Namespace) -> int:
         check_permission(ruleset, provider_permission_name(provider_name, config.raw.get("provider", {}).get("aliases")), "chat")
         registry = ProviderRegistry(config)
         provider = registry.get(provider_name)
+        _apply_provider_permission_mode(provider, yolo=bool(getattr(args, "yolo", False)))
         requested_session_id = _resolve_requested_session_id(db_path, args.session_id, bool(getattr(args, "latest", False)))
         session_id, created = _resolve_or_create_session(db_path, provider_name, requested_session_id)
     except PermissionDeniedError as exc:

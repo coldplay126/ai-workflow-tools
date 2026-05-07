@@ -219,9 +219,9 @@ class ToolLoopProvider(StreamingProvider, Protocol):
 
 | Provider | Tier | Capabilities (현재) |
 |----------|:----:|---------------------|
-| `claude-code` | 2 | `COMPLETE`, `ANALYZE_NATIVE`*, `WF_NATIVE`*, `TOOL_LOOP`, `EVENT_STREAM` |
+| `claude-code` | 2 | `COMPLETE`, `ANALYZE_NATIVE`*, `WF_NATIVE`*, `TOOL_LOOP`, `EVENT_STREAM`, `ADD_DIR` |
 | `claude-sdk` | 2 | `COMPLETE`, `TOOL_LOOP`, `EVENT_STREAM` |
-| `codex` | 0 | `COMPLETE` (sandbox 기반 subprocess) |
+| `codex` | 0 | `COMPLETE`, `ADD_DIR` (sandbox 기반 subprocess) |
 | `openai` | 2 | `COMPLETE`, `TOOL_LOOP`, `EVENT_STREAM` |
 | `fixture` | 0 | `COMPLETE` (테스트 전용) |
 
@@ -233,13 +233,11 @@ class ToolLoopProvider(StreamingProvider, Protocol):
 |----------|:----:|---------------------|
 | `claude-code` | 2 | `COMPLETE`, `EVENT_STREAM`, `TOOL_LOOP`, `THINKING`, `ADD_DIR` |
 | `claude-sdk` | 2 | `COMPLETE`, `EVENT_STREAM`, `TOOL_LOOP`, `THINKING`, `CITATIONS` |
-| `codex` | 0 | `COMPLETE` (향후 `EVENT_STREAM` 추가 검토) |
+| `codex` | 0 | `COMPLETE`, `ADD_DIR` (향후 `EVENT_STREAM` 추가 검토) |
 | `openai` | 2 | `COMPLETE`, `EVENT_STREAM`, `TOOL_LOOP`, `SESSION` |
 | `fixture` | 0 | `COMPLETE` |
 
-> **enum 상태**: `THINKING`, `CITATIONS`, `SESSION`, `ADD_DIR`은 현재 `ProviderCapability` enum에 존재하지 않는다. Migration Step 1에서 enum 확장과 함께 추가된다(§10.2).
->
-> Step 1 완료: enum에 THINKING/CITATIONS/SESSION/ADD_DIR 추가됨, provider별 capability 집합 변경은 Step 2에서 진행.
+> **enum 상태**: `THINKING`, `CITATIONS`, `SESSION`, `ADD_DIR`은 현재 `ProviderCapability` enum에 존재한다. `claude-code`와 `codex`는 CLI `--add-dir` 지원을 `ADD_DIR` capability로 노출한다.
 
 **`ANALYZE_NATIVE` / `WF_NATIVE` 제거 후 파급**:
 - `claude-code` provider는 더 이상 "파이프라인을 안다"는 역할을 하지 않는다.
@@ -397,7 +395,7 @@ provider는 이를 자체 포맷으로 변환하되, **tool 실행 결과 포맷
 
 ### 9.1 Tier 0 (MUST pass)
 
-> **구현 상태**: Step 4 완료 (2026-04-17). `fixture` provider는 baseline suite(`cli/tests/conformance/test_tier0_baseline.py`)에서 PASS, 4개 real provider(`claude-code`, `claude-sdk`, `codex`, `openai`)는 `@pytest.mark.live`로 격리되어 기본 실행에서 deselected. subprocess timeout 경로는 `unittest.mock`로 deterministic하게 검증한다.
+> **구현 상태**: Step 4 완료 (2026-04-17). `fixture` provider는 baseline suite(`cli/tests/conformance/test_provider_contract_baseline.py`)에서 PASS, 4개 real provider(`claude-code`, `claude-sdk`, `codex`, `openai`)는 `@pytest.mark.live`로 격리되어 기본 실행에서 deselected. subprocess timeout 경로는 `unittest.mock`로 deterministic하게 검증한다.
 
 - `test_complete_returns_result`: prompt 입력 시 `ProviderResult` 반환
 - `test_error_is_structured`: 실패 시 예외 대신 `returncode!=0` 반환
@@ -515,9 +513,9 @@ class ProviderCapability(str, Enum):
 - `cli/tests/conformance/__init__.py` — 패키지 마커
 - `cli/tests/conformance/conftest.py` — `baseline_fixture_path`, `fixture_provider`, parametrized `live_provider_name` fixture
 - `cli/tests/conformance/test_protocol_contract.py` — `ProviderResult` 7필드 / `ProviderCapability` 9 enum / keyword-only 시그니처 / deprecated 마커 정적 검증
-- `cli/tests/conformance/test_tier0_baseline.py` — FixtureProvider 대상 Tier 0 MUST 5종 (returns_result, unicode, error, timeout, usage reported/skip)
-- `cli/tests/conformance/test_tier0_subprocess.py` — SubprocessProvider timeout(124)/timeout=None/structured error를 mock으로 검증 + `claude-code`/`codex` 대상 `@pytest.mark.live` 스켈레톤
-- `cli/tests/conformance/test_tier0_sdk.py` — `claude-sdk`/`openai` 대상 `@pytest.mark.live` 스켈레톤 (timeout은 `xfail(strict=False)`)
+- `cli/tests/conformance/test_provider_contract_baseline.py` — FixtureProvider 대상 Tier 0 MUST 5종 (returns_result, unicode, error, timeout, usage reported/skip)
+- `cli/tests/conformance/test_provider_contract_subprocess.py` — SubprocessProvider timeout(124)/timeout=None/structured error를 mock으로 검증 + `claude-code`/`codex` 대상 `@pytest.mark.live` 스켈레톤
+- `cli/tests/conformance/test_provider_contract_sdk.py` — `claude-sdk`/`openai` 대상 `@pytest.mark.live` 스켈레톤 (timeout은 `xfail(strict=False)`)
 - `cli/tests/conformance/fixtures/fixture_echo.txt` — baseline 응답 본문 (한글/이모지 포함)
 - `cli/tests/conformance/fixtures/fixture_error.txt` — 빈 파일 (오류 유도는 `AWF_FIXTURE_RETURNCODE` 환경변수로)
 - `cli/tests/conformance/fixtures/slow_cmd.py` — 장기 실행 레퍼런스 (실 실행은 mock으로 차단)

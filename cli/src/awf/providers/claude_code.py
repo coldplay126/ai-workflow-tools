@@ -232,6 +232,7 @@ class ClaudeCodeProvider(SubprocessProvider, GatewayProvider):
         ProviderCapability.WF_NATIVE,
         ProviderCapability.TOOL_LOOP,
         ProviderCapability.EVENT_STREAM,
+        ProviderCapability.ADD_DIR,
     }
 
     def __init__(
@@ -240,17 +241,30 @@ class ClaudeCodeProvider(SubprocessProvider, GatewayProvider):
         flags: Optional[list[str]] = None,
         verbose: bool = True,
         effort: Optional[str] = None,
+        json_schema: Optional[str] = None,
     ) -> None:
         resolved_command = command or os.environ.get("AWF_CLAUDE_COMMAND", "claude")
         if flags is not None:
             resolved_flags = flags
         else:
             env_flags = os.environ.get("AWF_CLAUDE_FLAGS")
-            resolved_flags = shlex.split(env_flags) if env_flags else ["--print", "--permission-mode", "bypassPermissions"]
+            resolved_flags = shlex.split(env_flags) if env_flags else ["--print", "--permission-mode", "default"]
         super().__init__(command=resolved_command, flags=resolved_flags)
         self.timeout_sec = int(os.environ.get("AWF_CLAUDE_TIMEOUT_SEC", "900"))
         self.verbose = verbose
         self.effort = effort
+        self.json_schema = json_schema or os.environ.get("AWF_CLAUDE_JSON_SCHEMA")
+
+    def set_permission_mode(self, mode: str) -> None:
+        """Set or replace Claude Code permission mode."""
+        for index, flag in enumerate(self.flags):
+            if flag == "--permission-mode" and index + 1 < len(self.flags):
+                self.flags[index + 1] = mode
+                return
+            if flag.startswith("--permission-mode="):
+                self.flags[index] = f"--permission-mode={mode}"
+                return
+        self.flags.extend(["--permission-mode", mode])
 
     def complete(
         self,
@@ -266,6 +280,8 @@ class ClaudeCodeProvider(SubprocessProvider, GatewayProvider):
             cmd.extend(["--effort", self.effort])
         for directory in add_dirs or []:
             cmd.extend(["--add-dir", directory])
+        if self.json_schema:
+            cmd.extend(["--json-schema", self.json_schema])
         cmd.append(prompt)
         try:
             started_at = time.monotonic()
@@ -356,6 +372,12 @@ class ClaudeCodeProvider(SubprocessProvider, GatewayProvider):
             flags.append("--include-partial-messages")
         if self.effort and "--effort" not in flags:
             flags.extend(["--effort", self.effort])
+        add_dirs = task.params.get("add_dirs") or []
+        if isinstance(add_dirs, list):
+            for directory in add_dirs:
+                flags.extend(["--add-dir", str(directory)])
+        if self.json_schema and "--json-schema" not in flags:
+            flags.extend(["--json-schema", self.json_schema])
         cmd = [self.command, *flags, prompt]
         process = subprocess.Popen(
             cmd,

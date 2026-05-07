@@ -174,6 +174,8 @@ def _run_agent_streaming(provider, prompt, cwd, add_dirs, timeout_sec, on_progre
         handle = tempfile.NamedTemporaryFile(prefix="awf-agent-", suffix=".txt", delete=False)
         output_path = handle.name
         handle.close()
+        if "--json" not in cmd:
+            cmd.append("--json")
         cmd.extend(["--output-last-message", output_path])
 
     if add_dirs:
@@ -225,6 +227,10 @@ def _run_agent_streaming(provider, prompt, cwd, add_dirs, timeout_sec, on_progre
                     continue
                 if key.data == "stdout":
                     stdout_chunks.append(chunk)
+                    if provider_name == "codex":
+                        event_label = _codex_json_event_label(chunk)
+                        if event_label:
+                            on_progress(time.monotonic() - started, event_label)
                 else:
                     stderr_chunks.append(chunk)
                     line = chunk.strip()
@@ -252,6 +258,19 @@ def _run_agent_streaming(provider, prompt, cwd, add_dirs, timeout_sec, on_progre
                 pass
 
     return ProviderResult(returncode=returncode, stdout=stdout, stderr="".join(stderr_chunks))
+
+
+def _codex_json_event_label(line: str) -> str | None:
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    event_type = str(payload.get("type") or payload.get("event") or "")
+    if not event_type:
+        return None
+    return f"codex_event:{event_type}"
 
 
 def _try_parse_json(text: str) -> dict | None:

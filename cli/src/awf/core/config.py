@@ -47,7 +47,7 @@ class AwfConfig:
                     "aliases": {},
                     "claude-code": {
                         "command": os.environ.get("AWF_CLAUDE_COMMAND", "claude"),
-                        "flags": ["--print", "--permission-mode", "bypassPermissions"],
+                        "flags": ["--print", "--permission-mode", "default"],
                     },
                     "claude-sdk": {
                         "api_key_env": "ANTHROPIC_API_KEY",

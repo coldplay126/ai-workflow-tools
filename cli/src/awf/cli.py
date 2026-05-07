@@ -67,7 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     analyze_parser = subparsers.add_parser(
         "analyze",
-        help="Run the Phase 1 delegated analysis flow via Claude CLI.",
+        help="Run delegated analysis through the configured provider.",
     )
     analyze_parser.add_argument("service", help="Service name, e.g. sample-api")
     analyze_parser.add_argument("domain", nargs="?", default=None, help="Domain or domain cluster name, e.g. quest-challenge. Omit with --all.")
@@ -81,7 +81,13 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("--repo-root", help="ai-workflow-tools repo root. Defaults to current or parent directories.")
     analyze_parser.add_argument("--docs-root", help="Override AWF_DOCS_ROOT.")
     analyze_parser.add_argument("--github-root", help="Override AWF_GITHUB_ROOT.")
-    analyze_parser.add_argument("--provider", help="Provider name. Defaults to config provider.default. Phase 1 supports claude-code only.")
+    analyze_parser.add_argument("--provider", help="Provider name. Defaults to config provider.default.")
+    analyze_parser.add_argument(
+        "--provider-add-dirs",
+        choices=["off", "minimal", "full"],
+        default=os.environ.get("AWF_PROVIDER_ADD_DIRS", "off"),
+        help="Pass extra readable directories to native CLI providers. Default: off. minimal adds external project roots; full adds all discovered analysis roots.",
+    )
     analyze_parser.add_argument("--yolo", action="store_true", help="Bypass configured permission checks for this run.")
     analyze_parser.add_argument("--status", action="store_true", help="Show .analysis-state.json summary for this service/domain and exit.")
     analyze_parser.add_argument("--json", action="store_true", help="Print status as raw JSON when used with --status.")
@@ -116,7 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     wf_next_parser.add_argument("--repo-root", help="Repository root containing .workflow/. Defaults to current or parent directories.")
     wf_next_parser.add_argument("--phase", help="Override the target phase instead of resolving from state.")
-    wf_next_parser.add_argument("--provider", help="Provider name. Defaults to config provider.default. Phase 1 supports claude-code only.")
+    wf_next_parser.add_argument("--provider", help="Provider name. Defaults to config provider.default.")
     wf_next_parser.add_argument(
         "--mode",
         choices=["solo", "quick", "precise", "cross", "critical"],

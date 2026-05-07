@@ -108,7 +108,7 @@ stateDiagram-v2
 - Slave(Codex, Sonnet)는 **read-only 분석만** 수행
 - 실제 파일 변경은 Primary(Master)만 사용자 승인 후 실행
 - Codex: `sandbox: read-only` (MCP 기본)
-- Sonnet: `--model sonnet --permission-mode bypassPermissions`
+- Sonnet: `--model sonnet --permission-mode default` by default; `--yolo` switches Claude Code to `bypassPermissions` for trusted automation.
 
 ## 에이전트 정의
 
