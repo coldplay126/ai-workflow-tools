@@ -17,6 +17,27 @@ def _sha256_text(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def compute_exports_hash(content: str, language: str, *, extractor_name: str = "regex_baseline") -> str:
+    """SHA-256 of normalized exported symbols (sorted name+kind tuples).
+
+    A change in this hash means the file's public surface changed and any
+    transitive importer must be re-analyzed even if its own content_hash is
+    unchanged. Languages without an extractor return the empty string and
+    fall back to content_hash semantics for invalidation.
+    """
+    from awf.core.lang_adapters import get as _get_extractor
+
+    try:
+        extractor = _get_extractor(extractor_name)
+    except KeyError:
+        return ""
+    symbols = extractor.extract(content, language)
+    if not symbols:
+        return ""
+    payload = "\n".join(f"{s.name}\t{s.kind}" for s in symbols)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def collect_domain_files(context: AnalysisContext) -> tuple[list[dict[str, str]], dict[str, object]]:
     toolset = FileOpsToolset(context.github_root)
     collected: list[dict[str, str]] = []

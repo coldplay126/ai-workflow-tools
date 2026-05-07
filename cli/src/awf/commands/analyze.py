@@ -461,6 +461,18 @@ def run_analyze(args: argparse.Namespace) -> int:
                 file_analyses = new_analyses
 
             analyses_path = save_stage1_file_analyses(context, file_analyses)
+
+            # Phase 0b: build the import graph for diagnostic visibility.
+            # No invalidation logic consumes this yet; failures are warnings only.
+            try:
+                from awf.core.graph_builder import build_and_save_graph
+
+                graph_path = build_and_save_graph(context, domain_files)
+                if graph_path:
+                    print(f"import_graph: {graph_path}", file=sys.stderr)
+            except Exception as graph_exc:  # noqa: BLE001
+                print(f"warning: import-graph step skipped: {graph_exc}", file=sys.stderr)
+
             file_analyses_text = format_file_analyses_for_memo(file_analyses)
             file_analyses_list = file_analyses
             parse_errors = sum(1 for a in file_analyses if a.get("parse_error") or a.get("provider_error"))
