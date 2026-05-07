@@ -1,0 +1,44 @@
+{
+  "conclusion": "PASS - verify fixture",
+  "scope": {
+    "changed_files": 7,
+    "planned_files": 7,
+    "violations": 0,
+    "violation_files": []
+  },
+  "compliance": {
+    "total_requirements": 8,
+    "pass": 8,
+    "warn": 0,
+    "fail": 0,
+    "percentage": 100,
+    "failed_requirements": []
+  },
+  "quality": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 1,
+    "issues": [
+      {
+        "id": "Q1",
+        "severity": "LOW",
+        "file": "README.md",
+        "summary": "Fixture quality note"
+      }
+    ]
+  },
+  "evidence": [
+    {
+      "id": "E1",
+      "detail": "Fixture verify evidence"
+    }
+  ],
+  "risks": [],
+  "action_items": [
+    {
+      "id": "A1",
+      "action": "Verify fixture action item"
+    }
+  ]
+}

@@ -1,0 +1,54 @@
+{
+  "name": "phase-done",
+  "version": "1.0.0",
+  "description": "Human-in-the-loop final confirmation. Presents full workflow timeline, gate results, test summary. Optionally creates PR.",
+
+  "capabilities": {
+    "file_access": true,
+    "file_write": true,
+    "git_access": true,
+    "sandbox_modes": [],
+    "execution_modes": ["inline"],
+    "protocol_hint": { "recommended_mode": "solo", "reason": "최종확인은 단일 에이전트가 적합" }
+  },
+
+  "skills": [
+    { "id": "timeline-summary", "description": "Generates 7-phase timeline with completion timestamps and retry counts" },
+    { "id": "doc-update-check", "description": "Analyzes git diff against trigger table (routes, schema, deps, env vars) to detect analysis-docs updates needed. Optionally creates PR on analysis-docs repo." },
+    { "id": "pr-creation", "description": "Creates pull request with squash-merge compatible body" }
+  ],
+
+  "input": {
+    "required_artifacts": [
+      { "key": "state", "path": "state.json", "embed_for_stateless": false },
+      { "key": "test_report", "path": "artifacts/test-report.md", "embed_for_stateless": false },
+      { "key": "verification_report", "path": "artifacts/verification-report.md", "embed_for_stateless": false }
+    ],
+    "required_state": {
+      "gates": {
+        "G6": { "passed": true }
+      }
+    },
+    "optional_context": []
+  },
+
+  "output": {
+    "artifacts": [
+      { "key": "confirmation", "path": "artifacts/confirmation.json", "format": "json", "required": true }
+    ],
+    "structured_result": {
+      "decision": "confirmed_with_pr|confirmed_no_pr|deferred",
+      "pr_url": "string|null"
+    }
+  },
+
+  "gate": {
+    "id": null,
+    "pass_conditions": ["user confirms"],
+    "on_pass": { "next_phase": null },
+    "on_fail": {}
+  },
+
+  "retry": { "max": 0 },
+  "hil": true
+}

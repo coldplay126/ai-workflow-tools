@@ -1,0 +1,27 @@
+===FILE: api-spec.json===
+{
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/quest",
+      "summary": "Fixture endpoint"
+    }
+  ]
+}
+
+===FILE: data-model.md===
+# Data Model
+
+- quest table
+- challenge table
+
+===FILE: domain-overview.md===
+# Domain Overview
+
+Fixture domain overview.
+
+===FILE: external-integration.md===
+# External Integration
+
+- notification service
+- point system

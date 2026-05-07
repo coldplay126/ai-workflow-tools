@@ -1,0 +1,14 @@
+{
+  "orchestrator": {
+    "provider": "claude",
+    "flags": "--effort max"
+  },
+  "worker-investigate": {
+    "provider": "codex",
+    "flags": "-c model_reasoning_effort=xhigh"
+  },
+  "worker-fix": {
+    "provider": "codex",
+    "flags": "-c model_reasoning_effort=xhigh"
+  }
+}

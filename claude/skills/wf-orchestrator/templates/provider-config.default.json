@@ -1,0 +1,37 @@
+{
+  "version": "2.0.0",
+  "phase_routing": {
+    "plan":    { "mode": "inline" },
+    "review":  { "mode": "dual", "primary": "inline", "secondary": "codex" },
+    "approve": { "mode": "inline" },
+    "impl":    { "mode": "inline" },
+    "verify":  { "mode": "dual", "primary": "inline", "secondary": "codex" },
+    "test":    { "mode": "inline" },
+    "done":    { "mode": "inline" }
+  },
+  "providers": {
+    "codex": {
+      "type": "mcp",
+      "tool": "mcp__codex__codex",
+      "fallback": "codex exec -s {sandbox}",
+      "file_access": true,
+      "timeout_seconds": 300
+    },
+    "claude:sonnet": {
+      "type": "cli",
+      "command": "claude --print --bare --model sonnet --output-format json --max-budget-usd {budget}",
+      "file_access": false,
+      "timeout_seconds": 180,
+      "budget_usd": 0.50
+    }
+  },
+  "fallback_chain": ["codex", "claude:sonnet"],
+  "phase_models": {
+    "plan":   { "effort": "max",  "codex_reasoning": "xhigh" },
+    "review": { "effort": "max",  "codex_reasoning": "xhigh" },
+    "impl":   { "inline_model": "sonnet", "effort": "high", "codex_reasoning": "xhigh" },
+    "verify": { "effort": "max",  "codex_reasoning": "xhigh" },
+    "test":   { "inline_model": "sonnet", "effort": "high", "codex_reasoning": "xhigh" }
+  },
+  "defaults": { "mode": "inline", "timeout_seconds": 300 }
+}

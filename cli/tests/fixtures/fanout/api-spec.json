@@ -1,0 +1,9 @@
+{
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/quest",
+      "summary": "Fan-out fixture endpoint"
+    }
+  ]
+}

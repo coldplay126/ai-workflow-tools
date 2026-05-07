@@ -1,0 +1,16 @@
+{
+  "skill": "analysis",
+  "version": "1.0.0",
+  "categories": {
+    "modes": {
+      "type": "json",
+      "path": "modes",
+      "description": "Analysis mode contracts defining output files, writers, and judge config"
+    },
+    "prompts": {
+      "type": "md",
+      "path": "prompts",
+      "description": "Prompt templates for writers, judge, and stage runners"
+    }
+  }
+}

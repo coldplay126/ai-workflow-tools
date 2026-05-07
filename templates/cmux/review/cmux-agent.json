@@ -1,0 +1,10 @@
+{
+  "orchestrator": {
+    "provider": "claude",
+    "flags": "--effort max"
+  },
+  "worker-review": {
+    "provider": "codex",
+    "flags": "-c model_reasoning_effort=xhigh"
+  }
+}

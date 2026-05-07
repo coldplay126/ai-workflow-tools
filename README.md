@@ -1,0 +1,54 @@
+# ai-workflow-tools
+
+AI workflow and analysis tooling for Claude Code, Codex, and local CLI workflows.
+
+This repository keeps the reusable workflow contracts, provider adapters, CLI, and agent prompts in one place. It is imported as a clean personal repository with no upstream Git history.
+
+## Contents
+
+```text
+ai-workflow-tools/
+├── cli/            # Python CLI: awf analyze, awf wf, awf chat, awf doctor
+├── claude/         # Claude Code skills and agent definitions
+├── codex/          # Codex runner and delegated worker rules
+├── cmux-agent/     # cmux worker support package
+├── docs/           # Architecture, specs, and operating guides
+├── snippets/       # CLAUDE.md snippets
+├── templates/      # cmux protocol templates
+└── setup.sh        # Claude Code skill/agent symlink installer
+```
+
+## CLI
+
+```bash
+uv run --project cli --no-editable awf --help
+uv run --project cli --no-editable awf doctor --repo-root . --json --ci
+uv run --project cli --no-editable awf wf status --repo-root .
+uv run --project cli --no-editable awf analyze sample-api health --repo-root . --dry-run
+```
+
+The Python package is `awf-cli`, and the console entrypoint is `awf`.
+
+## Claude Code Setup
+
+```bash
+./setup.sh
+```
+
+The setup script links the skills under `claude/skills/` and agents under `claude/agents/` into `~/.claude`. It does not register any company-specific MCP server.
+
+Optional snippets:
+
+- `snippets/claude-md-multi-agent.md`
+- `snippets/claude-md-wf-pipeline.md`
+
+## Core Ideas
+
+- `.workflow/` holds phase state and artifacts for gated feature work.
+- `.ai-context/` holds generated analysis output.
+- Provider adapters normalize Claude, Codex, OpenAI, subprocess, and fixture execution.
+- The same contracts can be driven from Claude skills, Codex runner scripts, or the `awf` CLI.
+
+## Import Notes
+
+This repo intentionally excludes company-specific material from the source repository, including internal memory files, per-repository AI configuration backups, private documentation MCP configuration, and archived workflow snapshots.

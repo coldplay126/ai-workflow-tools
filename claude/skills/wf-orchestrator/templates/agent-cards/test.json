@@ -1,0 +1,90 @@
+{
+  "name": "phase-test",
+  "version": "1.1.0",
+  "description": "Runs regression tests and acceptance scenario validation. Produces test report with pass/fail results and manual sign-off checklist.",
+
+  "agent": {
+    "definition": "claude/agents/happy-path-tester.md",
+    "name": "happy-path-tester"
+  },
+
+  "cmux": {
+    "worker": "worker-test",
+    "provider": "codex"
+  },
+
+  "capabilities": {
+    "file_access": true,
+    "file_write": false,
+    "git_access": false,
+    "sandbox_modes": ["read-only"],
+    "execution_modes": ["inline", "delegated"],
+    "protocol_hint": { "recommended_mode": "precise", "reason": "테스트 커버리지 정밀 분석에 최적" }
+  },
+
+  "skills": [
+    { "id": "regression-test", "description": "Executes test_command and captures pass/fail/skip counts" },
+    { "id": "acceptance-test", "description": "Validates spec.md acceptance scenarios against implementation and test code" },
+    { "id": "test-bootstrap", "description": "Generates test skeletons from acceptance scenarios (optional)" }
+  ],
+
+  "input": {
+    "required_artifacts": [
+      { "key": "spec", "path": "artifacts/spec.md", "embed_for_stateless": true },
+      { "key": "tasks", "path": "artifacts/tasks.md", "embed_for_stateless": true },
+      { "key": "manifest", "path": "manifest.json", "embed_for_stateless": true }
+    ],
+    "required_state": {
+      "gates": {
+        "G5": { "passed": true }
+      }
+    },
+    "optional_context": [
+      { "key": "verification_report", "path": "artifacts/verification-report.md" }
+    ]
+  },
+
+  "output": {
+    "artifacts": [
+      { "key": "test_report", "path": "artifacts/test-report.md", "format": "markdown", "required": true }
+    ],
+    "structured_result": {
+      "conclusion": "PASS|FAIL",
+      "findings": [{ "severity": "CRITICAL|HIGH|MEDIUM|LOW", "category": "hp_*", "location": "string", "description": "string", "suggestion": "string" }],
+      "evidence": [],
+      "risks": [],
+      "action_items": [],
+      "phase_metrics": {
+        "regression": {
+          "pass": "int",
+          "fail": "int",
+          "skip": "int",
+          "total": "int",
+          "failed_tests": ["string"]
+        },
+        "acceptance": {
+          "auto_verified": "int",
+          "code_review": "int",
+          "manual_pending": "int",
+          "total": "int"
+        }
+      }
+    }
+  },
+
+  "gate": {
+    "id": "G6",
+    "pass_conditions": [
+      "regression.fail == 0 (or test_command is null + manual confirmed)",
+      "acceptance auto-verified items all pass",
+      "manual items signed by user (if any)"
+    ],
+    "on_pass": { "next_phase": "done" },
+    "on_fail": {
+      "regression_failure": { "next_phase": "impl" }
+    }
+  },
+
+  "retry": { "max": 3 },
+  "hil": false
+}

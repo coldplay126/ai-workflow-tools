@@ -1,0 +1,87 @@
+{
+  "name": "phase-impl",
+  "version": "1.1.0",
+  "description": "Implements tasks from tasks.md sequentially. Writes code, runs linting, creates git commits per phase. Supports resume from interrupted state.",
+
+  "agent": {
+    "definition": "claude/agents/implementer.md",
+    "name": "implementer"
+  },
+
+  "cmux": {
+    "worker": "worker-impl",
+    "provider": "codex"
+  },
+
+  "capabilities": {
+    "file_access": true,
+    "file_write": true,
+    "git_access": true,
+    "sandbox_modes": ["workspace-write"],
+    "execution_modes": ["inline", "delegated"],
+    "dual_strategy": "implement_then_review",
+    "protocol_hint": { "recommended_mode": "precise", "reason": "코드 정밀 분석에 최적" }
+  },
+
+  "skills": [
+    { "id": "task-execution", "description": "Implements individual tasks from tasks.md with code changes" },
+    { "id": "lint-fix", "description": "Runs linting and auto-fixes errors" },
+    { "id": "git-commit", "description": "Creates conventional commits per implementation phase" },
+    { "id": "resume", "description": "Resumes from last completed task on interrupted runs" }
+  ],
+
+  "input": {
+    "required_artifacts": [
+      { "key": "spec", "path": "artifacts/spec.md", "embed_for_stateless": true },
+      { "key": "plan", "path": "artifacts/plan.md", "embed_for_stateless": true },
+      { "key": "tasks", "path": "artifacts/tasks.md", "embed_for_stateless": true },
+      { "key": "allowed_files", "path": "artifacts/allowed-files.json", "embed_for_stateless": true },
+      { "key": "manifest", "path": "manifest.json", "embed_for_stateless": true }
+    ],
+    "required_state": {
+      "gates": {
+        "G3": { "passed": true }
+      }
+    },
+    "optional_context": [
+      { "key": "approval", "path": "artifacts/approval.json", "description": "Scope hash for integrity check" }
+    ]
+  },
+
+  "output": {
+    "artifacts": [
+      { "key": "impl_log", "path": "artifacts/impl-log.md", "format": "markdown", "required": true },
+      { "key": "tasks_updated", "path": "artifacts/tasks.md", "format": "markdown", "required": true }
+    ],
+    "structured_result": {
+      "conclusion": "PASS|FAIL",
+      "findings": [{ "severity": "CRITICAL|HIGH|MEDIUM|LOW", "category": "impl_*", "location": "string", "description": "string", "suggestion": "string" }],
+      "evidence": [],
+      "risks": [],
+      "action_items": [],
+      "phase_metrics": {
+        "tasks_completed": "int",
+        "tasks_total": "int",
+        "commits": ["string"],
+        "scope_warnings": ["string"],
+        "lint_errors": "int"
+      }
+    }
+  },
+
+  "gate": {
+    "id": "G4",
+    "pass_conditions": [
+      "all tasks in tasks.md marked [X]",
+      "lint_command errors == 0 (if lint_command configured)",
+      "all phases have commits"
+    ],
+    "on_pass": { "next_phase": "verify" },
+    "on_fail": {
+      "incomplete_tasks": { "next_phase": "impl" }
+    }
+  },
+
+  "retry": { "max": 5 },
+  "hil": false
+}

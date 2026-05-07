@@ -1,0 +1,97 @@
+{
+  "name": "phase-plan",
+  "version": "2.1.0",
+  "description": "Spec-kit routine: generates constitution, spec, plan, tasks, test-criteria from concept. Cross-referenced via FR-NNN ID tags.",
+
+  "agent": {
+    "definition": "claude/agents/spec-writer.md",
+    "name": "spec-writer"
+  },
+
+  "cmux": {
+    "worker": "worker-plan",
+    "provider": "codex"
+  },
+
+  "capabilities": {
+    "file_access": true,
+    "file_write": false,
+    "git_access": false,
+    "sandbox_modes": ["read-only"],
+    "execution_modes": ["inline", "delegated"],
+    "dual_strategy": "generate_then_validate",
+    "protocol_hint": { "recommended_mode": "critical", "reason": "설계 심층 분석에 최적" }
+  },
+
+  "skills": [
+    { "id": "context-collection", "description": "Collects project context from MCP, CLAUDE.md, AGENTS.md, constitution" },
+    { "id": "spec-generation", "description": "Creates feature specification with user stories, requirements (FR-NNN), acceptance criteria" },
+    { "id": "plan-generation", "description": "Creates implementation plan with phases tagged [FR-NNN]" },
+    { "id": "task-breakdown", "description": "Creates task list with IDs, FR tags, dependencies, file paths" },
+    { "id": "test-criteria-generation", "description": "Creates acceptance test criteria (ATC-NNN [FR-NNN]) with coverage matrix" }
+  ],
+
+  "input": {
+    "required_artifacts": [
+      { "key": "concept", "path": "concept.md", "embed_for_stateless": true },
+      { "key": "manifest", "path": "manifest.json", "embed_for_stateless": true }
+    ],
+    "required_state": {},
+    "optional_context": [
+      { "key": "review_feedback", "path": "review-feedback.md", "description": "Feedback from Phase 2 regression" },
+      { "key": "constitution", "path": "artifacts/constitution.md", "description": "Project invariant rules. Loaded by SKILL.md from manifest.constitution_path. Severity: absent=info, explicit-missing=error" },
+      { "key": "claude_md", "path": "../CLAUDE.md", "description": "Project conventions" },
+      { "key": "agents_md", "path": "../AGENTS.md", "description": "Agent-specific instructions" }
+    ]
+  },
+
+  "output": {
+    "artifacts": [
+      { "key": "constitution", "path": "artifacts/constitution.md", "format": "markdown", "required": false },
+      { "key": "spec", "path": "artifacts/spec.md", "format": "markdown", "required": true },
+      { "key": "plan", "path": "artifacts/plan.md", "format": "markdown", "required": true },
+      { "key": "tasks", "path": "artifacts/tasks.md", "format": "markdown", "required": true },
+      { "key": "test_criteria", "path": "artifacts/test-criteria.md", "format": "markdown", "required": true },
+      { "key": "allowed_files", "path": "artifacts/allowed-files.json", "format": "json", "required": true }
+    ],
+    "structured_result": {
+      "conclusion": "PASS|FAIL",
+      "findings": [{ "severity": "CRITICAL|HIGH|MEDIUM|LOW", "category": "sw_*", "location": "string", "description": "string", "suggestion": "string" }],
+      "evidence": [],
+      "risks": [],
+      "action_items": [],
+      "phase_metrics": {
+        "spec_summary": { "user_stories": "int", "requirements": "int" },
+        "plan_summary": { "phases": "int", "files_affected": "int", "fr_coverage": "int" },
+        "tasks_summary": { "total_tasks": "int", "parallel_tasks": "int", "fr_coverage": "int" },
+        "test_criteria_summary": { "total_atc": "int", "fr_coverage": "int" },
+        "allowed_files": ["string"]
+      }
+    }
+  },
+
+  "gate": {
+    "id": "G1",
+    "pass_conditions": [
+      "artifacts/spec.md exists",
+      "spec.md has 0 [NEEDS CLARIFICATION] markers",
+      "artifacts/plan.md exists",
+      "artifacts/tasks.md exists",
+      "artifacts/test-criteria.md exists",
+      "tasks.md has >= 1 task (- [ ] T pattern)",
+      "all FR-NNN in spec.md have [FR-NNN] tag in plan.md",
+      "all FR-NNN in spec.md have [FR-NNN] tag in tasks.md",
+      "all FR-NNN in spec.md have [FR-NNN] tag in test-criteria.md",
+      "constitution loaded if manifest.constitution_path is set"
+    ],
+    "on_pass": { "next_phase": "review" },
+    "on_fail": {
+      "missing_artifact": { "next_phase": "plan", "prompt_user": true },
+      "clarification_needed": { "next_phase": "plan", "prompt_user": true },
+      "fr_coverage_gap": { "next_phase": "plan", "prompt_user": false }
+    }
+  },
+
+  "retry": { "max": 3 },
+  "hil": false
+}

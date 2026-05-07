@@ -1,0 +1,57 @@
+{
+  "name": "phase-approve",
+  "version": "1.0.0",
+  "description": "Human-in-the-loop approval gate. Presents scope summary and risk assessment, awaits user decision (approve/revise/reject).",
+
+  "capabilities": {
+    "file_access": true,
+    "file_write": false,
+    "git_access": true,
+    "sandbox_modes": [],
+    "execution_modes": ["inline"],
+    "protocol_hint": { "recommended_mode": "solo", "reason": "HIL 승인은 단일 에이전트가 적합" }
+  },
+
+  "skills": [
+    { "id": "scope-summary", "description": "Presents file scope, risk assessment, and task count for approval" }
+  ],
+
+  "input": {
+    "required_artifacts": [
+      { "key": "spec", "path": "artifacts/spec.md", "embed_for_stateless": false },
+      { "key": "plan", "path": "artifacts/plan.md", "embed_for_stateless": false },
+      { "key": "tasks", "path": "artifacts/tasks.md", "embed_for_stateless": false },
+      { "key": "review_report", "path": "artifacts/review-report.md", "embed_for_stateless": false },
+      { "key": "allowed_files", "path": "artifacts/allowed-files.json", "embed_for_stateless": false }
+    ],
+    "required_state": { "gates": { "G2": { "passed": true } } },
+    "optional_context": []
+  },
+
+  "output": {
+    "artifacts": [
+      { "key": "approval", "path": "artifacts/approval.json", "format": "json", "required": true }
+    ],
+    "structured_result": {
+      "decision": "approved|revision_requested|rejected",
+      "scope_hash": "string",
+      "branch": "string"
+    }
+  },
+
+  "gate": {
+    "id": "G3",
+    "pass_conditions": [
+      "user decision == approved",
+      "scope_hash computed and stored"
+    ],
+    "on_pass": { "next_phase": "impl" },
+    "on_fail": {
+      "revision": { "next_phase": "plan", "creates": "review-feedback.md" },
+      "rejected": { "next_phase": null }
+    }
+  },
+
+  "retry": { "max": 1 },
+  "hil": true
+}

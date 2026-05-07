@@ -1,0 +1,33 @@
+{
+  "version": "2.1.0",
+  "host": "codex",
+  "phase_routing": {
+    "plan":    { "mode": "inline" },
+    "review":  { "mode": "dual", "primary": "inline", "secondary": "claude:sonnet" },
+    "approve": { "mode": "inline" },
+    "impl":    { "mode": "inline" },
+    "verify":  { "mode": "dual", "primary": "inline", "secondary": "claude:sonnet" },
+    "test":    { "mode": "inline" },
+    "done":    { "mode": "inline" }
+  },
+  "providers": {
+    "codex": {
+      "type": "host",
+      "tool": "inline",
+      "file_access": true,
+      "timeout_seconds": 300
+    },
+    "claude:sonnet": {
+      "type": "cli",
+      "command": "claude --print --bare --model claude-sonnet-4-6 --output-format json --max-budget-usd {budget}",
+      "file_access": false,
+      "timeout_seconds": 180,
+      "budget_usd": 0.50
+    }
+  },
+  "fallback_chain": ["claude:sonnet", "codex"],
+  "defaults": {
+    "mode": "inline",
+    "timeout_seconds": 300
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "status": "completed",
+  "phase": "review",
+  "provider": "fixture",
+  "result": {
+    "conclusion": "PASS - review fixture",
+    "findings": [
+      {
+        "id": "F1",
+        "category": "ambiguity",
+        "severity": "MEDIUM",
+        "locations": ["artifacts/tasks.md:T008"],
+        "summary": "Fixture finding for review rendering",
+        "recommendation": "Clarify the dependent task ordering"
+      }
+    ],
+    "coverage": {
+      "total_requirements": 8,
+      "mapped_requirements": 8,
+      "percentage": 100,
+      "gaps": []
+    },
+    "evidence": [
+      {
+        "id": "E1",
+        "detail": "Fixture evidence"
+      }
+    ],
+    "risks": [
+      {
+        "id": "R1",
+        "severity": "LOW",
+        "detail": "Low risk fixture"
+      }
+    ],
+    "action_items": [
+      {
+        "id": "A1",
+        "action": "Review fixture action item"
+      }
+    ]
+  },
+  "escape": null,
+  "meta": {
+    "format_version": 1
+  }
+}

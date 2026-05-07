@@ -1,0 +1,11 @@
+{
+  "skill": "multi-agent",
+  "version": "1.0.0",
+  "categories": {
+    "protocols": {
+      "type": "md",
+      "path": "protocols",
+      "description": "Worker role protocols for agent team execution"
+    }
+  }
+}

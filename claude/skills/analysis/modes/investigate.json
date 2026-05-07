@@ -1,0 +1,13 @@
+{
+  "mode": "investigate",
+  "version": "1.0.0",
+  "description": "Investigation mode: generates a deep-dive investigation report.",
+  "required_output_files": [
+    "investigation-report.md"
+  ],
+  "writers": [],
+  "judge": {
+    "prompt": "judge",
+    "verdict_schema": "judge-v2"
+  }
+}

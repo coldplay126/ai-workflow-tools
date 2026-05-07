@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WF Phase Agent Card",
+  "description": "A2A-inspired agent card defining I/O contract for each workflow phase",
+  "type": "object",
+  "required": ["name", "version", "description", "input", "output", "gate", "retry", "hil"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Phase skill name (e.g., phase-review)"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable description of what this phase does"
+    },
+    "agent": {
+      "type": "object",
+      "description": "Agent definition reference. Points to claude/agents/*.md for behavioral instructions.",
+      "properties": {
+        "definition": { "type": "string", "description": "Path to agent definition file (e.g., claude/agents/artifact-reviewer.md)" },
+        "name": { "type": "string", "description": "Agent name matching the definition's frontmatter name" }
+      }
+    },
+    "cmux": {
+      "type": "object",
+      "description": "cmux-agent worker mapping for multi-session execution.",
+      "properties": {
+        "worker": { "type": "string", "description": "cmux worker name (e.g., worker-review)" },
+        "provider": { "type": "string", "description": "AI CLI provider (e.g., codex, claude, gemini)" }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "properties": {
+        "file_access": { "type": "boolean", "description": "Whether the phase needs to read project files" },
+        "file_write": { "type": "boolean", "description": "Whether the phase needs to write project files" },
+        "git_access": { "type": "boolean", "description": "Whether the phase needs git operations" },
+        "sandbox_modes": {
+          "type": "array",
+          "items": { "enum": ["read-only", "workspace-write", "danger-full-access"] }
+        },
+        "execution_modes": {
+          "type": "array",
+          "items": { "enum": ["inline", "delegated"] },
+          "description": "Supported execution modes. 'inline' = SKILL.md read by host LLM. 'delegated' = task sent to external worker."
+        },
+        "dual_strategy": {
+          "enum": ["parallel_evaluate", "generate_then_validate", "implement_then_review"],
+          "default": "parallel_evaluate",
+          "description": "How dual mode operates. 'parallel_evaluate' = both LLMs evaluate independently, merge results (review/verify). 'generate_then_validate' = Primary generates, Secondary pre-validates (plan/test). 'implement_then_review' = Primary implements, Secondary reviews git diff post-completion (impl)."
+        },
+        "protocol_hint": {
+          "type": "object",
+          "description": "Suggests optimal Multi-Agent Protocol mode for ad-hoc queries during this phase",
+          "properties": {
+            "recommended_mode": { "enum": ["solo", "precise", "cross", "critical"] },
+            "reason": { "type": "string" }
+          }
+        }
+      }
+    },
+    "skills": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "description"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "input": {
+      "type": "object",
+      "properties": {
+        "required_artifacts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["key", "path"],
+            "properties": {
+              "key": { "type": "string" },
+              "path": { "type": "string", "description": "Relative to .workflow/" },
+              "embed_for_stateless": { "type": "boolean", "default": true, "description": "If true, embed full content in task message for workers without file access" }
+            }
+          }
+        },
+        "required_state": {
+          "type": "object",
+          "description": "State preconditions that must be true before this phase can execute",
+          "properties": {
+            "gates": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "properties": {
+                  "passed": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        },
+        "optional_context": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": { "type": "string" },
+              "path": { "type": "string" },
+              "description": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["key", "path"],
+            "properties": {
+              "key": { "type": "string" },
+              "path": { "type": "string" },
+              "format": { "enum": ["markdown", "json"] },
+              "required": { "type": "boolean", "default": true }
+            }
+          }
+        },
+        "structured_result": {
+          "type": "object",
+          "description": "JSON schema for the structured result that delegated workers must return"
+        }
+      }
+    },
+    "gate": {
+      "type": "object",
+      "required": ["id", "pass_conditions", "on_pass"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^G[1-6]$" },
+        "pass_conditions": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Human-readable conditions. All must be true for gate to pass."
+        },
+        "on_pass": {
+          "type": "object",
+          "properties": {
+            "next_phase": { "type": "string" }
+          }
+        },
+        "on_fail": {
+          "type": "object",
+          "description": "Failure routing by severity/type",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "next_phase": { "type": "string" },
+              "prompt_user": { "type": "boolean" },
+              "creates": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "retry": {
+      "type": "object",
+      "properties": {
+        "max": { "type": "integer" }
+      }
+    },
+    "hil": {
+      "type": "boolean",
+      "description": "If true, this phase requires human-in-the-loop interaction and cannot be fully delegated"
+    }
+  }
+}

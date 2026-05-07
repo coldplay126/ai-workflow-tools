@@ -1,0 +1,13 @@
+{
+  "mode": "review",
+  "version": "1.0.0",
+  "description": "Review mode: generates a structured review report with security, quality, and performance findings.",
+  "required_output_files": [
+    "review-report.md"
+  ],
+  "writers": [],
+  "judge": {
+    "prompt": "judge",
+    "verdict_schema": "judge-v2"
+  }
+}

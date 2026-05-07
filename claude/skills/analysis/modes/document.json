@@ -1,0 +1,39 @@
+{
+  "mode": "document",
+  "version": "1.0.0",
+  "description": "Documentation mode: generates structured API spec, data model, domain overview, and external integration documents.",
+  "required_output_files": [
+    "api-spec.json",
+    "data-model.md",
+    "domain-overview.md",
+    "external-integration.md"
+  ],
+  "writers": [
+    {
+      "id": "structure",
+      "description": "API structure and data model writer",
+      "prompt": "writer-structure",
+      "produces": ["api-spec.json", "data-model.md"],
+      "allow_code_fallback": true
+    },
+    {
+      "id": "behavior",
+      "description": "Business flow and integration writer",
+      "prompt": "writer-behavior",
+      "produces": ["domain-overview.md", "external-integration.md"],
+      "allow_code_fallback": true
+    }
+  ],
+  "judge": {
+    "prompt": "judge",
+    "verdict_schema": "judge-v2",
+    "fallback": {
+      "enabled": true,
+      "max_files": 3,
+      "low_confidence_threshold": 3
+    }
+  },
+  "output": {
+    "analysis_report_enabled": true
+  }
+}

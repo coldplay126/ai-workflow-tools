@@ -1,0 +1,98 @@
+{
+  "name": "phase-verify",
+  "version": "1.1.0",
+  "description": "Verifies implementation scope (closed-system check) and spec compliance. Detects scope violations, unimplemented requirements, and code quality issues.",
+
+  "agent": {
+    "definition": "claude/agents/spec-verifier.md",
+    "name": "spec-verifier"
+  },
+
+  "cmux": {
+    "worker": "worker-verify",
+    "provider": "codex"
+  },
+
+  "capabilities": {
+    "file_access": true,
+    "file_write": false,
+    "git_access": true,
+    "sandbox_modes": ["read-only"],
+    "execution_modes": ["inline", "delegated"],
+    "dual_strategy": "parallel_evaluate",
+    "protocol_hint": { "recommended_mode": "cross", "reason": "범위+아키텍처 교차 검증에 최적" }
+  },
+
+  "skills": [
+    { "id": "scope-verification", "description": "Compares git diff against allowed-files.json to detect scope violations" },
+    { "id": "spec-compliance", "description": "Verifies each FR-NNN requirement has corresponding implementation" },
+    { "id": "code-quality", "description": "Checks for error handling, security vulnerabilities, convention violations" }
+  ],
+
+  "input": {
+    "required_artifacts": [
+      { "key": "spec", "path": "artifacts/spec.md", "embed_for_stateless": true },
+      { "key": "tasks", "path": "artifacts/tasks.md", "embed_for_stateless": true },
+      { "key": "allowed_files", "path": "artifacts/allowed-files.json", "embed_for_stateless": true },
+      { "key": "manifest", "path": "manifest.json", "embed_for_stateless": true }
+    ],
+    "required_state": {
+      "gates": {
+        "G4": { "passed": true }
+      }
+    },
+    "optional_context": [
+      { "key": "impl_log", "path": "artifacts/impl-log.md" },
+      { "key": "git_diff", "path": null, "description": "git diff <base>...HEAD — generated at runtime by orchestrator" }
+    ]
+  },
+
+  "output": {
+    "artifacts": [
+      { "key": "verification_report", "path": "artifacts/verification-report.md", "format": "markdown", "required": true }
+    ],
+    "structured_result": {
+      "conclusion": "PASS|FAIL",
+      "findings": [{ "severity": "CRITICAL|HIGH|MEDIUM|LOW", "category": "vf_*", "location": "string", "description": "string", "suggestion": "string" }],
+      "evidence": [],
+      "risks": [],
+      "action_items": [],
+      "phase_metrics": {
+        "requirements": [{ "id": "string", "status": "pass|warn|fail", "evidence": "string" }],
+        "metrics": {
+          "total_requirements": "int",
+          "pass": "int",
+          "warn": "int",
+          "fail": "int",
+          "compliance_percentage": "number"
+        },
+        "scope": {
+          "planned_files": "int",
+          "changed_files": "int",
+          "violations": "int",
+          "violation_files": ["string"]
+        }
+      }
+    }
+  },
+
+  "gate": {
+    "id": "G5",
+    "pass_conditions": [
+      "scope.violations == 0",
+      "compliance.fail == 0",
+      "compliance.percentage >= 90",
+      "quality.critical == 0",
+      "REVIEW_CONFLICT count == 0 (when multi-LLM)"
+    ],
+    "on_pass": { "next_phase": "test" },
+    "on_fail": {
+      "scope_violation": { "next_phase": "approve" },
+      "impl_bug": { "next_phase": "impl" },
+      "arch_issue": { "next_phase": "plan" }
+    }
+  },
+
+  "retry": { "max": 2 },
+  "hil": false
+}

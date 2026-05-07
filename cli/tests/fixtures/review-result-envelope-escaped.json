@@ -1,0 +1,23 @@
+{
+  "status": "escaped",
+  "phase": "review",
+  "provider": "fixture",
+  "result": {},
+  "escape": {
+    "reason": "scope_divergence",
+    "summary": "Planned workflow artifacts do not match current repository structure",
+    "evidence": [
+      {
+        "kind": "file",
+        "value": "artifacts/tasks.md"
+      }
+    ],
+    "affected_files": [
+      "artifacts/tasks.md"
+    ],
+    "recommended_action": "replan"
+  },
+  "meta": {
+    "format_version": 1
+  }
+}

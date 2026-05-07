@@ -1,0 +1,84 @@
+{
+  "name": "phase-review",
+  "version": "1.1.0",
+  "description": "Cross-validates spec/plan/tasks for consistency, coverage gaps, ambiguities, and domain conflicts. Produces review report with findings.",
+
+  "agent": {
+    "definition": "claude/agents/artifact-reviewer.md",
+    "name": "artifact-reviewer"
+  },
+
+  "cmux": {
+    "worker": "worker-review",
+    "provider": "codex"
+  },
+
+  "capabilities": {
+    "file_access": true,
+    "file_write": false,
+    "git_access": false,
+    "sandbox_modes": ["read-only"],
+    "execution_modes": ["inline", "delegated"],
+    "dual_strategy": "parallel_evaluate",
+    "protocol_hint": { "recommended_mode": "cross", "reason": "독립 이중 평가에 최적" }
+  },
+
+  "skills": [
+    { "id": "cross-validation", "description": "Validates coverage, consistency, ambiguity, duplications across spec/plan/tasks" },
+    { "id": "domain-review", "description": "Checks plan against existing codebase patterns, dependencies, and conventions" }
+  ],
+
+  "input": {
+    "required_artifacts": [
+      { "key": "spec", "path": "artifacts/spec.md", "embed_for_stateless": true },
+      { "key": "plan", "path": "artifacts/plan.md", "embed_for_stateless": true },
+      { "key": "tasks", "path": "artifacts/tasks.md", "embed_for_stateless": true },
+      { "key": "manifest", "path": "manifest.json", "embed_for_stateless": true }
+    ],
+    "required_state": { "gates": { "G1": { "passed": true } } },
+    "optional_context": [
+      { "key": "allowed_files", "path": "artifacts/allowed-files.json" }
+    ]
+  },
+
+  "output": {
+    "artifacts": [
+      { "key": "review_report", "path": "artifacts/review-report.md", "format": "markdown", "required": true },
+      { "key": "review_feedback", "path": "review-feedback.md", "format": "markdown", "required": false }
+    ],
+    "structured_result": {
+      "conclusion": "PASS|FAIL",
+      "findings": [{ "severity": "CRITICAL|HIGH|MEDIUM|LOW", "category": "xr_*", "location": "string", "description": "string", "suggestion": "string" }],
+      "evidence": [],
+      "risks": [],
+      "action_items": [],
+      "phase_metrics": {
+        "coverage": {
+          "total_requirements": "int",
+          "mapped_requirements": "int",
+          "percentage": "number",
+          "gaps": ["string"]
+        },
+        "domain_issues": [{ "severity": "string", "summary": "string", "recommendation": "string" }]
+      }
+    }
+  },
+
+  "gate": {
+    "id": "G2",
+    "pass_conditions": [
+      "findings.count(severity=CRITICAL) == 0",
+      "HIGH issues all have resolution or user acknowledgment",
+      "coverage.percentage >= 80",
+      "REVIEW_CONFLICT count(severity>=HIGH) == 0 (when multi-LLM)"
+    ],
+    "on_pass": { "next_phase": "approve" },
+    "on_fail": {
+      "critical_found": { "next_phase": "plan", "creates": "review-feedback.md" },
+      "high_only": { "prompt_user": true }
+    }
+  },
+
+  "retry": { "max": 2 },
+  "hil": false
+}
