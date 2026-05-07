@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 from pathlib import Path
+
+from fixture_support import (
+    ROOT,
+    initialize_workflow_fixture,
+    prepare_workflow_repo,
+)
+
+sys.path.insert(0, str(ROOT / "cli" / "src"))
 
 from awf.core.analysis_state import load_analysis_state, record_cross_synthesis
 from awf.core.config import resolve_analysis_context
 from awf.core.judge import synthesize_cross_stage2, synthesize_workflow_multi_provider_results
 from awf.core.state import load_workflow_state, record_workflow_synthesis
-
-
-ROOT = Path(__file__).resolve().parents[2]
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -65,6 +71,15 @@ def _verify_payload(
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmp_dir_str:
         tmp_dir = Path(tmp_dir_str)
+        workflow_repo = tmp_dir / "repo"
+        prepare_workflow_repo(workflow_repo)
+        initialized = initialize_workflow_fixture(
+            workflow_repo,
+            "Fixture judge synthesis concept covering workflow state recording",
+        )
+        if initialized.returncode != 0:
+            print(initialized.stdout, end="")
+            return initialized.returncode
         primary_path = tmp_dir / "primary-review.json"
         secondary_path = tmp_dir / "secondary-review.json"
         _write_json(
@@ -94,7 +109,7 @@ def main() -> int:
         )
 
         workflow = synthesize_workflow_multi_provider_results(
-            str(ROOT),
+            str(workflow_repo),
             "review",
             str(primary_path),
             str(secondary_path),
@@ -107,29 +122,24 @@ def main() -> int:
         print(f"workflow_selection_summary={workflow.get('selection_summary')}")
         if workflow["selected_provider"] != "fixture-secondary" or not workflow["final_passed"]:
             return 1
-        workflow_state_path = ROOT / ".workflow" / "state.json"
-        workflow_state_backup = workflow_state_path.read_text(encoding="utf-8")
-        try:
-            record_workflow_synthesis(
-                str(ROOT),
-                "review",
-                selected_provider=str(workflow["selected_provider"]),
-                selected_result_path=str(workflow["selected_result_path"]),
-                judge_passed=bool(workflow["judge_passed"]),
-                judge_reasons=list(workflow["judge_reasons"]),
-                synthesis_passed=bool(workflow["final_passed"]),
-                synthesis_reasons=list(workflow["synthesis_reasons"]),
-                selection_summary=str(workflow.get("selection_summary", "") or ""),
-                secondary_provider="fixture-secondary",
-            )
-            workflow_state = load_workflow_state(str(ROOT))
-            review_synthesis = workflow_state["phases"]["review"].get("synthesis", {})
-            print(f"workflow_state_selected_provider={review_synthesis.get('selectedProvider')}")
-            print(f"workflow_state_selection_summary={review_synthesis.get('selectionSummary')}")
-            if review_synthesis.get("selectedProvider") != "fixture-secondary":
-                return 1
-        finally:
-            workflow_state_path.write_text(workflow_state_backup, encoding="utf-8")
+        record_workflow_synthesis(
+            str(workflow_repo),
+            "review",
+            selected_provider=str(workflow["selected_provider"]),
+            selected_result_path=str(workflow["selected_result_path"]),
+            judge_passed=bool(workflow["judge_passed"]),
+            judge_reasons=list(workflow["judge_reasons"]),
+            synthesis_passed=bool(workflow["final_passed"]),
+            synthesis_reasons=list(workflow["synthesis_reasons"]),
+            selection_summary=str(workflow.get("selection_summary", "") or ""),
+            secondary_provider="fixture-secondary",
+        )
+        workflow_state = load_workflow_state(str(workflow_repo))
+        review_synthesis = workflow_state["phases"]["review"].get("synthesis", {})
+        print(f"workflow_state_selected_provider={review_synthesis.get('selectedProvider')}")
+        print(f"workflow_state_selection_summary={review_synthesis.get('selectionSummary')}")
+        if review_synthesis.get("selectedProvider") != "fixture-secondary":
+            return 1
 
         higher_coverage_primary_path = tmp_dir / "primary-review-pass.json"
         higher_coverage_secondary_path = tmp_dir / "secondary-review-pass.json"
@@ -150,7 +160,7 @@ def main() -> int:
             ),
         )
         workflow_higher_coverage = synthesize_workflow_multi_provider_results(
-            str(ROOT),
+            str(workflow_repo),
             "review",
             str(higher_coverage_primary_path),
             str(higher_coverage_secondary_path),
@@ -180,7 +190,7 @@ def main() -> int:
             ),
         )
         workflow_higher_compliance = synthesize_workflow_multi_provider_results(
-            str(ROOT),
+            str(workflow_repo),
             "verify",
             str(verify_primary_path),
             str(verify_secondary_path),

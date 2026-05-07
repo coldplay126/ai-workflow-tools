@@ -1,40 +1,28 @@
 from __future__ import annotations
 
 import json
-import os
-import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
-
-ROOT = Path(__file__).resolve().parents[2]
+from fixture_support import initialize_workflow_fixture, prepare_workflow_repo, run_awf
 
 
 def main() -> int:
-    config_path = ROOT / ".awf.toml"
-    backup = config_path.read_text(encoding="utf-8") if config_path.exists() else None
-    state_path = ROOT / ".workflow" / "state.json"
-    state_backup = state_path.read_text(encoding="utf-8")
-    review_report_path = ROOT / ".workflow" / "artifacts" / "review-report.md"
-    review_report_backup = review_report_path.read_text(encoding="utf-8")
-    config_path.write_text(
-        "\n".join(
-            [
-                "[provider]",
-                'default = "fixture"',
-                "",
-                "[provider.fixture]",
-                'result_file = "cli/tests/fixtures/review-result.json"',
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    try:
-        env = os.environ.copy()
-        env["PYTHONPATH"] = str(ROOT / "cli" / "src")
-        state = json.loads((ROOT / ".workflow" / "state.json").read_text(encoding="utf-8"))
+    with tempfile.TemporaryDirectory() as tmp_dir_str:
+        temp_repo = Path(tmp_dir_str) / "repo"
+        prepare_workflow_repo(temp_repo)
+        initialized = initialize_workflow_fixture(
+            temp_repo,
+            "Fixture status concept covering workflow status summary",
+        )
+        if initialized.returncode != 0:
+            print(initialized.stdout, end="")
+            if initialized.stderr:
+                print(initialized.stderr, file=sys.stderr, end="")
+            return initialized.returncode
+        state_path = temp_repo / ".workflow" / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
         state["eventSync"] = {
             "lastEventAt": "2026-03-31T18:55:00+09:00",
             "stages": {
@@ -102,23 +90,9 @@ def main() -> int:
                 },
             ],
         }
-        (ROOT / ".workflow" / "state.json").write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-        status = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "awf",
-                "wf",
-                "status",
-                "--repo-root",
-                str(ROOT),
-            ],
-            cwd=str(ROOT),
-            env=env,
-            capture_output=True,
-            text=True,
-        )
+        status = run_awf(temp_repo, "wf", "status")
         print(status.stdout, end="")
         if status.stderr:
             print(status.stderr, file=sys.stderr, end="")
@@ -150,17 +124,10 @@ def main() -> int:
         if "loop_history:" not in status.stdout:
             raise SystemExit("missing loop_history")
 
-        state = json.loads((ROOT / ".workflow" / "state.json").read_text(encoding="utf-8"))
+        state = json.loads(state_path.read_text(encoding="utf-8"))
         print(f"currentPhase={state.get('currentPhase')}")
         print(f"eventSyncTasks={len((state.get('eventSync') or {}).get('tasks', {}))}")
         return 0
-    finally:
-        if backup is None:
-            config_path.unlink(missing_ok=True)
-        else:
-            config_path.write_text(backup, encoding="utf-8")
-        state_path.write_text(state_backup, encoding="utf-8")
-        review_report_path.write_text(review_report_backup, encoding="utf-8")
 
 
 if __name__ == "__main__":

@@ -1,20 +1,20 @@
 from __future__ import annotations
 
 import json
-import os
-import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
+from fixture_support import ROOT, initialize_workflow_fixture, prepare_workflow_repo, run_awf
 
-ROOT = Path(__file__).resolve().parents[2]
+
 sys.path.insert(0, str(ROOT / "cli" / "src"))
 
 from awf.core.state import load_workflow_state
 
 
-def _seed_deciding_state() -> None:
-    state_path = ROOT / ".workflow" / "state.json"
+def _seed_deciding_state(repo_root: Path) -> None:
+    state_path = repo_root / ".workflow" / "state.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
     phases = state.setdefault("phases", {})
     review = phases.setdefault("review", {"status": "pending", "retries": 0})
@@ -57,26 +57,28 @@ def _seed_deciding_state() -> None:
     state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def _run_decide(*args: str) -> tuple[subprocess.CompletedProcess[str], dict]:
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(ROOT / "cli" / "src")
-    completed = subprocess.run(
-        [sys.executable, "-m", "awf", "wf", "decide", *args, "--repo-root", str(ROOT)],
-        cwd=str(ROOT),
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-    state = load_workflow_state(str(ROOT))
+def _run_decide(repo_root: Path, *args: str) -> tuple[object, dict]:
+    completed = run_awf(repo_root, "wf", "decide", *args)
+    state = load_workflow_state(str(repo_root))
     return completed, state
 
 
 def main() -> int:
-    state_path = ROOT / ".workflow" / "state.json"
-    state_backup = state_path.read_text(encoding="utf-8")
-    try:
-        _seed_deciding_state()
-        completed, state = _run_decide("continue", "--phase", "review")
+    with tempfile.TemporaryDirectory() as tmp_dir_str:
+        temp_repo = Path(tmp_dir_str) / "repo"
+        prepare_workflow_repo(temp_repo)
+        initialized = initialize_workflow_fixture(
+            temp_repo,
+            "Fixture decide concept covering workflow decision commands",
+        )
+        if initialized.returncode != 0:
+            print(initialized.stdout, end="")
+            if initialized.stderr:
+                print(initialized.stderr, file=sys.stderr, end="")
+            return initialized.returncode
+
+        _seed_deciding_state(temp_repo)
+        completed, state = _run_decide(temp_repo, "continue", "--phase", "review")
         if completed.returncode != 0:
             print(completed.stdout, end="")
             print(completed.stderr, file=sys.stderr, end="")
@@ -90,8 +92,8 @@ def main() -> int:
         if not loop_history or (loop_history[-1] or {}).get("decision") != "continue":
             raise SystemExit("continue should append loop history")
 
-        _seed_deciding_state()
-        completed, state = _run_decide("replan", "--phase", "review", "--target", "plan")
+        _seed_deciding_state(temp_repo)
+        completed, state = _run_decide(temp_repo, "replan", "--phase", "review", "--target", "plan")
         if completed.returncode != 0:
             print(completed.stdout, end="")
             print(completed.stderr, file=sys.stderr, end="")
@@ -109,8 +111,8 @@ def main() -> int:
         if not loop_history or (loop_history[-1] or {}).get("decision") != "replan":
             raise SystemExit("replan should append loop history")
 
-        _seed_deciding_state()
-        completed, state = _run_decide("abort", "--phase", "review")
+        _seed_deciding_state(temp_repo)
+        completed, state = _run_decide(temp_repo, "abort", "--phase", "review")
         if completed.returncode != 0:
             print(completed.stdout, end="")
             print(completed.stderr, file=sys.stderr, end="")
@@ -126,8 +128,6 @@ def main() -> int:
 
         print("wf_decide_ok=true")
         return 0
-    finally:
-        state_path.write_text(state_backup, encoding="utf-8")
 
 
 if __name__ == "__main__":

@@ -2,24 +2,19 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-
-ROOT = Path(__file__).resolve().parents[2]
-AWF_DOCS_TEMPLATES = ROOT.parent / "analysis-docs" / "_templates"
+from fixture_support import ROOT, prepare_analysis_docs_fixture
 
 
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmp_dir_str:
         tmp_dir = Path(tmp_dir_str)
+        prepare_analysis_docs_fixture(tmp_dir)
         templates_dir = tmp_dir / "_templates"
-        templates_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(AWF_DOCS_TEMPLATES / "analysis-config.json", templates_dir / "analysis-config.json")
-        shutil.copy2(AWF_DOCS_TEMPLATES / "analysis-pipeline.json", templates_dir / "analysis-pipeline.json")
 
         analysis_config_path = templates_dir / "analysis-config.json"
         analysis_config = json.loads(analysis_config_path.read_text(encoding="utf-8"))
@@ -46,6 +41,8 @@ def main() -> int:
                 "--repo-root",
                 str(ROOT),
                 "--docs-root",
+                str(tmp_dir),
+                "--github-root",
                 str(tmp_dir),
                 "--provider",
                 "fixture",

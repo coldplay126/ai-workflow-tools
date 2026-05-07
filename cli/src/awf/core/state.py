@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import threading
 from copy import deepcopy
@@ -333,6 +334,47 @@ def resolve_repo_root(explicit_root: Optional[str] = None) -> Path:
     return find_repo_root(explicit_root)
 
 
+def _find_workflow_template_root(root: Path) -> Path | None:
+    env_dir = os.environ.get("AWF_WORKFLOW_TEMPLATE_DIR", "").strip()
+    candidates: list[Path] = []
+    if env_dir:
+        candidates.append(Path(env_dir).expanduser())
+    candidates.append(root / "claude" / "skills" / "wf-orchestrator" / "templates")
+    candidates.extend(
+        base / "claude" / "skills" / "wf-orchestrator" / "templates"
+        for base in Path(__file__).resolve().parents
+    )
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if (resolved / "agent-cards").is_dir() and (resolved / "provider-config.default.json").is_file():
+            return resolved
+    return None
+
+
+def _copy_missing_tree(source: Path, target: Path) -> None:
+    for source_path in source.rglob("*"):
+        relative = source_path.relative_to(source)
+        target_path = target / relative
+        if source_path.is_dir():
+            target_path.mkdir(parents=True, exist_ok=True)
+        elif not target_path.exists():
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_path, target_path)
+
+
+def _bootstrap_workflow_runtime(root: Path, wf_dir: Path) -> None:
+    template_root = _find_workflow_template_root(root)
+    if template_root is None:
+        return
+    _copy_missing_tree(template_root / "agent-cards", wf_dir / "agent-cards")
+    provider_config = wf_dir / "provider-config.json"
+    if not provider_config.exists():
+        shutil.copy2(template_root / "provider-config.default.json", provider_config)
+    schema = template_root / "agent-card.schema.json"
+    if schema.is_file() and not (wf_dir / "agent-card.schema.json").exists():
+        shutil.copy2(schema, wf_dir / "agent-card.schema.json")
+
+
 def initialize_workflow(explicit_root: Optional[str], concept: str, force: bool = False) -> dict:
     root = find_repo_root(explicit_root)
     wf_dir = root / ".workflow"
@@ -343,6 +385,7 @@ def initialize_workflow(explicit_root: Optional[str], concept: str, force: bool 
     wf_dir.mkdir(parents=True, exist_ok=True)
     (wf_dir / "artifacts").mkdir(parents=True, exist_ok=True)
     (wf_dir / "tmp").mkdir(parents=True, exist_ok=True)
+    _bootstrap_workflow_runtime(root, wf_dir)
 
     manifest_path = wf_dir / "manifest.json"
     concept_path = wf_dir / "concept.md"

@@ -14,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def _prepare_temp_repo(temp_repo: Path) -> None:
     (temp_repo / "docs").mkdir(parents=True, exist_ok=True)
+    temp_docs_root = temp_repo.parent / "analysis-docs"
+    temp_docs_root.mkdir(parents=True, exist_ok=True)
     shutil.copy2(ROOT / "docs" / "architecture" / "awf-cli-architecture.md", temp_repo / "docs" / "awf-cli-architecture.md")
     skill_dir = temp_repo / ".awf" / "skills" / "fixture-docs"
     skill_dir.mkdir(parents=True, exist_ok=True)
@@ -44,8 +46,8 @@ def _prepare_temp_repo(temp_repo: Path) -> None:
                 'result_file = "cli/tests/fixtures/review-result.json"',
                 "",
                 "[paths]",
-                f'analysis_docs = "{ROOT.parent / "analysis-docs"}"',
-                f'awf_github = "{ROOT.parent}"',
+                f'analysis_docs = "{temp_docs_root}"',
+                f'awf_github = "{temp_repo.parent}"',
                 "",
                 '[mcp."fixture_mcp"]',
                 'type = "stdio"',

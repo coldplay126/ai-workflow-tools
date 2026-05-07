@@ -2,21 +2,18 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-
-ROOT = Path(__file__).resolve().parents[2]
-AWF_DOCS_TEMPLATES = ROOT.parent / "analysis-docs" / "_templates"
+from fixture_support import ANALYSIS_RESULT, ROOT, prepare_analysis_docs_fixture
 
 
 def _run_analyze(tmp_docs_root: Path) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT / "cli" / "src")
-    env["AWF_FIXTURE_RESULT_FILE"] = str(ROOT / "cli" / "tests" / "fixtures" / "analysis-stage2-result.txt")
+    env["AWF_FIXTURE_RESULT_FILE"] = str(ANALYSIS_RESULT)
     return subprocess.run(
         [
             sys.executable,
@@ -28,6 +25,8 @@ def _run_analyze(tmp_docs_root: Path) -> subprocess.CompletedProcess[str]:
             "--repo-root",
             str(ROOT),
             "--docs-root",
+            str(tmp_docs_root),
+            "--github-root",
             str(tmp_docs_root),
             "--provider",
             "fixture",
@@ -43,10 +42,8 @@ def _run_analyze(tmp_docs_root: Path) -> subprocess.CompletedProcess[str]:
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmp_dir_str:
         tmp_dir = Path(tmp_dir_str)
+        prepare_analysis_docs_fixture(tmp_dir)
         templates_dir = tmp_dir / "_templates"
-        templates_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(AWF_DOCS_TEMPLATES / "analysis-config.json", templates_dir / "analysis-config.json")
-        shutil.copy2(AWF_DOCS_TEMPLATES / "analysis-pipeline.json", templates_dir / "analysis-pipeline.json")
 
         first = _run_analyze(tmp_dir)
         print(first.stdout, end="")

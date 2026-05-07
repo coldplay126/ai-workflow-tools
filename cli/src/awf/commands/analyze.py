@@ -780,34 +780,37 @@ def run_analyze(args: argparse.Namespace) -> int:
         # Multi-agent cross-validation of Stage 2 results
         exec_mode = getattr(args, "mode", None)
         if exec_mode and exec_mode not in {"solo", None} and result.returncode == 0 and not output_summary["missing_files"]:
-            from awf.core.multi_agent import run_multi_agent
-            from awf.core.spec_loader import load_prompt_optional
-            validation_prompt = load_prompt_optional(
-                "analysis", "cross-validate",
-                service=context.service, domain=context.domain,
-                stage2_result=result.stdout[:20000], stage1_memo=stage1_memo_text[:5000],
-            )
-            if not validation_prompt:
-                validation_prompt = (
-                    f"다음은 `{context.service}/{context.domain}` 도메인의 Stage 2 분석 결과입니다.\n"
-                    f"이 결과의 정확성을 검증하세요.\n\n"
-                    f"## Stage 2 결과\n\n{result.stdout[:20000]}\n\n"
-                    f"## Stage 1 메모\n\n{stage1_memo_text[:5000]}\n"
+            if provider_name == "fixture":
+                print("multi_agent_validation: skipped for fixture provider", file=sys.stderr)
+            else:
+                from awf.core.multi_agent import run_multi_agent
+                from awf.core.spec_loader import load_prompt_optional
+                validation_prompt = load_prompt_optional(
+                    "analysis", "cross-validate",
+                    service=context.service, domain=context.domain,
+                    stage2_result=result.stdout[:20000], stage1_memo=stage1_memo_text[:5000],
                 )
-            multi_result = run_multi_agent(
-                mode=exec_mode,
-                prompt=validation_prompt,
-                primary_provider=provider,
-                registry=registry,
-                config={},
-                cwd=str(context.repo_root),
-            )
-            for agent in multi_result.agents:
-                if agent.role != "primary" and agent.stdout.strip():
-                    val_path = context.ai_context_dir / ".tmp" / f"validation-{agent.provider_name}-{agent.role}.txt"
-                    val_path.write_text(agent.stdout, encoding="utf-8")
-                    print(f"multi_agent_{agent.role}: {agent.provider_name} ({agent.elapsed_sec:.1f}s)", file=sys.stderr)
-            print(f"multi_agent_judge: {multi_result.judge_verdict} ({multi_result.judge_reason})", file=sys.stderr)
+                if not validation_prompt:
+                    validation_prompt = (
+                        f"다음은 `{context.service}/{context.domain}` 도메인의 Stage 2 분석 결과입니다.\n"
+                        f"이 결과의 정확성을 검증하세요.\n\n"
+                        f"## Stage 2 결과\n\n{result.stdout[:20000]}\n\n"
+                        f"## Stage 1 메모\n\n{stage1_memo_text[:5000]}\n"
+                    )
+                multi_result = run_multi_agent(
+                    mode=exec_mode,
+                    prompt=validation_prompt,
+                    primary_provider=provider,
+                    registry=registry,
+                    config={},
+                    cwd=str(context.repo_root),
+                )
+                for agent in multi_result.agents:
+                    if agent.role != "primary" and agent.stdout.strip():
+                        val_path = context.ai_context_dir / ".tmp" / f"validation-{agent.provider_name}-{agent.role}.txt"
+                        val_path.write_text(agent.stdout, encoding="utf-8")
+                        print(f"multi_agent_{agent.role}: {agent.provider_name} ({agent.elapsed_sec:.1f}s)", file=sys.stderr)
+                print(f"multi_agent_judge: {multi_result.judge_verdict} ({multi_result.judge_reason})", file=sys.stderr)
 
         if context.mode == "deep" and not resume.get("stage3_retry_blocked"):
             processor.emit(

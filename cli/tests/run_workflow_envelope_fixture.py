@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
-import os
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+from fixture_support import (
+    ROOT,
+    initialize_workflow_fixture,
+    mark_workflow_prerequisites_passed,
+    prepare_workflow_repo,
+    run_awf,
+)
+
 sys.path.insert(0, str(ROOT / "cli" / "src"))
 
 from awf.commands.wf import _workflow_idempotency_key
@@ -21,62 +26,39 @@ def _run_wf_with_fixture(
     *,
     returncode: int = 0,
     loop: dict | None = None,
-) -> tuple[subprocess.CompletedProcess[str], dict]:
-    config_path = ROOT / ".awf.toml"
-    state_path = ROOT / ".workflow" / "state.json"
-    review_report_path = ROOT / ".workflow" / "artifacts" / "review-report.md"
-    backup = config_path.read_text(encoding="utf-8") if config_path.exists() else None
-    state_backup = state_path.read_text(encoding="utf-8")
-    review_report_backup = review_report_path.read_text(encoding="utf-8")
-    config_path.write_text(
-        "\n".join(
-            [
-                "[provider]",
-                'default = "fixture"',
-                "",
-                "[provider.fixture]",
-                f'result_file = "{result_file}"',
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    try:
+) -> tuple[object, dict]:
+    with tempfile.TemporaryDirectory() as tmp_dir_str:
+        temp_repo = Path(tmp_dir_str) / "repo"
+        prepare_workflow_repo(temp_repo, result_file=result_file)
+        initialized = initialize_workflow_fixture(
+            temp_repo,
+            "Fixture envelope concept covering escaped and completed worker envelopes",
+        )
+        if initialized.returncode != 0:
+            print(initialized.stdout, end="")
+            if initialized.stderr:
+                print(initialized.stderr, file=sys.stderr, end="")
+            return initialized, {}
+        mark_workflow_prerequisites_passed(temp_repo)
+        state_path = temp_repo / ".workflow" / "state.json"
         state = json.loads(state_path.read_text(encoding="utf-8"))
         if loop is not None:
             state["loop"] = loop
             state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        env = os.environ.copy()
-        env["PYTHONPATH"] = str(ROOT / "cli" / "src")
-        env["AWF_FIXTURE_RESULT_FILE"] = str(result_file)
-        env["AWF_FIXTURE_RETURNCODE"] = str(returncode)
-        completed = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "awf",
-                "wf",
-                "next",
-                "--repo-root",
-                str(ROOT),
-                "--phase",
-                "review",
-                "--auto-apply",
-            ],
-            cwd=str(ROOT),
-            env=env,
-            capture_output=True,
-            text=True,
+        completed = run_awf(
+            temp_repo,
+            "wf",
+            "next",
+            "--phase",
+            "review",
+            "--auto-apply",
+            extra_env={
+                "AWF_FIXTURE_RESULT_FILE": str(result_file),
+                "AWF_FIXTURE_RETURNCODE": str(returncode),
+            },
         )
-        state_snapshot = load_workflow_state(str(ROOT))
+        state_snapshot = load_workflow_state(str(temp_repo))
         return completed, state_snapshot
-    finally:
-        if backup is None:
-            config_path.unlink(missing_ok=True)
-        else:
-            config_path.write_text(backup, encoding="utf-8")
-        state_path.write_text(state_backup, encoding="utf-8")
-        review_report_path.write_text(review_report_backup, encoding="utf-8")
 
 
 def main() -> int:
