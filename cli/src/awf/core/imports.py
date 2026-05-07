@@ -51,6 +51,53 @@ _LANG_RESOLVE: dict[str, dict] = {
 }
 
 
+def extract_imports_with_kinds(content: str, language: str) -> list[tuple[str, str]]:
+    """Like `extract_imports` but tags each path with an edge kind.
+
+    Returns list of (import_path, kind) where kind is one of:
+    - "import"     — runtime value/symbol import
+    - "type-only"  — TypeScript `import type` (erased at compile time)
+    - "reexport"   — TypeScript `export ... from`
+
+    Other languages currently return only "import" since type-only semantics
+    do not apply or require AST-level analysis.
+    """
+    results: list[tuple[str, str]] = []
+
+    if language in ("typescript", "javascript"):
+        # `import type { ... } from '...'`  → type-only
+        for m in re.finditer(r"""import\s+type\s+[^;]*?\s+from\s+['"]([^'"]+)['"]""", content):
+            path = m.group(1)
+            if path and not path.startswith("@") and not path.startswith("node_modules"):
+                results.append((path, "type-only"))
+        # `export ... from '...'` → reexport (treat as runtime; barrel re-exports propagate)
+        for m in re.finditer(r"""export\s+[^;]*?\s+from\s+['"]([^'"]+)['"]""", content):
+            path = m.group(1)
+            if path and not path.startswith("@") and not path.startswith("node_modules"):
+                results.append((path, "reexport"))
+        # Plain runtime imports: `import ... from '...'` (excluding the type form above)
+        for m in re.finditer(r"""import\s+(?!type\s)[^;]*?\s+from\s+['"]([^'"]+)['"]""", content):
+            path = m.group(1)
+            if path and not path.startswith("@") and not path.startswith("node_modules"):
+                results.append((path, "import"))
+        # CommonJS: require('...')
+        for m in re.finditer(r"""require\s*\(\s*['"]([^'"]+)['"]\s*\)""", content):
+            path = m.group(1)
+            if path and not path.startswith("@") and not path.startswith("node_modules"):
+                results.append((path, "import"))
+        # Dedup while keeping the strongest kind: type-only < import == reexport
+        # If the same path appears as both type-only and import, prefer "import".
+        merged: dict[str, str] = {}
+        kind_rank = {"type-only": 0, "reexport": 1, "import": 2}
+        for path, kind in results:
+            if path not in merged or kind_rank[kind] > kind_rank[merged[path]]:
+                merged[path] = kind
+        return list(merged.items())
+
+    # Default: every path from extract_imports is a runtime import.
+    return [(p, "import") for p in extract_imports(content, language)]
+
+
 def extract_imports(content: str, language: str) -> list[str]:
     """Extract import/require paths from file content."""
     paths: list[str] = []
