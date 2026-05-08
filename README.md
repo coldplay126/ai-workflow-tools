@@ -41,6 +41,14 @@ The orchestrator can request dynamic workers by writing a `control` artifact wit
 uv run --project cmux-agent cmux-agent spawn worker-api --provider codex
 ```
 
+Runtime diagnostics are available from the same CLI:
+
+```bash
+uv run --project cmux-agent cmux-agent status --failures
+uv run --project cmux-agent cmux-agent failures
+uv run --project cmux-agent cmux-agent events --failures
+```
+
 ## Claude Code Setup
 
 ```bash

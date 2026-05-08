@@ -38,5 +38,6 @@ orchestrator가 명시적으로 허용한 경우 다른 worker에게 dispatch를
 
 ## 주의
 - outbox에 생성한 파일은 컨트롤러(watcher)가 감지 즉시 processed/로 이동시킨다. 파일 생성 후 확인했을 때 파일이 없어도 **정상 동작**이다. 오류가 아니므로 재생성하지 마라.
+- 검증 실패 artifact는 `.agent/processed/failed/`에 남는다. 실패 이유는 `cmux-agent failures` 또는 `cmux-agent events --failures`에서 확인한다.
 - dispatch에 명시된 파일만 수정하라. 범위 외 변경 금지.
 - 기존 테스트가 깨지지 않도록 하라.
