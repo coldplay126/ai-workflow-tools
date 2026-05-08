@@ -256,4 +256,25 @@ awf wf expand-scope --dry-run --json
 - `expanded_files`: 정렬·중복 제거된 추가 경로 목록
 - `graph_expansion`: 사용된 direction/depth, 항목별 사유(`dependent_of:X` / `import_of:X`), planned_files coverage 진단
 
-verify(G5)는 현재 `planned_files`만 검사한다. 프로젝트 정책상 더 넓은 스코프를 허용하려면 G5 검증 로직을 `planned_files ∪ expanded_files`로 확장한다(별도 PR 예정).
+## G5 결정론적 스코프 검증 (`awf wf scope-check`)
+
+verify SKILL은 `awf wf scope-check`를 호출해 결정론적으로 SCOPE_VIOLATION을 판정한다. LLM이 git diff와 allowed-files를 직접 비교하지 않는다.
+
+```bash
+awf wf scope-check --json
+```
+
+동작:
+1. base branch 추론 (`state.baseBranch` → `main`/`master`/`staging` 순)
+2. `git diff --name-only <base>...HEAD` 실행, `.workflow/` 경로는 자동 제외 (WF 인프라)
+3. 각 변경 파일을 다음으로 분류:
+   - `planned`: `planned_files`에 명시
+   - `expanded`: `expanded_files`에 있음 (reason 필드에 `dependent_of:X` / `import_of:X` 사유)
+   - `violation`: 어느 셋에도 없음 → SCOPE_VIOLATION
+4. 종료 코드: 위반 1건 이상이면 1, 아니면 0
+
+| 옵션 | 기본 | 설명 |
+|------|------|------|
+| `--base-branch` | (자동 추론) | `state.baseBranch` → `main`/`master`/`staging` |
+| `--no-expanded` | off | `expanded_files`를 무시하고 legacy 동작 (planned_files만 비교) |
+| `--json` | off | 분류 결과 + 위반 목록을 JSON으로 출력 (verify SKILL이 그대로 인용) |

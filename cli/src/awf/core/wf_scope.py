@@ -1,4 +1,4 @@
-"""Expand a WF feature's allowed-files.json using saved import graphs.
+"""WF scope helpers — allowed-files expansion + git-diff-based G5 check.
 
 The WF plan phase emits ``planned_files`` from the LLM-generated tasks.md.
 That list captures where the user *plans* to edit, but real implementations
@@ -200,6 +200,185 @@ def save_allowed_files(repo_root: Path, payload: dict) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return path
+
+
+# ---------------------------------------------------------------------------
+# G5 deterministic scope check — compare git diff against allowed-files.
+# ---------------------------------------------------------------------------
+
+DEFAULT_BASE_BRANCH_CANDIDATES = ("main", "master", "staging")
+
+STATUS_PLANNED = "planned"
+STATUS_EXPANDED = "expanded"
+STATUS_VIOLATION = "violation"
+
+
+@dataclass(frozen=True)
+class FileClassification:
+    path: str
+    status: str  # "planned" | "expanded" | "violation"
+    reason: str  # explanation that the verify SKILL can quote verbatim
+
+
+@dataclass(frozen=True)
+class ScopeCheckResult:
+    base_branch: str
+    planned_set: tuple[str, ...]
+    expanded_set: tuple[str, ...]
+    changed_files: tuple[str, ...]
+    classifications: tuple[FileClassification, ...]
+    violations: tuple[FileClassification, ...]
+    # Files in planned that were not actually changed (informational).
+    planned_not_changed: tuple[str, ...]
+
+    @property
+    def violation_count(self) -> int:
+        return len(self.violations)
+
+    def to_json(self) -> dict:
+        return {
+            "base_branch": self.base_branch,
+            "planned_count": len(self.planned_set),
+            "expanded_count": len(self.expanded_set),
+            "changed_count": len(self.changed_files),
+            "violation_count": self.violation_count,
+            "violations": [
+                {"path": v.path, "reason": v.reason} for v in self.violations
+            ],
+            "classifications": [
+                {"path": c.path, "status": c.status, "reason": c.reason}
+                for c in self.classifications
+            ],
+            "planned_not_changed": list(self.planned_not_changed),
+        }
+
+
+def _git_diff_changed_files(repo_root: Path, base_branch: str) -> list[str]:
+    import subprocess
+
+    result = subprocess.run(
+        ["git", "diff", "--name-only", f"{base_branch}...HEAD"],
+        cwd=str(repo_root),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"git diff failed (exit {result.returncode}): {result.stderr.strip()}"
+        )
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def _resolve_base_branch(repo_root: Path, explicit: str | None) -> str:
+    if explicit:
+        return explicit
+    state_path = repo_root / ".workflow" / "state.json"
+    if state_path.is_file():
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            base = state.get("baseBranch") or state.get("base_branch")
+            if isinstance(base, str) and base.strip():
+                return base.strip()
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    import subprocess
+
+    for candidate in DEFAULT_BASE_BRANCH_CANDIDATES:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", candidate],
+            cwd=str(repo_root),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            return candidate
+    raise RuntimeError(
+        "could not resolve base branch; pass --base-branch or set state.baseBranch"
+    )
+
+
+def _build_expansion_reason_index(payload: dict) -> dict[str, str]:
+    """Map each expanded path to its `dependent_of:X` / `import_of:X` reason."""
+    audit = payload.get("graph_expansion") or {}
+    entries = audit.get("entries") or []
+    index: dict[str, str] = {}
+    for entry in entries:
+        path = entry.get("path") if isinstance(entry, dict) else None
+        reason = entry.get("reason") if isinstance(entry, dict) else None
+        if path and reason and path not in index:
+            index[path] = reason
+    return index
+
+
+def check_scope_violations(
+    repo_root: Path,
+    *,
+    base_branch: str | None = None,
+    include_expanded: bool = True,
+) -> ScopeCheckResult:
+    """Run G5 scope check deterministically.
+
+    Compares ``git diff --name-only <base>...HEAD`` against the union of
+    ``planned_files`` and (when ``include_expanded`` is True)
+    ``expanded_files`` from ``.workflow/artifacts/allowed-files.json``.
+
+    Returns per-file classifications plus a focused list of violations.
+    """
+    payload = load_allowed_files(repo_root)
+    planned = sorted({p for p in (payload.get("planned_files") or []) if p})
+    expanded = (
+        sorted({p for p in (payload.get("expanded_files") or []) if p})
+        if include_expanded
+        else []
+    )
+    expansion_reasons = _build_expansion_reason_index(payload) if include_expanded else {}
+
+    base = _resolve_base_branch(repo_root, base_branch)
+    raw_changed = _git_diff_changed_files(repo_root, base)
+    # `.workflow/` is WF infrastructure (artifacts, state.json, etc.), not
+    # user-authored source. Excluding it here matches operator intuition —
+    # nobody puts these paths in `planned_files` or `expanded_files`.
+    changed = [p for p in raw_changed if not p.startswith(".workflow/")]
+
+    planned_set = set(planned)
+    expanded_set = set(expanded)
+
+    classifications: list[FileClassification] = []
+    violations: list[FileClassification] = []
+    for path in changed:
+        if path in planned_set:
+            classifications.append(
+                FileClassification(path=path, status=STATUS_PLANNED, reason="in planned_files")
+            )
+        elif path in expanded_set:
+            reason = expansion_reasons.get(path) or "in expanded_files"
+            classifications.append(
+                FileClassification(path=path, status=STATUS_EXPANDED, reason=reason)
+            )
+        else:
+            classification = FileClassification(
+                path=path,
+                status=STATUS_VIOLATION,
+                reason="not in planned_files or expanded_files",
+            )
+            classifications.append(classification)
+            violations.append(classification)
+
+    changed_set = set(changed)
+    planned_not_changed = tuple(sorted(planned_set - changed_set))
+
+    return ScopeCheckResult(
+        base_branch=base,
+        planned_set=tuple(planned),
+        expanded_set=tuple(expanded),
+        changed_files=tuple(changed),
+        classifications=tuple(classifications),
+        violations=tuple(violations),
+        planned_not_changed=planned_not_changed,
+    )
 
 
 def apply_expansion_to_payload(payload: dict, result: ExpansionResult) -> dict:

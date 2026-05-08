@@ -37,15 +37,23 @@ runtime_contract: ".workflow/agent-cards/verify.json"
 `phases.verify.status: "in_progress"`.
 
 ### 2. 스코프 검증 (닫힌계 강제)
-- base branch 확인 (state.json의 branch에서 추론, 또는 staging/main/master)
-- `git diff --name-only <base-branch>...HEAD` 실행
-- `.workflow/artifacts/allowed-files.json`의 `planned_files`와 비교
-- 결과:
-  - **planned & changed**: 정상 (스코프 내 수정)
-  - **planned & not changed**: 경고 (계획했지만 수정 안 함)
-  - **not planned & changed**: **SCOPE_VIOLATION** (스코프 외 수정)
 
-스코프 위반 시 verification-report.md에 CRITICAL로 기록.
+**반드시 아래 CLI 명령으로 검증합니다** (LLM 판단이 아닌 결정론적 Python 분류기 사용):
+
+```bash
+awf wf scope-check --json
+```
+
+이 명령은 base branch 자동 추론 → `git diff --name-only <base>...HEAD` → `allowed-files.json`의 `planned_files ∪ expanded_files` 비교를 한 번에 수행하고 파일별 분류와 종료 코드(0=PASS, 1=FAIL)를 반환합니다.
+
+분류 결과:
+- **planned**: 정상 (사용자가 명시한 스코프)
+- **expanded**: 정상 (`expand-scope`가 graph로 추가한 dependent/import; reason 필드에 사유 포함)
+- **violation**: **SCOPE_VIOLATION** (어느 셋에도 없음)
+
+`--no-expanded` 플래그는 expanded_files를 무시하고 legacy 동작(planned_files만 비교)으로 fallback합니다. expanded 영역을 의도적으로 좁게 가두려는 정책에서만 사용하세요.
+
+위반이 있으면 `verification-report.md`의 "스코프 검증" 표에 CRITICAL로 기록하고, 각 행에 `awf wf scope-check`의 reason을 그대로 인용합니다.
 
 ### 3. Spec 준수 검증 (spec-verifier 에이전트, fork context)
 
