@@ -76,21 +76,27 @@ The orchestrator can request a new worker by writing a control artifact:
   "message": "Need isolated API implementation worker",
   "action": "spawn_agent",
   "agent": {
-    "name": "worker-api",
+    "template": "impl",
     "provider": "codex"
   }
 }
 ```
 
+Use `agent.template` or `agent.role` when the worker purpose is known. For
+example, `template: "review"` creates `worker-review`, or `worker-review-2`
+when `worker-review` already exists. Matching worker protocols such as
+`WORKER-REVIEW.md` are reused for numbered workers.
+
 You can also spawn one manually:
 
 ```bash
 uv run --project cmux-agent cmux-agent --cwd . spawn worker-api --provider codex
+uv run --project cmux-agent cmux-agent --cwd . spawn --worker-template review --provider codex
 ```
 
-When no worker name is provided, `spawn` creates the next `worker-auto-N`
-worker. Prefer explicit role names such as `worker-api`, `worker-review`, or
-`worker-test` when the delegation scope is known.
+When no worker name or purpose is provided, `spawn` creates the next
+`worker-auto-N` worker. Prefer purpose templates such as `impl`, `review`, or
+`test` when the delegation scope is known.
 
 ## Watch And Observe
 

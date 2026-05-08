@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -11,6 +12,16 @@ from cmux_agent.domain.models import AgentRole, MessageType
 
 if TYPE_CHECKING:
     from cmux_agent.domain.models import Agent
+
+
+def _strip_numeric_worker_suffix(name: str) -> str:
+    return re.sub(r"-\d+$", "", name)
+
+
+def _retarget_worker_protocol(content: str, source_name: str, target_name: str) -> str:
+    return content.replace(source_name.upper(), target_name.upper()).replace(
+        source_name, target_name
+    )
 
 
 ARTIFACT_FORMAT_DISPATCH = {
@@ -34,7 +45,9 @@ ARTIFACT_FORMAT_CONTROL_SPAWN = {
     "message": "<왜 worker가 필요한지>",
     "action": "spawn_agent",
     "agent": {
-        "name": "<worker-name 또는 생략>",
+        "template": "impl|test|review|fix|investigate|plan|verify|<purpose>",
+        "role": "<선택: template alias>",
+        "name": "<선택: 명시 이름이 꼭 필요할 때만>",
         "provider": "claude|codex|gemini",
         "flags": "<선택>",
     },
@@ -269,10 +282,17 @@ class PromptBuilder:
                 if w.role != AgentRole.WORKER:
                     continue
                 upper_name = w.name.upper()
+                source_name = w.name
                 worker_file = workers_dir / f"{upper_name}.md"
+                if not worker_file.exists():
+                    source_name = _strip_numeric_worker_suffix(w.name)
+                    worker_file = workers_dir / f"{source_name.upper()}.md"
                 if worker_file.exists() and upper_name not in custom_names:
+                    content = worker_file.read_text(encoding="utf-8")
+                    if source_name != w.name:
+                        content = _retarget_worker_protocol(content, source_name, w.name)
                     (base / f"{upper_name}.md").write_text(
-                        worker_file.read_text(encoding="utf-8"), encoding="utf-8"
+                        content, encoding="utf-8"
                     )
                     custom_names.add(upper_name)
 
@@ -299,6 +319,7 @@ class PromptBuilder:
                 "\n"
                 "## 동적 worker 생성\n"
                 "- 작업 규모를 분석해 병렬화가 유효하면 새 worker를 요청한다.\n"
+                "- 가능하면 `name`보다 `template`/`role`로 목적을 지정한다. 예: `review` → `worker-review`.\n"
                 "- provider는 작업 성격에 맞게 `claude`, `codex`, `gemini` 중 선택한다.\n"
                 "- 새 worker가 생성되면 controller가 결과 메시지로 worker 이름을 알려준다.\n"
                 "\n"

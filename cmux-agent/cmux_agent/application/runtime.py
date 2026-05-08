@@ -84,14 +84,17 @@ class AgentRuntime:
         self,
         *,
         name: str | None = None,
+        role: str | None = None,
+        template: str | None = None,
         provider: str | None = None,
         flags: str | None = None,
     ) -> SpawnResult:
-        worker_name = self._resolve_worker_name(name)
+        purpose = template or role
+        worker_name = self._resolve_worker_name(name, purpose=purpose)
         if self._store.get_agent_by_name(self._run_id, worker_name):
             return SpawnResult(ok=False, name=worker_name, error="agent already exists")
 
-        entry = normalize_agent_entry(self._provider_config.get(worker_name))
+        entry = self._provider_entry(worker_name, purpose=purpose)
         selected_provider = provider or str(entry.get("provider", "") or "claude")
         selected_flags = flags if flags is not None else str(entry.get("flags", "") or "")
 
@@ -137,7 +140,7 @@ class AgentRuntime:
         )
         return SpawnResult(ok=True, name=worker_name, surface_id=surface_id, provider=selected_provider)
 
-    def _resolve_worker_name(self, requested: str | None) -> str:
+    def _resolve_worker_name(self, requested: str | None, *, purpose: str | None = None) -> str:
         if requested:
             return _sanitize_agent_name(requested)
 
@@ -146,12 +149,55 @@ class AgentRuntime:
             for agent in self._store.get_agents(self._run_id)
             if agent.role == AgentRole.WORKER
         }
-        idx = 1
-        while f"worker-auto-{idx}" in used:
-            idx += 1
-        return f"worker-auto-{idx}"
+        base_name = _worker_base_name(purpose)
+        if base_name:
+            return _next_worker_name(base_name, used, numbered_first=False)
+        return _next_worker_name("worker-auto", used, numbered_first=True)
+
+    def _provider_entry(self, worker_name: str, *, purpose: str | None = None) -> dict:
+        keys = [worker_name]
+        base_name = _worker_base_name(purpose)
+        if base_name and base_name not in keys:
+            keys.append(base_name)
+        suffix_base = _strip_numeric_suffix(worker_name)
+        if suffix_base != worker_name and suffix_base not in keys:
+            keys.append(suffix_base)
+
+        for key in keys:
+            if key in self._provider_config:
+                return normalize_agent_entry(self._provider_config.get(key))
+        return {}
 
 
 def _sanitize_agent_name(name: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9_.-]+", "-", name.strip()).strip("-")
     return normalized or "worker"
+
+
+def _sanitize_worker_purpose(purpose: str | None) -> str:
+    if not purpose:
+        return ""
+    return _sanitize_agent_name(str(purpose)).lower()
+
+
+def _worker_base_name(purpose: str | None) -> str | None:
+    normalized = _sanitize_worker_purpose(purpose)
+    if not normalized or normalized == "worker":
+        return None
+    if normalized.startswith("worker-"):
+        return normalized
+    return f"worker-{normalized}"
+
+
+def _next_worker_name(base_name: str, used: set[str], *, numbered_first: bool) -> str:
+    if not numbered_first and base_name not in used:
+        return base_name
+
+    idx = 1 if numbered_first else 2
+    while f"{base_name}-{idx}" in used:
+        idx += 1
+    return f"{base_name}-{idx}"
+
+
+def _strip_numeric_suffix(name: str) -> str:
+    return re.sub(r"-\d+$", "", name)

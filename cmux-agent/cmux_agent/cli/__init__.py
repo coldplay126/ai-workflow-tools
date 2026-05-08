@@ -67,7 +67,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # spawn
     p_spawn = sub.add_parser("spawn", help="새 worker 세션 생성")
-    p_spawn.add_argument("name", nargs="?", help="worker 이름 (기본: 다음 worker-auto-N)")
+    p_spawn.add_argument("name", nargs="?", help="worker 이름 (목적이 없으면 기본: 다음 worker-auto-N)")
+    p_spawn.add_argument("--role", help="worker 목적 역할 (예: review, test, fix)")
+    p_spawn.add_argument("--worker-template", help="worker 프로토콜 템플릿 이름 (예: review, test)")
     p_spawn.add_argument("--provider", help="provider 이름 (기본: 설정 또는 claude)")
     p_spawn.add_argument("--flags", default="", help="provider 실행 플래그")
 

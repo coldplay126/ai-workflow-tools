@@ -143,6 +143,8 @@ class MessageBroker:
             agent_data = {}
         result = self._runtime.spawn_worker(
             name=str(agent_data.get("name") or payload.get("agent_name") or "").strip() or None,
+            role=str(agent_data.get("role") or payload.get("role") or "").strip() or None,
+            template=str(agent_data.get("template") or payload.get("template") or "").strip() or None,
             provider=str(agent_data.get("provider") or payload.get("provider") or "").strip() or None,
             flags=str(agent_data.get("flags") or payload.get("flags") or "").strip() or None,
         )

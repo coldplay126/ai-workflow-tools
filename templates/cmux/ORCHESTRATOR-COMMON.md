@@ -36,12 +36,18 @@ watcher가 처리한 artifact는 `.agent/processed/`로 이동한다. 검증 실
   "message": "<왜 worker가 필요한지>",
   "action": "spawn_agent",
   "agent": {
-    "name": "<worker-name 또는 생략>",
+    "template": "impl|test|review|fix|investigate|plan|verify|<purpose>",
+    "role": "<선택: template alias>",
+    "name": "<선택: 명시 이름이 꼭 필요할 때만>",
     "provider": "claude|codex|gemini",
     "flags": "<선택>"
   }
 }
 ```
+
+가능하면 `name`을 직접 만들지 말고 `template` 또는 `role`로 목적을 지정한다.
+예를 들어 `"template": "review"`는 `worker-review`를 만들고, 이미 존재하면 `worker-review-2`를 만든다.
+목적을 생략한 경우에만 `worker-auto-N` fallback이 사용된다.
 
 controller가 새 worker 이름을 result 메시지로 알려주면 그 worker에게 dispatch한다.
 
