@@ -33,6 +33,8 @@ The Python package is `awf-cli`, and the console entrypoint is `awf`.
 
 `cmux-agent` provides a visual multi-agent runtime on top of cmux. It creates a controller, an orchestrator, and configured workers, then routes JSON artifacts through `.agent/outbox` and `.agent/inbox`.
 
+Quickstart: [cmux-agent Quickstart](docs/manuals/cmux-agent-quickstart.md).
+
 The orchestrator can request dynamic workers by writing a `control` artifact with `action: "spawn_agent"`. You can also create one manually:
 
 ```bash

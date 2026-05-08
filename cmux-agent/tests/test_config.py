@@ -1,9 +1,18 @@
 """설정 파일 로딩 테스트."""
 
 import json
-import os
 
-from cmux_agent.cli.commands import _load_config, _normalize_agent_entry, DEFAULT_CONFIG
+from cmux_agent.cli import commands as command_module
+from cmux_agent.cli.commands import (
+    _clear_template_state,
+    _load_config,
+    _normalize_agent_entry,
+    _resolve_template_dir,
+    _restore_template_dir,
+    _write_template_state,
+    DEFAULT_CONFIG,
+)
+from cmux_agent.infrastructure.filesystem import AgentFileSystem
 
 
 class TestLoadConfig:
@@ -59,6 +68,50 @@ class TestLoadConfig:
         config = _load_config(str(tmp_path))
         assert config["orchestrator"] == "claude"
         assert config["worker-1"]["provider"] == "codex"
+
+    def test_loads_from_restored_template_state(self, tmp_path, monkeypatch):
+        template_dir = tmp_path / "templates" / "feature"
+        template_dir.mkdir(parents=True)
+        (template_dir / "cmux-agent.json").write_text(json.dumps({
+            "orchestrator": "claude",
+            "worker-impl": {"provider": "codex", "flags": "--fast"},
+        }))
+
+        fs = AgentFileSystem(tmp_path / ".agent")
+        fs.init()
+        _write_template_state(fs, "feature", template_dir)
+        monkeypatch.setattr(command_module, "_active_template_dir", None)
+
+        assert _restore_template_dir(fs) == template_dir
+        config = _load_config(str(tmp_path))
+        assert config["worker-impl"] == {"provider": "codex", "flags": "--fast"}
+
+    def test_clear_template_state(self, tmp_path):
+        template_dir = tmp_path / "template"
+        template_dir.mkdir()
+        fs = AgentFileSystem(tmp_path / ".agent")
+        fs.init()
+        _write_template_state(fs, "feature", template_dir)
+
+        _clear_template_state(fs)
+
+        assert _restore_template_dir(fs) is None
+
+
+class TestResolveTemplateDir:
+    def test_resolves_named_template_from_templates_dir(self, tmp_path):
+        template_dir = tmp_path / "feature"
+        template_dir.mkdir()
+        (template_dir / "cmux-agent.json").write_text("{}")
+
+        assert _resolve_template_dir("feature", str(tmp_path)) == template_dir
+
+    def test_resolves_explicit_template_path(self, tmp_path):
+        template_dir = tmp_path / "custom-template"
+        template_dir.mkdir()
+        (template_dir / "cmux-agent.json").write_text("{}")
+
+        assert _resolve_template_dir(str(template_dir), None) == template_dir
 
 
 class TestNormalizeAgentEntry:

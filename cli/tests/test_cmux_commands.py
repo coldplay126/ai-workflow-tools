@@ -119,6 +119,53 @@ def test_resolve_log_path_auto_discovery(tmp_path, monkeypatch):
     assert resolved == other_dir / ".agent" / "events.jsonl"
 
 
+def test_tail_and_runs_read_cmux_agent_event_schema_from_repo_root(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("AWF_CMUX_LOG", raising=False)
+    log = tmp_path / "cmux-agent" / ".agent" / "events.jsonl"
+    events = [
+        {
+            "ts": "2026-05-08T00:00:00+00:00",
+            "event": "run.created",
+            "run_id": "run-operational-1",
+            "data": {"workspace_id": "workspace:1"},
+        },
+        {
+            "ts": "2026-05-08T00:00:01+00:00",
+            "event": "agent.registered",
+            "run_id": "run-operational-1",
+            "data": {"name": "orchestrator", "role": "orchestrator"},
+        },
+        {
+            "ts": "2026-05-08T00:00:05+00:00",
+            "event": "run.status_changed",
+            "run_id": "run-operational-1",
+            "data": {"old": "RUNNING", "new": "completed"},
+        },
+    ]
+    _write_jsonl(log, events)
+
+    tail_args = _make_args(repo_root=str(tmp_path), json=True, limit=2)
+    assert run_cmux_tail(tail_args) == 0
+    tail_lines = capsys.readouterr().out.strip().splitlines()
+    assert [json.loads(line)["event"] for line in tail_lines] == [
+        "agent.registered",
+        "run.status_changed",
+    ]
+
+    runs_args = _make_args(repo_root=str(tmp_path), json=True)
+    assert run_cmux_runs(runs_args) == 0
+    runs = json.loads(capsys.readouterr().out)
+    assert runs == [
+        {
+            "run_id": "run-operational-1",
+            "started": "2026-05-08T00:00:00+00:00",
+            "status": "completed",
+            "events": 3,
+            "duration": "5s",
+        }
+    ]
+
+
 def test_tail_filters_by_run_id_and_event(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("AWF_CMUX_LOG", raising=False)
     log = tmp_path / ".agent" / "events.jsonl"
