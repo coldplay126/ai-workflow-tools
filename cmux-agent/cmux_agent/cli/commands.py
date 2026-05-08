@@ -11,6 +11,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -35,6 +36,7 @@ TEMPLATE_STATE_FILE = "template-state.json"
 FAILURE_EVENTS = {"artifact.validation_failed", "message.failed"}
 SUPPORTED_COMMANDS = (
     "doctor",
+    "smoke",
     "start",
     "task",
     "stop",
@@ -401,6 +403,207 @@ def cmd_doctor(_args: argparse.Namespace) -> None:
     for name, ok, detail in checks:
         mark = "\u2713" if ok else "\u2717"
         print(f"  {mark} {name}: {detail}")
+
+
+# ---------------------------------------------------------------------------
+# smoke
+# ---------------------------------------------------------------------------
+
+def _smoke_cwd(args: argparse.Namespace) -> tuple[Path, bool]:
+    requested = getattr(args, "smoke_cwd", None) or getattr(args, "cwd", ".")
+    if requested and requested != ".":
+        path = Path(str(requested)).expanduser()
+        path.mkdir(parents=True, exist_ok=True)
+        return path, False
+    return Path(tempfile.mkdtemp(prefix="awf-cmux-smoke.")), True
+
+
+def _write_smoke_spawn_artifact(
+    fs: AgentFileSystem,
+    *,
+    worker_template: str,
+    provider: str,
+) -> Path:
+    safe_template = re.sub(r"[^A-Za-z0-9_.-]+", "-", worker_template).strip("-") or "worker"
+    path = fs.outbox / f"smoke-spawn-{safe_template}.json"
+    tmp = path.with_suffix(".tmp")
+    payload = {
+        "type": "control",
+        "sender": "orchestrator",
+        "recipient": "controller",
+        "message": f"Need isolated {worker_template} worker for cmux smoke verification",
+        "action": "spawn_agent",
+        "agent": {
+            "template": worker_template,
+            "provider": provider,
+        },
+    }
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.rename(path)
+    return path
+
+
+def _find_smoke_spawn_result(fs: AgentFileSystem) -> dict | None:
+    inbox = fs.inbox / "orchestrator"
+    if not inbox.is_dir():
+        return None
+    for path in sorted(inbox.glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        context = payload.get("context") or {}
+        if context.get("control_action") == "spawn_agent":
+            return payload
+    return None
+
+
+def _wait_for_smoke_spawn_result(
+    fs: AgentFileSystem,
+    store: StateStore,
+    run_id: str,
+    *,
+    timeout: float,
+    poll_interval: float,
+) -> dict | None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() <= deadline:
+        result = _find_smoke_spawn_result(fs)
+        if result:
+            agent = (result.get("context") or {}).get("agent") or {}
+            name = str(agent.get("name") or "")
+            if name and store.get_agent_by_name(run_id, name):
+                return result
+        if list(fs.failed.glob("*.json")):
+            return None
+        time.sleep(poll_interval)
+    return None
+
+
+def _cleanup_smoke(
+    *,
+    fs: AgentFileSystem,
+    store: StateStore,
+    event_log: EventLog,
+    run: Run | None,
+    workspace_id: str | None,
+    cwd: Path,
+    created_tmp: bool,
+    keep: bool,
+) -> None:
+    if keep:
+        print(f"Smoke artifacts kept: {cwd}")
+        return
+
+    if run:
+        current = store.get_run(run.run_id)
+        if current and current.status != RunStatus.COMPLETED:
+            old = current.status.value
+            store.update_run_status(run.run_id, RunStatus.COMPLETED)
+            event_log.append(run_status_changed(run.run_id, old, "COMPLETED"))
+
+    if workspace_id:
+        result = CmuxAdapter().close_workspace(workspace_id)
+        if result.ok:
+            print(f"Closed workspace: {workspace_id}")
+        else:
+            print(f"Workspace close failed: {workspace_id} - {result.stderr}", file=sys.stderr)
+
+    if fs.base.exists():
+        shutil.rmtree(str(fs.base), ignore_errors=True)
+        print(f"Cleaned: {fs.base}")
+    if created_tmp and cwd.exists():
+        shutil.rmtree(str(cwd), ignore_errors=True)
+        print(f"Removed smoke cwd: {cwd}")
+
+
+def cmd_smoke(args: argparse.Namespace) -> None:
+    global _active_cwd  # noqa: PLW0603
+
+    cwd, created_tmp = _smoke_cwd(args)
+    template = getattr(args, "smoke_template", None) or getattr(args, "template", None) or "review"
+    templates_dir = getattr(args, "smoke_templates_dir", None) or getattr(args, "templates_dir", None)
+    worker_template = getattr(args, "worker_template", "test") or "test"
+    provider = getattr(args, "provider", "codex") or "codex"
+    timeout = float(getattr(args, "timeout", 20.0) or 20.0)
+    poll_interval = float(getattr(args, "poll_interval", 0.5) or 0.5)
+    keep = bool(getattr(args, "keep", False))
+
+    previous_cwd = _active_cwd
+    _active_cwd = str(cwd)
+    fs = _get_fs(str(cwd))
+    store = _get_store(fs)
+    event_log = _get_event_log(fs)
+    run: Run | None = None
+    workspace_id: str | None = None
+
+    print(f"Smoke cwd: {cwd}")
+    print(f"Template: {template}")
+    print(f"Dynamic worker template: {worker_template}")
+
+    try:
+        cmd_start(
+            argparse.Namespace(
+                cwd=str(cwd),
+                template=template,
+                templates_dir=templates_dir,
+                attach_orchestrator=True,
+            )
+        )
+
+        run = store.get_active_run()
+        if not run:
+            print("Smoke FAIL: active run not found", file=sys.stderr)
+            sys.exit(1)
+        workspace_id = run.workspace_id
+
+        artifact = _write_smoke_spawn_artifact(
+            fs,
+            worker_template=worker_template,
+            provider=provider,
+        )
+        print(f"Spawn artifact: {artifact}")
+
+        result = _wait_for_smoke_spawn_result(
+            fs,
+            store,
+            run.run_id,
+            timeout=timeout,
+            poll_interval=poll_interval,
+        )
+        if not result:
+            print("Smoke FAIL: dynamic worker spawn result not delivered", file=sys.stderr)
+            _print_failure_details(fs, event_log, run.run_id, limit=10)
+            sys.exit(1)
+
+        agent = (result.get("context") or {}).get("agent") or {}
+        worker_name = str(agent.get("name") or "")
+        if worker_name:
+            print(f"Spawned worker: {worker_name} ({agent.get('provider') or provider})")
+        else:
+            print("Smoke FAIL: spawn result missing worker name", file=sys.stderr)
+            sys.exit(1)
+
+        protocol = fs.base / f"{worker_name.upper()}.md"
+        if not protocol.is_file():
+            print(f"Smoke FAIL: protocol missing for {worker_name}", file=sys.stderr)
+            sys.exit(1)
+        print(f"Protocol: {protocol.name}")
+
+        cmd_task(argparse.Namespace(request="Smoke attach orchestrator dispatch prompt"))
+        print("Smoke PASS")
+    finally:
+        _cleanup_smoke(
+            fs=fs,
+            store=store,
+            event_log=event_log,
+            run=run,
+            workspace_id=workspace_id,
+            cwd=cwd,
+            created_tmp=created_tmp,
+            keep=keep,
+        )
+        _active_cwd = previous_cwd
 
 
 # ---------------------------------------------------------------------------

@@ -34,6 +34,19 @@ mode for normal operation because controller, orchestrator, and workers all
 have cmux surfaces and broker deliveries can be injected directly into the
 right terminal.
 
+For a full runtime smoke test after updating cmux, providers, or this checkout,
+run:
+
+```bash
+uv run --project cmux-agent cmux-agent smoke
+```
+
+The smoke command creates a temporary run in attached orchestrator mode, asks
+the controller watcher to spawn a dynamic worker using `agent.template`, checks
+the result delivery, verifies the attached task prompt, then stops the run and
+closes the cmux workspace. Use `--keep` to preserve the smoke workspace and
+`.agent/` files for debugging.
+
 ```bash
 uv run --project cmux-agent cmux-agent \
   --cwd . \

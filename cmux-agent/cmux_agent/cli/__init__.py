@@ -13,6 +13,7 @@ from cmux_agent.cli.commands import (
     cmd_messages,
     cmd_register,
     cmd_send,
+    cmd_smoke,
     cmd_spawn,
     cmd_start,
     cmd_status,
@@ -36,6 +37,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # doctor
     sub.add_parser("doctor", help="시스템 진단")
+
+    # smoke
+    p_smoke = sub.add_parser("smoke", help="실제 cmux runtime smoke test")
+    p_smoke.add_argument("--cwd", dest="smoke_cwd", help="smoke 작업 디렉토리 (기본: 임시 디렉토리)")
+    p_smoke.add_argument("--template", dest="smoke_template", default="review", help="시작 템플릿 (기본: review)")
+    p_smoke.add_argument("--templates-dir", dest="smoke_templates_dir", help="템플릿 루트 디렉토리")
+    p_smoke.add_argument("--worker-template", default="test", help="동적으로 생성할 worker template (기본: test)")
+    p_smoke.add_argument("--provider", default="codex", help="동적 worker provider (기본: codex)")
+    p_smoke.add_argument("--timeout", type=float, default=20.0, help="spawn/result 대기 초")
+    p_smoke.add_argument("--poll-interval", type=float, default=0.5, help="poll 간격 초")
+    p_smoke.add_argument("--keep", action="store_true", help="smoke workspace와 .agent 파일을 보존")
 
     # start
     p_start = sub.add_parser("start", help="새 run 시작")
@@ -123,6 +135,7 @@ def main(argv: list[str] | None = None) -> None:
 
     commands = {
         "doctor": cmd_doctor,
+        "smoke": cmd_smoke,
         "start": cmd_start,
         "task": cmd_task,
         "stop": cmd_stop,
