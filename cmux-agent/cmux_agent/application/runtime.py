@@ -122,6 +122,12 @@ class AgentRuntime:
 
         command = provider_command(selected_provider, selected_flags)
         self._cmux.send_text(f"{command}\n", surface_id=surface_id, workspace_id=self._workspace_id)
+        self._cmux.send_text(
+            self._prompt.build_startup_prompt(agent),
+            surface_id=surface_id,
+            workspace_id=self._workspace_id,
+        )
+        self._cmux.send_key("enter", surface_id=surface_id, workspace_id=self._workspace_id)
         self._cmux.notify(title="cmux-agent", body=f"Worker spawned: {worker_name}")
         self._cmux.log(
             f"worker spawned: {worker_name} ({selected_provider})",
@@ -141,9 +147,9 @@ class AgentRuntime:
             if agent.role == AgentRole.WORKER
         }
         idx = 1
-        while f"worker-{idx}" in used:
+        while f"worker-auto-{idx}" in used:
             idx += 1
-        return f"worker-{idx}"
+        return f"worker-auto-{idx}"
 
 
 def _sanitize_agent_name(name: str) -> str:

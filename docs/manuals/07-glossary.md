@@ -58,6 +58,7 @@ awf 문서에서 사용하는 주요 용어를 정리합니다.
 | **Governance** | awf-cli가 관리하는 phase/gate/decision 규칙 계층 |
 | **Artifact** | 에이전트 간 교환되는 구조화된 메시지. `dispatch` / `result` / `decision` |
 | **Broker** | cmux-agent의 메시지 라우팅 + artifact 감지 컴포넌트 |
+| **Attached Orchestrator** | 현재 Claude Code/Codex CLI 세션을 orchestrator로 등록하고 controller/worker만 cmux surface로 실행하는 모드 |
 | **Decision Authority Rule** | 모든 상태 전이는 `awf wf decide`를 통해서만 발생한다는 규칙 |
 | **Standalone Compatibility** | awf-cli가 cmux-agent 없이도 독립 실행 가능하다는 보장 |
 

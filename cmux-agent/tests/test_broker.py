@@ -40,6 +40,10 @@ class FakeCmux(CmuxAdapter):
         self.calls.append(("send_text", {"text": text, "surface_id": surface_id, "workspace_id": workspace_id}))
         return CmuxResult(ok=True, stdout="", stderr="")
 
+    def send_key(self, key, *, surface_id=None, workspace_id=None):
+        self.calls.append(("send_key", {"key": key, "surface_id": surface_id, "workspace_id": workspace_id}))
+        return CmuxResult(ok=True, stdout="", stderr="")
+
     def notify(self, title: str, body: str = ""):
         self.calls.append(("notify", {"title": title, "body": body}))
         return CmuxResult(ok=True, stdout="", stderr="")

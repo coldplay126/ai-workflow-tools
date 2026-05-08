@@ -38,7 +38,12 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("doctor", help="시스템 진단")
 
     # start
-    sub.add_parser("start", help="새 run 시작")
+    p_start = sub.add_parser("start", help="새 run 시작")
+    p_start.add_argument(
+        "--attach-orchestrator",
+        action="store_true",
+        help="현재 CLI/AI 세션을 orchestrator로 등록하고 worker/controller만 cmux에 생성",
+    )
 
     # task
     p_task = sub.add_parser("task", help="orchestrator에 작업 주입")
@@ -62,7 +67,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # spawn
     p_spawn = sub.add_parser("spawn", help="새 worker 세션 생성")
-    p_spawn.add_argument("name", nargs="?", help="worker 이름 (기본: 다음 worker-N)")
+    p_spawn.add_argument("name", nargs="?", help="worker 이름 (기본: 다음 worker-auto-N)")
     p_spawn.add_argument("--provider", help="provider 이름 (기본: 설정 또는 claude)")
     p_spawn.add_argument("--flags", default="", help="provider 실행 플래그")
 

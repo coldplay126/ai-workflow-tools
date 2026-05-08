@@ -71,6 +71,24 @@ class TestPromptBuilder:
         assert "auth done" in result
         assert "dispatch" in result
 
+    def test_startup_prompt_orchestrator(self):
+        result = self.builder.build_startup_prompt(
+            Agent(run_id="r", role=AgentRole.ORCHESTRATOR, name="orchestrator")
+        )
+        assert "ORCHESTRATOR-COMMON.md" in result
+        assert "ORCHESTRATOR.md" in result
+        assert "dispatch artifact" in result
+        assert "/tmp/outbox" in result
+
+    def test_startup_prompt_worker(self):
+        result = self.builder.build_startup_prompt(
+            Agent(run_id="r", role=AgentRole.WORKER, name="worker-impl")
+        )
+        assert "WORKER-COMMON.md" in result
+        assert "WORKER-IMPL.md" in result
+        assert "docs/templates/gap.md" in result
+        assert "result artifact" in result
+
     def test_write_protocol_files(self, tmp_path):
         workers = [
             Agent(run_id="r", role=AgentRole.ORCHESTRATOR, name="orchestrator"),

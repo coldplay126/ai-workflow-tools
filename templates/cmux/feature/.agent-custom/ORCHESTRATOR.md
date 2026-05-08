@@ -12,11 +12,11 @@ SKILL.md의 "인라인 실행"을 cmux worker 위임으로 대체한다:
 1. `agent-cards/{phase}.json`의 `cmux.worker` 필드에서 전담 worker를 확인
 2. `.agent/outbox/`에 dispatch JSON을 생성하여 위임
 3. worker 결과를 `.workflow/tmp/result-{phase}.json`에 저장
-4. `blip wf gate {phase}` CLI로 gate 판정 (LLM 판단 금지)
+4. `awf wf gate {phase}` CLI로 gate 판정 (LLM 판단 금지)
 5. PASS → 다음 phase worker에 dispatch / FAIL → 같은 worker에 재dispatch
 
 ## 직접 수행 phase
-- `blip wf init` (초기화)
+- `awf wf init` (초기화)
 - approve (G3) — 사용자 승인 (HIL)
 - done — 종합 요약 + PR 생성 (HIL)
 

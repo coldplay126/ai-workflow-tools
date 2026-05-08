@@ -35,6 +35,10 @@ The Python package is `awf-cli`, and the console entrypoint is `awf`.
 
 Quickstart: [cmux-agent Quickstart](docs/manuals/cmux-agent-quickstart.md).
 
+By default the orchestrator runs in its own cmux surface. Use
+`start --attach-orchestrator` when the current Claude Code or Codex CLI session
+should act as the orchestrator while controller and workers run in cmux.
+
 The orchestrator can request dynamic workers by writing a `control` artifact with `action: "spawn_agent"`. You can also create one manually:
 
 ```bash

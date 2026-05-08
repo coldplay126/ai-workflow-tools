@@ -133,6 +133,46 @@ def _calls(fake: FakeCmux, name: str) -> list[dict]:
     return [payload for call_name, payload in fake.calls if call_name == name]
 
 
+def test_runtime_uses_auto_worker_names_when_spawn_name_is_omitted(tmp_path):
+    fs = AgentFileSystem(tmp_path / ".agent")
+    fs.init()
+    store = StateStore(fs.db_path)
+    event_log = EventLog(fs.event_log_path)
+    cmux = FakeCmux()
+
+    run = Run(
+        run_id="run-1",
+        status=RunStatus.RUNNING,
+        workspace_id="workspace:1",
+    )
+    store.save_run(run)
+    for agent in (
+        Agent(run_id=run.run_id, role=AgentRole.ORCHESTRATOR, name="orchestrator"),
+        Agent(run_id=run.run_id, role=AgentRole.WORKER, name="worker-auto-1"),
+    ):
+        store.save_agent(agent)
+        fs.create_inbox(agent.name)
+
+    runtime = AgentRuntime(
+        store=store,
+        event_log=event_log,
+        fs=fs,
+        cmux=cmux,
+        prompt_builder=PromptBuilder(str(fs.outbox), str(fs.inbox)),
+        run_id=run.run_id,
+        workspace_id=run.workspace_id,
+        template_dir=None,
+        provider_config={},
+    )
+
+    result = runtime.spawn_worker(name=None, provider=None, flags=None)
+
+    assert result.ok
+    assert result.name == "worker-auto-2"
+    assert store.get_agent_by_name(run.run_id, "worker-auto-2") is not None
+    assert (fs.inbox / "worker-auto-2").is_dir()
+
+
 def test_watcher_routes_artifacts_through_broker_and_runtime(tmp_path):
     fs = AgentFileSystem(tmp_path / ".agent")
     fs.init()
@@ -290,12 +330,18 @@ def test_watcher_routes_artifacts_through_broker_and_runtime(tmp_path):
         for call in send_texts
     )
     assert any(
+        call["surface_id"] == "surface:3"
+        and "WORKER-REVIEW.md" in call["text"]
+        and "docs/templates/gap.md" in call["text"]
+        for call in send_texts
+    )
+    assert any(
         call["surface_id"] == "surface:1"
         and "spawned worker-review (claude)" in call["text"]
         for call in send_texts
     )
 
-    assert len(_calls(cmux, "send_key")) == 3
+    assert len(_calls(cmux, "send_key")) == 4
     assert {call["surface_id"] for call in _calls(cmux, "trigger_flash")} == {
         "surface:1",
         "surface:2",
