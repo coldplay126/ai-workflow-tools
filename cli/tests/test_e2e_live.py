@@ -145,7 +145,7 @@ class TestDryRun:
             cards_src = Path(REPO_ROOT) / "claude" / "skills" / "wf-orchestrator" / "templates" / "agent-cards"
             cards_dst = Path(tmpdir) / ".workflow" / "agent-cards"
             if cards_src.is_dir():
-                shutil.copytree(str(cards_src), str(cards_dst))
+                shutil.copytree(str(cards_src), str(cards_dst), dirs_exist_ok=True)
 
             rc, out, _ = _capture_main([
                 "wf", "next", "--repo-root", tmpdir, "--dry-run",
@@ -202,7 +202,7 @@ class TestLive:
             cards_src = Path(REPO_ROOT) / "claude" / "skills" / "wf-orchestrator" / "templates" / "agent-cards"
             cards_dst = wf_dir / "agent-cards"
             if cards_src.is_dir():
-                shutil.copytree(str(cards_src), str(cards_dst))
+                shutil.copytree(str(cards_src), str(cards_dst), dirs_exist_ok=True)
 
             # Build the plan prompt (dry-run) and execute via SDK
             rc, prompt_out, _ = _capture_main([

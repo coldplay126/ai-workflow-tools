@@ -24,6 +24,8 @@ cli:
 
 prompts:
   base: "prompts/base.md"
+
+allowed-tools:
   - Skill
   - Agent
 ---

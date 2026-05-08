@@ -18,7 +18,7 @@ jobs:
       - uses: astral-sh/setup-uv@v8.1.0
       - name: Run CLI tests
         working-directory: cli
-        run: uv run --with pytest pytest -q --ignore=tests/test_e2e_live.py
+        run: uv run --group dev pytest -q --ignore=tests/test_e2e_live.py
 
   cmux-agent:
     name: cmux-agent tests
