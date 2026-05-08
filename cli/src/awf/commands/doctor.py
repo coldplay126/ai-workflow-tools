@@ -28,6 +28,20 @@ def run_doctor(args: argparse.Namespace) -> int:
     print(f"repo_root: {payload['paths']['repo_root']}")
     print(f"session_db: {payload['paths']['session_db']}")
     print(f"mcp_servers: {payload['mcp']['server_count']} ({', '.join(payload['mcp']['servers']) or 'none'})")
+
+    dispatch = payload.get("dispatch", {})
+    if dispatch:
+        surfaces = ", ".join(dispatch.get("available_surfaces") or ["inline"])
+        cmux_note = (
+            "ready"
+            if dispatch.get("cmux_backend_ready")
+            else (
+                "binary on PATH but backend not yet wired up"
+                if dispatch.get("cmux_binary_on_path")
+                else "binary not on PATH"
+            )
+        )
+        print(f"dispatch_surfaces: {surfaces} (cmux: {cmux_note})")
     print("")
     print("providers:")
     for provider in payload["providers"]:

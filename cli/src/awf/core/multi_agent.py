@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from awf.core.agent_runner import AgentResult, MultiAgentResult, run_agent
@@ -250,7 +249,14 @@ def run_multi_agent(
     elif mode == "precise":
         result = _run_precise(registry, primary_provider, prompt, cwd, timeouts, add_dirs, codex_reasoning=_codex_re)
     elif mode == "cross":
-        result = _run_cross(registry, prompt, cwd, timeouts, add_dirs, effort=_effort, codex_reasoning=_codex_re)
+        from awf.core.dispatch import resolve_preference_from_config
+
+        result = _run_cross(
+            registry, prompt, cwd, timeouts, add_dirs,
+            effort=_effort,
+            codex_reasoning=_codex_re,
+            dispatch_preference=resolve_preference_from_config(config),
+        )
     elif mode == "critical":
         result = _run_critical(registry, primary_provider, prompt, cwd, timeouts, add_dirs, effort=_effort, codex_reasoning=_codex_re)
     else:
@@ -728,8 +734,20 @@ def _run_precise(registry, primary_provider, prompt: str, cwd: str, timeouts: di
     )
 
 
-def _run_cross(registry, prompt: str, cwd: str, timeouts: dict, add_dirs: list[str] | None, *, effort: str | None = None, codex_reasoning: str | None = None) -> MultiAgentResult:
+def _run_cross(
+    registry,
+    prompt: str,
+    cwd: str,
+    timeouts: dict,
+    add_dirs: list[str] | None,
+    *,
+    effort: str | None = None,
+    codex_reasoning: str | None = None,
+    dispatch_preference: str = "auto",
+) -> MultiAgentResult:
     """Cross mode: codex + sonnet parallel → judge."""
+    from awf.core.dispatch import WorkerSpec, select_dispatch
+
     codex = _get_codex_provider(registry, reasoning_effort=codex_reasoning)
     sonnet = _get_sonnet_provider(registry, effort=effort)
     if codex:
@@ -751,27 +769,36 @@ def _run_cross(registry, prompt: str, cwd: str, timeouts: dict, add_dirs: list[s
         if not available:
             return MultiAgentResult(mode="cross", judge_verdict="FAIL", judge_reason="no agents available")
 
-    # Parallel execution
-    print(f"mode: cross — {len(available)} agents parallel", file=sys.stderr)
-    agents: list[AgentResult] = []
+    specs: list[WorkerSpec] = []
+    for name, provider, role, timeout in available:
+        specs.append(
+            WorkerSpec(
+                role=role,
+                provider=provider,
+                prompt=_make_slave_prompt(prompt, role),
+                timeout_sec=timeout,
+                require_json=True,
+                add_dirs=tuple(add_dirs or ()),
+                on_progress=_make_progress_callback(name, role),
+            )
+        )
 
-    with ThreadPoolExecutor(max_workers=len(available)) as pool:
-        futures = {}
-        for name, provider, role, timeout in available:
-            slave_prompt = _make_slave_prompt(prompt, role)
-            progress_cb = _make_progress_callback(name, role)
-            future = pool.submit(run_agent, provider, slave_prompt, role, cwd, timeout_sec=timeout, require_json=True, add_dirs=add_dirs, on_progress=progress_cb)
-            futures[future] = name
+    dispatch = select_dispatch(
+        worker_count=len(specs),
+        estimated_seconds=max(s.expected_seconds() for s in specs),
+        preference=dispatch_preference,  # type: ignore[arg-type]
+    )
+    print(
+        f"mode: cross — {len(specs)} agents parallel via {dispatch.name}",
+        file=sys.stderr,
+    )
 
-        for future in as_completed(futures):
-            name = futures[future]
-            result = future.result()
-            # Clear progress line before summary
-            if sys.stderr.isatty():
-                sys.stderr.write("\r" + " " * 100 + "\r")
-                sys.stderr.flush()
-            agents.append(result)
-            _print_agent_summary(result)
+    agents: list[AgentResult] = list(dispatch.run(specs, cwd=cwd, strategy="parallel"))
+    for result in agents:
+        if sys.stderr.isatty():
+            sys.stderr.write("\r" + " " * 100 + "\r")
+            sys.stderr.flush()
+        _print_agent_summary(result)
 
     # Sort by provider name for deterministic ordering (prevents non-deterministic judge input)
     agents.sort(key=lambda a: a.provider_name)
