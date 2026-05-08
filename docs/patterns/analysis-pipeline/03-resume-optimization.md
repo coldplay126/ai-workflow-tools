@@ -54,6 +54,17 @@ Stage 1 완료 후 `.ai-context/.tmp/import-graph.json`을 저장한다. 다음 
 
 Type-only edge도 analysis stale 방지를 위해 포함한다. Runtime-only invalidation은 별도 소비자가 생길 때 graph query 옵션으로 분리한다.
 
+### 간접 무효화 비활성화 (escape hatch)
+
+다음 두 가지 방법으로 transitive 무효화만 끄고 직접 변경 파일 기준의 incremental만 유지할 수 있다. 그래프 자체는 계속 빌드되어 다음 실행에 사용 가능하다.
+
+| 우선순위 | 방법 | 설정 |
+|---------|------|------|
+| 1 (응급용) | 환경변수 | `AWF_DISABLE_TRANSITIVE_INVALIDATION=1` |
+| 2 | pipeline config | `analysis-pipeline.json` → `transitive_invalidation.enabled = false` |
+
+비활성화되면 stderr에 `stage1_invalidation: transitive disabled (env:... | config:...)`가 한 줄 출력된다. 직접 변경된 파일만 재분석되므로, exports_hash 변경이 누락된 dependent는 stale 상태로 남을 수 있다.
+
 ---
 
 ## Observation 캐시
