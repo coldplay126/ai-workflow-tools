@@ -11,12 +11,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from awf.core.dispatch import (
     CmuxDispatch,
+    CmuxDispatchError,
     InlineDispatch,
     MultiAgentDispatch,
     SURFACE_CMUX,
     SURFACE_INLINE,
     WorkerSpec,
     cmux_dispatch_available,
+    resolve_cmux_options_from_config,
     resolve_preference_from_config,
     select_dispatch,
 )
@@ -144,20 +146,21 @@ def test_inline_dispatch_handles_empty_workers():
 
 
 # --------------------------------------------------------------------------
-# CmuxDispatch (stub)
+# CmuxDispatch — surface-level checks (full integration in test_dispatch_cmux)
 # --------------------------------------------------------------------------
 
 
-def test_cmux_dispatch_stub_raises_clear_error():
+def test_cmux_dispatch_raises_clear_error_when_no_active_run(tmp_path):
     import pytest
 
-    with pytest.raises(NotImplementedError) as excinfo:
+    # No .agent/ directory exists in tmp_path → must surface a clear error.
+    with pytest.raises(CmuxDispatchError) as excinfo:
         CmuxDispatch().run(
-            [_spec("x", _FakeProvider("p", "{}"))], cwd="."
+            [_spec("x", _FakeProvider("p", "{}"))], cwd=str(tmp_path)
         )
-    # Error message must point operators at the supported alternative.
     msg = str(excinfo.value)
-    assert "inline" in msg or "auto" in msg
+    assert "cmux-agent start" in msg
+    assert str(tmp_path) in msg
 
 
 # --------------------------------------------------------------------------
@@ -165,45 +168,91 @@ def test_cmux_dispatch_stub_raises_clear_error():
 # --------------------------------------------------------------------------
 
 
-def test_cmux_dispatch_unavailable_in_phase_1():
-    # Phase 1 ships InlineDispatch only; cmux availability returns False
-    # regardless of PATH so auto routing can never accidentally pick it.
-    assert cmux_dispatch_available() is False
+def test_cmux_dispatch_unavailable_when_no_active_run(tmp_path):
+    # Without an active run in cwd, cmux is unavailable regardless of PATH.
+    assert cmux_dispatch_available(str(tmp_path)) is False
 
 
-def test_select_dispatch_inline_preference_always_inline():
-    selected = select_dispatch(worker_count=3, estimated_seconds=300, preference="inline")
+def test_select_dispatch_inline_preference_always_inline(tmp_path):
+    selected = select_dispatch(
+        worker_count=3, estimated_seconds=300,
+        preference="inline", cwd=str(tmp_path),
+    )
     assert isinstance(selected, InlineDispatch)
 
 
-def test_select_dispatch_cmux_preference_falls_back_when_unavailable(capsys):
-    selected = select_dispatch(worker_count=3, estimated_seconds=300, preference="cmux")
+def test_select_dispatch_cmux_preference_falls_back_when_unavailable(capsys, tmp_path):
+    selected = select_dispatch(
+        worker_count=3, estimated_seconds=300,
+        preference="cmux", cwd=str(tmp_path),
+    )
     assert isinstance(selected, InlineDispatch)
     err = capsys.readouterr().err
     assert "cmux" in err and "inline" in err
 
 
-def test_select_dispatch_auto_picks_inline_when_cmux_unavailable():
-    # Even with shape that would otherwise prefer cmux (2-5 workers, ≥60s),
-    # the unavailable backend forces inline.
-    selected = select_dispatch(worker_count=3, estimated_seconds=120, preference="auto")
+def test_select_dispatch_auto_picks_inline_when_cmux_unavailable(tmp_path):
+    selected = select_dispatch(
+        worker_count=3, estimated_seconds=120,
+        preference="auto", cwd=str(tmp_path),
+    )
     assert isinstance(selected, InlineDispatch)
 
 
-def test_select_dispatch_auto_picks_inline_for_short_work():
-    selected = select_dispatch(worker_count=3, estimated_seconds=30, preference="auto")
+def test_select_dispatch_auto_picks_inline_for_short_work(tmp_path):
+    selected = select_dispatch(
+        worker_count=3, estimated_seconds=30,
+        preference="auto", cwd=str(tmp_path),
+    )
     assert isinstance(selected, InlineDispatch)
 
 
-def test_select_dispatch_auto_picks_inline_for_single_worker():
-    selected = select_dispatch(worker_count=1, estimated_seconds=300, preference="auto")
+def test_select_dispatch_auto_picks_inline_for_single_worker(tmp_path):
+    selected = select_dispatch(
+        worker_count=1, estimated_seconds=300,
+        preference="auto", cwd=str(tmp_path),
+    )
     assert isinstance(selected, InlineDispatch)
 
 
-def test_select_dispatch_auto_picks_inline_for_large_worker_pool():
-    # >5 workers → too many cmux surfaces → inline.
-    selected = select_dispatch(worker_count=10, estimated_seconds=300, preference="auto")
+def test_select_dispatch_auto_picks_inline_for_large_worker_pool(tmp_path):
+    selected = select_dispatch(
+        worker_count=10, estimated_seconds=300,
+        preference="auto", cwd=str(tmp_path),
+    )
     assert isinstance(selected, InlineDispatch)
+
+
+# --------------------------------------------------------------------------
+# resolve_cmux_options_from_config
+# --------------------------------------------------------------------------
+
+
+def test_resolve_cmux_options_defaults_to_reusable():
+    opts = resolve_cmux_options_from_config(None)
+    assert opts.lifecycle == "reusable"
+    assert opts.role_to_worker == {}
+
+
+def test_resolve_cmux_options_reads_lifecycle_and_role_map():
+    cfg = {
+        "dispatch": {
+            "worker_lifecycle": "ephemeral",
+            "role_to_worker": {
+                "plan_conformance": {"provider": "codex", "template": "review"},
+            },
+        }
+    }
+    opts = resolve_cmux_options_from_config(cfg)
+    assert opts.lifecycle == "ephemeral"
+    assert opts.role_to_worker == {
+        "plan_conformance": {"provider": "codex", "template": "review"},
+    }
+
+
+def test_resolve_cmux_options_falls_back_on_unknown_lifecycle():
+    cfg = {"dispatch": {"worker_lifecycle": "sideways"}}
+    assert resolve_cmux_options_from_config(cfg).lifecycle == "reusable"
 
 
 # --------------------------------------------------------------------------

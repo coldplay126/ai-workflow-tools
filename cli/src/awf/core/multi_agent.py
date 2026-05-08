@@ -256,6 +256,7 @@ def run_multi_agent(
             effort=_effort,
             codex_reasoning=_codex_re,
             dispatch_preference=resolve_preference_from_config(config),
+            provider_config=config,
         )
     elif mode == "critical":
         result = _run_critical(registry, primary_provider, prompt, cwd, timeouts, add_dirs, effort=_effort, codex_reasoning=_codex_re)
@@ -744,9 +745,14 @@ def _run_cross(
     effort: str | None = None,
     codex_reasoning: str | None = None,
     dispatch_preference: str = "auto",
+    provider_config: dict | None = None,
 ) -> MultiAgentResult:
     """Cross mode: codex + sonnet parallel → judge."""
-    from awf.core.dispatch import WorkerSpec, select_dispatch
+    from awf.core.dispatch import (
+        WorkerSpec,
+        resolve_cmux_options_from_config,
+        select_dispatch,
+    )
 
     codex = _get_codex_provider(registry, reasoning_effort=codex_reasoning)
     sonnet = _get_sonnet_provider(registry, effort=effort)
@@ -787,6 +793,8 @@ def _run_cross(
         worker_count=len(specs),
         estimated_seconds=max(s.expected_seconds() for s in specs),
         preference=dispatch_preference,  # type: ignore[arg-type]
+        cwd=cwd,
+        options=resolve_cmux_options_from_config(provider_config),
     )
     print(
         f"mode: cross — {len(specs)} agents parallel via {dispatch.name}",
