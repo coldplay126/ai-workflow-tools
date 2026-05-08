@@ -17,6 +17,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
+FAILURE_EVENTS = {"artifact.validation_failed", "message.failed"}
+
 
 # ---------------------------------------------------------------------------
 # Path resolution
@@ -173,6 +175,33 @@ def _match_filters(record: dict, run_id: Optional[str], event: Optional[str]) ->
     if event and record.get("event") != event:
         return False
     return True
+
+
+def _is_failure_event(record: dict) -> bool:
+    return record.get("event") in FAILURE_EVENTS
+
+
+def _failure_entry(record: dict) -> dict:
+    data = record.get("data") or {}
+    event = str(record.get("event", ""))
+    entry = {
+        "ts": str(record.get("ts", "")),
+        "run_id": str(record.get("run_id", "") or ""),
+        "event": event,
+        "reason": str(data.get("reason", "") or ""),
+        "path": str(data.get("path", "") or ""),
+        "message_id": str(data.get("message_id", "") or ""),
+        "recipient": str(data.get("recipient", "") or ""),
+    }
+    if event == "artifact.validation_failed":
+        entry["target"] = Path(entry["path"]).name if entry["path"] else "-"
+    elif entry["message_id"]:
+        entry["target"] = entry["message_id"]
+    elif entry["recipient"]:
+        entry["target"] = entry["recipient"]
+    else:
+        entry["target"] = "-"
+    return entry
 
 
 # ---------------------------------------------------------------------------
@@ -467,4 +496,66 @@ def run_cmux_runs(args: argparse.Namespace) -> int:
         events = entry.get("events", 0)
         duration = str(entry.get("duration") or "-")
         print(f"{run_col:<14}  {started:<32}  {status:<10}  {events:>6}  {duration}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# failures
+# ---------------------------------------------------------------------------
+
+def run_cmux_failures(args: argparse.Namespace) -> int:
+    try:
+        path = _resolve_log_path(
+            getattr(args, "repo_root", None),
+            getattr(args, "path", None),
+        )
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if not path.exists():
+        print(
+            f"error: cmux events log not found at {path}. "
+            "Set AWF_CMUX_LOG or pass a path.",
+            file=sys.stderr,
+        )
+        return 2
+
+    run_id = getattr(args, "run_id", None)
+    try:
+        records = [
+            record
+            for record in _iter_events(path)
+            if _match_filters(record, run_id, None) and _is_failure_event(record)
+        ]
+    except FileNotFoundError:
+        print(
+            f"error: cmux events log not found at {path}. "
+            "Set AWF_CMUX_LOG or pass a path.",
+            file=sys.stderr,
+        )
+        return 2
+
+    limit = getattr(args, "limit", None)
+    if limit is not None and limit > 0:
+        records = records[-limit:]
+
+    entries = [_failure_entry(record) for record in records]
+    if bool(getattr(args, "json", False)):
+        print(json.dumps(entries, ensure_ascii=False, indent=2))
+        return 0
+
+    if not entries:
+        print("No cmux failure events found.")
+        return 0
+
+    header = f"{'TS':<32}  {'RUN-ID':<10}  {'EVENT':<28}  {'TARGET':<24}  REASON"
+    print(header)
+    for entry in entries:
+        ts = entry["ts"]
+        run_col = entry["run_id"][:8] if entry["run_id"] else "-"
+        event = entry["event"]
+        target = entry["target"]
+        reason = entry["reason"]
+        print(f"{ts:<32}  {run_col:<10}  {event:<28}  {target:<24}  {reason}")
     return 0
