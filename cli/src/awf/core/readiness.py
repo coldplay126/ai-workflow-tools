@@ -167,6 +167,29 @@ def collect_doctor_report(config: AwfConfig, repo_root: str | None, *, probe: bo
             "servers": [server.name for server in mcp_servers],
         },
         "providers": providers,
+        "dispatch": _collect_dispatch_status(),
+    }
+
+
+def _collect_dispatch_status() -> dict[str, Any]:
+    """Snapshot which dispatch backends are usable.
+
+    The cmux backend is gated on both the binary being on PATH and the
+    `core.dispatch` module saying the backend is implemented; users see
+    "not yet wired up" while the stub is in place so they don't expect
+    a working surface.
+    """
+    import shutil
+
+    from awf.core.dispatch import SURFACE_INLINE, cmux_dispatch_available
+
+    cmux_on_path = shutil.which("cmux-agent") is not None
+    backend_ready = cmux_dispatch_available()
+    return {
+        "default_surface": SURFACE_INLINE,
+        "cmux_binary_on_path": cmux_on_path,
+        "cmux_backend_ready": backend_ready,
+        "available_surfaces": ["inline"] + (["cmux"] if backend_ready else []),
     }
 
 
