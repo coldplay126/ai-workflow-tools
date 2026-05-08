@@ -9,6 +9,7 @@ from cmux_agent.cli.commands import (
     cmd_agents,
     cmd_doctor,
     cmd_events,
+    cmd_failures,
     cmd_messages,
     cmd_register,
     cmd_send,
@@ -76,11 +77,19 @@ def _build_parser() -> argparse.ArgumentParser:
     # status
     p_status = sub.add_parser("status", help="run 상태 조회")
     p_status.add_argument("run_id", nargs="?", help="run ID")
+    p_status.add_argument("--failures", action="store_true", help="최근 실패 상세 출력")
+    p_status.add_argument("-n", "--failure-limit", type=int, default=10, help="최근 실패 N건")
 
     # events
     p_events = sub.add_parser("events", help="이벤트 로그 조회")
     p_events.add_argument("run_id", nargs="?", help="run ID")
     p_events.add_argument("-n", "--limit", type=int, default=20, help="최근 N건")
+    p_events.add_argument("--failures", action="store_true", help="실패 이벤트만 출력")
+
+    # failures
+    p_failures = sub.add_parser("failures", help="최근 실패 artifact와 이유 조회")
+    p_failures.add_argument("run_id", nargs="?", help="run ID")
+    p_failures.add_argument("-n", "--limit", type=int, default=10, help="최근 실패 N건")
 
     # send
     p_send = sub.add_parser("send", help="수동 메시지 전송")
@@ -116,6 +125,7 @@ def main(argv: list[str] | None = None) -> None:
         "watch": cmd_watch,
         "status": cmd_status,
         "events": cmd_events,
+        "failures": cmd_failures,
         "send": cmd_send,
         "messages": cmd_messages,
     }
