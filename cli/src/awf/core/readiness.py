@@ -167,28 +167,28 @@ def collect_doctor_report(config: AwfConfig, repo_root: str | None, *, probe: bo
             "servers": [server.name for server in mcp_servers],
         },
         "providers": providers,
-        "dispatch": _collect_dispatch_status(),
+        "dispatch": _collect_dispatch_status(repo_root),
     }
 
 
-def _collect_dispatch_status() -> dict[str, Any]:
-    """Snapshot which dispatch backends are usable.
+def _collect_dispatch_status(repo_root: str | None = None) -> dict[str, Any]:
+    """Snapshot which dispatch backends are usable for ``repo_root``.
 
-    The cmux backend is gated on both the binary being on PATH and the
-    `core.dispatch` module saying the backend is implemented; users see
-    "not yet wired up" while the stub is in place so they don't expect
-    a working surface.
+    cmux readiness is per-project: it depends on the ``.agent/`` state in
+    the working directory, not just the binary on PATH.
     """
     import shutil
 
     from awf.core.dispatch import SURFACE_INLINE, cmux_dispatch_available
 
+    cwd = repo_root or os.getcwd()
     cmux_on_path = shutil.which("cmux-agent") is not None
-    backend_ready = cmux_dispatch_available()
+    backend_ready = cmux_dispatch_available(cwd)
     return {
         "default_surface": SURFACE_INLINE,
         "cmux_binary_on_path": cmux_on_path,
         "cmux_backend_ready": backend_ready,
+        "cwd_checked": str(cwd),
         "available_surfaces": ["inline"] + (["cmux"] if backend_ready else []),
     }
 
