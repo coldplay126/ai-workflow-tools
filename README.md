@@ -29,6 +29,16 @@ uv run --project cli --no-editable awf analyze sample-api health --repo-root . -
 
 The Python package is `awf-cli`, and the console entrypoint is `awf`.
 
+### Stage 1 transitive cache invalidation
+
+`awf analyze` builds an import graph alongside its analysis output and uses it on the next run to re-analyze not just files whose content changed, but also their reverse dependents whose imported source moved. This is why a unit you did not touch can still be re-analyzed — its dependency's exported surface changed.
+
+- `awf analyze {service} --check` flags both direct and transitive stale candidates per unit.
+- `awf analyze {service} --cycles` reports import cycles using the same saved graph.
+- Disable transitive invalidation in an emergency with `AWF_DISABLE_TRANSITIVE_INVALIDATION=1`, or persistently via `analysis-pipeline.json` → `transitive_invalidation.enabled = false`. Direct-change incremental still works without it.
+
+See [docs/patterns/analysis-pipeline/03-resume-optimization.md](docs/patterns/analysis-pipeline/03-resume-optimization.md) for the full contract.
+
 ## Tests
 
 ```bash
