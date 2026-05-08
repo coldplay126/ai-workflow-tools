@@ -29,6 +29,7 @@ from cmux_agent.infrastructure.storage import StateStore
 
 AGENT_DIR = ".agent"
 TEMPLATE_STATE_FILE = "template-state.json"
+FAILURE_EVENTS = {"artifact.validation_failed", "message.failed"}
 
 
 def _normalize_agent_entry(entry: str | dict) -> dict:
@@ -170,6 +171,85 @@ def _resolve_run_id(args: argparse.Namespace, store: StateStore) -> str:
         print("활성 run이 없습니다. 'cmux-agent start'로 시작하세요.", file=sys.stderr)
         sys.exit(1)
     return run.run_id
+
+
+def _event_time(event: dict) -> str:
+    ts = str(event.get("ts", ""))
+    return ts.split("T")[1].split(".")[0] if "T" in ts else ts
+
+
+def _failure_events(event_log: EventLog, run_id: str) -> list[dict]:
+    return [
+        event
+        for event in event_log.read_all(run_id)
+        if event.get("event") in FAILURE_EVENTS
+    ]
+
+
+def _failed_artifacts(fs: AgentFileSystem) -> list[Path]:
+    if not fs.failed.exists():
+        return []
+    return sorted(path for path in fs.failed.iterdir() if path.is_file())
+
+
+def _failure_summary(fs: AgentFileSystem, event_log: EventLog, run_id: str) -> dict[str, int]:
+    events = _failure_events(event_log, run_id)
+    artifact_failures = sum(
+        1 for event in events if event.get("event") == "artifact.validation_failed"
+    )
+    message_failures = sum(1 for event in events if event.get("event") == "message.failed")
+    failed_files = len(_failed_artifacts(fs))
+    return {
+        "artifact": artifact_failures,
+        "message": message_failures,
+        "files": failed_files,
+    }
+
+
+def _print_failure_summary(
+    fs: AgentFileSystem,
+    event_log: EventLog,
+    run_id: str,
+) -> None:
+    summary = _failure_summary(fs, event_log, run_id)
+    if not any(summary.values()):
+        return
+    print(
+        "\nFailures: "
+        f"{summary['artifact']} artifact validation, "
+        f"{summary['message']} message, "
+        f"{summary['files']} failed artifacts"
+    )
+    print("Details: cmux-agent failures")
+
+
+def _print_failure_details(
+    fs: AgentFileSystem,
+    event_log: EventLog,
+    run_id: str,
+    *,
+    limit: int,
+) -> None:
+    events = _failure_events(event_log, run_id)[-limit:]
+    failed_files = _failed_artifacts(fs)[-limit:]
+
+    if not events and not failed_files:
+        print("최근 실패가 없습니다.")
+        return
+
+    if events:
+        print("Recent failure events:")
+        for event in events:
+            data = event.get("data") or {}
+            reason = data.get("reason", "-")
+            path = data.get("path")
+            target = Path(str(path)).name if path else data.get("message_id", "-")
+            print(f"  {_event_time(event)}  {event['event']:<28} {target} - {reason}")
+
+    if failed_files:
+        print("\nFailed artifacts:")
+        for path in failed_files:
+            print(f"  {path.name}")
 
 
 # ---------------------------------------------------------------------------
@@ -612,6 +692,7 @@ def cmd_watch(args: argparse.Namespace) -> None:
 def cmd_status(args: argparse.Namespace) -> None:
     fs = _get_fs()
     store = _get_store(fs)
+    event_log = _get_event_log(fs)
     run_id = _resolve_run_id(args, store)
 
     run = store.get_run(run_id)
@@ -636,6 +717,12 @@ def cmd_status(args: argparse.Namespace) -> None:
         parts = [f"{count} {status.lower()}" for status, count in counts.items()]
         print(f"\nMessages: {', '.join(parts)}")
 
+    _print_failure_summary(fs, event_log, run_id)
+    if getattr(args, "failures", False):
+        limit = getattr(args, "failure_limit", 10)
+        print()
+        _print_failure_details(fs, event_log, run_id, limit=limit)
+
 
 # ---------------------------------------------------------------------------
 # events
@@ -648,6 +735,8 @@ def cmd_events(args: argparse.Namespace) -> None:
     run_id = _resolve_run_id(args, store)
 
     events = event_log.read_all(run_id)
+    if getattr(args, "failures", False):
+        events = [event for event in events if event.get("event") in FAILURE_EVENTS]
     limit = getattr(args, "limit", 20)
     events = events[-limit:]
 
@@ -656,12 +745,30 @@ def cmd_events(args: argparse.Namespace) -> None:
         return
 
     for e in events:
-        ts = e["ts"].split("T")[1].split(".")[0] if "T" in e["ts"] else e["ts"]
+        ts = _event_time(e)
         data_str = ""
         if e.get("data"):
             parts = [f"{k}={v}" for k, v in e["data"].items()]
             data_str = " ".join(parts)
         print(f"  {ts}  {e['event']:<30} {data_str}")
+
+
+# ---------------------------------------------------------------------------
+# failures
+# ---------------------------------------------------------------------------
+
+def cmd_failures(args: argparse.Namespace) -> None:
+    fs = _get_fs()
+    store = _get_store(fs)
+    event_log = _get_event_log(fs)
+    run_id = _resolve_run_id(args, store)
+
+    _print_failure_details(
+        fs,
+        event_log,
+        run_id,
+        limit=getattr(args, "limit", 10),
+    )
 
 
 # ---------------------------------------------------------------------------
