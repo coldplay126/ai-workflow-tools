@@ -7,7 +7,7 @@ from typing import Optional
 
 from awf.commands.analyze import run_analyze
 from awf.commands.chat import run_chat
-from awf.commands.cmux import run_cmux_runs, run_cmux_tail
+from awf.commands.cmux import run_cmux_failures, run_cmux_runs, run_cmux_tail
 from awf.commands.config import run_config_show
 from awf.commands.doctor import run_doctor
 from awf.commands.mcp import run_mcp_check, run_mcp_invoke, run_mcp_list, run_mcp_read
@@ -270,6 +270,17 @@ def build_parser() -> argparse.ArgumentParser:
     cmux_runs_parser.add_argument("--event", help="Ignored for aggregation; kept for symmetry with tail.")
     cmux_runs_parser.add_argument("--limit", type=int, help="Only show the most recent N runs.")
     cmux_runs_parser.set_defaults(handler=run_cmux_runs)
+
+    cmux_failures_parser = cmux_subparsers.add_parser(
+        "failures",
+        help="Show cmux-agent failure events from the JSONL event log.",
+    )
+    cmux_failures_parser.add_argument("path", nargs="?", help="Path to events.jsonl or a directory containing .agent/events.jsonl.")
+    cmux_failures_parser.add_argument("--repo-root", help="Repository root for auto-discovery. Defaults to current directory.")
+    cmux_failures_parser.add_argument("--run-id", help="Filter failures by run_id.")
+    cmux_failures_parser.add_argument("--limit", type=int, help="Only show the most recent N failures.")
+    cmux_failures_parser.add_argument("--json", action="store_true", help="Print failures as JSON.")
+    cmux_failures_parser.set_defaults(handler=run_cmux_failures)
 
     scan_parser = subparsers.add_parser("scan", help="Auto-discover project structure for analysis config.")
     scan_parser.add_argument("repo_path", nargs="?", help="Path to a single repo to scan.")

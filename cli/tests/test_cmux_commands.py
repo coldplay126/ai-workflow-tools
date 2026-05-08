@@ -20,9 +20,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from awf.commands import cmux as cmux_module
 from awf.commands.cmux import (
     _aggregate_runs,
+    _failure_entry,
     _follow_loop,
     _iter_events,
     _resolve_log_path,
+    run_cmux_failures,
     run_cmux_runs,
     run_cmux_tail,
 )
@@ -227,6 +229,116 @@ def test_runs_summary_aggregates_status_and_duration(tmp_path, monkeypatch, caps
     assert by_id["run-aaaa-1"]["duration"] == "2m30s"
     assert by_id["run-bbbb-2"]["status"] == "running"
     assert by_id["run-bbbb-2"]["events"] == 3
+
+
+def test_failures_json_outputs_structured_failure_records(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("AWF_CMUX_LOG", raising=False)
+    log = tmp_path / ".agent" / "events.jsonl"
+    events = [
+        _SAMPLE_EVENTS[0],
+        {
+            "ts": "2026-05-08T01:00:00+00:00",
+            "event": "artifact.validation_failed",
+            "run_id": "run-aaaa-1",
+            "data": {
+                "path": str(tmp_path / ".agent" / "outbox" / "bad.json"),
+                "reason": "미등록 recipient: worker-missing",
+            },
+        },
+        _SAMPLE_EVENTS[-1],
+    ]
+    _write_jsonl(log, events)
+
+    args = _make_args(path=str(log), json=True)
+    assert run_cmux_failures(args) == 0
+    output = json.loads(capsys.readouterr().out)
+
+    assert output == [
+        {
+            "ts": "2026-05-08T01:00:00+00:00",
+            "run_id": "run-aaaa-1",
+            "event": "artifact.validation_failed",
+            "reason": "미등록 recipient: worker-missing",
+            "path": str(tmp_path / ".agent" / "outbox" / "bad.json"),
+            "message_id": "",
+            "recipient": "",
+            "target": "bad.json",
+        },
+        {
+            "ts": "2026-04-17T11:00:30+00:00",
+            "run_id": "run-bbbb-2",
+            "event": "message.failed",
+            "reason": "timeout",
+            "path": "",
+            "message_id": "m1",
+            "recipient": "bob",
+            "target": "m1",
+        },
+    ]
+
+
+def test_failures_text_filters_by_run_id_and_limit(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("AWF_CMUX_LOG", raising=False)
+    log = tmp_path / ".agent" / "events.jsonl"
+    events = [
+        {
+            "ts": "2026-05-08T01:00:00+00:00",
+            "event": "artifact.validation_failed",
+            "run_id": "run-aaaa-1",
+            "data": {"path": "outbox/old.json", "reason": "old failure"},
+        },
+        {
+            "ts": "2026-05-08T01:01:00+00:00",
+            "event": "artifact.validation_failed",
+            "run_id": "run-aaaa-1",
+            "data": {"path": "outbox/latest.json", "reason": "latest failure"},
+        },
+        {
+            "ts": "2026-05-08T01:02:00+00:00",
+            "event": "message.failed",
+            "run_id": "run-bbbb-2",
+            "data": {"message_id": "m2", "reason": "other run"},
+        },
+    ]
+    _write_jsonl(log, events)
+
+    args = _make_args(path=str(log), run_id="run-aaaa-1", limit=1)
+    assert run_cmux_failures(args) == 0
+    output = capsys.readouterr().out
+
+    assert "TS" in output
+    assert "artifact.validation_failed" in output
+    assert "latest.json" in output
+    assert "latest failure" in output
+    assert "old.json" not in output
+    assert "m2" not in output
+
+
+def test_failures_empty_state_and_missing_log(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("AWF_CMUX_LOG", raising=False)
+    log = tmp_path / ".agent" / "events.jsonl"
+    _write_jsonl(log, [_SAMPLE_EVENTS[0]])
+
+    assert run_cmux_failures(_make_args(path=str(log))) == 0
+    assert "No cmux failure events found." in capsys.readouterr().out
+
+    missing = tmp_path / "missing" / "events.jsonl"
+    assert run_cmux_failures(_make_args(path=str(missing))) == 2
+    assert "cmux events log not found" in capsys.readouterr().err
+
+
+def test_failure_entry_falls_back_to_recipient_target():
+    entry = _failure_entry(
+        {
+            "ts": "2026-05-08T01:00:00+00:00",
+            "event": "message.failed",
+            "run_id": "run-1",
+            "data": {"recipient": "worker-fix", "reason": "inbox 전달 실패"},
+        }
+    )
+
+    assert entry["target"] == "worker-fix"
+    assert entry["reason"] == "inbox 전달 실패"
 
 
 def test_follow_terminates_on_keyboard_interrupt(tmp_path, monkeypatch):

@@ -37,6 +37,7 @@
 - `awf doctor [--probe] [--ci]`: provider readiness MVP. 기본은 installed/configured 상태와 default provider, session DB, MCP server count를 보여주고, `--probe`는 가능한 provider에 대해 lightweight subprocess probe를 추가한다. `--ci`는 default provider readiness가 충분하지 않으면 non-zero exit를 반환한다
 - `awf cmux tail [path] [-f] [--run-id ...] [--event ...] [--limit N] [--json]`: cmux-agent `.agent/events.jsonl`을 구조화된 4컬럼(`ts / run_id-prefix / event / summary`)으로 출력한다. `-f/--follow`는 폴링 기반 tail이며 `Ctrl-C`로 정상 종료한다. cmux-agent 패키지를 import하지 않는 read-only consumer다
 - `awf cmux runs [path] [--json] [--limit N]`: 로그를 1회 스캔해 run_id별 `STARTED / STATUS / EVENTS / DURATION`을 요약한다. 마지막 `run.status_changed.new`가 `completed/failed/aborted`면 해당 값, 아니면 `running`으로 표시한다
+- `awf cmux failures [path] [--run-id ...] [--limit N] [--json]`: `artifact.validation_failed`와 `message.failed`를 한 번에 필터링해 timestamp, run_id, target, reason을 보여준다. JSON 모드는 structured array를 출력한다
 - `~/.config/awf/config.toml`, `.awf.toml`: 기본 provider/경로 override 읽기
 - `permissions.allowed_tools` / `disabled_tools` / `yolo`: provider 실행 전 최소 권한 검사
 - `tools/` 모듈: `read/write/glob/grep/git diff/log` 기본 계층 추가 (Phase 2 groundwork)
@@ -82,6 +83,8 @@ uv run --project cli --no-editable awf cmux tail --repo-root .
 uv run --project cli --no-editable awf cmux tail --repo-root . -f --run-id <run-id>
 uv run --project cli --no-editable awf cmux tail --repo-root . --event run.status_changed --limit 20 --json
 uv run --project cli --no-editable awf cmux runs --repo-root .
+uv run --project cli --no-editable awf cmux failures --repo-root . --limit 20
+uv run --project cli --no-editable awf cmux failures --repo-root . --json
 AWF_CMUX_LOG=/path/to/events.jsonl uv run --project cli --no-editable awf cmux tail
 NO_COLOR=1 uv run --project cli --no-editable awf cmux tail --repo-root . | cat
 ```
@@ -92,6 +95,7 @@ NO_COLOR=1 uv run --project cli --no-editable awf cmux tail --repo-root . | cat
 
 - `awf cmux tail` — 고정폭 4컬럼(`ts / run_id-prefix / event / summary`) 출력. `-f/--follow`는 폴링 기반이며 `Ctrl-C`로 exit 0. `--run-id`, `--event`, `--limit N`, `--json` 필터/포맷 지원
 - `awf cmux runs` — 전체 스캔 후 run_id별 `STARTED / STATUS / EVENTS / DURATION` 요약. `--json`으로 구조화 출력
+- `awf cmux failures` — `artifact.validation_failed`와 `message.failed`만 출력. `--run-id`, `--limit N`, `--json` 지원
 - 컬러는 stdout이 tty이고 `NO_COLOR`가 설정되지 않은 경우에만 ANSI escape 사용 (`rich`/`colorama` 등 외부 라이브러리 미사용)
 - `--follow`에서 파일 rotation(`st_ino` 변경 또는 size 축소)이 감지되면 defensive하게 재오픈한다
 

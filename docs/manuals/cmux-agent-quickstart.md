@@ -84,6 +84,7 @@ The `awf cmux` commands are read-only helpers for inspecting `.agent/events.json
 uv run --project cli --no-editable awf cmux runs --repo-root .
 uv run --project cli --no-editable awf cmux tail --repo-root . --limit 20
 uv run --project cli --no-editable awf cmux tail --repo-root . --event message.failed
+uv run --project cli --no-editable awf cmux failures --repo-root . --limit 20
 ```
 
 If the event log lives elsewhere, set `AWF_CMUX_LOG=/path/to/events.jsonl` or pass the path directly.
@@ -98,6 +99,7 @@ Use these commands first when a run stops making progress:
 uv run --project cmux-agent cmux-agent --cwd . status --failures
 uv run --project cmux-agent cmux-agent --cwd . failures
 uv run --project cmux-agent cmux-agent --cwd . events --failures -n 20
+uv run --project cli --no-editable awf cmux failures --repo-root . --limit 20
 ```
 
 Common failure causes:
