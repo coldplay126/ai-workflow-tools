@@ -45,20 +45,25 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant CLI as awf-cli
+    participant D as MultiAgentDispatch
+    participant C as Codex<br/>(precision)
+    participant S as Sonnet<br/>(quality)
     participant P as Primary
-    participant C as Codex
-    participant S as Sonnet
+    participant J as Judge
 
-    CLI->>P: prompt (native mode)
-    P-->>CLI: primary result
-
-    CLI->>C: Step 1: precision analysis
-    C-->>CLI: codex result
-    CLI->>S: Step 2: impact analysis + codex result
-    S-->>CLI: sonnet result
-    Note over CLI: Step 3: Primary가 Step 1+2 종합<br/>(이미 primary result에 포함)
-    CLI->>CLI: Judge Rules 적용
+    CLI->>D: run_chained([step1, step2, step3])
+    D->>C: Step 1 spec (precision prompt)
+    C-->>D: codex result
+    D->>S: Step 2 spec (built from codex result)
+    S-->>D: sonnet result
+    D->>P: Step 3 spec (built from codex + sonnet results)
+    P-->>D: primary result
+    D-->>CLI: [codex, sonnet, primary] in order
+    CLI->>J: Judge Rules 적용
+    J-->>CLI: PASS/FAIL + reason
 ```
+
+각 step은 `ChainedStep(role, factory)` 구조이며, `factory(prior_results)` 가 다음 단계의 `WorkerSpec` 을 만든다. cmux 백엔드 선택 시 같은 role 의 worker 가 chain 동안 고정되어 터미널 컨텍스트가 누적된다.
 
 ### precise (정밀)
 

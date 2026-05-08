@@ -259,7 +259,15 @@ def run_multi_agent(
             provider_config=config,
         )
     elif mode == "critical":
-        result = _run_critical(registry, primary_provider, prompt, cwd, timeouts, add_dirs, effort=_effort, codex_reasoning=_codex_re)
+        from awf.core.dispatch import resolve_preference_from_config
+
+        result = _run_critical(
+            registry, primary_provider, prompt, cwd, timeouts, add_dirs,
+            effort=_effort,
+            codex_reasoning=_codex_re,
+            dispatch_preference=resolve_preference_from_config(config),
+            provider_config=config,
+        )
     else:
         raise ValueError(
             f"Unknown multi-agent mode '{mode}'. "
@@ -841,83 +849,171 @@ def _run_cross(
     )
 
 
-def _run_critical(registry, primary_provider, prompt: str, cwd: str, timeouts: dict, add_dirs: list[str] | None, *, effort: str | None = None, codex_reasoning: str | None = None) -> MultiAgentResult:
-    """Critical mode: codex → sonnet → primary (sequential, chained)."""
+def _run_critical(
+    registry,
+    primary_provider,
+    prompt: str,
+    cwd: str,
+    timeouts: dict,
+    add_dirs: list[str] | None,
+    *,
+    effort: str | None = None,
+    codex_reasoning: str | None = None,
+    dispatch_preference: str = "auto",
+    provider_config: dict | None = None,
+) -> MultiAgentResult:
+    """Critical mode: codex → sonnet → primary (sequential, chained).
+
+    Each step's prompt incorporates the prior steps' outputs. Dispatch is
+    routed through ``MultiAgentDispatch.run_chained`` so cmux selection can
+    keep all three steps on the same set of pinned workers.
+    """
+    from awf.core.dispatch import (
+        ChainedStep,
+        WorkerSpec,
+        resolve_cmux_options_from_config,
+        select_dispatch,
+    )
+
     codex = _get_codex_provider(registry, reasoning_effort=codex_reasoning)
     sonnet = _get_sonnet_provider(registry, effort=effort)
-    agents: list[AgentResult] = []
-
-    # Track cumulative timeout budget (same pattern as precise mode)
-    total_budget = sum(timeouts.values()) if timeouts else 270
-    budget_start = time.monotonic()
-
-    # Step 1: Codex precision analysis
     if codex:
         _force_codex_read_only(codex)
-        print("mode: critical — step 1: codex precision analysis", file=sys.stderr)
-        codex_result = run_agent(
-            codex, _make_slave_prompt(prompt, "precision"), "precision", cwd,
+
+    total_budget = sum(timeouts.values()) if timeouts else 270
+    budget_start = time.monotonic()
+    summary_printed: set[int] = set()
+
+    def _flush_prior_summaries(prior: list[AgentResult]) -> None:
+        for i, a in enumerate(prior):
+            if i not in summary_printed:
+                _print_agent_summary(a)
+                summary_printed.add(i)
+
+    def _remaining_budget() -> int:
+        return max(30, int(total_budget - (time.monotonic() - budget_start)))
+
+    def step1_factory(prior: list[AgentResult]) -> "WorkerSpec | None":
+        if codex is None:
+            print(
+                "warning: codex not available for critical step 1, skipping",
+                file=sys.stderr,
+            )
+            return None
+        print(
+            "mode: critical — step 1: codex precision analysis",
+            file=sys.stderr,
+        )
+        return WorkerSpec(
+            role="precision",
+            provider=codex,
+            prompt=_make_slave_prompt(prompt, "precision"),
             timeout_sec=timeouts.get("codex", 90),
             require_json=True,
-            add_dirs=add_dirs,
+            add_dirs=tuple(add_dirs or ()),
             on_progress=_make_progress_callback("codex", "precision"),
         )
-        agents.append(codex_result)
-        _print_agent_summary(codex_result)
-    else:
-        print("warning: codex not available for critical step 1, skipping", file=sys.stderr)
 
-    # Step 2: Sonnet impact analysis (receives Step 1 result)
-    elapsed_so_far = time.monotonic() - budget_start
-    remaining_budget = max(30, total_budget - elapsed_so_far)
-    if sonnet:
+    def step2_factory(prior: list[AgentResult]) -> "WorkerSpec | None":
+        _flush_prior_summaries(prior)
+        if sonnet is None:
+            print(
+                "warning: sonnet not available for critical step 2, skipping",
+                file=sys.stderr,
+            )
+            return None
         step2_prompt = prompt
-        if agents and agents[-1].ok:
+        if prior and prior[-1].ok:
             from awf.core.spec_loader import load_prompt_optional
-            impact_template = load_prompt_optional("multi-agent", "critical-impact", step1_result=agents[-1].stdout)
+
+            impact_template = load_prompt_optional(
+                "multi-agent", "critical-impact", step1_result=prior[-1].stdout
+            )
             if impact_template:
                 step2_prompt = f"{prompt}\n\n{impact_template}"
             else:
-                step2_prompt = f"{prompt}\n\n## Step 1 분석 결과 (Codex Precision)\n\n{agents[-1].stdout}\n\n위 분석 결과를 기반으로 영향도를 분석하세요.\n"
-        print("mode: critical — step 2: sonnet impact analysis", file=sys.stderr)
-        sonnet_result = run_agent(
-            sonnet, _make_slave_prompt(step2_prompt, "quality_validation"), "quality_validation", cwd,
-            timeout_sec=min(timeouts.get("sonnet", 60), int(remaining_budget)),
+                step2_prompt = (
+                    f"{prompt}\n\n## Step 1 분석 결과 (Codex Precision)\n\n"
+                    f"{prior[-1].stdout}\n\n위 분석 결과를 기반으로 영향도를 분석하세요.\n"
+                )
+        print(
+            "mode: critical — step 2: sonnet impact analysis",
+            file=sys.stderr,
+        )
+        return WorkerSpec(
+            role="quality_validation",
+            provider=sonnet,
+            prompt=_make_slave_prompt(step2_prompt, "quality_validation"),
+            timeout_sec=min(timeouts.get("sonnet", 60), _remaining_budget()),
             require_json=True,
             on_progress=_make_progress_callback("sonnet", "quality_validation"),
         )
-        agents.append(sonnet_result)
-        _print_agent_summary(sonnet_result)
-    else:
-        print("warning: sonnet not available for critical step 2, skipping", file=sys.stderr)
 
-    # Step 3: Primary final judgment (receives Step 1 + 2 results)
-    elapsed_so_far = time.monotonic() - budget_start
-    remaining_budget = max(30, total_budget - elapsed_so_far)
-    step3_prompt = prompt
-    prior_results = []
-    for i, a in enumerate(agents):
-        if a.ok:
-            prior_results.append(f"## Step {i+1} 결과 ({a.provider_name}, {a.role})\n\n{a.stdout}")
-    if prior_results:
-        from awf.core.spec_loader import load_prompt_optional
-        joined = "\n\n".join(prior_results)
-        final_template = load_prompt_optional("multi-agent", "critical-final", prior_results=joined)
-        if final_template:
-            step3_prompt = f"{prompt}\n\n{final_template}"
-        else:
-            step3_prompt = f"{prompt}\n\n{joined}\n\n위 분석 결과를 종합하여 최종 판정하세요.\n"
+    def step3_factory(prior: list[AgentResult]) -> "WorkerSpec | None":
+        _flush_prior_summaries(prior)
+        step3_prompt = prompt
+        prior_results = [
+            f"## Step {i + 1} 결과 ({a.provider_name}, {a.role})\n\n{a.stdout}"
+            for i, a in enumerate(prior) if a.ok
+        ]
+        if prior_results:
+            from awf.core.spec_loader import load_prompt_optional
 
-    print("mode: critical — step 3: primary final judgment", file=sys.stderr)
-    primary_result = run_agent(
-        primary_provider, step3_prompt, "primary", cwd,
-        timeout_sec=min(timeouts.get("primary", 120), int(remaining_budget)),
-        add_dirs=add_dirs,
+            joined = "\n\n".join(prior_results)
+            final_template = load_prompt_optional(
+                "multi-agent", "critical-final", prior_results=joined
+            )
+            if final_template:
+                step3_prompt = f"{prompt}\n\n{final_template}"
+            else:
+                step3_prompt = (
+                    f"{prompt}\n\n{joined}\n\n위 분석 결과를 종합하여 최종 판정하세요.\n"
+                )
+        print(
+            "mode: critical — step 3: primary final judgment",
+            file=sys.stderr,
+        )
+        return WorkerSpec(
+            role="primary",
+            provider=primary_provider,
+            prompt=step3_prompt,
+            timeout_sec=min(timeouts.get("primary", 120), _remaining_budget()),
+            add_dirs=tuple(add_dirs or ()),
+        )
+
+    dispatch = select_dispatch(
+        worker_count=3,
+        estimated_seconds=float(total_budget),
+        preference=dispatch_preference,  # type: ignore[arg-type]
+        cwd=cwd,
+        options=resolve_cmux_options_from_config(provider_config),
     )
-    agents.append(primary_result)
-    _print_agent_summary(primary_result)
+    print(
+        f"mode: critical — chained 3 steps via {dispatch.name}",
+        file=sys.stderr,
+    )
 
-    # Judge all agent results
+    agents = list(
+        dispatch.run_chained(
+            [
+                ChainedStep(role="precision", factory=step1_factory),
+                ChainedStep(role="quality_validation", factory=step2_factory),
+                ChainedStep(role="primary", factory=step3_factory),
+            ],
+            cwd=cwd,
+        )
+    )
+
+    _flush_prior_summaries(agents)
+
+    if not agents:
+        return MultiAgentResult(
+            mode="critical",
+            judge_verdict="FAIL",
+            judge_reason="no agents available",
+        )
+
+    primary_result = agents[-1]
     verdict, reason = judge(agents)
     _print_judge_summary(verdict, reason, agents)
 
