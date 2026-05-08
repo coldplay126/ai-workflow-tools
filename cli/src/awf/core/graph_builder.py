@@ -10,6 +10,7 @@ reported as warnings and never break the analysis pipeline.
 """
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -30,6 +31,30 @@ from awf.tools.file_ops import FileOpsToolset
 
 
 GRAPH_FILE_NAME = "import-graph.json"
+
+DISABLE_ENV_VAR = "AWF_DISABLE_TRANSITIVE_INVALIDATION"
+_TRUTHY_ENV = frozenset({"1", "true", "yes", "on"})
+
+
+def transitive_invalidation_status(pipeline_config: dict | None) -> tuple[bool, str]:
+    """Return (enabled, reason) for the transitive Stage-1 invalidation gate.
+
+    Disable mechanisms — first match wins:
+    1. ``AWF_DISABLE_TRANSITIVE_INVALIDATION`` environment variable set to a
+       truthy value (1/true/yes/on, case-insensitive).
+    2. ``analysis-pipeline.json`` → ``transitive_invalidation.enabled = false``.
+
+    Default is enabled; the empty string is treated as unset for the env var.
+    """
+    env_value = os.environ.get(DISABLE_ENV_VAR, "").strip().lower()
+    if env_value and env_value in _TRUTHY_ENV:
+        return False, f"env:{DISABLE_ENV_VAR}"
+
+    config_section = (pipeline_config or {}).get("transitive_invalidation", {})
+    if isinstance(config_section, dict) and config_section.get("enabled") is False:
+        return False, "config:transitive_invalidation.enabled=false"
+
+    return True, "default"
 
 
 @dataclass(frozen=True)

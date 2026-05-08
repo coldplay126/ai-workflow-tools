@@ -417,13 +417,23 @@ def run_analyze(args: argparse.Namespace) -> int:
                 save_stage1_file_analyses,
             )
             from awf.core.analysis_files import compute_changed_files, compute_deleted_files
-            from awf.core.graph_builder import expand_stage1_targets_with_import_graph
+            from awf.core.graph_builder import (
+                expand_stage1_targets_with_import_graph,
+                transitive_invalidation_status,
+            )
 
             # K1: Incremental — only analyze changed files when previous results exist
             stage1_target_files = domain_files
             previous_analyses: list[dict] = []
             unchanged_paths: set[str] = set()
             bypass_cache_paths: set[str] = set()
+
+            ti_enabled, ti_reason = transitive_invalidation_status(pipeline_config)
+            if not ti_enabled:
+                print(
+                    f"stage1_invalidation: transitive disabled ({ti_reason})",
+                    file=sys.stderr,
+                )
 
             cached_stage1_analyses = load_stage1_file_analyses(context)
             if resume.get("hashes_changed") and cached_stage1_analyses:
@@ -438,32 +448,50 @@ def run_analyze(args: argparse.Namespace) -> int:
                     domain_files,
                     saved_hashes=previous_hashes,
                 )
-                graph_invalidation = expand_stage1_targets_with_import_graph(
-                    context,
-                    domain_files,
-                    changed_files,
-                    deleted_files,
-                )
-                unchanged_paths = {e["path"] for e in graph_invalidation.unchanged_files}
-                bypass_cache_paths = set(graph_invalidation.indirect_paths)
-                if graph_invalidation.target_files:
-                    stage1_target_files = graph_invalidation.target_files
-                    print(
-                        f"stage1_incremental: {len(changed_files)} direct + "
-                        f"{len(graph_invalidation.indirect_paths)} graph-dependent / "
-                        f"{len(graph_invalidation.unchanged_files)} unchanged "
-                        f"(saving {len(graph_invalidation.unchanged_files)} provider calls)",
-                        file=sys.stderr,
+                if ti_enabled:
+                    graph_invalidation = expand_stage1_targets_with_import_graph(
+                        context,
+                        domain_files,
+                        changed_files,
+                        deleted_files,
                     )
-                    if graph_invalidation.indirect_paths:
+                    unchanged_paths = {e["path"] for e in graph_invalidation.unchanged_files}
+                    bypass_cache_paths = set(graph_invalidation.indirect_paths)
+                    if graph_invalidation.target_files:
+                        stage1_target_files = graph_invalidation.target_files
                         print(
-                            "stage1_graph_invalidation: "
-                            f"{len(graph_invalidation.invalidating_paths)} invalidating path(s), "
-                            f"{len(graph_invalidation.indirect_paths)} reverse dependent(s)",
+                            f"stage1_incremental: {len(changed_files)} direct + "
+                            f"{len(graph_invalidation.indirect_paths)} graph-dependent / "
+                            f"{len(graph_invalidation.unchanged_files)} unchanged "
+                            f"(deleted={len(graph_invalidation.deleted_paths)}, "
+                            f"saving {len(graph_invalidation.unchanged_files)} provider calls)",
                             file=sys.stderr,
                         )
+                        if graph_invalidation.indirect_paths:
+                            print(
+                                "stage1_graph_invalidation: "
+                                f"{len(graph_invalidation.invalidating_paths)} invalidating path(s), "
+                                f"{len(graph_invalidation.indirect_paths)} reverse dependent(s)",
+                                file=sys.stderr,
+                            )
+                    else:
+                        stage1_target_files = []
                 else:
-                    stage1_target_files = []
+                    # Transitive invalidation disabled — fall back to direct-only
+                    # incremental: re-analyze changed files; reuse previous results
+                    # for everything else even if their imports moved.
+                    changed_paths = {e["path"] for e in changed_files}
+                    unchanged_paths = {
+                        e["path"] for e in domain_files if e["path"] not in changed_paths
+                    }
+                    bypass_cache_paths = set()
+                    stage1_target_files = changed_files
+                    print(
+                        f"stage1_incremental: {len(changed_files)} direct / "
+                        f"{len(unchanged_paths)} unchanged "
+                        f"(deleted={len(deleted_files)}, transitive=off)",
+                        file=sys.stderr,
+                    )
 
             print(f"stage1_provider: {stage1_provider_name} (files={len(stage1_target_files)}, parallel={stage1_max_concurrent})", file=sys.stderr)
 

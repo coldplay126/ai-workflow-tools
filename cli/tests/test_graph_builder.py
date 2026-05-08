@@ -16,10 +16,12 @@ from awf.core.analysis_files import (
     save_hashes_file,
 )
 from awf.core.graph_builder import (
+    DISABLE_ENV_VAR,
     build_and_save_graph,
     build_graph,
     expand_stage1_targets_with_import_graph,
     graph_path_for,
+    transitive_invalidation_status,
 )
 from awf.core.import_graph import ImportGraph
 from awf.core.imports import extract_imports_with_kinds
@@ -343,3 +345,55 @@ def test_graph_invalidation_without_previous_graph_uses_direct_changes_only(tmp_
     assert [entry["path"] for entry in result.target_files] == ["src/shared.ts"]
     assert result.indirect_paths == ()
     assert [entry["path"] for entry in result.unchanged_files] == ["src/consumer.ts"]
+
+
+# --------------------------------------------------------------------------
+# transitive_invalidation_status — escape hatch
+# --------------------------------------------------------------------------
+
+def test_transitive_invalidation_default_is_enabled(monkeypatch):
+    monkeypatch.delenv(DISABLE_ENV_VAR, raising=False)
+    enabled, reason = transitive_invalidation_status({})
+    assert enabled is True
+    assert reason == "default"
+
+
+def test_transitive_invalidation_env_disables(monkeypatch):
+    for value in ("1", "true", "TRUE", "Yes", "on"):
+        monkeypatch.setenv(DISABLE_ENV_VAR, value)
+        enabled, reason = transitive_invalidation_status({})
+        assert enabled is False, f"value {value!r} should disable"
+        assert reason == f"env:{DISABLE_ENV_VAR}"
+
+
+def test_transitive_invalidation_env_falsy_keeps_default(monkeypatch):
+    for value in ("", "0", "false", "no", "off", "anything-else"):
+        monkeypatch.setenv(DISABLE_ENV_VAR, value)
+        enabled, reason = transitive_invalidation_status({})
+        assert enabled is True, f"value {value!r} must not disable"
+        assert reason == "default"
+
+
+def test_transitive_invalidation_config_disables(monkeypatch):
+    monkeypatch.delenv(DISABLE_ENV_VAR, raising=False)
+    pipeline_config = {"transitive_invalidation": {"enabled": False}}
+    enabled, reason = transitive_invalidation_status(pipeline_config)
+    assert enabled is False
+    assert reason == "config:transitive_invalidation.enabled=false"
+
+
+def test_transitive_invalidation_env_overrides_config(monkeypatch):
+    # Even when config says enabled=true, the env var emergency switch wins.
+    monkeypatch.setenv(DISABLE_ENV_VAR, "1")
+    pipeline_config = {"transitive_invalidation": {"enabled": True}}
+    enabled, reason = transitive_invalidation_status(pipeline_config)
+    assert enabled is False
+    assert reason == f"env:{DISABLE_ENV_VAR}"
+
+
+def test_transitive_invalidation_handles_missing_section(monkeypatch):
+    monkeypatch.delenv(DISABLE_ENV_VAR, raising=False)
+    # No pipeline_config at all — should default to enabled.
+    assert transitive_invalidation_status(None) == (True, "default")
+    # Section present but malformed (not a dict) — treat as default.
+    assert transitive_invalidation_status({"transitive_invalidation": "off"}) == (True, "default")
