@@ -49,6 +49,7 @@ uv run --project cmux-agent cmux-agent spawn --worker-template review --provider
 Runtime diagnostics are available from `cmux-agent` and the read-only `awf cmux` observer:
 
 ```bash
+uv run --project cmux-agent cmux-agent doctor
 uv run --project cmux-agent cmux-agent status --failures
 uv run --project cmux-agent cmux-agent failures
 uv run --project cmux-agent cmux-agent events --failures

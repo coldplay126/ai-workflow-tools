@@ -6,8 +6,10 @@ import argparse
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -31,6 +33,21 @@ from cmux_agent.infrastructure.storage import StateStore
 AGENT_DIR = ".agent"
 TEMPLATE_STATE_FILE = "template-state.json"
 FAILURE_EVENTS = {"artifact.validation_failed", "message.failed"}
+SUPPORTED_COMMANDS = (
+    "doctor",
+    "start",
+    "task",
+    "stop",
+    "register",
+    "spawn",
+    "agents",
+    "watch",
+    "status",
+    "events",
+    "failures",
+    "send",
+    "messages",
+)
 
 
 def _normalize_agent_entry(entry: str | dict) -> dict:
@@ -257,6 +274,70 @@ def _print_failure_details(
 # doctor
 # ---------------------------------------------------------------------------
 
+def _cmux_agent_paths() -> list[Path]:
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        candidate = Path(entry) / "cmux-agent"
+        if not candidate.is_file() or not os.access(candidate, os.X_OK):
+            continue
+        try:
+            key = str(candidate.resolve())
+        except OSError:
+            key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        paths.append(candidate)
+    return paths
+
+
+def _is_current_python_env_script(path: Path, executable: str | None = None) -> bool:
+    executable_path = Path(executable or sys.executable)
+    executable_parents = {executable_path.parent.resolve()}
+    try:
+        executable_parents.add(executable_path.resolve().parent)
+    except OSError:
+        pass
+    try:
+        script_path = path.resolve()
+    except OSError:
+        script_path = path
+    script_parents = {path.parent.resolve(), script_path.parent}
+    return bool(executable_parents & script_parents)
+
+
+def _parse_help_commands(help_text: str) -> set[str]:
+    commands: set[str] = set()
+    for group in re.findall(r"\{([^{}]+)\}", help_text.replace("\n", "")):
+        names = [part.strip() for part in group.split(",")]
+        if any(name in names for name in ("doctor", "start", "task")):
+            commands.update(name for name in names if name)
+    return commands
+
+
+def _probe_cmux_agent_commands(path: Path) -> set[str] | None:
+    try:
+        proc = subprocess.run(
+            [str(path), "--help"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return _parse_help_commands(proc.stdout + proc.stderr)
+
+
+def _missing_supported_commands(commands: set[str] | None) -> list[str]:
+    if commands is None:
+        return []
+    return [name for name in SUPPORTED_COMMANDS if name not in commands]
+
+
 def cmd_doctor(_args: argparse.Namespace) -> None:
     cmux = CmuxAdapter()
     checks = []
@@ -277,6 +358,37 @@ def cmd_doctor(_args: argparse.Namespace) -> None:
         checks.append(("cmux CLI", True, cmux_bin))
     else:
         checks.append(("cmux CLI", False, "PATH에 없음"))
+
+    # cmux-agent runtime / PATH drift
+    module_root = Path(__file__).resolve().parents[1]
+    checks.append(("cmux-agent module", True, str(module_root)))
+    checks.append(("cmux-agent python", True, sys.executable))
+    checks.append(("cmux-agent supported commands", True, ", ".join(SUPPORTED_COMMANDS)))
+
+    agent_paths = _cmux_agent_paths()
+    if not agent_paths:
+        checks.append(("cmux-agent CLI", False, "PATH에 없음; python -m cmux_agent 사용 가능"))
+    else:
+        active_path = agent_paths[0]
+        active_commands = _probe_cmux_agent_commands(active_path)
+        missing = _missing_supported_commands(active_commands)
+        active_ok = _is_current_python_env_script(active_path) and not missing
+        if missing:
+            detail = f"{active_path} (missing commands: {', '.join(missing)})"
+        elif not _is_current_python_env_script(active_path):
+            detail = f"{active_path} (현재 Python env와 다름)"
+        else:
+            detail = str(active_path)
+        checks.append(("cmux-agent CLI", active_ok, detail))
+
+        stale_paths = []
+        for path in agent_paths[1:]:
+            commands = _probe_cmux_agent_commands(path)
+            missing = _missing_supported_commands(commands)
+            if missing:
+                stale_paths.append(f"{path} missing {', '.join(missing)}")
+        if stale_paths:
+            checks.append(("cmux-agent PATH drift", False, "; ".join(stale_paths)))
 
     # AI CLI
     for cli_name in ("claude", "codex", "gemini"):
