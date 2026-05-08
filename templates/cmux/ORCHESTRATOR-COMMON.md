@@ -23,6 +23,8 @@ dispatch 메시지에 별도 보고 형식을 지정하지 마라. worker는 자
 
 watcher가 처리한 artifact는 `.agent/processed/`로 이동한다. 검증 실패, 미등록 수신자, 비활성 surface, spawn 실패는 `.agent/processed/failed/`에 남고 `cmux-agent failures`에서 이유를 확인할 수 있다.
 
+문서 gap/status/test artifact를 생성하거나 갱신할 때는 `docs/templates/gap.md`, `docs/templates/status.md`, `docs/templates/test.md`의 필드와 closing rule을 따른다.
+
 ## 동적 worker 생성
 작업 규모가 커서 병렬화가 유효하거나, 기존 worker 역할로 분절하기 어렵다면 controller에게 worker 생성을 요청한다.
 

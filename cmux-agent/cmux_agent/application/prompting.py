@@ -147,6 +147,29 @@ class PromptBuilder:
             f"모든 작업이 완료되었으면 최종 결과를 보고하세요."
         )
 
+    def build_startup_prompt(self, agent: Agent) -> str:
+        """Build the first prompt injected after an AI CLI session starts."""
+        base = Path(self._outbox).parent
+        if agent.role == AgentRole.ORCHESTRATOR:
+            protocol = base / "ORCHESTRATOR.md"
+            common = base / "ORCHESTRATOR-COMMON.md"
+            return (
+                "[cmux-agent] startup protocol\n"
+                f"작업 전 `{common}`와 `{protocol}`를 읽고 역할/I/O 계약을 따르세요.\n"
+                f"worker 위임은 `{self._outbox}`에 dispatch artifact(JSON)로 작성하세요.\n"
+                "작업 규모상 worker가 더 필요하면 control spawn_agent artifact를 작성하세요."
+            )
+
+        protocol = base / f"{agent.name.upper()}.md"
+        common = base / "WORKER-COMMON.md"
+        return (
+            "[cmux-agent] startup protocol\n"
+            f"작업 전 `{common}`와 `{protocol}`를 읽고 역할/I/O 계약을 따르세요.\n"
+            "docs/templates/gap.md, docs/templates/status.md, docs/templates/test.md를 "
+            "생성하거나 갱신할 때는 해당 템플릿의 closing/status/test 규칙을 따르세요.\n"
+            f"할당된 작업 완료 후 `{self._outbox}`에 result artifact(JSON)를 작성하세요."
+        )
+
     # -- 초기 프롬프트 -------------------------------------------------------
 
     def build_initial_orchestrator(self, workers: list[Agent]) -> dict:

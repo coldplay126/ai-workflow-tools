@@ -39,7 +39,7 @@ class TestLoadConfig:
 
         config = _load_config(str(tmp_path))
         assert config["orchestrator"] == "claude"
-        assert config["worker-1"] == "claude"
+        assert config["worker-impl"] == "claude"
         assert config["worker-2"] == "gemini"
 
     def test_invalid_json_returns_default(self, tmp_path):

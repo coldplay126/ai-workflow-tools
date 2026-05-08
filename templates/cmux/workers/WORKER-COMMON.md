@@ -36,6 +36,12 @@ category 접두어와 phase_metrics 내용은 각 에이전트 정의를 따른�
 ## 팀 작업
 orchestrator가 명시적으로 허용한 경우 다른 worker에게 dispatch를 보낼 수 있다. 이때 sender는 자신의 worker 이름, recipient는 대상 worker 이름으로 기록한다.
 
+## 문서 템플릿 계약
+gap/status/test 문서를 생성하거나 갱신할 때는 아래 템플릿 계약을 따른다:
+- `docs/templates/gap.md`
+- `docs/templates/status.md`
+- `docs/templates/test.md`
+
 ## 주의
 - outbox에 생성한 파일은 컨트롤러(watcher)가 감지 즉시 processed/로 이동시킨다. 파일 생성 후 확인했을 때 파일이 없어도 **정상 동작**이다. 오류가 아니므로 재생성하지 마라.
 - 검증 실패 artifact는 `.agent/processed/failed/`에 남는다. 실패 이유는 `cmux-agent failures` 또는 `cmux-agent events --failures`에서 확인한다.

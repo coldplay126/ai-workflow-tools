@@ -49,7 +49,7 @@ def _runtime_dir(cwd: str) -> Path:
 CONFIG_FILE = "cmux-agent.json"
 DEFAULT_CONFIG = {
     "orchestrator": "claude",
-    "worker-1": "claude",
+    "worker-impl": "claude",
 }
 
 
@@ -315,6 +315,7 @@ def _parse_workspace_ref(output: str) -> str | None:
 
 def cmd_start(args: argparse.Namespace) -> None:
     cwd = getattr(args, "cwd", ".")
+    attach_orchestrator = bool(getattr(args, "attach_orchestrator", False))
     # --template 지정 시 템플릿을 직접 참조 (파일 복사 없음)
     global _active_template_dir  # noqa: PLW0603
     template_name = getattr(args, "template", None)
@@ -381,8 +382,11 @@ def cmd_start(args: argparse.Namespace) -> None:
         if name.startswith("worker-"):
             tabs.append((name, AgentRole.WORKER, None))
 
-    # orchestrator, worker-1, worker-2 탭 생성
+    # orchestrator, worker 탭 생성. attach 모드에서는 현재 세션이
+    # orchestrator 역할을 하므로 별도 orchestrator surface를 만들지 않는다.
     for i in range(1, len(tabs)):
+        if attach_orchestrator and tabs[i][1] == AgentRole.ORCHESTRATOR:
+            continue
         result = cmux.new_surface(workspace_id=ws_ref)
         if result.ok:
             tabs[i] = (tabs[i][0], tabs[i][1], _parse_surface_ref(result.stdout))
@@ -436,6 +440,16 @@ def cmd_start(args: argparse.Namespace) -> None:
                 surface_id=agent.surface_id,
                 workspace_id=ws_ref,
             )
+            cmux.send_text(
+                prompt_builder.build_startup_prompt(agent),
+                surface_id=agent.surface_id,
+                workspace_id=ws_ref,
+            )
+            cmux.send_key(
+                "enter",
+                surface_id=agent.surface_id,
+                workspace_id=ws_ref,
+            )
             time.sleep(0.3)
 
     cmux.notify(title="cmux-agent", body=f"Run 시작: {run.run_id[:8]}")
@@ -445,6 +459,12 @@ def cmd_start(args: argparse.Namespace) -> None:
     for a in agents:
         print(f"  {a.name:<16} {a.surface_id or '-'}")
     print(f"Workspace: {ws_ref}")
+    if attach_orchestrator:
+        print("\n현재 세션이 orchestrator입니다.")
+        print(f"  1. {fs.base / 'ORCHESTRATOR-COMMON.md'} 를 읽으세요.")
+        print(f"  2. {fs.base / 'ORCHESTRATOR.md'} 를 읽으세요.")
+        print(f"  3. dispatch/control artifact를 {fs.outbox} 에 작성하세요.")
+        print(f"  4. worker 결과는 {fs.inbox / 'orchestrator'} 와 events/failures 명령으로 확인하세요.")
     print(f"\n'cmux-agent task \"요청\"' 으로 작업을 시작하세요.")
 
 
@@ -463,8 +483,8 @@ def cmd_task(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     orch = store.get_agent_by_name(run.run_id, "orchestrator")
-    if not orch or not orch.surface_id:
-        print("orchestrator가 등록되지 않았거나 surface_id가 없습니다.", file=sys.stderr)
+    if not orch:
+        print("orchestrator가 등록되지 않았습니다.", file=sys.stderr)
         sys.exit(1)
 
     request = args.request
@@ -485,16 +505,14 @@ def cmd_task(args: argparse.Namespace) -> None:
         f"사용 가능한 worker: {', '.join(active_names) if active_names else '(없음 - 필요 시 spawn_agent 요청)'}"
     )
 
-    cmux.send_text(
-        prompt,
-        surface_id=orch.surface_id,
-        workspace_id=run.workspace_id,
-    )
-    cmux.send_key(
-        "enter",
-        surface_id=orch.surface_id,
-        workspace_id=run.workspace_id,
-    )
+    if not orch.surface_id:
+        print("현재 세션 attached orchestrator 모드입니다.")
+        print("아래 요청을 기준으로 dispatch/control artifact를 작성하세요.\n")
+        print(prompt)
+        return
+
+    cmux.send_text(prompt, surface_id=orch.surface_id, workspace_id=run.workspace_id)
+    cmux.send_key("enter", surface_id=orch.surface_id, workspace_id=run.workspace_id)
 
     cmux.log(f"task → orchestrator: {request[:50]}", level="info", source="cmux-agent")
     print(f"작업 주입 완료: orchestrator ({orch.surface_id})")

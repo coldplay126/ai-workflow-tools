@@ -10,6 +10,11 @@
 
 ## Start A Run
 
+Default mode starts a separate orchestrator session. This is the recommended
+mode for normal operation because controller, orchestrator, and workers all
+have cmux surfaces and broker deliveries can be injected directly into the
+right terminal.
+
 ```bash
 uv run --project cmux-agent cmux-agent \
   --cwd . \
@@ -20,6 +25,25 @@ uv run --project cmux-agent cmux-agent \
 
 The selected template is written to `.agent/template-state.json` so the separate `watch` and `spawn` processes keep using the same provider config and worker protocols.
 
+If you want the current Claude Code or Codex CLI session to act as the
+orchestrator, attach it instead:
+
+```bash
+uv run --project cmux-agent cmux-agent \
+  --cwd . \
+  --templates-dir templates/cmux \
+  --template feature \
+  start --attach-orchestrator
+```
+
+Attach mode still creates the controller and worker cmux sessions, but registers
+`orchestrator` without a surface. The current session must read
+`.agent/ORCHESTRATOR-COMMON.md` and `.agent/ORCHESTRATOR.md`, write
+dispatch/control artifacts to `.agent/outbox`, and inspect
+`.agent/inbox/orchestrator` or `cmux-agent messages/events/failures` for worker
+results. This mode is useful when an existing Claude Code or Codex CLI session
+already has the task context.
+
 ## Send Work
 
 ```bash
@@ -27,6 +51,9 @@ uv run --project cmux-agent cmux-agent --cwd . task "Implement the requested fea
 ```
 
 The orchestrator should write dispatch artifacts to `.agent/outbox`. Workers receive deliveries in `.agent/inbox/<worker-name>/` and report results by writing result artifacts back to `.agent/outbox`.
+
+In attach mode, `task` prints the orchestrator prompt instead of injecting it
+into a cmux surface.
 
 The normal runtime loop is:
 
@@ -60,6 +87,10 @@ You can also spawn one manually:
 ```bash
 uv run --project cmux-agent cmux-agent --cwd . spawn worker-api --provider codex
 ```
+
+When no worker name is provided, `spawn` creates the next `worker-auto-N`
+worker. Prefer explicit role names such as `worker-api`, `worker-review`, or
+`worker-test` when the delegation scope is known.
 
 ## Watch And Observe
 

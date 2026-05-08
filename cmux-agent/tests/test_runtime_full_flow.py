@@ -163,8 +163,20 @@ def test_start_task_and_spawn_preserve_template_contract(tmp_path, monkeypatch):
         for call in texts
     )
     assert any(
+        call["surface_id"] == "surface:2"
+        and "ORCHESTRATOR.md" in call["text"]
+        and "dispatch artifact" in call["text"]
+        for call in texts
+    )
+    assert any(
         call["surface_id"] == "surface:3"
         and call["text"] == "npx @openai/codex -c model_reasoning_effort=xhigh\n"
+        for call in texts
+    )
+    assert any(
+        call["surface_id"] == "surface:3"
+        and "WORKER-FIX.md" in call["text"]
+        and "docs/templates/gap.md" in call["text"]
         for call in texts
     )
 
@@ -205,3 +217,61 @@ def test_start_task_and_spawn_preserve_template_contract(tmp_path, monkeypatch):
     assert event_names.count("run.created") == 1
     assert event_names.count("agent.registered") == 5
     assert "run.status_changed" in event_names
+
+
+def test_start_can_attach_current_session_as_orchestrator(tmp_path, monkeypatch, capsys):
+    fake = FakeCmux()
+    monkeypatch.setattr(command_module, "CmuxAdapter", lambda: fake)
+    monkeypatch.setattr(command_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(command_module, "_active_cwd", str(tmp_path))
+    monkeypatch.setattr(command_module, "_active_template_dir", None)
+
+    command_module.cmd_start(
+        Namespace(
+            cwd=str(tmp_path),
+            template="review",
+            templates_dir=str(TEMPLATES_ROOT),
+            attach_orchestrator=True,
+        )
+    )
+
+    fs = AgentFileSystem(tmp_path / ".agent")
+    store = StateStore(fs.db_path)
+    run = store.get_active_run()
+    assert run is not None
+
+    agents = {agent.name: agent for agent in store.get_agents(run.run_id)}
+    assert set(agents) == {"controller", "orchestrator", "worker-review"}
+    assert agents["controller"].surface_id == "surface:1"
+    assert agents["orchestrator"].surface_id is None
+    assert agents["worker-review"].surface_id == "surface:2"
+
+    send_texts = _send_texts(fake)
+    assert any(
+        call["surface_id"] == "surface:1" and call["text"] == "cmux-agent watch\n"
+        for call in send_texts
+    )
+    assert not any(
+        call["text"] == "claude --effort max\n" and call["surface_id"] is None
+        for call in send_texts
+    )
+    assert any(
+        call["surface_id"] == "surface:2"
+        and "npx @openai/codex" in call["text"]
+        for call in send_texts
+    )
+    assert any(
+        call["surface_id"] == "surface:2"
+        and "WORKER-REVIEW.md" in call["text"]
+        for call in send_texts
+    )
+
+    output = capsys.readouterr().out
+    assert "현재 세션이 orchestrator입니다." in output
+    assert "ORCHESTRATOR.md" in output
+
+    command_module.cmd_task(Namespace(request="Review the staged changes"))
+    task_output = capsys.readouterr().out
+    assert "attached orchestrator" in task_output
+    assert "Review the staged changes" in task_output
+    assert str(fs.outbox) in task_output
