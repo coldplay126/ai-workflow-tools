@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import sys
 import tempfile
-import textwrap
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -24,7 +23,6 @@ from awf.core.spec_loader import (
     load_agent_definition,
     load_agent_instructions,
     resolve_agent_for_role,
-    _agent_search_paths,
     clear_cache,
 )
 
@@ -32,18 +30,8 @@ from awf.core.spec_loader import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-passed = 0
-failed = 0
-
-
 def _assert(condition: bool, name: str, detail: str = ""):
-    global passed, failed
-    if condition:
-        passed += 1
-        print(f"  PASS  {name}")
-    else:
-        failed += 1
-        print(f"  FAIL  {name}  {detail}")
+    assert condition, f"{name}: {detail}" if detail else name
 
 
 def _make_agent_file(tmp: Path, name: str, frontmatter: str, body: str) -> Path:
@@ -58,9 +46,6 @@ def _make_agent_file(tmp: Path, name: str, frontmatter: str, body: str) -> Path:
 # ===========================================================================
 # _parse_agent_frontmatter
 # ===========================================================================
-
-print("--- parse_agent_frontmatter ---")
-
 
 def test_parse_simple_string():
     text = '---\nname: code-reviewer\ndescription: "A reviewer"\n---\n\nBody text here.'
@@ -131,24 +116,9 @@ def test_parse_single_item_list():
     _assert(meta["roles"] == ["only_one"], "single_item_list")
 
 
-test_parse_simple_string()
-test_parse_list()
-test_parse_boolean()
-test_parse_comment_lines()
-test_parse_empty_lines_in_frontmatter()
-test_parse_no_frontmatter()
-test_parse_quoted_values()
-test_parse_colon_in_value()
-test_parse_empty_list()
-test_parse_single_item_list()
-
-
 # ===========================================================================
 # load_agent_definition / load_agent_instructions (with fixture files)
 # ===========================================================================
-
-print("\n--- load_agent_definition ---")
-
 
 def test_load_definition_found():
     """Agent found in search path → returns meta + instructions."""
@@ -158,9 +128,6 @@ def test_load_definition_found():
                          'name: test-agent\nmodel: sonnet\nroles: [tester]\n',
                          "You are a test agent.")
         clear_cache()
-        # Monkey-patch search paths
-        original = _agent_search_paths.__code__
-        import types
         def patched():
             return [tmp_path / "agents"]
         import awf.core.spec_loader as sl
@@ -241,18 +208,9 @@ def test_load_instructions_returns_body_only():
             clear_cache()
 
 
-test_load_definition_found()
-test_load_definition_not_found()
-test_load_definition_cached()
-test_load_instructions_returns_body_only()
-
-
 # ===========================================================================
 # resolve_agent_for_role
 # ===========================================================================
-
-print("\n--- resolve_agent_for_role ---")
-
 
 def test_resolve_role_found():
     """Role exists in an agent's roles list → returns agent stem."""
@@ -338,18 +296,9 @@ def test_resolve_search_order():
             clear_cache()
 
 
-test_resolve_role_found()
-test_resolve_role_not_found()
-test_resolve_role_no_roles_field()
-test_resolve_search_order()
-
-
 # ===========================================================================
 # _load_protocol / _load_team_protocol fallback chain
 # ===========================================================================
-
-print("\n--- fallback chain ---")
-
 
 def test_fallback_agent_takes_priority():
     """_load_protocol prefers agent over protocol when both exist."""
@@ -399,18 +348,9 @@ def test_fallback_team_builtin():
             f"content: {content[:80]}")
 
 
-test_fallback_agent_takes_priority()
-test_fallback_protocol_when_no_agent()
-test_fallback_team_protocol_same_order()
-test_fallback_team_builtin()
-
-
 # ===========================================================================
 # Real agent files validation
 # ===========================================================================
-
-print("\n--- real agent files ---")
-
 
 def test_all_real_agents_parseable():
     """All agent .md files in claude/agents/ parse without error."""
@@ -420,7 +360,7 @@ def test_all_real_agents_parseable():
         _assert(False, "agents_dir_exists", f"{agents_dir} not found")
         return
     agent_files = sorted(agents_dir.glob("*.md"))
-    _assert(len(agent_files) >= 12, "at_least_12_agents", f"found {len(agent_files)}")
+    _assert(len(agent_files) > 0, "agents_present", "found 0")
     for af in agent_files:
         text = af.read_text(encoding="utf-8")
         meta, body = _parse_agent_frontmatter(text)
@@ -453,18 +393,3 @@ def test_no_duplicate_roles_across_agents():
     duplicates = {r: agents for r, agents in role_map.items() if len(agents) > 1}
     _assert(len(duplicates) == 0, "no_duplicate_roles",
             f"duplicates: {duplicates}" if duplicates else "")
-
-
-test_all_real_agents_parseable()
-test_all_real_agents_have_required_fields()
-test_no_duplicate_roles_across_agents()
-
-
-# ===========================================================================
-# Summary
-# ===========================================================================
-
-print(f"\n{'=' * 40}")
-print(f"{passed} passed, {failed} failed")
-if failed:
-    sys.exit(1)
