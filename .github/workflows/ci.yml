@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  cli:
+    name: CLI tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: actions/setup-python@v6.2.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v8.1.0
+      - name: Run CLI tests
+        working-directory: cli
+        run: uv run --with pytest pytest -q --ignore=tests/test_e2e_live.py
+
+  cmux-agent:
+    name: cmux-agent tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: actions/setup-python@v6.2.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v8.1.0
+      - name: Run cmux-agent tests
+        working-directory: cmux-agent
+        run: uv run --group dev pytest -q
