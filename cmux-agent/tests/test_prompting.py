@@ -42,6 +42,7 @@ class TestPromptBuilder:
         assert result["role"] == "orchestrator"
         assert len(result["workers"]) == 2
         assert "dispatch" in result["artifact_format"]["type"]
+        assert "template" in result["control_format"]["agent"]
 
     def test_initial_worker(self):
         result = self.builder.build_initial_worker("worker-1")

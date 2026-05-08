@@ -213,3 +213,29 @@ class TestBrokerRouting:
             call[0] == "send_text" and "npx @openai/codex" in call[1]["text"]
             for call in cmux.calls
         )
+
+    def test_control_spawn_agent_uses_purpose_name_when_name_is_omitted(self, setup):
+        broker, store, fs, _, _ = setup
+
+        artifact_path = fs.outbox / "spawn-review.json"
+        artifact_path.write_text("{}")
+
+        data = {
+            "type": "control",
+            "sender": "orchestrator",
+            "recipient": "controller",
+            "message": "need isolated review worker",
+            "action": "spawn_agent",
+            "agent": {"template": "review"},
+        }
+        broker.handle_artifact(artifact_path, data)
+
+        worker = store.get_agent_by_name("run-1", "worker-review")
+        assert worker is not None
+        assert worker.role == AgentRole.WORKER
+
+        inbox_files = list((fs.inbox / "orchestrator").iterdir())
+        assert len(inbox_files) == 1
+        payload = json.loads(inbox_files[0].read_text())
+        assert payload["result"] == "spawned worker-review (claude)"
+        assert payload["context"]["agent"]["name"] == "worker-review"

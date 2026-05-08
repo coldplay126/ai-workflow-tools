@@ -173,6 +173,59 @@ def test_runtime_uses_auto_worker_names_when_spawn_name_is_omitted(tmp_path):
     assert (fs.inbox / "worker-auto-2").is_dir()
 
 
+def test_runtime_uses_purpose_names_and_protocol_templates_for_dynamic_workers(tmp_path):
+    fs = AgentFileSystem(tmp_path / ".agent")
+    fs.init()
+    store = StateStore(fs.db_path)
+    event_log = EventLog(fs.event_log_path)
+    cmux = FakeCmux()
+
+    run = Run(
+        run_id="run-1",
+        status=RunStatus.RUNNING,
+        workspace_id="workspace:1",
+    )
+    store.save_run(run)
+    for agent in (
+        Agent(run_id=run.run_id, role=AgentRole.ORCHESTRATOR, name="orchestrator"),
+        Agent(run_id=run.run_id, role=AgentRole.WORKER, name="worker-review"),
+    ):
+        store.save_agent(agent)
+        fs.create_inbox(agent.name)
+
+    runtime = AgentRuntime(
+        store=store,
+        event_log=event_log,
+        fs=fs,
+        cmux=cmux,
+        prompt_builder=PromptBuilder(str(fs.outbox), str(fs.inbox)),
+        run_id=run.run_id,
+        workspace_id=run.workspace_id,
+        template_dir=TEMPLATES_ROOT / "feature",
+        provider_config={
+            "worker-review": {
+                "provider": "codex",
+                "flags": "-c model_reasoning_effort=high",
+            },
+        },
+    )
+
+    result = runtime.spawn_worker(name=None, template="review", provider=None, flags=None)
+
+    assert result.ok
+    assert result.name == "worker-review-2"
+    assert result.provider == "codex"
+    assert store.get_agent_by_name(run.run_id, "worker-review-2") is not None
+    protocol = (fs.base / "WORKER-REVIEW-2.md").read_text(encoding="utf-8")
+    assert "당신은 worker-review-2입니다." in protocol
+    assert ".workflow/agent-cards/review.json" in protocol
+    assert any(
+        call["surface_id"] == "surface:3"
+        and call["text"] == "npx @openai/codex -c model_reasoning_effort=high\n"
+        for call in _calls(cmux, "send_text")
+    )
+
+
 def test_watcher_routes_artifacts_through_broker_and_runtime(tmp_path):
     fs = AgentFileSystem(tmp_path / ".agent")
     fs.init()

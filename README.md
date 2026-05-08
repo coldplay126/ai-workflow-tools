@@ -43,6 +43,7 @@ The orchestrator can request dynamic workers by writing a `control` artifact wit
 
 ```bash
 uv run --project cmux-agent cmux-agent spawn worker-api --provider codex
+uv run --project cmux-agent cmux-agent spawn --worker-template review --provider codex
 ```
 
 Runtime diagnostics are available from `cmux-agent` and the read-only `awf cmux` observer:

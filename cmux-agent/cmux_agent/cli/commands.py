@@ -605,6 +605,8 @@ def cmd_spawn(args: argparse.Namespace) -> None:
     )
     result = runtime.spawn_worker(
         name=args.name,
+        role=getattr(args, "role", None),
+        template=getattr(args, "worker_template", None),
         provider=args.provider,
         flags=args.flags,
     )
