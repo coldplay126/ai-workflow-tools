@@ -155,7 +155,10 @@ def test_start_task_and_spawn_preserve_template_contract(tmp_path, monkeypatch):
 
     texts = _send_texts(fake)
     assert any(
-        call["surface_id"] == "surface:1" and call["text"] == "cmux-agent watch\n"
+        call["surface_id"] == "surface:1"
+        and " -m cmux_agent " in call["text"]
+        and f"--cwd {tmp_path}" in call["text"]
+        and call["text"].endswith(" watch\n")
         for call in texts
     )
     assert any(
@@ -248,7 +251,10 @@ def test_start_can_attach_current_session_as_orchestrator(tmp_path, monkeypatch,
 
     send_texts = _send_texts(fake)
     assert any(
-        call["surface_id"] == "surface:1" and call["text"] == "cmux-agent watch\n"
+        call["surface_id"] == "surface:1"
+        and " -m cmux_agent " in call["text"]
+        and f"--cwd {tmp_path}" in call["text"]
+        and call["text"].endswith(" watch\n")
         for call in send_texts
     )
     assert not any(

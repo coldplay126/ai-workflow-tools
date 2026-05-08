@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import os
+import shlex
 import shutil
 import sys
 import time
@@ -313,6 +314,11 @@ def _parse_workspace_ref(output: str) -> str | None:
     return None
 
 
+def _watch_command(cwd: str) -> str:
+    python = shlex.quote(sys.executable)
+    return f"{python} -m cmux_agent --cwd {shlex.quote(cwd)} watch\n"
+
+
 def cmd_start(args: argparse.Namespace) -> None:
     cwd = getattr(args, "cwd", ".")
     attach_orchestrator = bool(getattr(args, "attach_orchestrator", False))
@@ -421,7 +427,7 @@ def cmd_start(args: argparse.Namespace) -> None:
     controller = agents[0]
     if controller.surface_id:
         cmux.send_text(
-            "cmux-agent watch\n",
+            _watch_command(cwd),
             surface_id=controller.surface_id,
             workspace_id=ws_ref,
         )

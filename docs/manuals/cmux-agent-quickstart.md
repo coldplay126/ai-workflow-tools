@@ -24,6 +24,9 @@ uv run --project cmux-agent cmux-agent \
 ```
 
 The selected template is written to `.agent/template-state.json` so the separate `watch` and `spawn` processes keep using the same provider config and worker protocols.
+The controller tab starts `watch` through the same Python environment that ran
+`start`, so a stale globally installed `cmux-agent` binary is not used for the
+active run.
 
 If you want the current Claude Code or Codex CLI session to act as the
 orchestrator, attach it instead:
