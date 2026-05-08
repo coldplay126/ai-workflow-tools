@@ -1350,6 +1350,16 @@ def _scan_ai_context_units(docs_root: Path, service: str) -> dict[str, dict]:
     return units
 
 
+def _load_unit_import_graph(meta: dict):
+    """Load the import graph saved alongside this unit's analysis, if any."""
+    from awf.core.import_graph import ImportGraph
+
+    ai_context_path = meta.get("path")
+    if not ai_context_path:
+        return None
+    return ImportGraph.load(Path(ai_context_path) / ".tmp" / "import-graph.json")
+
+
 def _check_unit_drift(meta: dict, gh_root: Path) -> dict:
     """Compare saved hashes with current files to detect drift."""
     hashes_data = meta.get("hashes")
@@ -1372,11 +1382,33 @@ def _check_unit_drift(meta: dict, gh_root: Path) -> dict:
         if current_hash != entry["sha256"]:
             changed.append({"path": entry["path"], "status": "modified"})
 
+    # Transitive stale candidates: files unchanged on disk but whose imported
+    # source moved. Loaded from the import graph saved on the previous run.
+    # The exit code keeps using direct changes only, so existing CI integrations
+    # do not start failing on transitive findings alone.
+    direct_paths = {c["path"] for c in changed}
+    transitive_stale_files: list[str] = []
+    if direct_paths:
+        try:
+            from awf.core.graph_builder import compute_transitive_stale_paths
+
+            graph = _load_unit_import_graph(meta)
+            transitive_stale_files = sorted(
+                compute_transitive_stale_paths(graph, direct_paths)
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"warning: import-graph stale lookup failed for {meta.get('name', '?')}: {exc}",
+                file=sys.stderr,
+            )
+
     return {
         "stale": len(changed) > 0,
         "changed_count": len(changed),
         "total_files": len(saved_files),
         "changed_files": changed,
+        "transitive_stale_count": len(transitive_stale_files),
+        "transitive_stale_files": transitive_stale_files,
     }
 
 
@@ -1396,23 +1428,41 @@ def _run_drift_check(args: argparse.Namespace) -> int:
     print(f"=== Drift Detection: {service} ===")
     stale_count = 0
     up_to_date_count = 0
+    total_transitive = 0
 
     for name, meta in sorted(analyzed_units.items()):
         drift = _check_unit_drift(meta, gh_root)
         if drift["stale"]:
             stale_count += 1
             changed = drift["changed_files"]
+            transitive = drift.get("transitive_stale_files", [])
+            total_transitive += len(transitive)
             date = (meta.get("completed_at") or "")[:10]
-            print(f"  \u26a0 {name}: {drift['changed_count']} files changed since last analysis ({date})")
+            extra = f" + {len(transitive)} transitive" if transitive else ""
+            print(
+                f"  \u26a0 {name}: {drift['changed_count']} direct{extra} "
+                f"since last analysis ({date})"
+            )
             for cf in changed[:5]:
                 print(f"    {cf['status']}: {cf['path']}")
             if len(changed) > 5:
-                print(f"    ... and {len(changed) - 5} more")
+                print(f"    ... and {len(changed) - 5} more direct")
+            for path in transitive[:5]:
+                print(f"    transitive: {path}")
+            if len(transitive) > 5:
+                print(f"    ... and {len(transitive) - 5} more transitive")
         else:
             up_to_date_count += 1
             print(f"  \u2713 {name}: no changes")
 
-    print(f"\nstale: {stale_count} units, up-to-date: {up_to_date_count} units")
+    transitive_note = f" (+{total_transitive} transitive)" if total_transitive else ""
+    print(
+        f"\nstale: {stale_count} units{transitive_note}, "
+        f"up-to-date: {up_to_date_count} units"
+    )
+    # Exit code intentionally uses direct stale only, so existing CI gates
+    # that key on "did source change?" keep their semantics. Transitive
+    # findings are operational visibility, not a hard fail.
     return 1 if stale_count > 0 else 0
 
 
@@ -1474,7 +1524,9 @@ def _run_catalog(args: argparse.Namespace) -> int:
             print(f"  \u2717 {name:<25} {date}  {lines:>4}\uc904  {files}\ud30c\uc77c  thin (< 15\uc904)")
         elif drift["stale"]:
             stale += 1
-            print(f"  \u26a0 {name:<25} {date}  {lines:>4}\uc904  {files}\ud30c\uc77c  stale ({drift['changed_count']} changed)")
+            transitive = drift.get("transitive_stale_count", 0)
+            extra = f"+{transitive}T " if transitive else ""
+            print(f"  \u26a0 {name:<25} {date}  {lines:>4}\uc904  {files}\ud30c\uc77c  stale ({drift['changed_count']} {extra}changed)")
         else:
             completed += 1
             print(f"  \u2713 {name:<25} {date}  {lines:>4}\uc904  {files}\ud30c\uc77c")

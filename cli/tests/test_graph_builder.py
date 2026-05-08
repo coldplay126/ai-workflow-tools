@@ -397,3 +397,100 @@ def test_transitive_invalidation_handles_missing_section(monkeypatch):
     assert transitive_invalidation_status(None) == (True, "default")
     # Section present but malformed (not a dict) — treat as default.
     assert transitive_invalidation_status({"transitive_invalidation": "off"}) == (True, "default")
+
+
+# --------------------------------------------------------------------------
+# compute_transitive_stale_paths — used by --check / --catalog
+# --------------------------------------------------------------------------
+
+def _build_simple_graph_with_chain() -> ImportGraph:
+    """types.ts ← service.ts ← controller.ts plus an unrelated leaf.ts."""
+    from awf.core.import_graph import GraphEdge, GraphNode
+
+    g = ImportGraph()
+    for path in ("src/types.ts", "src/service.ts", "src/controller.ts", "src/leaf.ts"):
+        g.upsert_node(
+            GraphNode(
+                path=path,
+                language="typescript",
+                content_hash="c",
+                exports_hash="e",
+                exports=("X",),
+                last_analyzed_at="2026-05-08T00:00:00Z",
+            )
+        )
+    g.replace_edges_from(
+        "src/service.ts",
+        [GraphEdge(src="src/service.ts", dst="src/types.ts", symbols=("X",), kind="import")],
+    )
+    g.replace_edges_from(
+        "src/controller.ts",
+        [GraphEdge(src="src/controller.ts", dst="src/service.ts", symbols=("X",), kind="import")],
+    )
+    return g
+
+
+def test_transitive_stale_includes_chain_dependents():
+    from awf.core.graph_builder import compute_transitive_stale_paths
+
+    g = _build_simple_graph_with_chain()
+    stale = compute_transitive_stale_paths(g, ["src/types.ts"])
+    assert stale == {"src/service.ts", "src/controller.ts"}
+
+
+def test_transitive_stale_excludes_directly_changed_set():
+    from awf.core.graph_builder import compute_transitive_stale_paths
+
+    g = _build_simple_graph_with_chain()
+    # service.ts is directly changed AND a dependent of types.ts. It must
+    # not appear in the transitive set when types.ts is also direct.
+    stale = compute_transitive_stale_paths(g, ["src/types.ts", "src/service.ts"])
+    assert stale == {"src/controller.ts"}
+
+
+def test_transitive_stale_empty_when_graph_missing():
+    from awf.core.graph_builder import compute_transitive_stale_paths
+
+    assert compute_transitive_stale_paths(None, ["src/anything.ts"]) == set()
+
+
+def test_transitive_stale_empty_when_no_direct_changes():
+    from awf.core.graph_builder import compute_transitive_stale_paths
+
+    g = _build_simple_graph_with_chain()
+    assert compute_transitive_stale_paths(g, []) == set()
+
+
+def test_transitive_stale_unrelated_paths_have_no_dependents():
+    from awf.core.graph_builder import compute_transitive_stale_paths
+
+    g = _build_simple_graph_with_chain()
+    # leaf.ts has no reverse dependents.
+    assert compute_transitive_stale_paths(g, ["src/leaf.ts"]) == set()
+
+
+def test_transitive_stale_runtime_only_flag_passes_through():
+    """The runtime_only kwarg threads down to ImportGraph.reverse_dependents."""
+    from awf.core.graph_builder import compute_transitive_stale_paths
+    from awf.core.import_graph import GraphEdge, GraphNode
+
+    g = ImportGraph()
+    for path in ("src/types.ts", "src/consumer.ts"):
+        g.upsert_node(
+            GraphNode(
+                path=path,
+                language="typescript",
+                content_hash="c",
+                exports_hash="e",
+                exports=("X",),
+                last_analyzed_at="2026-05-08T00:00:00Z",
+            )
+        )
+    g.replace_edges_from(
+        "src/consumer.ts",
+        [GraphEdge(src="src/consumer.ts", dst="src/types.ts", symbols=("X",), kind="type-only")],
+    )
+    # Default (runtime_only=False) sees the type-only edge.
+    assert compute_transitive_stale_paths(g, ["src/types.ts"]) == {"src/consumer.ts"}
+    # runtime_only=True ignores type-only edges.
+    assert compute_transitive_stale_paths(g, ["src/types.ts"], runtime_only=True) == set()

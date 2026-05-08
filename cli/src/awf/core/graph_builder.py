@@ -36,6 +36,32 @@ DISABLE_ENV_VAR = "AWF_DISABLE_TRANSITIVE_INVALIDATION"
 _TRUTHY_ENV = frozenset({"1", "true", "yes", "on"})
 
 
+def compute_transitive_stale_paths(
+    graph: ImportGraph | None,
+    direct_changed_paths: Iterable[str],
+    *,
+    runtime_only: bool = False,
+) -> set[str]:
+    """Reverse dependents of any directly-changed path, minus the direct set.
+
+    `runtime_only` defaults to False because the analysis pipeline cares
+    about every dependent whose source it analyzes — including type-only
+    edges, which still influence Stage 1 output even when they are erased
+    at compile time. Set to True if a caller wants a runtime-only closure.
+
+    Returns the empty set when the graph is missing or no direct changes
+    were supplied.
+    """
+    direct_set = {p for p in direct_changed_paths if p}
+    if graph is None or not direct_set:
+        return set()
+    transitive: set[str] = set()
+    for path in direct_set:
+        transitive |= graph.reverse_dependents(path, runtime_only=runtime_only)
+    transitive -= direct_set
+    return transitive
+
+
 def transitive_invalidation_status(pipeline_config: dict | None) -> tuple[bool, str]:
     """Return (enabled, reason) for the transitive Stage-1 invalidation gate.
 

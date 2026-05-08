@@ -54,6 +54,10 @@ Stage 1 완료 후 `.ai-context/.tmp/import-graph.json`을 저장한다. 다음 
 
 Type-only edge도 analysis stale 방지를 위해 포함한다. Runtime-only invalidation은 별도 소비자가 생길 때 graph query 옵션으로 분리한다.
 
+### `--check` / `--catalog`에서 transitive 가시화
+
+`awf analyze {service} --check`와 `--catalog`는 직접 변경 파일 외에 import graph로 잡힌 transitive stale 후보 수도 함께 표시한다. 출력 예: `⚠ {unit}: 3 direct + 7 transitive since 2026-05-08`. exit code는 직접 변경만 기준으로 판정하므로 기존 CI 게이트 의미는 그대로 유지된다(transitive는 운영 가시성 정보).
+
 ### 간접 무효화 비활성화 (escape hatch)
 
 다음 두 가지 방법으로 transitive 무효화만 끄고 직접 변경 파일 기준의 incremental만 유지할 수 있다. 그래프 자체는 계속 빌드되어 다음 실행에 사용 가능하다.
