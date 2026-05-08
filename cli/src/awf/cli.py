@@ -15,7 +15,16 @@ from awf.commands.skills import run_skills_list
 from awf.commands.init import run_init
 from awf.commands.scan import run_scan
 from awf.commands.wf_apply import run_wf_apply_result
-from awf.commands.wf import run_wf_decide, run_wf_detect_class, run_wf_gate, run_wf_init, run_wf_next, run_wf_reset, run_wf_status
+from awf.commands.wf import (
+    run_wf_decide,
+    run_wf_detect_class,
+    run_wf_expand_scope,
+    run_wf_gate,
+    run_wf_init,
+    run_wf_next,
+    run_wf_reset,
+    run_wf_status,
+)
 from awf.core.router import route_natural_language
 
 
@@ -177,6 +186,41 @@ def build_parser() -> argparse.ArgumentParser:
     wf_reset_parser.add_argument("--repo-root", help="Repository root containing .workflow/. Defaults to current or parent directories.")
     wf_reset_parser.add_argument("--concept", help="Optional replacement concept text. Defaults to existing .workflow/concept.md.")
     wf_reset_parser.set_defaults(handler=run_wf_reset)
+
+    wf_expand_parser = wf_subparsers.add_parser(
+        "expand-scope",
+        help="Expand allowed-files.json with reverse dependents / imports from saved import graphs.",
+    )
+    wf_expand_parser.add_argument("--repo-root", help="Repository root containing .workflow/. Defaults to current or parent directories.")
+    wf_expand_parser.add_argument(
+        "--direction",
+        choices=("dependents", "imports", "both"),
+        default="dependents",
+        help="Which neighbors to add. dependents = files that import a planned file (default). imports = files a planned file depends on. both = combine.",
+    )
+    wf_expand_parser.add_argument(
+        "--depth",
+        type=int,
+        default=1,
+        help="Graph traversal depth. 1 = direct neighbors (default). 0 or negative = full transitive closure.",
+    )
+    wf_expand_parser.add_argument(
+        "--service",
+        action="append",
+        help="Restrict graph search to one or more services (repeatable). Default: scan every service under docs_root.",
+    )
+    wf_expand_parser.add_argument(
+        "--runtime-only",
+        action="store_true",
+        help="Skip type-only edges. Default keeps them — analysis pipelines treat type changes as scope-relevant.",
+    )
+    wf_expand_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the expansion without writing back to allowed-files.json.",
+    )
+    wf_expand_parser.add_argument("--json", action="store_true", help="Print expansion result as JSON.")
+    wf_expand_parser.set_defaults(handler=run_wf_expand_scope)
 
     config_parser = subparsers.add_parser("config", help="Configuration helpers.")
     config_subparsers = config_parser.add_subparsers(dest="config_command", required=True)

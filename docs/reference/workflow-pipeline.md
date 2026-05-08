@@ -221,3 +221,39 @@ pattern 문서의 불변식/파생 규칙이 참조하는 구체적 수치와 �
 | `loop.replanCount` | 누적 replan 횟수 | replan 실행 시 증가 |
 | `changeClass` | 변경 위험 등급 | 워크플로우 초기화 |
 | `history` | 모든 상태 전이 이력 | 모든 상태 변경 |
+
+---
+
+## allowed-files.json 그래프 확장 (`awf wf expand-scope`)
+
+`allowed-files.json`은 plan SKILL이 `tasks.md`에서 추출한 `planned_files` 목록이다. LLM이 직접 만들기 때문에 dependent / dependency 파일이 누락되어 G5 SCOPE_VIOLATION false positive가 자주 발생한다.
+
+`awf wf expand-scope`는 분석된 unit별 `import-graph.json`을 사용해 결정론적으로 `expanded_files`를 추가하고 audit trail을 남긴다.
+
+```bash
+# 직접 dependent만 추가 (1-hop, 기본)
+awf wf expand-scope --direction dependents
+
+# 1-hop dependents + imports 양방향
+awf wf expand-scope --direction both
+
+# 전체 transitive closure (위험 — 의도적으로만)
+awf wf expand-scope --direction dependents --depth 0
+
+# 작성 안 하고 미리보기
+awf wf expand-scope --dry-run --json
+```
+
+| 옵션 | 기본 | 설명 |
+|------|------|------|
+| `--direction` | `dependents` | `dependents` (consumers) / `imports` (deps) / `both` |
+| `--depth` | `1` | 그래프 traversal 깊이. `0` 또는 음수 → 전체 closure |
+| `--service` | (모든 서비스) | 검색 범위를 특정 서비스로 제한 (반복 가능) |
+| `--runtime-only` | off | type-only edge 제외. analysis pipeline 기본은 포함. |
+| `--dry-run` | off | 파일 수정 없이 결과만 출력 |
+
+쓰기 시 `allowed-files.json`에 추가되는 필드:
+- `expanded_files`: 정렬·중복 제거된 추가 경로 목록
+- `graph_expansion`: 사용된 direction/depth, 항목별 사유(`dependent_of:X` / `import_of:X`), planned_files coverage 진단
+
+verify(G5)는 현재 `planned_files`만 검사한다. 프로젝트 정책상 더 넓은 스코프를 허용하려면 G5 검증 로직을 `planned_files ∪ expanded_files`로 확장한다(별도 PR 예정).
