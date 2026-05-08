@@ -288,7 +288,7 @@ fallback 발동 조건: Writer가 특정 observation에 대해 `confidence: low`
 ## 4. Plan Contract (WF v2 Execution Contract)
 
 > 관련 원칙: **C2** (계약 기반), **C3** (결정론적 gate), **C5** (위험도 비례)
-> 현재: `allowed-files.json` (파일 목록만)
+> 현재: `allowed-files.json` (`planned_files` + 선택적 `expanded_files` + audit)
 > 변경: 완전한 실행 계약
 
 ### 4.1 plan-contract.json Schema
@@ -336,9 +336,10 @@ fallback 발동 조건: Writer가 특정 observation에 대해 `confidence: low`
 
 | 시점 | 검증 내용 | 실패 시 |
 |------|----------|---------|
-| impl 시작 전 (선제 scope gate) | executor 프롬프트에 allowed_files + forbidden_paths 주입 | — |
-| impl 실행 중 (patch 적용 전) | changed_files ⊂ allowed_files, forbidden path 미접근, 신규 파일 수 ≤ max_new_files | patch 거부 → fix_feedback |
-| impl 실행 후 (verify) | diff ↔ plan-contract 전체 대조, change_type 검증 | 구조화된 피드백 → 재시도 |
+| plan 직후 (선택) | `awf wf expand-scope`가 import graph reverse-dependents/imports를 `expanded_files`로 추가하고 `graph_expansion` audit를 기록 | — |
+| impl 시작 전 (선제 scope gate) | executor 프롬프트에 `planned_files ∪ expanded_files` + forbidden_paths 주입 | — |
+| impl 실행 중 (patch 적용 전) | changed_files ⊂ (planned ∪ expanded), forbidden path 미접근, 신규 파일 수 ≤ max_new_files | patch 거부 → fix_feedback |
+| impl 실행 후 (verify, G5) | `awf wf scope-check`가 결정론적으로 분류 (planned/expanded/violation), `.workflow/` 경로는 자동 제외 | 구조화된 피드백 → 재시도 |
 
 ### 4.3 Reclassify 트리거
 
@@ -346,7 +347,7 @@ plan-contract 생성 후, 다음 조건에 해당하면 change_class를 승격�
 
 | 신호 | 승격 대상 | 적용 조건 |
 |------|----------|----------|
-| allowed_files에 민감 경로 포함 (auth/, payment/, migration/) | → high-risk | 현재 등급 불문 |
+| planned_files 또는 expanded_files에 민감 경로 포함 (auth/, payment/, migration/) | → high-risk | 현재 등급 불문 |
 | migration_allowed: true | → high-risk | 현재 등급 불문 |
 | public_api_change: true | → high-risk | 현재 등급 불문 |
 | unresolved 항목 ≥ 2 | small → standard | small일 때만 승격. standard/high-risk는 유지 |

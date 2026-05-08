@@ -46,9 +46,10 @@ observation을 기반으로 판단(judgment)을 수행한다. 규모에 따라 1
 
 종합 판단 결과를 목적에 맞는 최종 산출물로 변환한다.
 
-- 결과 병합 및 산출물 파일 생성
+- 결과 병합 및 산출물 파일 생성 (`api-spec.json`, `data-model.md`, `domain-overview.md`, `external-integration.md`)
 - 프로젝트 수준 지식 갱신 (knowledge accumulation)
-- 해시 기록 및 상태 저장
+- 해시 기록 (`.tmp/hashes.json`) 및 상태 저장
+- **Import graph 영속화** (`.tmp/import-graph.json`): Layer 2/3에서 추출한 import 정보를 그래프로 저장 → 다음 실행에서 transitive cache invalidation에 사용. WF의 `awf wf expand-scope`도 동일 그래프를 재사용.
 
 **권한**: 파일 쓰기, 프로젝트 지식 갱신
 **금지**: LLM 호출

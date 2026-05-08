@@ -116,7 +116,7 @@ Result Envelope의 status가 `escaped`일 때 자동 규칙 엔진이 다음 행
 | advisory | (무관) | continue | 참고 사항, Phase 진행에 영향 없음 |
 | degraded | quality | continue | 품질 저하이나 기능적 진행 가능 |
 | warning | spec_divergence | replan | 명세와의 이탈, 재계획 필요 |
-| warning | scope_violation | replan | 허용 범위 벗어남, 범위 재정의 필요 |
+| warning | scope_violation | replan | 허용 범위 벗어남, 범위 재정의 필요 (planned ∪ expanded 어느 쪽에도 없는 변경) |
 | critical | spec_divergence | replan | 심각한 명세 이탈, 즉시 재계획 |
 | critical | constraint_violation | abort | 복구 불가능한 제약 위반 |
 | critical | budget_exceeded | abort | 리소스 한도 초과, 진행 불가 |

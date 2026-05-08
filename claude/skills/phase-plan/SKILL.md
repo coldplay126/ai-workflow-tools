@@ -180,6 +180,18 @@ tasks.md에서 파일 경로 추출:
 }
 ```
 
+#### 6.1 (선택) import graph 기반 스코프 확장
+
+해당 서비스가 `awf analyze`로 분석된 적이 있다면, 다음 명령으로 reverse-dependent / import 파일을 결정론적으로 추가하면 G5 SCOPE_VIOLATION false positive가 줄어든다:
+
+```bash
+awf wf expand-scope --direction dependents       # 1-hop consumer (기본)
+awf wf expand-scope --direction both             # consumer + dependency 양방향
+awf wf expand-scope --dry-run                    # 미리보기만
+```
+
+확장 시 `expanded_files` 필드와 `graph_expansion` audit (direction/depth/항목별 reason/coverage)이 추가된다. 그래프가 없으면 명령은 빈 결과로 빠지고 동작은 변하지 않는다.
+
 ### 7. Gate G1 검증
 
 **반드시 아래 CLI 명령으로 검증합니다** (LLM 판단이 아닌 결정론적 Python 검증기 사용):

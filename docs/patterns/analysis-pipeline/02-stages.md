@@ -37,6 +37,10 @@ Stage 1은 파일 간 의존성이 없으므로 모든 파일을 병렬로 처�
 
 Stage 1 출력 스키마는 reference 문서를 참조한다.
 
+### 부수 효과: import graph 갱신
+
+Stage 1이 추출한 import 정보를 사용해 Layer 4가 `.ai-context/.tmp/import-graph.json`을 갱신한다. 그래프 빌드는 LLM 호출이 없는 결정론적 후처리이며, 다음 실행에서 transitive cache invalidation의 입력으로 쓰인다 — 변경 파일의 exports hash가 바뀌면 reverse-dependents도 stage1 재분석 대상으로 자동 포함된다. 비활성화는 `AWF_DISABLE_TRANSITIVE_INVALIDATION=1` 또는 `analysis-pipeline.json` → `transitive_invalidation.enabled = false`.
+
 ---
 
 ## Stage 2: 단위 합성 — Writer/Judge 패턴

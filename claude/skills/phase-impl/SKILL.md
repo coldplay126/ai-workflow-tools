@@ -118,14 +118,16 @@ commit 실패 시: 에러 기록, 다음 Phase 계속
 - T003 ✓ — <설명> (완료: <timestamp>)
 - T004 ✗ — <설명> (실패: lint error in src/foo.ts)
 - T004 ✓ — <설명> (재시도 후 완료: <timestamp>)
-- SCOPE_WARNING: src/utils/helper.ts 수정 (allowed-files에 없음)
+- SCOPE_WARNING: src/utils/helper.ts 수정 (planned ∪ expanded 어느 쪽에도 없음)
 - Commit: def5678
 ```
 
 ### 8. 스코프 경고
-`allowed-files.json`에 없는 파일 수정 시:
+`allowed-files.json`의 `planned_files`와 `expanded_files` 어느 쪽에도 없는 파일을 수정 시:
 - impl-log.md에 `SCOPE_WARNING` 기록
-- Phase 5에서 최종 검증 (detective control)
+- Phase 5에서 `awf wf scope-check`로 결정론적 최종 검증 (detective control)
+
+`expanded_files`가 비어 있다면 plan phase의 `awf wf expand-scope` 단계가 생략됐거나 그래프가 아직 없는 경우다. 분석된 unit이 있다면 plan에서 미리 채우는 편이 false positive를 줄여 준다.
 
 ### 9. Gate G4 검증
 - [ ] tasks.md의 모든 task가 `[X]`

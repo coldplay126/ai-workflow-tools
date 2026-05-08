@@ -33,7 +33,7 @@ flowchart LR
 | review | G2 | 교차 검증 (설계/보안/품질 관점) | 서브에이전트 |
 | approve | G3 | 범위와 계획 승인 | - (conditional HIL) |
 | impl | G4 | 작업 목록 기반 구현 실행 | 서브에이전트 |
-| verify | G5 | 범위 검증 + 명세 준수 확인 | 서브에이전트 |
+| verify | G5 | 범위 검증 (결정론적 `awf wf scope-check`) + 명세 준수 확인 | 서브에이전트 (spec/품질만) |
 | test | G6 | 회귀 테스트 + 수락 테스트 실행 | 에이전트 팀 (QA) |
 | done | -- | 최종 확인 + 산출물 생성 | - (conditional HIL) |
 

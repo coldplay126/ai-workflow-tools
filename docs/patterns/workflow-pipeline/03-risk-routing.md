@@ -51,7 +51,7 @@ flowchart TD
 | review 깊이 | 최소 | AI 리뷰 | 심층 다중 관점 리뷰 |
 | 승인 경로 | 자동 가능 | 조건부 자동 | 사람 승인 필수 |
 | Gate 범위 | 변경 파일만 | 변경 파일 → 전체 | 전체 프로젝트 |
-| verify 엄격도 | scope 검증 | scope + compliance | scope + compliance + 아키텍처 |
+| verify 엄격도 | scope 검증 (`scope-check`) | scope + compliance | scope + compliance + 아키텍처. high_risk는 expand-scope를 plan에서 의무화하고 `--no-expanded`로 추가 1회 검증해 expanded 영역 위반도 별도 검토 |
 | test 범위 | 관련 테스트 | 회귀 + 수락 | 회귀 + 수락 + 수동 검증 |
 
 ---

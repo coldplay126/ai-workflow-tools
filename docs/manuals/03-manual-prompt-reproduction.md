@@ -38,7 +38,7 @@
 - spec에는 user story, requirements, acceptance scenarios 포함
 - plan은 구현 전략과 검증 방향 포함
 - tasks는 파일 경로와 task ID 포함
-- allowed-files는 tasks에서 추출
+- allowed-files의 `planned_files`는 tasks에서 추출. 분석된 import graph가 있다면 plan 직후 `awf wf expand-scope`를 실행해 `expanded_files`/`graph_expansion`도 채워둔다 (verify 단계에서 G5 false positive 감소).
 - 기존 `.workflow` 계약과 호환되게 작성
 ```
 
@@ -93,7 +93,7 @@ gate 판단은 `review.json`의 `gate.pass_conditions`를 따르세요.
 - `.workflow/agent-cards/verify.json`
 
 검증 항목:
-- scope violation
+- scope violation — `awf wf scope-check --json`을 먼저 실행해 결정론적 분류(planned/expanded/violation)를 받고, 위반된 path는 명령의 `reason` 필드를 그대로 인용한다. 수동으로 git diff와 allowed-files를 비교하지 않는다.
 - requirement 미구현
 - compliance fail
 - quality critical issue
