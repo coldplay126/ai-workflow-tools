@@ -321,6 +321,27 @@ def _parse_help_commands(help_text: str) -> set[str]:
 
 
 def _probe_cmux_agent_commands(path: Path) -> set[str] | None:
+    status = _probe_cmux_agent_script(path)
+    return status["commands"]
+
+
+# Probe outcomes for callers that want to distinguish failure modes.
+PROBE_OK = "ok"
+PROBE_MODULE_NOT_FOUND = "module_not_found"
+PROBE_TIMEOUT = "timeout"
+PROBE_OS_ERROR = "os_error"
+PROBE_NONZERO_EXIT = "nonzero_exit"
+
+
+def _probe_cmux_agent_script(path: Path) -> dict[str, object]:
+    """Run ``<path> --help`` and report what happened.
+
+    Returns a dict with:
+    - ``status``: one of the PROBE_* constants
+    - ``commands``: parsed command set when status == PROBE_OK, else None
+    - ``stderr``: captured stderr (truncated)
+    - ``returncode``: subprocess return code, or -1 when unavailable
+    """
     try:
         proc = subprocess.run(
             [str(path), "--help"],
@@ -329,9 +350,44 @@ def _probe_cmux_agent_commands(path: Path) -> set[str] | None:
             timeout=5,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return _parse_help_commands(proc.stdout + proc.stderr)
+    except subprocess.TimeoutExpired:
+        return {"status": PROBE_TIMEOUT, "commands": None, "stderr": "", "returncode": -1}
+    except OSError as exc:
+        return {
+            "status": PROBE_OS_ERROR,
+            "commands": None,
+            "stderr": str(exc),
+            "returncode": -1,
+        }
+
+    stderr = (proc.stderr or "").strip()[:400]
+    combined = proc.stdout + proc.stderr
+
+    # Editable-install drift: .venv/bin/cmux-agent runs but its sys.path
+    # cannot find the cmux_agent package. This shows up on Python 3.13 +
+    # uv editable installs in script execution mode.
+    if "ModuleNotFoundError" in combined and "cmux_agent" in combined:
+        return {
+            "status": PROBE_MODULE_NOT_FOUND,
+            "commands": None,
+            "stderr": stderr,
+            "returncode": proc.returncode,
+        }
+
+    if proc.returncode != 0:
+        return {
+            "status": PROBE_NONZERO_EXIT,
+            "commands": None,
+            "stderr": stderr,
+            "returncode": proc.returncode,
+        }
+
+    return {
+        "status": PROBE_OK,
+        "commands": _parse_help_commands(combined),
+        "stderr": stderr,
+        "returncode": proc.returncode,
+    }
 
 
 def _missing_supported_commands(commands: set[str] | None) -> list[str]:
@@ -372,10 +428,30 @@ def cmd_doctor(_args: argparse.Namespace) -> None:
         checks.append(("cmux-agent CLI", False, "PATH에 없음; python -m cmux_agent 사용 가능"))
     else:
         active_path = agent_paths[0]
-        active_commands = _probe_cmux_agent_commands(active_path)
+        active_status = _probe_cmux_agent_script(active_path)
+        active_commands = active_status["commands"]
+        active_probe_status = active_status["status"]
         missing = _missing_supported_commands(active_commands)
-        active_ok = _is_current_python_env_script(active_path) and not missing
-        if missing:
+        active_ok = (
+            _is_current_python_env_script(active_path)
+            and active_probe_status == PROBE_OK
+            and not missing
+        )
+        if active_probe_status == PROBE_MODULE_NOT_FOUND:
+            detail = (
+                f"{active_path} (cmux_agent import 실패 — Python 3.13 + uv editable 설치 알려진 이슈; "
+                "fallback: 'python -m cmux_agent' 또는 'uv tool install --force ./cmux-agent')"
+            )
+        elif active_probe_status == PROBE_TIMEOUT:
+            detail = f"{active_path} (--help 5초 초과)"
+        elif active_probe_status == PROBE_OS_ERROR:
+            detail = f"{active_path} (실행 실패: {active_status['stderr']})"
+        elif active_probe_status == PROBE_NONZERO_EXIT:
+            detail = (
+                f"{active_path} (exit {active_status['returncode']}: "
+                f"{active_status['stderr'] or 'no stderr'})"
+            )
+        elif missing:
             detail = f"{active_path} (missing commands: {', '.join(missing)})"
         elif not _is_current_python_env_script(active_path):
             detail = f"{active_path} (현재 Python env와 다름)"
@@ -385,8 +461,11 @@ def cmd_doctor(_args: argparse.Namespace) -> None:
 
         stale_paths = []
         for path in agent_paths[1:]:
-            commands = _probe_cmux_agent_commands(path)
-            missing = _missing_supported_commands(commands)
+            stale_status = _probe_cmux_agent_script(path)
+            if stale_status["status"] == PROBE_MODULE_NOT_FOUND:
+                stale_paths.append(f"{path} cmux_agent import 실패")
+                continue
+            missing = _missing_supported_commands(stale_status["commands"])
             if missing:
                 stale_paths.append(f"{path} missing {', '.join(missing)}")
         if stale_paths:
