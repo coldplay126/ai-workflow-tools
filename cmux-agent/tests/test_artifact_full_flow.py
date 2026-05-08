@@ -30,12 +30,23 @@ TEMPLATES_ROOT = REPO_ROOT / "templates" / "cmux"
 class FakeCmux:
     """Fake cmux session shared by watcher, broker, and runtime."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        surfaces: set[str] | None = None,
+        new_surface_result: CmuxResult | None = None,
+    ) -> None:
         self.calls: list[tuple[str, dict]] = []
         self._surface_seq = 3
-        self._surfaces = {"surface:1", "surface:2"}
+        self._surfaces = surfaces if surfaces is not None else {"surface:1", "surface:2"}
+        self._new_surface_result = new_surface_result
 
     def new_surface(self, *, pane_id=None, workspace_id=None) -> CmuxResult:
+        if self._new_surface_result is not None:
+            self.calls.append(
+                ("new_surface", {"workspace_id": workspace_id, "surface": None})
+            )
+            return self._new_surface_result
         surface = f"surface:{self._surface_seq}"
         self._surface_seq += 1
         self._surfaces.add(surface)
@@ -295,3 +306,145 @@ def test_watcher_routes_artifacts_through_broker_and_runtime(tmp_path):
     assert event_names.count("message.delivered") == 3
     assert event_names.count("agent.registered") == 1
     assert "artifact.validation_failed" not in event_names
+
+
+def test_watcher_moves_failed_artifacts_without_delivery_or_injection(tmp_path):
+    fs = AgentFileSystem(tmp_path / ".agent")
+    fs.init()
+    store = StateStore(fs.db_path)
+    event_log = EventLog(fs.event_log_path)
+    cmux = FakeCmux(
+        surfaces={"surface:1"},
+        new_surface_result=CmuxResult(
+            ok=False,
+            stdout="",
+            stderr="cmux new-surface unavailable",
+        ),
+    )
+
+    run = Run(
+        run_id="run-1",
+        status=RunStatus.RUNNING,
+        workspace_id="workspace:1",
+    )
+    store.save_run(run)
+    for agent in (
+        Agent(
+            run_id=run.run_id,
+            role=AgentRole.CONTROLLER,
+            name="controller",
+        ),
+        Agent(
+            run_id=run.run_id,
+            role=AgentRole.ORCHESTRATOR,
+            name="orchestrator",
+            surface_id="surface:1",
+        ),
+        Agent(
+            run_id=run.run_id,
+            role=AgentRole.WORKER,
+            name="worker-fix",
+            surface_id="surface:2",
+        ),
+    ):
+        store.save_agent(agent)
+        fs.create_inbox(agent.name)
+
+    prompt_builder = PromptBuilder(str(fs.outbox), str(fs.inbox))
+    runtime = AgentRuntime(
+        store=store,
+        event_log=event_log,
+        fs=fs,
+        cmux=cmux,
+        prompt_builder=prompt_builder,
+        run_id=run.run_id,
+        workspace_id=run.workspace_id,
+        template_dir=TEMPLATES_ROOT / "bugfix",
+    )
+    broker = MessageBroker(
+        store=store,
+        event_log=event_log,
+        fs=fs,
+        cmux=cmux,
+        prompt_builder=prompt_builder,
+        run_id=run.run_id,
+        workspace_id=run.workspace_id,
+        runtime=runtime,
+    )
+
+    (fs.outbox / "01-malformed.json").write_text("{not-json", encoding="utf-8")
+    _write_artifact(
+        fs.outbox / "02-missing-field.json",
+        {
+            "type": "dispatch",
+            "sender": "orchestrator",
+            "recipient": "worker-fix",
+        },
+    )
+    _write_artifact(
+        fs.outbox / "03-unknown-recipient.json",
+        {
+            "type": "dispatch",
+            "sender": "orchestrator",
+            "recipient": "worker-missing",
+            "message": "Route this nowhere",
+        },
+    )
+    _write_artifact(
+        fs.outbox / "04-inactive-surface.json",
+        {
+            "type": "dispatch",
+            "sender": "orchestrator",
+            "recipient": "worker-fix",
+            "message": "This worker tab is closed",
+        },
+    )
+    _write_artifact(
+        fs.outbox / "05-spawn-failure.json",
+        {
+            "type": "control",
+            "sender": "orchestrator",
+            "recipient": "controller",
+            "message": "Need another worker",
+            "action": "spawn_agent",
+            "agent": {"name": "worker-review"},
+        },
+    )
+
+    watcher = ArtifactWatcher(fs.outbox, broker)
+    watcher._process_existing()
+
+    assert list(fs.outbox.iterdir()) == []
+    assert sorted(path.name for path in fs.failed.iterdir()) == [
+        "01-malformed.json",
+        "02-missing-field.json",
+        "03-unknown-recipient.json",
+        "04-inactive-surface.json",
+        "05-spawn-failure.json",
+    ]
+    assert store.get_messages(run.run_id) == []
+    assert store.get_agent_by_name(run.run_id, "worker-review") is None
+    assert _read_inbox(fs.inbox / "orchestrator") == []
+    assert _read_inbox(fs.inbox / "worker-fix") == []
+
+    assert _calls(cmux, "send_text") == []
+    assert _calls(cmux, "send_key") == []
+    assert _calls(cmux, "trigger_flash") == []
+    assert _calls(cmux, "notify") == []
+    assert len(_calls(cmux, "new_surface")) == 1
+
+    events = event_log.read_all(run.run_id)
+    event_names = [event["event"] for event in events]
+    reasons = [
+        event["data"]["reason"]
+        for event in events
+        if event["event"] == "artifact.validation_failed"
+    ]
+    assert event_names.count("artifact.detected") == 3
+    assert event_names.count("artifact.validation_failed") == 5
+    assert "message.delivered" not in event_names
+    assert any("artifact parse failed" in reason for reason in reasons)
+    assert any("필수 필드 누락" in reason for reason in reasons)
+    assert "미등록 recipient: worker-missing" in reasons
+    assert "비활성 recipient: worker-fix" in reasons
+    assert "cmux new-surface unavailable" in reasons

@@ -59,9 +59,17 @@ class _OutboxHandler(FileSystemEventHandler):
             return
         try:
             text = path.read_text(encoding="utf-8")
-            data = json.loads(text)
-        except (json.JSONDecodeError, OSError) as exc:
+        except OSError as exc:
             logger.warning("artifact 파싱 실패: %s — %s", path, exc)
+            return
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as exc:
+            logger.warning("artifact 파싱 실패: %s — %s", path, exc)
+            self._consumer.handle_artifact(
+                path,
+                {"_error": f"artifact parse failed: {exc}"},
+            )
             return
 
         error = validate_artifact(data)
