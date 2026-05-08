@@ -101,6 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("--output-format", choices=["text", "json"], default="text", help="Output format. json outputs structured data to stdout.")
     analyze_parser.add_argument("--check", action="store_true", help="Detect stale .ai-context by comparing hashes. No analysis run.")
     analyze_parser.add_argument("--catalog", action="store_true", help="Show analysis status for all units in a service.")
+    analyze_parser.add_argument("--cycles", action="store_true", help="Report import cycles in each analyzed unit's saved import graph. No analysis run.")
     analyze_parser.set_defaults(handler=run_analyze)
 
     wf_parser = subparsers.add_parser("wf", help="Workflow helpers.")

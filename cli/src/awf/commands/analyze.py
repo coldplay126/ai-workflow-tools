@@ -229,6 +229,10 @@ def run_analyze(args: argparse.Namespace) -> int:
     if getattr(args, "catalog", False):
         return _run_catalog(args)
 
+    # --cycles mode: import-cycle diagnostic over saved graphs
+    if getattr(args, "cycles", False):
+        return _run_cycles(args)
+
     # --all mode: scan service and run each domain sequentially
     if getattr(args, "all", False):
         return _run_analyze_all(args)
@@ -1534,3 +1538,63 @@ def _run_catalog(args: argparse.Namespace) -> int:
     print(f"\n  \ubd84\uc11d \uc644\ub8cc: {completed}/{len(all_units)}, "
           f"\ube48\uc57d: {thin}, stale: {stale}, \ubbf8\ubd84\uc11d: {not_analyzed}")
     return 0
+
+
+def _run_cycles(args: argparse.Namespace) -> int:
+    """Report import cycles per unit using each unit's saved import graph.
+
+    Exit code: 1 if any cycle found anywhere in the service, 0 otherwise.
+    Units with no saved graph are skipped (and noted), not failed \u2014 a fresh
+    repo simply has nothing to analyze yet.
+    """
+    try:
+        docs_root, gh_root, service = _resolve_service_docs_root(args)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    analyzed_units = _scan_ai_context_units(docs_root, service)
+    if not analyzed_units:
+        print(f"No analyzed units found for {service}.")
+        return 0
+
+    print(f"=== Import Cycles: {service} ===")
+    units_with_cycles = 0
+    units_clean = 0
+    units_no_graph = 0
+    total_cycles = 0
+
+    for name, meta in sorted(analyzed_units.items()):
+        try:
+            graph = _load_unit_import_graph(meta)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ! {name}: graph load failed ({exc})")
+            continue
+
+        if graph is None:
+            units_no_graph += 1
+            print(f"  \u00b7 {name}: no import graph saved (run analyze first)")
+            continue
+
+        cycles = graph.detect_cycles()
+        if not cycles:
+            units_clean += 1
+            print(f"  \u2713 {name}: no cycles ({len(graph.nodes)} files, {graph.edge_count()} edges)")
+            continue
+
+        units_with_cycles += 1
+        total_cycles += len(cycles)
+        print(f"  \u26a0 {name}: {len(cycles)} cycle(s)")
+        # Cycles are SCCs; the smallest are usually the most actionable.
+        for cycle in sorted(cycles, key=len)[:5]:
+            arrow = " \u2192 ".join(cycle + [cycle[0]])
+            print(f"    cycle ({len(cycle)} files): {arrow}")
+        if len(cycles) > 5:
+            print(f"    ... and {len(cycles) - 5} more")
+
+    summary = (
+        f"\nunits with cycles: {units_with_cycles} ({total_cycles} total), "
+        f"clean: {units_clean}, no graph: {units_no_graph}"
+    )
+    print(summary)
+    return 1 if units_with_cycles > 0 else 0
