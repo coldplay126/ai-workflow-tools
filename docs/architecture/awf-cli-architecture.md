@@ -395,8 +395,8 @@ models = ["deepseek-chat", "deepseek-coder"]
 agent-cards/
 ├── plan.json       → G1: concept.md 존재 + 5-field 완성도
 ├── review.json     → G2: critical finding 0건
-├── impl.json       → G4: allowed-files 준수 + 컴파일
-├── verify.json     → G5: scope violation 0건
+├── impl.json       → G4: allowed-files (planned ∪ expanded) 준수 + 컴파일
+├── verify.json     → G5: `awf wf scope-check` 위반 0건 (결정론적, .workflow/ 자동 제외)
 └── test.json       → G6: 테스트 통과율 >= 80%
 ```
 

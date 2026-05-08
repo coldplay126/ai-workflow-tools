@@ -22,7 +22,7 @@ done (P7)  | —    | 완료                 | —
 | **G2** | CRITICAL 0건, HIGH 해결/확인, coverage ≥ 80% |
 | **G3** | 사용자 승인 + scope hash 계산 |
 | **G4** | 모든 task `[X]`, lint 에러 0건, 각 phase에 commit 존재 |
-| **G5** | SCOPE_VIOLATION 0건, spec 준수율 ≥ 90%, CRITICAL 품질 이슈 0건 |
+| **G5** | `awf wf scope-check` (planned ∪ expanded 결정론적 비교) 위반 0건, spec 준수율 ≥ 90%, CRITICAL 품질 이슈 0건 |
 | **G6** | 회귀 테스트 통과, 수락 테스트 통과, 수동 항목 서명 |
 
 ## .workflow/ 디렉토리 구조
@@ -37,7 +37,7 @@ done (P7)  | —    | 완료                 | —
 │   ├── spec.md                 ← P1: 요구사항, 사용자 스토리, 수락 기준
 │   ├── plan.md                 ← P1: 기술 계획
 │   ├── tasks.md                ← P1: 작업 분해
-│   ├── allowed-files.json      ← P1: 허용 파일 목록 (스코프)
+│   ├── allowed-files.json      ← P1: planned_files + 선택적 expanded_files (graph 확장) + graph_expansion audit
 │   ├── review-report.md        ← P2: 교차 검증 결과
 │   ├── approval.json           ← P3: 승인 기록 + scope hash
 │   ├── impl-log.md             ← P4: 구현 로그
