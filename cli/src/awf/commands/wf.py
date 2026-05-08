@@ -1271,3 +1271,76 @@ def run_wf_expand_scope(args: argparse.Namespace) -> int:
     out_path = save_allowed_files(repo_root, new_payload)
     print(f"\nwrote: {out_path}")
     return 0
+
+
+def run_wf_scope_check(args: argparse.Namespace) -> int:
+    """Deterministic G5 scope check: git diff vs allowed-files.json.
+
+    Compares changed files against `planned_files` (and `expanded_files`
+    unless --no-expanded) and prints per-file classification. Exit code
+    is 1 if any violation is found, 0 otherwise — suitable for direct
+    consumption by the verify SKILL or a CI gate.
+    """
+    from awf.core.wf_scope import (
+        STATUS_EXPANDED,
+        STATUS_PLANNED,
+        STATUS_VIOLATION,
+        check_scope_violations,
+    )
+
+    try:
+        repo_root = resolve_repo_root(args.repo_root)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        result = check_scope_violations(
+            repo_root,
+            base_branch=args.base_branch,
+            include_expanded=not args.no_expanded,
+        )
+    except FileNotFoundError as exc:
+        print(f"error: allowed-files.json not found at {exc}", file=sys.stderr)
+        return 2
+    except json.JSONDecodeError as exc:
+        print(f"error: allowed-files.json is not valid JSON: {exc}", file=sys.stderr)
+        return 2
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(json.dumps(result.to_json(), ensure_ascii=False, indent=2))
+        return 1 if result.violation_count > 0 else 0
+
+    print(f"=== Scope Check (base: {result.base_branch}) ===")
+    print(
+        f"planned: {len(result.planned_set)}, "
+        f"expanded: {len(result.expanded_set)}, "
+        f"changed: {len(result.changed_files)}"
+    )
+    counts: dict[str, int] = {STATUS_PLANNED: 0, STATUS_EXPANDED: 0, STATUS_VIOLATION: 0}
+    for c in result.classifications:
+        counts[c.status] = counts.get(c.status, 0) + 1
+    print(
+        f"verdict: {counts[STATUS_PLANNED]} planned, "
+        f"{counts[STATUS_EXPANDED]} expanded, "
+        f"{counts[STATUS_VIOLATION]} violation(s)"
+    )
+
+    icon = {STATUS_PLANNED: "✓", STATUS_EXPANDED: "+", STATUS_VIOLATION: "✗"}
+    for c in result.classifications:
+        print(f"  {icon.get(c.status, '?')} {c.status:<10} {c.path}  ({c.reason})")
+
+    if result.planned_not_changed:
+        print(
+            f"\nplanned but not changed ({len(result.planned_not_changed)}): "
+            "possible missing implementation"
+        )
+        for path in result.planned_not_changed[:10]:
+            print(f"  · {path}")
+        if len(result.planned_not_changed) > 10:
+            print(f"  ... and {len(result.planned_not_changed) - 10} more")
+
+    return 1 if result.violation_count > 0 else 0

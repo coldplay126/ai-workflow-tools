@@ -238,3 +238,194 @@ def test_load_allowed_files_raises_for_missing(tmp_path: Path):
 
     with pytest.raises(FileNotFoundError):
         load_allowed_files(tmp_path)
+
+
+# --------------------------------------------------------------------------
+# check_scope_violations — G5 deterministic gate
+# --------------------------------------------------------------------------
+
+def _init_repo_with_branch(repo_root: Path, base: str = "main") -> None:
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", "-b", base], cwd=repo_root, check=True)
+    subprocess.run(["git", "config", "user.email", "t@x"], cwd=repo_root, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo_root, check=True)
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo_root, check=True)
+
+
+def _commit_all(repo_root: Path, msg: str) -> None:
+    import subprocess
+
+    subprocess.run(["git", "add", "-A"], cwd=repo_root, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", msg], cwd=repo_root, check=True)
+
+
+def _setup_repo_with_changes(
+    repo_root: Path,
+    *,
+    planned: list[str],
+    expanded: list[str],
+    expansion_entries: list[dict] | None = None,
+    base_files: list[str] | None = None,
+    changed_files: list[str] | None = None,
+) -> None:
+    """Initialize a git repo, write base files on `main`, then branch and modify."""
+    from awf.core.wf_scope import save_allowed_files
+
+    _init_repo_with_branch(repo_root, base="main")
+
+    for path in (base_files or []):
+        full = repo_root / path
+        full.parent.mkdir(parents=True, exist_ok=True)
+        full.write_text("// base\n", encoding="utf-8")
+    (repo_root / "README.md").write_text("seed\n", encoding="utf-8")
+    _commit_all(repo_root, "base")
+
+    import subprocess
+
+    subprocess.run(["git", "checkout", "-q", "-b", "feature"], cwd=repo_root, check=True)
+
+    payload = {"planned_files": planned}
+    if expanded:
+        payload["expanded_files"] = expanded
+    if expansion_entries is not None:
+        payload["graph_expansion"] = {"entries": expansion_entries}
+    save_allowed_files(repo_root, payload)
+
+    for path in (changed_files or []):
+        full = repo_root / path
+        full.parent.mkdir(parents=True, exist_ok=True)
+        full.write_text("// modified\n", encoding="utf-8")
+    if changed_files:
+        _commit_all(repo_root, "feature changes")
+
+
+def test_scope_check_passes_when_only_planned_files_change(tmp_path: Path):
+    from awf.core.wf_scope import check_scope_violations
+
+    _setup_repo_with_changes(
+        tmp_path,
+        planned=["src/a.ts", "src/b.ts"],
+        expanded=[],
+        base_files=["src/a.ts", "src/b.ts"],
+        changed_files=["src/a.ts", "src/b.ts"],
+    )
+
+    result = check_scope_violations(tmp_path, base_branch="main")
+    assert result.violation_count == 0
+    statuses = {c.path: c.status for c in result.classifications}
+    assert statuses["src/a.ts"] == "planned"
+    assert statuses["src/b.ts"] == "planned"
+
+
+def test_scope_check_treats_expanded_files_as_in_scope(tmp_path: Path):
+    from awf.core.wf_scope import check_scope_violations
+
+    _setup_repo_with_changes(
+        tmp_path,
+        planned=["src/a.ts"],
+        expanded=["src/b.ts"],
+        expansion_entries=[{"path": "src/b.ts", "reason": "dependent_of:src/a.ts"}],
+        base_files=["src/a.ts", "src/b.ts"],
+        changed_files=["src/a.ts", "src/b.ts"],
+    )
+
+    result = check_scope_violations(tmp_path, base_branch="main")
+    assert result.violation_count == 0
+    statuses = {c.path: c.status for c in result.classifications}
+    reasons = {c.path: c.reason for c in result.classifications}
+    assert statuses["src/a.ts"] == "planned"
+    assert statuses["src/b.ts"] == "expanded"
+    # The reason should come from the audit trail when available.
+    assert reasons["src/b.ts"] == "dependent_of:src/a.ts"
+
+
+def test_scope_check_flags_unplanned_unexpanded_change_as_violation(tmp_path: Path):
+    from awf.core.wf_scope import check_scope_violations
+
+    _setup_repo_with_changes(
+        tmp_path,
+        planned=["src/a.ts"],
+        expanded=["src/b.ts"],
+        expansion_entries=[{"path": "src/b.ts", "reason": "dependent_of:src/a.ts"}],
+        base_files=["src/a.ts", "src/b.ts", "src/c.ts"],
+        changed_files=["src/a.ts", "src/b.ts", "src/c.ts"],
+    )
+
+    result = check_scope_violations(tmp_path, base_branch="main")
+    assert result.violation_count == 1
+    assert result.violations[0].path == "src/c.ts"
+    assert "not in planned_files or expanded_files" in result.violations[0].reason
+
+
+def test_scope_check_no_expanded_falls_back_to_legacy_behavior(tmp_path: Path):
+    from awf.core.wf_scope import check_scope_violations
+
+    _setup_repo_with_changes(
+        tmp_path,
+        planned=["src/a.ts"],
+        expanded=["src/b.ts"],
+        expansion_entries=[{"path": "src/b.ts", "reason": "dependent_of:src/a.ts"}],
+        base_files=["src/a.ts", "src/b.ts"],
+        changed_files=["src/a.ts", "src/b.ts"],
+    )
+
+    result = check_scope_violations(tmp_path, base_branch="main", include_expanded=False)
+    # With expansion ignored, src/b.ts becomes a violation again.
+    assert result.violation_count == 1
+    assert result.violations[0].path == "src/b.ts"
+
+
+def test_scope_check_reports_planned_not_changed(tmp_path: Path):
+    from awf.core.wf_scope import check_scope_violations
+
+    _setup_repo_with_changes(
+        tmp_path,
+        planned=["src/a.ts", "src/b.ts"],
+        expanded=[],
+        base_files=["src/a.ts", "src/b.ts"],
+        changed_files=["src/a.ts"],  # b planned but not modified
+    )
+
+    result = check_scope_violations(tmp_path, base_branch="main")
+    assert result.violation_count == 0
+    assert result.planned_not_changed == ("src/b.ts",)
+
+
+def test_scope_check_to_json_serializes_expected_keys(tmp_path: Path):
+    from awf.core.wf_scope import check_scope_violations
+
+    _setup_repo_with_changes(
+        tmp_path,
+        planned=["src/a.ts"],
+        expanded=[],
+        base_files=["src/a.ts", "src/c.ts"],
+        changed_files=["src/a.ts", "src/c.ts"],
+    )
+
+    payload = check_scope_violations(tmp_path, base_branch="main").to_json()
+    for key in (
+        "base_branch",
+        "planned_count",
+        "expanded_count",
+        "changed_count",
+        "violation_count",
+        "violations",
+        "classifications",
+        "planned_not_changed",
+    ):
+        assert key in payload
+    assert payload["violation_count"] == 1
+    assert payload["violations"][0]["path"] == "src/c.ts"
+
+
+def test_scope_check_raises_when_allowed_files_missing(tmp_path: Path):
+    import pytest
+    from awf.core.wf_scope import check_scope_violations
+
+    _init_repo_with_branch(tmp_path, base="main")
+    (tmp_path / "README.md").write_text("seed\n", encoding="utf-8")
+    _commit_all(tmp_path, "base")
+
+    with pytest.raises(FileNotFoundError):
+        check_scope_violations(tmp_path, base_branch="main")

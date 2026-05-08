@@ -23,6 +23,7 @@ from awf.commands.wf import (
     run_wf_init,
     run_wf_next,
     run_wf_reset,
+    run_wf_scope_check,
     run_wf_status,
 )
 from awf.core.router import route_natural_language
@@ -221,6 +222,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     wf_expand_parser.add_argument("--json", action="store_true", help="Print expansion result as JSON.")
     wf_expand_parser.set_defaults(handler=run_wf_expand_scope)
+
+    wf_scope_parser = wf_subparsers.add_parser(
+        "scope-check",
+        help="Deterministic G5 scope check: git diff vs allowed-files.json (planned ∪ expanded).",
+    )
+    wf_scope_parser.add_argument("--repo-root", help="Repository root containing .workflow/. Defaults to current or parent directories.")
+    wf_scope_parser.add_argument("--base-branch", help="Base branch for git diff. Defaults to state.baseBranch, then main/master/staging.")
+    wf_scope_parser.add_argument(
+        "--no-expanded",
+        action="store_true",
+        help="Ignore expanded_files. Only files in planned_files are accepted (legacy behavior).",
+    )
+    wf_scope_parser.add_argument("--json", action="store_true", help="Print classifications as JSON. Exit code unchanged.")
+    wf_scope_parser.set_defaults(handler=run_wf_scope_check)
 
     config_parser = subparsers.add_parser("config", help="Configuration helpers.")
     config_subparsers = config_parser.add_subparsers(dest="config_command", required=True)
