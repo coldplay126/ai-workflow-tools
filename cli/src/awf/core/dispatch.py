@@ -70,6 +70,24 @@ class WorkerSpec:
 
 
 @dataclass(frozen=True)
+class ChainedStep:
+    """One step of a chained dispatch where each step's prompt depends on
+    the prior steps' results.
+
+    ``factory`` receives ``(prior: list[AgentResult])`` and returns a
+    ``WorkerSpec`` for this step, or ``None`` to skip the step (used when
+    a provider is unavailable). ``role`` is duplicated outside the spec
+    so cmux backends can pin the same worker across steps without invoking
+    the factory before its turn.
+    """
+
+    role: str
+    factory: Callable[[list[AgentResult]], "WorkerSpec | None"] = field(
+        compare=False
+    )
+
+
+@dataclass(frozen=True)
 class CmuxDispatchOptions:
     """Configuration for ``CmuxDispatch`` derived from provider-config.
 
@@ -110,6 +128,23 @@ class MultiAgentDispatch(Protocol):
         cwd: str,
         strategy: Strategy = "parallel",
     ) -> list[AgentResult]: ...
+
+    def run_chained(
+        self,
+        steps: list[ChainedStep],
+        *,
+        cwd: str,
+    ) -> list[AgentResult]:
+        """Run ``steps`` sequentially, threading prior results into each
+        next step's prompt.
+
+        Each step's ``factory`` is invoked with the list of completed
+        ``AgentResult`` so far and must return a ``WorkerSpec`` (or
+        ``None`` to skip that step entirely). Implementations preserve
+        the input order: skipped steps drop out of the returned list,
+        and the remainder appears in the order it ran.
+        """
+        ...
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +190,20 @@ class InlineDispatch:
                 idx = futures[future]
                 results[idx] = future.result()
         return [r for r in results if r is not None]
+
+    def run_chained(
+        self,
+        steps: list[ChainedStep],
+        *,
+        cwd: str,
+    ) -> list[AgentResult]:
+        completed: list[AgentResult] = []
+        for step in steps:
+            spec = step.factory(list(completed))
+            if spec is None:
+                continue
+            completed.append(_run_single(spec, cwd))
+        return completed
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +276,76 @@ class CmuxDispatch:
         finally:
             self._cleanup(state, batch_id, spawned_now)
 
+    def run_chained(
+        self,
+        steps: list[ChainedStep],
+        *,
+        cwd: str,
+    ) -> list[AgentResult]:
+        if not steps:
+            return []
+
+        state = bridge.find_active_run(cwd)
+        if state is None:
+            raise CmuxDispatchError(
+                f"cmux dispatch requested but no active cmux-agent run was "
+                f"found in {cwd}. Start one with "
+                f"'cmux-agent start --attach-orchestrator' from that "
+                f"directory before retrying."
+            )
+
+        bridge.ensure_orchestrator_registered(state)
+
+        batch_id = uuid.uuid4().hex[:12]
+        spawned_now: list[bridge.WorkerInfo] = []
+        # Pin one worker per role across the chain so a step's terminal
+        # carries the prompt history the prior step left behind.
+        role_to_worker: dict[str, bridge.WorkerInfo] = {}
+        completed: list[AgentResult] = []
+
+        try:
+            for seq, step in enumerate(steps):
+                spec = step.factory(list(completed))
+                if spec is None:
+                    continue
+                if spec.role != step.role:
+                    raise CmuxDispatchError(
+                        f"chained step #{seq} declared role {step.role!r} but "
+                        f"factory returned spec with role {spec.role!r}"
+                    )
+
+                worker = role_to_worker.get(step.role)
+                if worker is None:
+                    worker = self._assign_one_worker(
+                        state, step.role, cwd, spawned_now, set()
+                    )
+                    role_to_worker[step.role] = worker
+
+                start = time.monotonic()
+                bridge.write_dispatch_artifact(
+                    state,
+                    batch_id=batch_id,
+                    worker_idx=seq,
+                    recipient=worker.name,
+                    role=spec.role,
+                    prompt=spec.prompt,
+                    require_json=spec.require_json,
+                )
+                deadline = start + spec.timeout_sec + _CMUX_WARMUP_GRACE_SEC
+                raw = bridge.poll_results(
+                    state,
+                    batch_id=batch_id,
+                    deadlines={seq: deadline},
+                    poll_interval=self._options.poll_interval_sec,
+                )
+                elapsed = time.monotonic() - start
+                completed.append(
+                    self._to_agent_result(spec, worker, raw.get(seq), elapsed)
+                )
+            return completed
+        finally:
+            self._cleanup(state, batch_id, spawned_now)
+
     # -- worker assignment -----------------------------------------------
 
     def _assign_workers(
@@ -236,68 +355,69 @@ class CmuxDispatch:
         cwd: str,
         spawned_now: list[bridge.WorkerInfo],
     ) -> list[_Assignment]:
-        existing = bridge.list_workers(state)
-        by_role: dict[str, list[bridge.WorkerInfo]] = {}
-        for w in existing:
-            by_role.setdefault(w.role_hint, []).append(w)
-
         used: set[str] = set()
         assignments: list[_Assignment] = []
         for spec in workers:
-            picked: bridge.WorkerInfo | None = None
-            candidates = by_role.get(spec.role, [])
-            for cand in candidates:
-                if cand.name in used:
-                    continue
-                picked = cand
-                break
-
-            if picked is None:
-                hint = self._options.role_to_worker.get(
-                    spec.role, self._options.role_to_worker.get("default", {})
-                )
-                desired_name = f"worker-{spec.role}"
-                ok, message = bridge.spawn_worker_subprocess(
-                    cwd=cwd,
-                    name=desired_name,
-                    role=spec.role,
-                    provider=hint.get("provider"),
-                    template=hint.get("template"),
-                    flags=hint.get("flags"),
-                    timeout_sec=self._options.spawn_timeout_sec,
-                )
-                if not ok:
-                    raise CmuxDispatchError(
-                        f"failed to spawn cmux worker for role {spec.role!r}: "
-                        f"{message}"
-                    )
-                # Re-resolve from SQLite — cmux-agent may have appended a
-                # numeric suffix on collision and we need the surface_id.
-                refreshed = {w.name: w for w in bridge.list_workers(state)}
-                picked = refreshed.get(desired_name)
-                if picked is None:
-                    # Try suffixed variants in registration order.
-                    suffixed = sorted(
-                        (
-                            w
-                            for w in refreshed.values()
-                            if w.name.startswith(desired_name)
-                        ),
-                        key=lambda w: w.name,
-                    )
-                    picked = suffixed[-1] if suffixed else None
-                if picked is None:
-                    raise CmuxDispatchError(
-                        "spawn reported success but no worker row was found "
-                        f"for role {spec.role!r}"
-                    )
-                bridge.mark_spawned(state, picked.name)
-                spawned_now.append(picked)
-
-            used.add(picked.name)
-            assignments.append(_Assignment(spec=spec, worker=picked))
-
+            worker = self._assign_one_worker(
+                state, spec.role, cwd, spawned_now, used
+            )
+            used.add(worker.name)
+            assignments.append(_Assignment(spec=spec, worker=worker))
         return assignments
+
+    def _assign_one_worker(
+        self,
+        state: bridge.CmuxRunState,
+        role: str,
+        cwd: str,
+        spawned_now: list[bridge.WorkerInfo],
+        used: set[str],
+    ) -> bridge.WorkerInfo:
+        existing = bridge.list_workers(state)
+        for cand in existing:
+            if cand.role_hint != role or cand.name in used:
+                continue
+            return cand
+
+        hint = self._options.role_to_worker.get(
+            role, self._options.role_to_worker.get("default", {})
+        )
+        desired_name = f"worker-{role}"
+        ok, message = bridge.spawn_worker_subprocess(
+            cwd=cwd,
+            name=desired_name,
+            role=role,
+            provider=hint.get("provider"),
+            template=hint.get("template"),
+            flags=hint.get("flags"),
+            timeout_sec=self._options.spawn_timeout_sec,
+        )
+        if not ok:
+            raise CmuxDispatchError(
+                f"failed to spawn cmux worker for role {role!r}: {message}"
+            )
+        # Re-resolve from SQLite — cmux-agent may have appended a numeric
+        # suffix on collision and we need the surface_id.
+        refreshed = {w.name: w for w in bridge.list_workers(state)}
+        picked = refreshed.get(desired_name)
+        if picked is None:
+            suffixed = sorted(
+                (
+                    w
+                    for w in refreshed.values()
+                    if w.name.startswith(desired_name)
+                ),
+                key=lambda w: w.name,
+            )
+            picked = suffixed[-1] if suffixed else None
+        if picked is None:
+            raise CmuxDispatchError(
+                f"spawn reported success but no worker row was found "
+                f"for role {role!r}"
+            )
+        bridge.mark_spawned(state, picked.name)
+        spawned_now.append(picked)
+        return picked
 
     # -- dispatch + poll -------------------------------------------------
 

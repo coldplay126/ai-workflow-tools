@@ -521,8 +521,14 @@ escalation 조건 예시:
 ```bash
 awf analyze quest-challenge --mode precise     # Codex + Claude 검증
 awf analyze quest-challenge --mode cross        # Codex + Sonnet 병렬
-awf wf next --mode critical                    # Codex → Claude 순차
+awf wf next --mode critical                    # Codex → Sonnet → Primary 체인
 ```
+
+다중 에이전트 실행은 `awf.core.dispatch.MultiAgentDispatch` 인터페이스 뒤에 추상화된다:
+- `run(workers, *, cwd, strategy)` — 고정 리스트의 워커를 parallel/sequential 로 실행 (cross 가 사용)
+- `run_chained(steps, *, cwd)` — 각 step의 prompt 가 이전 결과에 의존하는 체인을 실행 (critical 이 사용; Phase 5 agent teams 의 leader→workers 핸드오프에서도 재사용 예정)
+
+백엔드는 `InlineDispatch` (ThreadPoolExecutor) 와 `CmuxDispatch` (cmux-agent `.agent/` artifact 프로토콜) 두 가지가 있고, `provider-config.json` 의 `dispatch.surface_preference` 로 선택한다 (`auto`/`inline`/`cmux`). cmux 라우팅에서 `run_chained` 는 step 별 worker 를 role 로 고정해 같은 터미널 컨텍스트가 chain 동안 누적되도록 한다.
 
 Judge Rules (결정론적):
 1. `CRITICAL` finding 1건 이상 → FAIL

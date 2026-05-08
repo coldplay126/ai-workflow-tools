@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from awf.core.dispatch import (
+    ChainedStep,
     CmuxDispatch,
     CmuxDispatchError,
     InlineDispatch,
@@ -143,6 +144,58 @@ def test_inline_dispatch_sequential_runs_serially():
 
 def test_inline_dispatch_handles_empty_workers():
     assert InlineDispatch().run([], cwd=".") == []
+
+
+# --------------------------------------------------------------------------
+# InlineDispatch.run_chained
+# --------------------------------------------------------------------------
+
+
+def test_inline_chained_runs_steps_sequentially_with_prior_results():
+    captured_priors: list[list[str]] = []
+
+    def factory_for(label: str):
+        def _f(prior):
+            captured_priors.append([r.role for r in prior])
+            return _spec(label, _FakeProvider(f"p-{label}", f'{{"label":"{label}"}}'))
+        return _f
+
+    steps = [
+        ChainedStep(role="a", factory=factory_for("a")),
+        ChainedStep(role="b", factory=factory_for("b")),
+        ChainedStep(role="c", factory=factory_for("c")),
+    ]
+    results = InlineDispatch().run_chained(steps, cwd=".")
+
+    assert [r.role for r in results] == ["a", "b", "c"]
+    assert captured_priors == [[], ["a"], ["a", "b"]]
+
+
+def test_inline_chained_skips_step_when_factory_returns_none():
+    def step1(prior):
+        return _spec("a", _FakeProvider("p1", "{}"))
+
+    def step2(prior):
+        return None  # provider unavailable → skip
+
+    def step3(prior):
+        # Step 2 is missing from prior, so the chain shows only step 1's result.
+        assert [r.role for r in prior] == ["a"]
+        return _spec("c", _FakeProvider("p3", "{}"))
+
+    results = InlineDispatch().run_chained(
+        [
+            ChainedStep(role="a", factory=step1),
+            ChainedStep(role="b", factory=step2),
+            ChainedStep(role="c", factory=step3),
+        ],
+        cwd=".",
+    )
+    assert [r.role for r in results] == ["a", "c"]
+
+
+def test_inline_chained_empty_steps_returns_empty_list():
+    assert InlineDispatch().run_chained([], cwd=".") == []
 
 
 # --------------------------------------------------------------------------

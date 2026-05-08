@@ -18,7 +18,7 @@
 |----|--------|
 | M1 | 작업의 위험도/복잡도에 따라 5가지 실행 모드 중 하나를 선택한다 |
 | M2 | cross mode는 병렬 독립 평가 후 Judge로 판정한다 |
-| M3 | critical mode는 이전 결과를 다음 입력에 누적하는 순차 체인이다 |
+| M3 | critical mode는 이전 결과를 다음 입력에 누적하는 순차 체인이며 `MultiAgentDispatch.run_chained` 인터페이스로 실행된다 |
 | M4 | Judge는 결정론적 규칙 체인으로 작동한다 (확률적 판단 아님) |
 | M5 | 오케스트레이터는 Provider Protocol 뒤에 provider를 추상화한다 |
 | M6 | 3가지 synthesis 패턴으로 워크플로우와 통합한다 |

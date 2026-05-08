@@ -108,9 +108,11 @@
 | precise | Primary | 120s |
 | cross | Secondary A | 90s |
 | cross | Secondary B | 90s |
-| critical | Secondary A | 90s |
-| critical | Secondary B | 60s |
-| critical | Primary | 120s |
+| critical | Secondary A (codex) | 90s + 30s warmup grace (cmux 백엔드 시) |
+| critical | Secondary B (sonnet) | 60s + 30s warmup grace (cmux 백엔드 시) |
+| critical | Primary | 120s + 30s warmup grace (cmux 백엔드 시) |
+
+> critical 모드는 `MultiAgentDispatch.run_chained` 인터페이스로 실행되며, cmux 백엔드 선택 시 step 마다 같은 role 의 worker 가 고정 재사용된다. warmup grace 는 fresh worker spawn 시 cmux 탭 + AI CLI 부팅 시간을 흡수하기 위한 보정.
 
 ---
 

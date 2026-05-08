@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from awf.core import _cmux_bridge as bridge
 from awf.core.dispatch import (
+    ChainedStep,
     CmuxDispatch,
     CmuxDispatchError,
     CmuxDispatchOptions,
@@ -535,6 +536,197 @@ def test_cmux_dispatch_cleanup_runs_even_when_dispatch_raises(tmp_path):
 
 # --------------------------------------------------------------------------
 # Result shape compatibility with InlineDispatch
+# --------------------------------------------------------------------------
+
+
+# --------------------------------------------------------------------------
+# Chained dispatch (Phase 3)
+# --------------------------------------------------------------------------
+
+
+def test_cmux_chained_threads_prior_results_into_next_prompts(tmp_path):
+    _make_run(
+        tmp_path,
+        workers=[("worker-precision", None), ("worker-quality_validation", None)],
+    )
+
+    captured_prompts: list[str] = []
+
+    def responder(dispatch: dict) -> str:
+        captured_prompts.append(dispatch.get("message", ""))
+        role = (dispatch.get("context") or {}).get("awf_role", "")
+        return f'{{"role":"{role}","step_done":true}}'
+
+    def step1(prior):
+        return WorkerSpec(
+            role="precision",
+            provider=object(),
+            prompt="STEP1_PROMPT",
+            timeout_sec=5,
+            require_json=True,
+        )
+
+    def step2(prior):
+        # Prompt builds on step 1's stdout — exercises factory(prior_results).
+        prior_stdout = prior[-1].stdout if prior else "(none)"
+        return WorkerSpec(
+            role="quality_validation",
+            provider=object(),
+            prompt=f"STEP2 incorporates: {prior_stdout}",
+            timeout_sec=5,
+            require_json=True,
+        )
+
+    with _FakeBroker(tmp_path, responder=responder):
+        results = CmuxDispatch().run_chained(
+            [
+                ChainedStep(role="precision", factory=step1),
+                ChainedStep(role="quality_validation", factory=step2),
+            ],
+            cwd=str(tmp_path),
+        )
+
+    assert [r.role for r in results] == ["precision", "quality_validation"]
+    assert all(r.parsed and r.parsed["step_done"] is True for r in results)
+    assert captured_prompts[0] == "STEP1_PROMPT"
+    # Step 2's prompt must have included step 1's actual stdout.
+    assert "step_done" in captured_prompts[1]
+
+
+def test_cmux_chained_pins_one_worker_per_role_across_steps(tmp_path):
+    _make_run(tmp_path, workers=[("worker-primary", "surface:1")])
+
+    recipients: list[str] = []
+
+    def responder(dispatch: dict) -> str:
+        recipients.append(dispatch["recipient"])
+        return "ok"
+
+    def factory(role: str):
+        def _f(prior):
+            return WorkerSpec(role=role, provider=object(), prompt="p", timeout_sec=5)
+        return _f
+
+    with _FakeBroker(tmp_path, responder=responder):
+        results = CmuxDispatch().run_chained(
+            [
+                ChainedStep(role="primary", factory=factory("primary")),
+                ChainedStep(role="primary", factory=factory("primary")),
+                ChainedStep(role="primary", factory=factory("primary")),
+            ],
+            cwd=str(tmp_path),
+        )
+
+    assert len(results) == 3
+    # All three steps must have routed to the same pinned worker — that's the
+    # whole point of chained mode (terminal context is reused across the chain).
+    assert recipients == ["worker-primary"] * 3
+
+
+def test_cmux_chained_skips_step_when_factory_returns_none(tmp_path):
+    _make_run(
+        tmp_path,
+        workers=[("worker-a", None), ("worker-c", None)],
+    )
+
+    def responder(dispatch):
+        return "ok"
+
+    def step_a(prior):
+        return WorkerSpec(role="a", provider=object(), prompt="p1", timeout_sec=5)
+
+    def step_b_skipped(prior):
+        return None
+
+    def step_c(prior):
+        # Skipped step must not appear in prior.
+        assert [r.role for r in prior] == ["a"]
+        return WorkerSpec(role="c", provider=object(), prompt="p3", timeout_sec=5)
+
+    with _FakeBroker(tmp_path, responder=responder):
+        results = CmuxDispatch().run_chained(
+            [
+                ChainedStep(role="a", factory=step_a),
+                ChainedStep(role="b", factory=step_b_skipped),
+                ChainedStep(role="c", factory=step_c),
+            ],
+            cwd=str(tmp_path),
+        )
+
+    assert [r.role for r in results] == ["a", "c"]
+
+
+def test_cmux_chained_factory_role_mismatch_raises(tmp_path):
+    _make_run(tmp_path, workers=[("worker-x", None)])
+
+    def bad_factory(prior):
+        # Declared role "x" but spec says "y" — caller bug we want to surface.
+        return WorkerSpec(role="y", provider=object(), prompt="p", timeout_sec=5)
+
+    with pytest.raises(CmuxDispatchError, match="role"):
+        CmuxDispatch().run_chained(
+            [ChainedStep(role="x", factory=bad_factory)], cwd=str(tmp_path),
+        )
+
+
+def test_cmux_chained_no_active_run_raises_actionable_error(tmp_path):
+    def step(prior):
+        return WorkerSpec(role="x", provider=object(), prompt="p", timeout_sec=5)
+
+    with pytest.raises(CmuxDispatchError, match="cmux-agent start"):
+        CmuxDispatch().run_chained(
+            [ChainedStep(role="x", factory=step)], cwd=str(tmp_path),
+        )
+
+
+def test_cmux_chained_cleanup_runs_when_step_raises(tmp_path):
+    _make_run(tmp_path, workers=[])
+
+    def fake_spawn(*, cwd, name, role, provider, template, flags, timeout_sec):
+        db = Path(cwd) / ".agent" / "control-plane.sqlite3"
+        conn = sqlite3.connect(str(db))
+        run_id = conn.execute(
+            "SELECT run_id FROM runs WHERE status = 'RUNNING'"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO agents (agent_id, run_id, role, name, surface_id, created_at)"
+            " VALUES (?, ?, 'WORKER', ?, ?, ?)",
+            (str(uuid.uuid4()), run_id, name, "surface:abc", _now_iso()),
+        )
+        conn.commit()
+        conn.close()
+        return True, "spawned"
+
+    teardown_calls: list[str] = []
+
+    def fake_teardown(state, worker, *, cmux_close_timeout=10.0):
+        teardown_calls.append(worker.name)
+
+    def step1(prior):
+        return WorkerSpec(role="precision", provider=object(), prompt="p1", timeout_sec=5)
+
+    def step2_raises(prior):
+        raise RuntimeError("factory exploded")
+
+    options = CmuxDispatchOptions(lifecycle="ephemeral")
+
+    with patch("awf.core._cmux_bridge.spawn_worker_subprocess", side_effect=fake_spawn), \
+         patch("awf.core.dispatch.bridge.teardown_worker", side_effect=fake_teardown):
+        with _FakeBroker(tmp_path, responder=lambda d: "ok"):
+            with pytest.raises(RuntimeError, match="factory exploded"):
+                CmuxDispatch(options).run_chained(
+                    [
+                        ChainedStep(role="precision", factory=step1),
+                        ChainedStep(role="quality_validation", factory=step2_raises),
+                    ],
+                    cwd=str(tmp_path),
+                )
+
+    assert "worker-precision" in teardown_calls
+
+
+# --------------------------------------------------------------------------
+# Result shape compatibility
 # --------------------------------------------------------------------------
 
 
