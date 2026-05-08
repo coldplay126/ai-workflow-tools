@@ -28,6 +28,7 @@ from cmux_agent.infrastructure.filesystem import AgentFileSystem
 from cmux_agent.infrastructure.storage import StateStore
 
 AGENT_DIR = ".agent"
+TEMPLATE_STATE_FILE = "template-state.json"
 
 
 def _normalize_agent_entry(entry: str | dict) -> dict:
@@ -83,6 +84,47 @@ def _resolve_template_dir(template: str | None, templates_dir: str | None) -> Pa
 
 _active_template_dir: Path | None = None
 _active_cwd: str = "."
+
+
+def _template_state_path(fs: AgentFileSystem) -> Path:
+    return fs.base / TEMPLATE_STATE_FILE
+
+
+def _write_template_state(fs: AgentFileSystem, template: str, template_dir: Path) -> None:
+    payload = {
+        "template": template,
+        "template_dir": str(template_dir.resolve()),
+    }
+    _template_state_path(fs).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _clear_template_state(fs: AgentFileSystem) -> None:
+    try:
+        _template_state_path(fs).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _restore_template_dir(fs: AgentFileSystem) -> Path | None:
+    global _active_template_dir  # noqa: PLW0603
+    if _active_template_dir and _active_template_dir.is_dir():
+        return _active_template_dir
+
+    path = _template_state_path(fs)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    template_dir = Path(str(data.get("template_dir", ""))).expanduser()
+    if not template_dir.is_dir():
+        return None
+    _active_template_dir = template_dir
+    return template_dir
 
 
 def _load_config(cwd: str = ".") -> dict:
@@ -203,9 +245,16 @@ def cmd_start(args: argparse.Namespace) -> None:
             _active_template_dir = template_dir
             print(f"  ✓ 템플릿 참조: {template_name} ({template_dir})")
         else:
+            _active_template_dir = None
             print(f"  ⚠ 템플릿 '{template_name}'을 찾을 수 없습니다.", file=sys.stderr)
+    else:
+        _active_template_dir = None
     fs = _get_fs(cwd)
     fs.init()
+    if template_name and _active_template_dir:
+        _write_template_state(fs, template_name, _active_template_dir)
+    else:
+        _clear_template_state(fs)
     store = _get_store(fs)
     event_log = _get_event_log(fs)
     cmux = CmuxAdapter()
@@ -434,6 +483,7 @@ def cmd_register(args: argparse.Namespace) -> None:
 
 def cmd_spawn(args: argparse.Namespace) -> None:
     fs = _get_fs()
+    template_dir = _restore_template_dir(fs)
     store = _get_store(fs)
     event_log = _get_event_log(fs)
     cmux = CmuxAdapter()
@@ -452,7 +502,7 @@ def cmd_spawn(args: argparse.Namespace) -> None:
         prompt_builder=prompt_builder,
         run_id=run.run_id,
         workspace_id=run.workspace_id,
-        template_dir=_active_template_dir,
+        template_dir=template_dir,
         provider_config=_load_config(_active_cwd),
     )
     result = runtime.spawn_worker(
@@ -499,6 +549,7 @@ def cmd_watch(args: argparse.Namespace) -> None:
     logging.root.setLevel(logging.INFO)
 
     fs = _get_fs()
+    template_dir = _restore_template_dir(fs)
     store = _get_store(fs)
     event_log = _get_event_log(fs)
     cmux = CmuxAdapter()
@@ -520,7 +571,7 @@ def cmd_watch(args: argparse.Namespace) -> None:
         prompt_builder=prompt_builder,
         run_id=run.run_id,
         workspace_id=run.workspace_id,
-        template_dir=_active_template_dir,
+        template_dir=template_dir,
         provider_config=_load_config(_active_cwd),
     )
     broker = MessageBroker(
