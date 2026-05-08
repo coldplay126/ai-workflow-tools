@@ -1155,3 +1155,119 @@ def _orchestrator_decision_from_escape(escape: dict | None, *, state: dict | Non
     if recommended == "user_decision":
         return "escalate_user", f"{reason} requires user decision", None
     return "escalate_user", f"{reason} requires operator review", None
+
+
+def run_wf_expand_scope(args: argparse.Namespace) -> int:
+    """Expand `.workflow/artifacts/allowed-files.json` using saved import graphs.
+
+    Reads the planned_files list, looks each path up in the per-unit
+    import graphs written by `awf analyze`, and either prints a diff
+    (--dry-run) or writes back the merged payload with an audit trail.
+    """
+    from awf.core.config import resolve_analysis_context
+    from awf.core.wf_scope import (
+        VALID_DIRECTIONS,
+        apply_expansion_to_payload,
+        expand_allowed_files,
+        load_allowed_files,
+        save_allowed_files,
+    )
+
+    try:
+        repo_root = resolve_repo_root(args.repo_root)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if args.direction not in VALID_DIRECTIONS:
+        print(
+            f"error: --direction must be one of {VALID_DIRECTIONS}",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        payload = load_allowed_files(repo_root)
+    except FileNotFoundError as exc:
+        print(f"error: allowed-files.json not found at {exc}", file=sys.stderr)
+        return 2
+    except json.JSONDecodeError as exc:
+        print(f"error: allowed-files.json is not valid JSON: {exc}", file=sys.stderr)
+        return 2
+
+    planned = list(payload.get("planned_files") or [])
+    if not planned:
+        print("warning: planned_files is empty; nothing to expand", file=sys.stderr)
+        return 0
+
+    # Resolve docs_root via the existing analysis context plumbing so this
+    # command honors awf-config path overrides.
+    try:
+        ctx = resolve_analysis_context(
+            service="__placeholder__",
+            domain="__placeholder__",
+            deep=False,
+            repo_root=str(repo_root),
+        )
+        docs_root = ctx.docs_root
+    except Exception as exc:
+        print(f"error: cannot resolve docs_root: {exc}", file=sys.stderr)
+        return 2
+
+    services = list(args.service) if args.service else None
+    depth = None if args.depth in (None, 0) else int(args.depth)
+
+    result = expand_allowed_files(
+        planned,
+        docs_root,
+        services=services,
+        direction=args.direction,
+        depth=depth,
+        runtime_only=bool(args.runtime_only),
+    )
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "planned": list(result.planned),
+                    "added": list(result.added),
+                    "entries": [{"path": e.path, "reason": e.reason} for e in result.entries],
+                    "coverage": dict(result.coverage),
+                    "direction": result.direction,
+                    "depth": result.depth,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    else:
+        print(f"planned: {len(result.planned)} file(s)")
+        print(
+            f"added:   {len(result.added)} file(s) "
+            f"(direction={result.direction}, depth={result.depth})"
+        )
+        for entry in result.entries[:30]:
+            print(f"  + {entry.path}  ({entry.reason})")
+        if len(result.entries) > 30:
+            print(f"  ... and {len(result.entries) - 30} more")
+        ungraphed = sorted(
+            p for p, status in result.coverage.items() if status != "no_graph" and not status.startswith("found_in:")
+        )
+        if ungraphed:
+            print(
+                f"\nnote: {len(ungraphed)} planned file(s) not found in any saved graph "
+                "(run `awf analyze` for the relevant units to improve coverage)"
+            )
+            for path in ungraphed[:10]:
+                print(f"  · {path}")
+            if len(ungraphed) > 10:
+                print(f"  ... and {len(ungraphed) - 10} more")
+
+    if args.dry_run:
+        return 0
+
+    new_payload = apply_expansion_to_payload(payload, result)
+    out_path = save_allowed_files(repo_root, new_payload)
+    print(f"\nwrote: {out_path}")
+    return 0
