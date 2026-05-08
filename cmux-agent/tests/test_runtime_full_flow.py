@@ -7,7 +7,7 @@ from argparse import Namespace
 from pathlib import Path
 
 from cmux_agent.cli import commands as command_module
-from cmux_agent.domain.models import AgentRole, RunStatus
+from cmux_agent.domain.models import Agent, AgentRole, RunStatus
 from cmux_agent.infrastructure.cmux import CmuxResult
 from cmux_agent.infrastructure.filesystem import AgentFileSystem
 from cmux_agent.infrastructure.storage import StateStore
@@ -28,6 +28,10 @@ class FakeCmux:
     def new_workspace(self, *, cwd: str | None = None) -> CmuxResult:
         self.calls.append(("new_workspace", {"cwd": cwd}))
         return CmuxResult(ok=True, stdout="OK workspace:1", stderr="")
+
+    def close_workspace(self, workspace_id: str) -> CmuxResult:
+        self.calls.append(("close_workspace", {"workspace_id": workspace_id}))
+        return CmuxResult(ok=True, stdout=f"OK {workspace_id}", stderr="")
 
     def tree(self, workspace_id: str | None = None) -> CmuxResult:
         self.calls.append(("tree", {"workspace_id": workspace_id}))
@@ -281,3 +285,75 @@ def test_start_can_attach_current_session_as_orchestrator(tmp_path, monkeypatch,
     assert "attached orchestrator" in task_output
     assert "Review the staged changes" in task_output
     assert str(fs.outbox) in task_output
+
+
+def test_smoke_runs_attach_spawn_task_and_cleanup(tmp_path, monkeypatch, capsys):
+    fake = FakeCmux()
+    smoke_cwd = tmp_path / "smoke"
+    monkeypatch.setattr(command_module, "CmuxAdapter", lambda: fake)
+    monkeypatch.setattr(command_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(command_module, "_active_cwd", str(tmp_path))
+    monkeypatch.setattr(command_module, "_active_template_dir", None)
+
+    def fake_wait(fs, store, run_id, *, timeout, poll_interval):
+        artifact = fs.outbox / "smoke-spawn-test.json"
+        payload = json.loads(artifact.read_text(encoding="utf-8"))
+        assert payload["agent"]["template"] == "test"
+        assert payload["agent"]["provider"] == "codex"
+
+        fake._surfaces.add("surface:3")
+        agent = Agent(
+            run_id=run_id,
+            role=AgentRole.WORKER,
+            name="worker-test",
+            surface_id="surface:3",
+        )
+        store.save_agent(agent)
+        fs.create_inbox(agent.name)
+        (fs.base / "WORKER-TEST.md").write_text(
+            "# cmux-agent worker-test 프로토콜\n", encoding="utf-8"
+        )
+        fs.move_to_processed(artifact)
+        result = {
+            "type": "result",
+            "from": "controller",
+            "result": "spawned worker-test (codex)",
+            "context": {
+                "control_action": "spawn_agent",
+                "agent": {
+                    "name": "worker-test",
+                    "provider": "codex",
+                    "surface_id": "surface:3",
+                },
+            },
+        }
+        fs.write_to_inbox("orchestrator", "smoke-result", result)
+        return result
+
+    monkeypatch.setattr(command_module, "_wait_for_smoke_spawn_result", fake_wait)
+
+    command_module.cmd_smoke(
+        Namespace(
+            cwd=".",
+            smoke_cwd=str(smoke_cwd),
+            template=None,
+            smoke_template="review",
+            templates_dir=str(TEMPLATES_ROOT),
+            smoke_templates_dir=str(TEMPLATES_ROOT),
+            worker_template="test",
+            provider="codex",
+            timeout=1.0,
+            poll_interval=0.0,
+            keep=False,
+        )
+    )
+
+    output = capsys.readouterr().out
+    assert "Smoke PASS" in output
+    assert "Spawned worker: worker-test (codex)" in output
+    assert "사용 가능한 worker: worker-review, worker-test" in output
+    assert any(
+        name == "close_workspace" and payload["workspace_id"] == "workspace:1"
+        for name, payload in fake.calls
+    )
+    assert not (smoke_cwd / ".agent").exists()
