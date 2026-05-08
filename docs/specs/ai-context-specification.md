@@ -320,6 +320,13 @@ Stage 1 분석 결과로 enriched된 unit 전체 번들. Stage 2 provider에 전
 | `include_tests` | 위와 동일 |
 | `mode` 변경 (standard → deep) | project bundle이 없으면 재생성 |
 
+**Stage 1 간접 무효화**:
+- Stage 1 완료 후 `.tmp/import-graph.json`을 저장한다.
+- 다음 실행에서 직접 변경 파일의 `exports_hash`가 바뀌면, 이전 import graph의 reverse dependents도 Stage 1 재분석 대상에 포함한다.
+- `exports_hash`를 만들 수 없는 언어/파일은 content hash 변경을 exported surface 변경으로 간주한다.
+- graph로 추가된 dependent는 파일 content hash가 같아도 observation cache를 우회한다.
+- 삭제 파일은 이전 graph의 reverse dependents를 재분석 대상에 포함한다.
+
 `.analysis-state.json`에 번들 생성 조건 해시를 추가한다:
 ```json
 "layers": {

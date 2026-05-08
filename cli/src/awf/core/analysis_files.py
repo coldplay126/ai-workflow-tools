@@ -112,13 +112,15 @@ def hashes_changed(context: AnalysisContext, current_entries: list[dict[str, str
 def compute_changed_files(
     context: AnalysisContext,
     current_entries: list[dict[str, str]],
+    *,
+    saved_hashes: dict | None = None,
 ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     """Compare current file entries with saved hashes.
 
     Returns (changed_entries, unchanged_entries) where each entry is from current_entries.
     New files, modified files, and renamed files are considered 'changed'.
     """
-    saved = load_hashes_file(context)
+    saved = saved_hashes if saved_hashes is not None else load_hashes_file(context)
     previous = saved.get("files", [])
     prev_map = {e["path"]: e["sha256"] for e in previous}
     # Build reverse map: hash → paths for rename detection
@@ -149,12 +151,14 @@ def compute_changed_files(
 def compute_deleted_files(
     context: AnalysisContext,
     current_entries: list[dict[str, str]],
+    *,
+    saved_hashes: dict | None = None,
 ) -> list[dict[str, str]]:
     """Identify files that existed in previous analysis but are now deleted.
 
     Returns list of entries from previous hashes that no longer exist.
     """
-    saved = load_hashes_file(context)
+    saved = saved_hashes if saved_hashes is not None else load_hashes_file(context)
     previous = saved.get("files", [])
     current_paths = {e["path"] for e in current_entries}
     return [e for e in previous if e["path"] not in current_paths]

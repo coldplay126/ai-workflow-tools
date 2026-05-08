@@ -41,6 +41,19 @@
 | 삭제된 파일 | 파일 부재 + 해시 기록 존재 | 해시에서 제거, Stage 2 재합성 |
 | 무변경 파일 | 해시 일치 | 건너뜀 (캐시된 observation 사용) |
 
+### Import graph 기반 간접 무효화
+
+Stage 1 완료 후 `.ai-context/.tmp/import-graph.json`을 저장한다. 다음 실행에서 직접 변경 파일의 exported surface hash가 바뀌었거나, baseline extractor가 surface hash를 만들 수 없어 content hash fallback이 필요한 경우, 이전 import graph의 reverse dependents도 Stage 1 재분석 대상에 포함한다.
+
+| 조건 | 추가 대상 | 캐시 정책 |
+|------|----------|----------|
+| 변경 파일의 `exports_hash` 변경 | 이전 graph에서 해당 파일을 import하던 모든 transitive dependent | observation cache 우회 |
+| `exports_hash` 없음 + content hash 변경 | 이전 graph의 모든 transitive dependent | observation cache 우회 |
+| 삭제 파일 | 이전 graph에서 삭제 파일을 import하던 모든 transitive dependent | observation cache 우회 |
+| content hash 변경 + `exports_hash` 동일 | 직접 변경 파일만 재분석 | dependent는 기존 observation 재사용 |
+
+Type-only edge도 analysis stale 방지를 위해 포함한다. Runtime-only invalidation은 별도 소비자가 생길 때 graph query 옵션으로 분리한다.
+
 ---
 
 ## Observation 캐시

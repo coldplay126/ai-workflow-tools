@@ -264,6 +264,7 @@ def run_stage1_file_analyses(
     max_concurrent: int = 5,
     on_progress=None,
     use_observation: bool = False,
+    bypass_cache_paths: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Run per-file analysis with the given provider. Returns list of file analysis dicts.
 
@@ -279,6 +280,7 @@ def run_stage1_file_analyses(
 
     # Track observation cache stats
     cache_stats = {"cached": 0, "analyzed": 0}
+    bypass_cache_paths = bypass_cache_paths or set()
 
     def analyze_one(file_entry: dict[str, str]) -> dict[str, Any]:
         path = file_entry["path"]
@@ -288,7 +290,7 @@ def run_stage1_file_analyses(
             return {"path": path, "role": "unknown", "summary": "file read failed", "imports": [], "exports": [], "dependencies": [], "complexity": "unknown", "read_error": True}
 
         # Observation cache check (§1.6) — requires content_hash for validation
-        if use_observation and content_hash:
+        if use_observation and content_hash and path not in bypass_cache_paths:
             cached = load_observation_cache(context, path, content_hash)
             if cached is not None:
                 cache_stats["cached"] += 1
