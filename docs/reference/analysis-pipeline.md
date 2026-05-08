@@ -229,3 +229,29 @@ Status: 미정.
 - Stage 1 비용: 2/14 = 14% (86% 절감)
 - Stage 2 비용: 기존 문서 + 변경분 업데이트
 - 총 예상 절감: 약 70-85%
+
+---
+
+## 12. Transitive invalidation 설정
+
+`analysis-pipeline.json` 최상위에 다음 절을 두면 graph 기반 transitive 무효화를 영구히 끌 수 있다. 비활성화 시 직접 변경 파일만 재분석되며 graph 자체는 계속 빌드된다.
+
+```json
+{
+  "transitive_invalidation": {
+    "enabled": true
+  }
+}
+```
+
+| 키 | 타입 | 기본값 | 의미 |
+|----|------|------|------|
+| `transitive_invalidation.enabled` | bool | `true` | `false`로 두면 graph reverse-dependent invalidation을 건너뛴다. 누락/잘못된 타입은 default-on으로 처리. |
+
+응급 상황에선 환경변수가 우선한다(설정 파일 수정 없이 즉시 비활성화):
+
+```bash
+AWF_DISABLE_TRANSITIVE_INVALIDATION=1 awf analyze sample-api health
+```
+
+env 우선순위: `1`/`true`/`yes`/`on` (대소문자 무관) → 비활성화. 빈 문자열이나 그 외 값은 unset과 동일하게 처리.
