@@ -54,6 +54,10 @@ Stage 1 완료 후 `.ai-context/.tmp/import-graph.json`을 저장한다. 다음 
 
 Type-only edge도 analysis stale 방지를 위해 포함한다. Runtime-only invalidation은 별도 소비자가 생길 때 graph query 옵션으로 분리한다.
 
+### `--cycles` 진단
+
+`awf analyze {service} --cycles`는 각 unit의 `import-graph.json`에서 SCC를 검출해 import 사이클을 보고한다. 그래프가 없는 unit은 `no graph`로 분류되고 종료 코드에 영향을 주지 않는다. 사이클이 한 건이라도 있으면 종료 코드 1을 돌려준다(빌드 게이트로 활용 가능).
+
 ### `--check` / `--catalog`에서 transitive 가시화
 
 `awf analyze {service} --check`와 `--catalog`는 직접 변경 파일 외에 import graph로 잡힌 transitive stale 후보 수도 함께 표시한다. 출력 예: `⚠ {unit}: 3 direct + 7 transitive since 2026-05-08`. exit code는 직접 변경만 기준으로 판정하므로 기존 CI 게이트 의미는 그대로 유지된다(transitive는 운영 가시성 정보).
