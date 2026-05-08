@@ -8,6 +8,25 @@
 - At least one AI CLI provider used by the chosen template is installed (`claude`, `codex`, or `gemini`).
 - Run commands from the repository root unless a command passes `--cwd`.
 
+## Runtime Drift Check
+
+Run `doctor` before a smoke test or after updating the checkout:
+
+```bash
+uv run --project cmux-agent cmux-agent doctor
+```
+
+`doctor` prints the active Python environment, the imported `cmux_agent`
+module path, the active `cmux-agent` executable, and the supported command set.
+If it reports `cmux-agent PATH drift`, a stale globally installed
+`cmux-agent` is still on `PATH`. Prefer the `uv run --project cmux-agent ...`
+form during development, or refresh the installed tool from the current
+checkout:
+
+```bash
+uv tool install --force ./cmux-agent
+```
+
 ## Start A Run
 
 Default mode starts a separate orchestrator session. This is the recommended
