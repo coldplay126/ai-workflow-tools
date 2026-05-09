@@ -228,19 +228,19 @@ pattern 문서의 불변식/파생 규칙이 참조하는 구체적 수치와 �
 
 `allowed-files.json`은 plan SKILL이 `tasks.md`에서 추출한 `planned_files` 목록이다. LLM이 직접 만들기 때문에 dependent / dependency 파일이 누락되어 G5 SCOPE_VIOLATION false positive가 자주 발생한다.
 
-`awf wf expand-scope`는 분석된 unit별 `import-graph.json`을 사용해 결정론적으로 `expanded_files`를 추가하고 audit trail을 남긴다.
+plan SKILL은 `allowed-files.json` 생성 직후 `awf wf expand-scope --direction dependents`를 기본 hook으로 실행한다. 분석된 graph가 없거나 추가 파일이 없으면 정상 no-op으로 끝나며, graph가 있으면 unit별 `import-graph.json`을 사용해 결정론적으로 `expanded_files`를 추가하고 audit trail을 남긴다.
 
 ```bash
-# 직접 dependent만 추가 (1-hop, 기본)
+# plan SKILL 기본 hook: 직접 dependent만 추가 (1-hop)
 awf wf expand-scope --direction dependents
 
-# 1-hop dependents + imports 양방향
+# 수동 조정: 1-hop dependents + imports 양방향
 awf wf expand-scope --direction both
 
-# 전체 transitive closure (위험 — 의도적으로만)
+# 수동 조정: 전체 transitive closure (위험 — 의도적으로만)
 awf wf expand-scope --direction dependents --depth 0
 
-# 작성 안 하고 미리보기
+# 수동 점검: 작성 안 하고 미리보기
 awf wf expand-scope --dry-run --json
 ```
 

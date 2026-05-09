@@ -180,17 +180,24 @@ tasks.md에서 파일 경로 추출:
 }
 ```
 
-#### 6.1 (선택) import graph 기반 스코프 확장
+#### 6.1 import graph 기반 스코프 확장
 
-해당 서비스가 `awf analyze`로 분석된 적이 있다면, 다음 명령으로 reverse-dependent / import 파일을 결정론적으로 추가하면 G5 SCOPE_VIOLATION false positive가 줄어든다:
+`allowed-files.json` 생성 직후 아래 명령을 실행해 reverse-dependent 파일을 결정론적으로 추가합니다. 분석된 import graph가 없거나 추가할 파일이 없으면 명령은 정상 no-op으로 끝나며, plan 흐름은 그대로 진행됩니다.
 
 ```bash
-awf wf expand-scope --direction dependents       # 1-hop consumer (기본)
+awf wf expand-scope --direction dependents
+```
+
+이 단계는 G5 SCOPE_VIOLATION false positive를 줄이기 위한 기본 hook입니다. 확장 시 `expanded_files` 필드와 `graph_expansion` audit (direction/depth/항목별 reason/coverage)이 추가됩니다.
+
+수동 조정이 필요한 경우에만 아래 변형을 사용합니다:
+
+```bash
 awf wf expand-scope --direction both             # consumer + dependency 양방향
 awf wf expand-scope --dry-run                    # 미리보기만
 ```
 
-확장 시 `expanded_files` 필드와 `graph_expansion` audit (direction/depth/항목별 reason/coverage)이 추가된다. 그래프가 없으면 명령은 빈 결과로 빠지고 동작은 변하지 않는다.
+`allowed-files.json` 누락, JSON 파싱 오류, 명령 실패는 G1 검증 전에 해결해야 합니다.
 
 ### 7. Gate G1 검증
 
