@@ -116,6 +116,7 @@ The setup script links the skills under `claude/skills/` and agents under `claud
 
 Optional snippets:
 
+- `snippets/agents-md-awf-preflight.md`
 - `snippets/claude-md-multi-agent.md`
 - `snippets/claude-md-wf-pipeline.md`
 

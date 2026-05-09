@@ -3,6 +3,15 @@
 7단계 게이트 파이프라인. `/wf-orchestrator '기능 설명'`으로 시작 (과거 `/wf` alias는 2026-02 commands 폐기 시 제거됨).
 스킬: `~/.claude/skills/wf-*/`, `~/.claude/skills/phase-*/`, `~/.claude/skills/analysis/`
 
+### Deterministic Preflight
+
+처음 시작: `awf ready --gate workflow-init --repo-root . --json`
+중간 재개: `awf ready --gate workflow-run --repo-root . --json`
+
+- exit code `0`: 진행
+- exit code `10`: dry-run/status만 진행
+- exit code `20`: 중단 후 `gate.recommended_next` 수행
+
 ### Phase 흐름
 plan → review → approve → impl → verify → test → done
 

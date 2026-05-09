@@ -53,6 +53,7 @@ Codex runner는 `provider-config.json`의 `fallback_chain`을 보고 다음 prov
 
 현재 `run-wf.sh`는 다음까지 지원합니다.
 
+- `awf ready --gate workflow-run` preflight
 - `.workflow` 상태 읽기
 - phase별 secondary provider 해석
 - delegated self-contained prompt 생성
@@ -60,6 +61,5 @@ Codex runner는 `provider-config.json`의 `fallback_chain`을 보고 다음 prov
 
 아직 지원하지 않는 것:
 
-- gate 자동 판정
 - `verification-report.md` 같은 artifact 자동 반영
 - dual merge / format retry 자동화

@@ -316,6 +316,11 @@ def build_parser() -> argparse.ArgumentParser:
     ready_parser.add_argument("--repo-root", help="Repository root. Defaults to current or parent directories.")
     ready_parser.add_argument("--json", action="store_true", help="Print raw JSON.")
     ready_parser.add_argument("--probe", action="store_true", help="Run lightweight provider probes where supported.")
+    ready_parser.add_argument(
+        "--gate",
+        choices=["inspect", "analysis", "workflow-init", "workflow-run", "operations"],
+        help="Evaluate a deterministic automation gate and exit non-zero unless it is allowed.",
+    )
     ready_parser.set_defaults(handler=run_ready)
 
     init_parser = subparsers.add_parser("init", help="Initialize .awf.toml in the current project.")
@@ -521,3 +526,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 def cli_entry() -> None:
     """Console script entry point — calls main() and converts return code to sys.exit()."""
     sys.exit(main())
+
+
+if __name__ == "__main__":
+    cli_entry()

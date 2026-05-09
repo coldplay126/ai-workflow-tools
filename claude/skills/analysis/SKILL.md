@@ -70,6 +70,18 @@ awf analyze {service} --catalog      # 전체 현황
 - **--check**: 소스 파일 해시 비교로 stale 단위 탐지 (분석 실행 없음)
 - **--catalog**: 전체 분석 현황 출력 (config의 단위 정의 + .ai-context 상태 join)
 
+## Deterministic Preflight
+
+분석 실행 전 반드시 repo root에서 다음 gate를 실행합니다:
+
+```bash
+awf ready --gate analysis --repo-root . --json
+```
+
+- exit code `0` (`decision: "allow"`)일 때만 provider-backed 분석을 실행합니다.
+- exit code `10` (`decision: "dry_run_only"`)이면 provider 호출 없이 `awf analyze ... --dry-run`까지만 실행합니다.
+- 그 외 non-zero는 분석을 중단하고 `gate.recommended_next`의 명령만 제안합니다.
+
 ## 분석 파이프라인
 
 | Stage | 역할 | Provider |

@@ -4,7 +4,7 @@ import argparse
 import json
 import sys
 
-from awf.core.ready import collect_ready_report
+from awf.core.ready import collect_ready_report, evaluate_ready_gate
 
 
 def _fmt_status(status: str) -> str:
@@ -17,18 +17,22 @@ def _fmt_status(status: str) -> str:
 
 
 def run_ready(args: argparse.Namespace) -> int:
+    gate_name = getattr(args, "gate", None)
     try:
         payload = collect_ready_report(
             args.repo_root,
             probe=bool(getattr(args, "probe", False)),
         )
+        gate = evaluate_ready_gate(payload, gate_name) if gate_name else None
+        if gate:
+            payload["gate"] = gate
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
     if getattr(args, "json", False):
         print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return 0
+        return int(gate["exit_code"]) if gate else 0
 
     level = payload["automation_level"]
     print(f"repo_root: {payload['repo_root']}")
@@ -84,4 +88,16 @@ def run_ready(args: argparse.Namespace) -> int:
     for item in payload["recommended_next"]:
         print(f"  - {item['command']}")
         print(f"    {item['why']}")
-    return 0
+    if gate:
+        print("")
+        print("gate:")
+        print(f"  name: {gate['name']}")
+        print(f"  decision: {gate['decision']}")
+        print(f"  exit_code: {gate['exit_code']}")
+        print(f"  reason: {gate['reason']}")
+        if gate["recommended_next"]:
+            print("  gate_next:")
+            for item in gate["recommended_next"]:
+                print(f"    - {item['command']}")
+                print(f"      {item['why']}")
+    return int(gate["exit_code"]) if gate else 0
