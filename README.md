@@ -22,12 +22,18 @@ ai-workflow-tools/
 
 ```bash
 uv run --project cli --no-editable awf --help
+uv run --project cli --no-editable awf ready --repo-root .
 uv run --project cli --no-editable awf doctor --repo-root . --json --ci
 uv run --project cli --no-editable awf wf status --repo-root .
 uv run --project cli --no-editable awf analyze sample-api health --repo-root . --dry-run
 ```
 
 The Python package is `awf-cli`, and the console entrypoint is `awf`.
+
+`awf ready` is the first read-only check for a project. It combines config,
+provider, skill, scan, workflow, and operations-wiki readiness into one report,
+then prints the next safe commands instead of assuming the repo is ready for
+provider-backed automation.
 
 ### Stage 1 transitive cache invalidation
 
