@@ -364,7 +364,8 @@ def run_wf_decide(args: argparse.Namespace) -> int:
 def run_wf_next(args: argparse.Namespace) -> int:
     non_interactive = bool(getattr(args, "non_interactive", False))
     auto_apply = bool(args.auto_apply)
-    if not getattr(args, "dry_run", False):
+    dry_run = bool(getattr(args, "dry_run", False))
+    if not dry_run:
         gate_rc = enforce_ready_gate(
             args,
             "workflow-run",
@@ -378,8 +379,9 @@ def run_wf_next(args: argparse.Namespace) -> int:
         provider_config = load_workflow_provider_config(args.repo_root)
         phase = resolve_next_phase(state, args.phase)
         # Save state after resolve (policy skips may have been applied in-memory)
-        from awf.core.state import save_workflow_state_snapshot
-        save_workflow_state_snapshot(args.repo_root, state)
+        if not dry_run:
+            from awf.core.state import save_workflow_state_snapshot
+            save_workflow_state_snapshot(args.repo_root, state)
         # Log skipped phases
         skip_phases = [p for p in state.get("phases", {}) if state["phases"][p].get("status") == "skipped"]
         if skip_phases:
@@ -388,7 +390,11 @@ def run_wf_next(args: argparse.Namespace) -> int:
         prompt += _workflow_mode_prompt_note(getattr(args, "mode", None))
         provider_name = _resolve_phase_provider(args.provider, provider_config, phase, config)
         fallback_chain = _resolve_fallback_chain(provider_name, provider_config, getattr(args, "mode", None))
-        prompt_path = save_workflow_prompt(args.repo_root, phase, provider_name, prompt)
+        prompt_path = (
+            None
+            if dry_run
+            else save_workflow_prompt(args.repo_root, phase, provider_name, prompt)
+        )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -406,10 +412,15 @@ def run_wf_next(args: argparse.Namespace) -> int:
         print(f"execution_mode: {getattr(args, 'mode', None) or 'default'}")
         print(f"non_interactive: {non_interactive}")
         print(f"fallback_chain: {json.dumps(fallback_chain, ensure_ascii=False)}")
-        print(f"prompt_file: {prompt_path}")
+        prompt_file = (
+            str(prompt_path)
+            if prompt_path is not None
+            else "(dry-run, not written)"
+        )
+        print(f"prompt_file: {prompt_file}")
         print()
         print(prompt)
-        if args.dry_run:
+        if dry_run:
             return 0
 
     repo_root = str(resolve_repo_root(args.repo_root))
