@@ -1270,6 +1270,7 @@ def run_wf_expand_scope(args: argparse.Namespace) -> int:
         apply_expansion_to_payload,
         expand_allowed_files,
         load_allowed_files,
+        planned_files_from_payload,
         save_allowed_files,
     )
 
@@ -1295,7 +1296,7 @@ def run_wf_expand_scope(args: argparse.Namespace) -> int:
         print(f"error: allowed-files.json is not valid JSON: {exc}", file=sys.stderr)
         return 2
 
-    planned = list(payload.get("planned_files") or [])
+    planned = planned_files_from_payload(payload)
     if not planned:
         print("warning: planned_files is empty; nothing to expand", file=sys.stderr)
         return 0

@@ -14,6 +14,7 @@ from awf.core.wf_scope import (
     apply_expansion_to_payload,
     expand_allowed_files,
     load_allowed_files,
+    planned_files_from_payload,
     save_allowed_files,
 )
 
@@ -235,6 +236,19 @@ def test_load_save_allowed_files_roundtrip(tmp_path: Path):
     assert reread == loaded
 
 
+def test_planned_files_from_payload_prefers_canonical_key():
+    assert planned_files_from_payload({
+        "planned_files": ["src/new.ts"],
+        "files": ["src/legacy.ts"],
+    }) == ["src/new.ts"]
+
+
+def test_planned_files_from_payload_falls_back_to_legacy_files():
+    assert planned_files_from_payload({"files": ["src/legacy.ts"]}) == [
+        "src/legacy.ts"
+    ]
+
+
 def test_load_allowed_files_raises_for_missing(tmp_path: Path):
     import pytest
 
@@ -266,6 +280,44 @@ def test_expand_scope_command_resolves_docs_root_without_analysis_config(
     )
     (artifacts / "allowed-files.json").write_text(
         json.dumps({"planned_files": ["src/service.ts"]}) + "\n",
+        encoding="utf-8",
+    )
+    _write_unit_graph(docs_root, "svc", "alpha", _build_chain_graph())
+
+    rc = run_wf_expand_scope(argparse.Namespace(
+        repo_root=str(repo_root),
+        direction="dependents",
+        service=None,
+        depth=1,
+        runtime_only=False,
+        dry_run=True,
+        json=True,
+    ))
+
+    out = capsys.readouterr().out
+    payload = json.loads(out)
+    assert rc == 0
+    assert payload["planned"] == ["src/service.ts"]
+    assert payload["added"] == ["src/controller.ts"]
+
+
+def test_expand_scope_command_uses_legacy_files_fallback(tmp_path: Path, capsys):
+    repo_root = tmp_path / "repo"
+    docs_root = tmp_path / "analysis-docs"
+    artifacts = repo_root / ".workflow" / "artifacts"
+    artifacts.mkdir(parents=True)
+    (repo_root / ".awf.toml").write_text(
+        "\n".join(
+            [
+                "[paths]",
+                f'analysis_docs = "{docs_root}"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (artifacts / "allowed-files.json").write_text(
+        json.dumps({"files": ["src/service.ts"]}) + "\n",
         encoding="utf-8",
     )
     _write_unit_graph(docs_root, "svc", "alpha", _build_chain_graph())
@@ -363,6 +415,28 @@ def test_scope_check_passes_when_only_planned_files_change(tmp_path: Path):
     statuses = {c.path: c.status for c in result.classifications}
     assert statuses["src/a.ts"] == "planned"
     assert statuses["src/b.ts"] == "planned"
+
+
+def test_scope_check_treats_legacy_files_as_planned(tmp_path: Path):
+    from awf.core.wf_scope import check_scope_violations
+
+    _init_repo_with_branch(tmp_path, base="main")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.ts").write_text("// base\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("seed\n", encoding="utf-8")
+    _commit_all(tmp_path, "base")
+
+    import subprocess
+
+    subprocess.run(["git", "checkout", "-q", "-b", "feature"], cwd=tmp_path, check=True)
+    save_allowed_files(tmp_path, {"files": ["src/a.ts"]})
+    (tmp_path / "src" / "a.ts").write_text("// modified\n", encoding="utf-8")
+    _commit_all(tmp_path, "feature changes")
+
+    result = check_scope_violations(tmp_path, base_branch="main")
+    assert result.violation_count == 0
+    assert result.planned_set == ("src/a.ts",)
+    assert result.classifications[0].status == "planned"
 
 
 def test_scope_check_treats_expanded_files_as_in_scope(tmp_path: Path):
