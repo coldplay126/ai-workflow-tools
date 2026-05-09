@@ -59,6 +59,20 @@ class AnalysisStateUpdater:
                 kind = str(event.data.get("kind", "artifact"))
                 by_kind = artifacts.setdefault("byKind", {})
                 by_kind[kind] = int(by_kind.get(kind, 0) or 0) + 1
+                if kind == "analysis_bundle":
+                    bundle = sync.setdefault("analysisBundle", {})
+                    bundle["path"] = str(event.data.get("path", bundle.get("path", "")) or "")
+                    bundle["updatedAt"] = event.timestamp
+                    for source_key, target_key in {
+                        "source_file_count": "sourceFileCount",
+                        "bundle_line_count": "lineCount",
+                        "bundle_token_estimate": "tokenEstimate",
+                    }.items():
+                        if source_key in event.data:
+                            try:
+                                bundle[target_key] = int(event.data.get(source_key) or 0)
+                            except (TypeError, ValueError):
+                                bundle[target_key] = 0
             elif event.type in {EventType.TASK_STARTED, EventType.TASK_COMPLETED}:
                 tasks = sync.setdefault("tasks", {})
                 task_state = tasks.setdefault(event.task_id, {})

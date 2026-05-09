@@ -575,7 +575,7 @@ Profile 선택은 `.awf-operations/.profile` 한 줄 marker 에 저장되며, �
 **Events** — 현재 5 종이 자동 기록된다:
 - `stage1_invalidation`: `awf analyze` 의 import-graph transitive invalidation 결과 카운트
 - `scope_check`: `awf wf scope-check` 의 위반/계획/변경 카운트
-- `analysis_complete`: `awf analyze` 성공 종료 시 (service/domain/mode/total_seconds)
+- `analysis_complete`: `awf analyze` 성공 종료 시 (service/domain/mode/total_seconds/source_file_count/bundle_line_count/bundle_token_estimate/output_file_count)
 - `dispatch_complete`: cross/critical 끝 시 (backend/strategy/worker_count/success_count/total_seconds)
 - `dual_strategy_engaged`: `awf wf next` 가 review/verify phase 에서 solo→cross 자동 승격 시 (phase/promoted_from/promoted_to)
 
