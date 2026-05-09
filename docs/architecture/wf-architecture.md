@@ -67,6 +67,10 @@ done (P7)  | —    | 완료                 | —
 | `generate_then_validate` | Primary 생성 → Secondary 사전 검증 | plan |
 | `implement_then_review` | Primary 구현 → Secondary git diff 리뷰 | impl |
 
+#### parallel_evaluate 자동 활성화
+
+`awf wf next` 의 `--mode` 플래그가 미지정이면 review/verify phase 에서 자동으로 `cross` 모드로 승격된다. 결과 병합은 `synthesize_workflow_multi_provider_results` (cli/src/awf/core/judge.py) 가 처리하며 review 는 coverage 기반, verify 는 compliance 기반 selection 을 적용한다. 명시적 `--mode solo` 가 opt-out 경로. 자동 승격 phase 목록은 `provider-config.json` 의 `wf.dual_strategy_phases` 로 override 가능 (기본 `["review", "verify"]`, 빈 리스트 명시 시 비활성). 자동 승격 시 `.awf-operations/events/<date>.jsonl` 에 `dual_strategy_engaged` 이벤트가 기록된다.
+
 ### 기본 provider-config.json
 
 ```json

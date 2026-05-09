@@ -571,11 +571,12 @@ awf wiki regenerate-index                          # wiki/ 변경 후 index.md �
 
 Profile 선택은 `.awf-operations/.profile` 한 줄 marker 에 저장되며, 모든 wiki 명령에 `--profile` 플래그로 1회 override 가능. `awf wiki init` 이 awf 자체 레포 같은 환경(`cli/pyproject.toml::name == "awf-cli"`)에선 `self_improvement` 추천 hint 만 표시 — auto-detect 는 안 한다 (false-positive 회피).
 
-**Events** — 현재 4 종이 자동 기록된다:
+**Events** — 현재 5 종이 자동 기록된다:
 - `stage1_invalidation`: `awf analyze` 의 import-graph transitive invalidation 결과 카운트
 - `scope_check`: `awf wf scope-check` 의 위반/계획/변경 카운트
 - `analysis_complete`: `awf analyze` 성공 종료 시 (service/domain/mode/total_seconds)
 - `dispatch_complete`: cross/critical 끝 시 (backend/strategy/worker_count/success_count/total_seconds)
+- `dual_strategy_engaged`: `awf wf next` 가 review/verify phase 에서 solo→cross 자동 승격 시 (phase/promoted_from/promoted_to)
 
 **Gitignore 분리**: `.awf-operations/events/`, `log.md`, `.profile`, `wiki/operations/` 는 ignore. `wiki/decisions/`, `wiki/concepts/`, `wiki/services/`, `index.md` 는 commit 대상 — ADR 와 LLM 합성 페이지는 PR 에 박혀야 협업이 된다.
 

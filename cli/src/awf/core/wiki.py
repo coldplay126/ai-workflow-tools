@@ -266,12 +266,16 @@ def lint(
             issues.append(LintIssue(page=rel, code="malformed_frontmatter", detail=str(exc)))
             continue
 
-        if not page.frontmatter.get("source_runs") and not page.frontmatter.get("source_commits"):
+        provenance_keys = ("source_runs", "source_commits", "context_prs")
+        if not any(page.frontmatter.get(k) for k in provenance_keys):
             issues.append(
                 LintIssue(
                     page=rel,
                     code="missing_provenance",
-                    detail="frontmatter has neither source_runs nor source_commits",
+                    detail=(
+                        "frontmatter has none of: "
+                        + ", ".join(provenance_keys)
+                    ),
                 )
             )
 

@@ -204,6 +204,8 @@
 | generate_then_validate | precise | 최대 N회 | 기본 3회 |
 | implement_then_review | precise, critical | 최대 N회 | 기본 3회 |
 
+`parallel_evaluate` 는 review/verify phase 에서 `--mode` 미지정 시 `solo → cross` 로 자동 승격된다 (Phase 4, PR #30). 명시적 `--mode solo` 가 opt-out, `provider-config.json::wf.dual_strategy_phases` 로 phase 목록 변경 가능 (기본 `["review", "verify"]`, 빈 리스트 시 자동 승격 비활성). 결과 결합은 `synthesize_workflow_multi_provider_results` 가 처리: review = coverage 기반 selection, verify = compliance 기반.
+
 ---
 
 ## 11. 설정 구조
