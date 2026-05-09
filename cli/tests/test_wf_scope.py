@@ -1,12 +1,14 @@
 """Tests for awf.core.wf_scope — allowed-files expansion via import graph."""
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from awf.commands.wf import run_wf_expand_scope
 from awf.core.import_graph import GraphEdge, GraphNode, ImportGraph
 from awf.core.wf_scope import (
     apply_expansion_to_payload,
@@ -238,6 +240,51 @@ def test_load_allowed_files_raises_for_missing(tmp_path: Path):
 
     with pytest.raises(FileNotFoundError):
         load_allowed_files(tmp_path)
+
+
+# --------------------------------------------------------------------------
+# awf wf expand-scope command
+# --------------------------------------------------------------------------
+
+
+def test_expand_scope_command_resolves_docs_root_without_analysis_config(
+    tmp_path: Path, capsys
+):
+    repo_root = tmp_path / "repo"
+    docs_root = tmp_path / "analysis-docs"
+    artifacts = repo_root / ".workflow" / "artifacts"
+    artifacts.mkdir(parents=True)
+    (repo_root / ".awf.toml").write_text(
+        "\n".join(
+            [
+                "[paths]",
+                f'analysis_docs = "{docs_root}"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (artifacts / "allowed-files.json").write_text(
+        json.dumps({"planned_files": ["src/service.ts"]}) + "\n",
+        encoding="utf-8",
+    )
+    _write_unit_graph(docs_root, "svc", "alpha", _build_chain_graph())
+
+    rc = run_wf_expand_scope(argparse.Namespace(
+        repo_root=str(repo_root),
+        direction="dependents",
+        service=None,
+        depth=1,
+        runtime_only=False,
+        dry_run=True,
+        json=True,
+    ))
+
+    out = capsys.readouterr().out
+    payload = json.loads(out)
+    assert rc == 0
+    assert payload["planned"] == ["src/service.ts"]
+    assert payload["added"] == ["src/controller.ts"]
 
 
 # --------------------------------------------------------------------------
