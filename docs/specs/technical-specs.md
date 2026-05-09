@@ -672,6 +672,9 @@ fix_feedback가 존재하면 impl 재실행 시 다음 형식으로 주입:
       "storage": ".tmp/observations/"
     }
   },
+  "transitive_invalidation": {
+    "enabled": true
+  },
   "layer3": {
     "document": {
       "writers": ["structure", "behavior"],
@@ -701,6 +704,14 @@ fix_feedback가 존재하면 impl 재실행 시 다음 형식으로 주입:
   }
 }
 ```
+
+`transitive_invalidation`은 Stage 1 incremental resume의 import graph 기반 reverse-dependent 무효화를 제어하는 최상위 운영 설정이다.
+
+| Field | Type | Default | Semantics |
+|-------|------|---------|-----------|
+| `transitive_invalidation.enabled` | boolean | `true` | `false`로 두면 직접 변경 파일만 Stage 1 재분석 대상으로 삼고, import graph 기반 간접 무효화는 건너뛴다. 누락 또는 잘못된 타입은 default-on으로 처리한다. |
+
+응급 비활성화는 `AWF_DISABLE_TRANSITIVE_INVALIDATION=1` 환경변수가 우선한다. 환경변수가 truthy이면 `analysis-pipeline.json`에서 `enabled: true`를 지정해도 transitive invalidation은 꺼진다.
 
 ### 9.2 Provider 교체 가능 원칙
 
