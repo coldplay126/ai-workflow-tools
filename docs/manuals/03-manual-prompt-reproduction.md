@@ -107,8 +107,8 @@ gate 판단은 `review.json`의 `gate.pass_conditions`를 따르세요.
 ## 5. `/analysis` 재현
 
 읽을 파일:
-- `claude/commands/analysis.md`
-- `docs/ai-context-specification.md`
+- `claude/skills/analysis/SKILL.md`
+- `docs/specs/ai-context-specification.md`
 - `analysis-docs/_templates/analysis-config.json`
 - `analysis-docs/_templates/analysis-pipeline.json`
 
