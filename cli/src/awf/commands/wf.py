@@ -1310,6 +1310,21 @@ def run_wf_scope_check(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    try:
+        from awf.core.operational_metrics import record_scope_check
+        from awf.core.wiki import log_event
+
+        record_scope_check(repo_root, result)
+        log_event(
+            repo_root,
+            "scope_check",
+            f"violations={result.violation_count} "
+            f"changed={len(result.changed_files)} "
+            f"planned={len(result.planned_set)}",
+        )
+    except Exception as exc:
+        print(f"warning: operations metrics record failed: {exc}", file=sys.stderr)
+
     if args.json:
         print(json.dumps(result.to_json(), ensure_ascii=False, indent=2))
         return 1 if result.violation_count > 0 else 0

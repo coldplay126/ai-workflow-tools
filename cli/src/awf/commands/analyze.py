@@ -75,6 +75,38 @@ def _accumulate_knowledge_safe(context) -> None:
     except Exception as exc:
         print(f"warning: knowledge accumulation failed: {exc}", file=sys.stderr)
 
+
+def _record_stage1_invalidation_safe(
+    context, invalidation, *, transitive_enabled: bool
+) -> None:
+    """Persist a stage1 invalidation summary to .awf-operations/.
+
+    Failures are swallowed: operational telemetry must never block analysis.
+    """
+    try:
+        from awf.core.operational_metrics import record_stage1_invalidation
+        from awf.core.wiki import log_event
+
+        service = getattr(getattr(context, "service_config", None), "name", None) or getattr(
+            context, "service", None
+        )
+        record_stage1_invalidation(
+            context.repo_root,
+            invalidation,
+            service=service,
+            transitive_enabled=transitive_enabled,
+        )
+        summary = (
+            f"direct={len(invalidation.target_files) - len(invalidation.indirect_paths)} "
+            f"indirect={len(invalidation.indirect_paths)} "
+            f"unchanged={len(invalidation.unchanged_files)}"
+        )
+        if service:
+            summary = f"{service}: {summary}"
+        log_event(context.repo_root, "stage1_invalidation", summary)
+    except Exception as exc:
+        print(f"warning: operations metrics record failed: {exc}", file=sys.stderr)
+
 _STAGE_PROVIDER_ALIASES: dict[str, str] = {
     "sonnet": "claude:sonnet",
     "opus": "claude-code",
@@ -461,6 +493,9 @@ def run_analyze(args: argparse.Namespace) -> int:
                     )
                     unchanged_paths = {e["path"] for e in graph_invalidation.unchanged_files}
                     bypass_cache_paths = set(graph_invalidation.indirect_paths)
+                    _record_stage1_invalidation_safe(
+                        context, graph_invalidation, transitive_enabled=True
+                    )
                     if graph_invalidation.target_files:
                         stage1_target_files = graph_invalidation.target_files
                         print(
