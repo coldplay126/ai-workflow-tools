@@ -55,6 +55,7 @@ def _prepare_temp_repo(temp_repo: Path) -> None:
 def _run_awf(repo_root: Path, *args: str, fixture_result: Path | None = None) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT / "cli" / "src")
+    env["AWF_SKILLS_DIR"] = str(ROOT / "claude" / "skills")
     if fixture_result is not None:
         env["AWF_FIXTURE_RESULT_FILE"] = str(fixture_result)
     cmd = [sys.executable, "-m", "awf", *args, "--repo-root", str(repo_root)]

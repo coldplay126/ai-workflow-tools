@@ -17,3 +17,5 @@ Exit code contract:
 - `20`: `decision: "block"`; stop and follow `gate.recommended_next`.
 
 Use `analysis` before provider-backed `awf analyze`, `workflow-init` before creating `.workflow/`, `workflow-run` before continuing a workflow, and `operations` before writing operations wiki decisions.
+
+The main write/provider commands enforce the same gate internally. Use `--no-ready-gate` only when a higher-level wrapper has already performed the equivalent check.

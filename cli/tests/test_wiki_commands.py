@@ -33,6 +33,7 @@ from awf.core.wiki import (
 
 
 def _ns(**kw) -> argparse.Namespace:
+    kw.setdefault("no_ready_gate", True)
     return argparse.Namespace(**kw)
 
 

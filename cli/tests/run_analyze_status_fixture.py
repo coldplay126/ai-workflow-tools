@@ -40,7 +40,7 @@ def main() -> int:
         tmp_dir = Path(tmp_dir_str)
         prepare_analysis_docs_fixture(tmp_dir)
 
-        first = _run(tmp_dir, "--provider", "fixture", "--yolo")
+        first = _run(tmp_dir, "--provider", "fixture", "--yolo", "--no-ready-gate")
         if first.returncode != 0:
             print(first.stdout, end="")
             if first.stderr:

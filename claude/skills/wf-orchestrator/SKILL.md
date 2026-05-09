@@ -50,6 +50,8 @@ awf ready --gate workflow-run --repo-root . --json
 - exit code `10` (`decision: "dry_run_only"`)이면 provider 호출 없이 `awf wf next --dry-run` 또는 상태 점검까지만 수행합니다.
 - 그 외 non-zero는 오케스트레이션을 중단하고 `gate.recommended_next`의 명령만 제안합니다.
 
+`awf wf init`과 provider-backed `awf wf next`도 같은 gate를 내부에서 다시 확인합니다. 상위 wrapper가 이미 같은 판정을 수행한 경우에만 `--no-ready-gate`를 사용합니다.
+
 ## Quick Resume (세션 컴팩션 후 우선 실행)
 
 이 블록은 세션 재개 시 가장 먼저 실행합니다:

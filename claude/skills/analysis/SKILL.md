@@ -82,6 +82,8 @@ awf ready --gate analysis --repo-root . --json
 - exit code `10` (`decision: "dry_run_only"`)이면 provider 호출 없이 `awf analyze ... --dry-run`까지만 실행합니다.
 - 그 외 non-zero는 분석을 중단하고 `gate.recommended_next`의 명령만 제안합니다.
 
+`awf analyze`도 provider-backed 실행 전 같은 gate를 내부에서 다시 확인합니다. 상위 wrapper가 이미 같은 판정을 수행한 경우에만 `--no-ready-gate`를 사용합니다.
+
 ## 분석 파이프라인
 
 | Stage | 역할 | Provider |

@@ -58,6 +58,7 @@ from awf.core.progress import ProgressDisplay
 from awf.core.readiness import maybe_doctor_hint
 from awf.core.state_updater import AnalysisStateUpdater
 from awf.core.task import TaskConstraints, TaskContext, TaskDefinition, TaskType, resolve_execution_mode
+from awf.commands.ready_gate import enforce_ready_gate
 from awf.providers.base import ProviderCapability
 from awf.providers.registry import ProviderRegistry, UnknownProviderError
 
@@ -358,11 +359,28 @@ def run_analyze(args: argparse.Namespace) -> int:
 
     # --all mode: scan service and run each domain sequentially
     if getattr(args, "all", False):
+        if not getattr(args, "dry_run", False):
+            gate_rc = enforce_ready_gate(
+                args,
+                "analysis",
+                json_output=getattr(args, "output_format", "text") == "json",
+            )
+            if gate_rc != 0:
+                return gate_rc
         return _run_analyze_all(args)
 
     if not args.domain:
         print("error: domain is required (or use --all)", file=sys.stderr)
         return 2
+
+    if not getattr(args, "dry_run", False):
+        gate_rc = enforce_ready_gate(
+            args,
+            "analysis",
+            json_output=getattr(args, "output_format", "text") == "json",
+        )
+        if gate_rc != 0:
+            return gate_rc
 
     execution_mode = _resolve_analysis_mode(args)
     non_interactive = _is_non_interactive(args)
@@ -1387,6 +1405,7 @@ def _run_analyze_all(args: argparse.Namespace) -> int:
         domain_args.domain = domain_name
         # Remove --all to prevent recursion
         domain_args.all = False
+        domain_args.no_ready_gate = True
 
         try:
             rc = run_analyze(domain_args)

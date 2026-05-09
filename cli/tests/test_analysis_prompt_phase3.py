@@ -196,6 +196,7 @@ def test_analyze_logs_dropped_references_even_without_project_bundle(tmp_path: P
             "--provider",
             "fixture",
             "--yolo",
+            "--no-ready-gate",
         ]
     )
 
