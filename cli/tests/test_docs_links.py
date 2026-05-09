@@ -7,11 +7,17 @@ import urllib.parse
 from functools import lru_cache
 from pathlib import Path
 
+try:
+    import tomllib  # type: ignore[attr-defined]
+except ModuleNotFoundError:  # pragma: no cover
+    import tomli as tomllib  # type: ignore[no-redef]
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MACHINE_SPECIFIC_EXAMPLE_ROOT = "/Users/" + "example"
 MARKDOWN_LINK_RE = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
 JSON_FENCE_RE = re.compile(r"```json\s*\n(.*?)\n```", re.DOTALL)
+TOML_FENCE_RE = re.compile(r"```toml\s*\n(.*?)\n```", re.DOTALL)
 URL_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
 
 
@@ -108,6 +114,24 @@ def test_markdown_json_fences_are_parseable_when_not_placeholders() -> None:
             try:
                 json.loads(block, object_pairs_hook=_reject_duplicate_json_keys)
             except (json.JSONDecodeError, ValueError) as exc:
+                invalid.append(f"{path.relative_to(REPO_ROOT)}:{line} {exc}")
+
+    assert invalid == []
+
+
+def test_markdown_toml_fences_are_parseable_when_not_placeholders() -> None:
+    invalid: list[str] = []
+    for path in _markdown_files():
+        text = path.read_text(encoding="utf-8")
+        for match in TOML_FENCE_RE.finditer(text):
+            block = match.group(1)
+            if "..." in block or "<" in block:
+                continue
+
+            line = _line_number(text, match.start())
+            try:
+                tomllib.loads(block)
+            except tomllib.TOMLDecodeError as exc:
                 invalid.append(f"{path.relative_to(REPO_ROOT)}:{line} {exc}")
 
     assert invalid == []
