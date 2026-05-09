@@ -7,6 +7,7 @@ The wiki subsystem persists project-scoped operational state under
 - ``awf wiki lint``          — surface orphan/stale/missing-provenance issues
 - ``awf wiki regenerate-index`` — rebuild index.md from wiki/ contents
 - ``awf wiki events``        — print recorded JSONL event stream
+- ``awf wiki compile``       — synthesize operations/<topic>.md from events
 
 All commands are read-mostly except ``regenerate-index``; failures print
 to stderr and return a non-zero exit code.
@@ -38,6 +39,11 @@ from awf.core.wiki import (
     wiki_root,
     write_page,
     write_profile,
+)
+from awf.core.wiki_compile import (
+    DEFAULT_SINCE_DAYS,
+    compile_from_events,
+    known_topics,
 )
 
 
@@ -228,6 +234,76 @@ def run_wiki_decision(args: argparse.Namespace) -> int:
     print(f"profile: {profile}")
     if context_prs:
         print(f"context_prs: {', '.join(context_prs)}")
+    return 0
+
+
+def run_wiki_compile(args: argparse.Namespace) -> int:
+    """Compile ``wiki/operations/<topic>.md`` pages from the event log.
+
+    Output format is a one-line summary per topic so an operator can
+    eyeball the result, plus a final hint when no events qualified
+    (typical right after ``awf wiki init`` before any awf runs land).
+    """
+    repo_root = _resolve_repo_root(args)
+    topic = getattr(args, "topic", None)
+    if topic is not None and topic not in known_topics():
+        print(
+            f"error: unknown topic {topic!r}; expected one of "
+            f"{', '.join(known_topics())}",
+            file=sys.stderr,
+        )
+        return 2
+
+    since = getattr(args, "since", None)
+    since_days = since if since is not None else DEFAULT_SINCE_DAYS
+
+    pages = compile_from_events(
+        repo_root,
+        since_days=since_days,
+        topic=topic,
+        dry_run=bool(getattr(args, "dry_run", False)),
+    )
+
+    if getattr(args, "json", False):
+        print(json.dumps(
+            [
+                {
+                    "topic": p.topic,
+                    "path": str(p.path),
+                    "event_count": p.event_count,
+                    "event_window": list(p.event_window),
+                    "confidence": p.confidence,
+                    "written": p.written,
+                    "skipped_reason": p.skipped_reason,
+                }
+                for p in pages
+            ],
+            ensure_ascii=False,
+            indent=2,
+        ))
+        return 0
+
+    written = sum(1 for p in pages if p.written)
+    if getattr(args, "dry_run", False):
+        print(f"dry-run: {len(pages)} topic(s) evaluated, no files written")
+    else:
+        print(f"compiled {written}/{len(pages)} topic page(s)")
+    for p in pages:
+        if p.skipped_reason:
+            print(f"  · {p.topic}: skipped ({p.skipped_reason})")
+            continue
+        window = (
+            f"{p.event_window[0]}..{p.event_window[1]}"
+            if p.event_window[0] else "(no window)"
+        )
+        action = "→ " + str(p.path) if p.written else "(dry-run)"
+        print(
+            f"  · {p.topic}: {p.event_count} events "
+            f"[{window}] confidence={p.confidence} {action}"
+        )
+        if getattr(args, "dry_run", False) and getattr(args, "show_body", False):
+            print()
+            print(p.body)
     return 0
 
 

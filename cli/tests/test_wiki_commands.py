@@ -260,3 +260,148 @@ def test_regenerate_index_handler_creates_index(tmp_path, capsys):
     assert run_wiki_regenerate_index(args) == 0
     out = capsys.readouterr().out
     assert "regenerated" in out
+
+
+# --------------------------------------------------------------------------
+# compile
+# --------------------------------------------------------------------------
+
+
+def _compile_ns(tmp_path, **overrides) -> argparse.Namespace:
+    base = dict(
+        repo_root=str(tmp_path),
+        since=None,
+        topic=None,
+        dry_run=False,
+        show_body=False,
+        json=False,
+    )
+    base.update(overrides)
+    return _ns(**base)
+
+
+def test_compile_handler_no_events_reports_skipped(tmp_path, capsys):
+    from awf.commands.wiki import run_wiki_compile
+
+    assert run_wiki_compile(_compile_ns(tmp_path)) == 0
+    out = capsys.readouterr().out
+    # Header line + per-topic skip notes.
+    assert "compiled 0/" in out
+    assert "no_events_in_window" in out
+
+
+def test_compile_handler_writes_pages_for_each_event_type(tmp_path):
+    from awf.commands.wiki import run_wiki_compile
+    from awf.core.operational_metrics import record_event
+    from awf.core.wiki import wiki_root
+
+    now = "2026-05-15T12:00:00+00:00"
+    record_event(tmp_path, "stage1_invalidation", {
+        "service": "x", "transitive_enabled": True,
+        "direct_count": 1, "indirect_count": 1, "invalidating_count": 1,
+        "unchanged_count": 0, "deleted_count": 0,
+    }, ts=now)
+    record_event(tmp_path, "scope_check", {
+        "base_branch": "main", "planned_count": 3, "expanded_count": 4,
+        "changed_count": 2, "violation_count": 0, "violation_paths": [],
+        "planned_not_changed_count": 1,
+    }, ts=now)
+
+    assert run_wiki_compile(_compile_ns(tmp_path)) == 0
+    op_dir = wiki_root(tmp_path) / "operations"
+    assert (op_dir / "stage1-invalidation.md").exists()
+    assert (op_dir / "scope-check.md").exists()
+    # Topics with no matching events did not write a file.
+    assert not (op_dir / "dispatch-performance.md").exists()
+
+
+def test_compile_handler_topic_flag_restricts(tmp_path):
+    from awf.commands.wiki import run_wiki_compile
+    from awf.core.operational_metrics import record_event
+    from awf.core.wiki import wiki_root
+
+    now = "2026-05-15T12:00:00+00:00"
+    record_event(tmp_path, "stage1_invalidation", {
+        "direct_count": 1, "indirect_count": 1, "invalidating_count": 1,
+        "unchanged_count": 0, "deleted_count": 0, "transitive_enabled": True,
+    }, ts=now)
+    record_event(tmp_path, "scope_check", {
+        "base_branch": "main", "planned_count": 1, "expanded_count": 1,
+        "changed_count": 1, "violation_count": 0, "violation_paths": [],
+        "planned_not_changed_count": 0,
+    }, ts=now)
+
+    args = _compile_ns(tmp_path, topic="stage1-invalidation")
+    assert run_wiki_compile(args) == 0
+    op_dir = wiki_root(tmp_path) / "operations"
+    assert (op_dir / "stage1-invalidation.md").exists()
+    assert not (op_dir / "scope-check.md").exists()
+
+
+def test_compile_handler_unknown_topic_returns_two(tmp_path, capsys):
+    from awf.commands.wiki import run_wiki_compile
+
+    args = _compile_ns(tmp_path, topic="not-real")
+    assert run_wiki_compile(args) == 2
+    err = capsys.readouterr().err
+    assert "unknown topic" in err
+
+
+def test_compile_handler_dry_run_writes_nothing_but_reports(tmp_path, capsys):
+    from awf.commands.wiki import run_wiki_compile
+    from awf.core.operational_metrics import record_event
+    from awf.core.wiki import wiki_root
+
+    now = "2026-05-15T12:00:00+00:00"
+    record_event(tmp_path, "dual_strategy_engaged",
+                 {"phase": "review", "promoted_from": "solo", "promoted_to": "cross"},
+                 ts=now)
+
+    args = _compile_ns(tmp_path, dry_run=True)
+    assert run_wiki_compile(args) == 0
+    out = capsys.readouterr().out
+    assert "dry-run:" in out
+    # Nothing on disk
+    assert not (wiki_root(tmp_path) / "operations" / "dual-strategy-promotions.md").exists()
+
+
+def test_compile_handler_json_output_is_machine_parseable(tmp_path, capsys):
+    from awf.commands.wiki import run_wiki_compile
+    from awf.core.operational_metrics import record_event
+
+    now = "2026-05-15T12:00:00+00:00"
+    record_event(tmp_path, "dispatch_complete", {
+        "backend": "cmux", "strategy": "single", "mode": "cross",
+        "worker_count": 1, "success_count": 1, "timed_out_count": 0,
+        "total_seconds": 7.5,
+    }, ts=now)
+
+    args = _compile_ns(tmp_path, json=True)
+    assert run_wiki_compile(args) == 0
+    out = capsys.readouterr().out
+    payload = json.loads(out)
+    written = [p for p in payload if p["written"]]
+    assert any(p["topic"] == "dispatch-performance" for p in written)
+
+
+def test_compile_handler_since_filter_passes_through(tmp_path):
+    from awf.commands.wiki import run_wiki_compile
+    from awf.core.operational_metrics import record_event
+    from awf.core.wiki import read_page, wiki_root
+    from datetime import datetime, timedelta, timezone
+
+    now_dt = datetime.now(timezone.utc)
+    old_ts = (now_dt - timedelta(days=180)).isoformat()
+    new_ts = (now_dt - timedelta(days=2)).isoformat()
+    base = {
+        "service": "x", "transitive_enabled": True,
+        "direct_count": 1, "indirect_count": 1, "invalidating_count": 1,
+        "unchanged_count": 0, "deleted_count": 0,
+    }
+    record_event(tmp_path, "stage1_invalidation", base, ts=old_ts)
+    record_event(tmp_path, "stage1_invalidation", base, ts=new_ts)
+
+    args = _compile_ns(tmp_path, since=7)  # only the 2-day-old event qualifies
+    assert run_wiki_compile(args) == 0
+    page = read_page(wiki_root(tmp_path) / "operations" / "stage1-invalidation.md")
+    assert page.frontmatter["event_count"] == "1"

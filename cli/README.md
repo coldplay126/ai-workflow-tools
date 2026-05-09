@@ -38,9 +38,26 @@
 - `awf cmux tail [path] [-f] [--run-id ...] [--event ...] [--limit N] [--json]`: cmux-agent `.agent/events.jsonl`을 구조화된 4컬럼(`ts / run_id-prefix / event / summary`)으로 출력한다. `-f/--follow`는 폴링 기반 tail이며 `Ctrl-C`로 정상 종료한다. cmux-agent 패키지를 import하지 않는 read-only consumer다
 - `awf cmux runs [path] [--json] [--limit N]`: 로그를 1회 스캔해 run_id별 `STARTED / STATUS / EVENTS / DURATION`을 요약한다. 마지막 `run.status_changed.new`가 `completed/failed/aborted`면 해당 값, 아니면 `running`으로 표시한다
 - `awf cmux failures [path] [--run-id ...] [--limit N] [--json]`: `artifact.validation_failed`와 `message.failed`를 한 번에 필터링해 timestamp, run_id, target, reason을 보여준다. JSON 모드는 structured array를 출력한다
+- `awf wiki init [--profile self_improvement|consumer]`: `.awf-operations/` 운영 텔레메트리 + LLM Wiki 레이아웃 초기화 (`.profile` marker + starter 디렉토리)
+- `awf wiki decision "<title>" [--from-pr N]`: ADR-style 결정 페이지를 `wiki/decisions/<YYYY-MM-DD>-<slug>.md` 로 생성. `--from-pr` 은 `gh pr view` JSON 으로 context_prs/body 자동 prefill (gh 미설치 시 graceful fallback)
+- `awf wiki log [--tail N]`: 시간순 운영 로그(`log.md`) 출력
+- `awf wiki events [--type ...] [--limit N] [--json]`: 원본 JSONL 이벤트 스트림 필터 출력
+- `awf wiki lint [--stale-days N] [--json]`: orphan / stale / missing-provenance / malformed-frontmatter 검출
+- `awf wiki regenerate-index`: `wiki/` 변경 후 `index.md` 재생성
+- `awf wiki compile [--since N] [--topic ...] [--dry-run] [--show-body] [--json]`: `events/*.jsonl` 을 결정적으로 합성해 `wiki/operations/<topic>.md` 4 페이지(stage1-invalidation/scope-check/dispatch-performance/dual-strategy-promotions) 갱신. LLM 호출 없음, idempotent overwrite, 자동 `regenerate-index`
 - `~/.config/awf/config.toml`, `.awf.toml`: 기본 provider/경로 override 읽기
 - `permissions.allowed_tools` / `disabled_tools` / `yolo`: provider 실행 전 최소 권한 검사
 - `tools/` 모듈: `read/write/glob/grep/git diff/log` 기본 계층 추가 (Phase 2 groundwork)
+
+### Operations wiki / `awf wiki` (English summary)
+
+`awf wiki` manages the project-scoped knowledge layer under `.awf-operations/`:
+- `init` seeds starter dirs and a profile marker (`self_improvement` for awf itself, `consumer` for projects using awf).
+- `decision` creates ADR-style pages, with optional `--from-pr` prefill via `gh pr view`.
+- `log` / `events` print the append-only log and raw JSONL event stream.
+- `lint` flags orphan / stale / missing-provenance / malformed-frontmatter pages.
+- `regenerate-index` rebuilds `index.md` from `wiki/` contents.
+- `compile` deterministically synthesizes four `operations/<topic>.md` pages (stage1-invalidation, scope-check, dispatch-performance, dual-strategy-promotions) from the event log. Stdlib only — no LLM call. Idempotent overwrite, auto-runs `regenerate-index`. Confidence is computed from sample size and time span; output is reproducible and citable from ADRs.
 
 빠른 실행:
 
