@@ -8,10 +8,10 @@
 - 다음 우선순위: provider-native visibility 또는 구조/커밋 정리
 
 최근 문서:
-- [Gateway Migration Closeout](../docs/awf-cli-gateway-migration-closeout-2026-03-31.md)
 - [Gateway Migration Checklist](../docs/manuals/06-gateway-migration-checklist.md)
-- [WF Closed-Loop Review Plan](../docs/awf-cli-wf-review-plan-2026-04-01.md)
-- [WF Closed-Loop CL-4 Plan](../docs/awf-cli-wf-closed-loop-cl4-plan-2026-04-01.md)
+- [awf CLI Architecture](../docs/architecture/awf-cli-architecture.md)
+- [Workflow Pipeline Architecture](../docs/architecture/02-wf-pipeline.md)
+- [Provider Contract](../docs/specs/provider-contract.md)
 
 현재 CLI 표면:
 - `awf chat [--message ...] [--session-id ...] [--latest]`: Phase 5 chat session mode. SQLite에 세션/메시지를 저장하고 provider를 단일 턴 또는 최소 REPL로 호출하며, message-count threshold를 넘으면 turn 전 auto-compaction을 수행한다. compaction은 가능하면 provider-assisted summary를 사용하고, 실패하면 heuristic summary로 fallback한다. 각 turn에는 estimated input/output token과 session 누적 estimated cost를 함께 남긴다
@@ -229,8 +229,8 @@ command = "codex"
 flags = ["exec", "--sandbox", "workspace-write"]
 
 [paths]
-analysis_docs = "/Users/example/Documents/GitHub/analysis-docs"
-awf_github = "/Users/example/Documents/GitHub"
+analysis_docs = "~/Documents/GitHub/analysis-docs"
+awf_github = "~/Documents/GitHub"
 
 [permissions]
 allowed_tools = ["provider:claude-code", "provider:codex", "provider:fixture", "provider:claude-sdk", "provider:openai", "tool:file.read", "tool:file.glob", "tool:file.grep", "tool:git.diff", "tool:git.log"]
@@ -255,7 +255,7 @@ yolo = false
 - MCP는 외부 참조나 provider-configured lookup이 실제로 필요할 때만 사용
 - 안정적인 reference는 `mcp_read_resource`, 능동 조회/계산은 `mcp_call_tool` 우선
 - `server`는 명시 가능하지만, `[mcp_defaults]`가 설정돼 있으면 provider tool 호출에서 생략할 수 있음
-[공통 MCP guidance](/Users/example/Documents/GitHub/ai-workflow-tools/docs/mcp-usage-guidelines.md) 문서를 기준으로 유지합니다.
+MCP-backed tool guidance는 [awf CLI architecture](../docs/architecture/awf-cli-architecture.md)의 구현 메모와 위 원칙을 기준으로 유지합니다.
 `codex`는 현재 `wf next --provider codex` 경로와 review/verify 검증에 맞춰져 있습니다.
 `openai`도 optional provider이지만 현재는 실운영 우선순위 밖의 experimental provider입니다.
 `analyze`와 `wf next`는 provider 실행 전에 `permissions`를 검사합니다. `claude-sdk`와 `openai`의 tool loop는 `tool:file.read`, `tool:file.glob`, `tool:file.grep`, `tool:git.diff`, `tool:git.log` 권한도 함께 검사합니다. 필요하면 `--yolo`로 일시 우회할 수 있습니다.
