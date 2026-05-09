@@ -202,6 +202,16 @@ def save_allowed_files(repo_root: Path, payload: dict) -> Path:
     return path
 
 
+def planned_files_from_payload(payload: dict) -> list[str]:
+    """Return canonical planned files, falling back to legacy ``files``."""
+    raw = payload.get("planned_files")
+    if raw is None:
+        raw = payload.get("files")
+    if not isinstance(raw, list):
+        return []
+    return [str(path) for path in raw if path]
+
+
 # ---------------------------------------------------------------------------
 # G5 deterministic scope check — compare git diff against allowed-files.
 # ---------------------------------------------------------------------------
@@ -328,7 +338,7 @@ def check_scope_violations(
     Returns per-file classifications plus a focused list of violations.
     """
     payload = load_allowed_files(repo_root)
-    planned = sorted({p for p in (payload.get("planned_files") or []) if p})
+    planned = sorted({p for p in planned_files_from_payload(payload) if p})
     expanded = (
         sorted({p for p in (payload.get("expanded_files") or []) if p})
         if include_expanded
@@ -389,7 +399,7 @@ def apply_expansion_to_payload(payload: dict, result: ExpansionResult) -> dict:
     expansions apart from user-authored entries.
     """
     new_payload = dict(payload)
-    expanded = sorted(set(result.added) - set(new_payload.get("planned_files", [])))
+    expanded = sorted(set(result.added) - set(planned_files_from_payload(new_payload)))
     new_payload["expanded_files"] = expanded
     new_payload["graph_expansion"] = {
         "direction": result.direction,
