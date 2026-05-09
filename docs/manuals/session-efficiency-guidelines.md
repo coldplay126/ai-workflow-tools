@@ -392,7 +392,7 @@
 
 ## 참고
 
-- [constitution.md](/Users/example/Documents/GitHub/ai-workflow-tools/docs/specs/constitution.md)
-- [technical-specs.md](/Users/example/Documents/GitHub/ai-workflow-tools/docs/specs/technical-specs.md)
-- [multi-agent-protocol.md](/Users/example/Documents/GitHub/ai-workflow-tools/docs/specs/multi-agent-protocol.md)
-- [wf-pipeline-v2-plan-2026-04-07.md](/Users/example/Documents/GitHub/ai-workflow-tools/docs/wf-pipeline-v2-plan-2026-04-07.md)
+- [constitution.md](../specs/constitution.md)
+- [technical-specs.md](../specs/technical-specs.md)
+- [multi-agent-protocol.md](../specs/multi-agent-protocol.md)
+- [02-wf-pipeline.md](../architecture/02-wf-pipeline.md)

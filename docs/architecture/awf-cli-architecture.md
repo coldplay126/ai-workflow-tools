@@ -704,7 +704,7 @@ ai-workflow-tools/
 - provider MCP tool 호출은 explicit `server`를 우선 사용하고, 없으면 `[mcp_defaults]`의 `invoke`/`read`/`default` 순으로 기본 서버를 해석한다
 - MCP-backed tool guidance는 "prompt/repo 우선, 외부 참조가 필요할 때만 MCP 사용" 원칙을 따른다
 - 안정적인 reference는 `mcp_read_resource`, 능동 조회/계산은 `mcp_call_tool`을 우선 사용한다
-- 공통 MCP usage policy는 [mcp-usage-guidelines.md](/Users/example/Documents/GitHub/ai-workflow-tools/docs/mcp-usage-guidelines.md)에 정리한다
+- MCP fixture와 수동 검증 흐름은 [cmux-agent quickstart](../manuals/cmux-agent-quickstart.md)와 CLI fixture runner를 함께 참조한다
 - 아직 sse 상호작용은 하지 않는다
 - `critical`의 최소 2-provider judge와 `cross`의 Stage 2 secondary check까지 들어갔고, large-scale Stage 2 fan-out은 synthesizer 선행 + writer 병렬 실행 + post-writer consistency pass + single-agent fallback 수준까지 반영되었다
 - synthesis는 아직 full weighted merge는 아니지만 deterministic selection 규칙을 가진다:

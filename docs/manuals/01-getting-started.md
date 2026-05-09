@@ -72,7 +72,7 @@ uv run --project cli --no-editable awf wf status --repo-root .
 - 최근 history
 
 직접 열어볼 파일:
-- [state.json](/Users/example/Documents/GitHub/ai-workflow-tools/.workflow/state.json)
+- `.workflow/state.json`
 
 체크 질문:
 - `currentPhase`는 무엇인가?
@@ -88,7 +88,7 @@ uv run --project cli --no-editable awf wf next --repo-root . --phase review --pr
 ```
 
 실행 후 확인할 파일:
-- [.workflow/tmp](/Users/example/Documents/GitHub/ai-workflow-tools/.workflow/tmp)
+- `.workflow/tmp`
 
 핵심 포인트:
 - `wf next`는 phase를 정하고
@@ -119,13 +119,13 @@ uv run --project cli --no-editable awf analyze sample-api quest-challenge --repo
 ## 6. 산출물 위치 감각 익히기
 
 Workflow 관련:
-- [.workflow/state.json](/Users/example/Documents/GitHub/ai-workflow-tools/.workflow/state.json)
-- [.workflow/artifacts](/Users/example/Documents/GitHub/ai-workflow-tools/.workflow/artifacts)
-- [.workflow/agent-cards](/Users/example/Documents/GitHub/ai-workflow-tools/.workflow/agent-cards)
+- `.workflow/state.json`
+- `.workflow/artifacts`
+- `.workflow/agent-cards`
 
 Analysis 관련:
-- [analysis skill](/Users/example/Documents/GitHub/ai-workflow-tools/claude/skills/analysis/)
-- [ai-context-specification.md](/Users/example/Documents/GitHub/ai-workflow-tools/docs/specs/ai-context-specification.md)
+- [analysis skill](../../claude/skills/analysis/)
+- [ai-context-specification.md](../specs/ai-context-specification.md)
 
 ## 7. 기대 결과
 

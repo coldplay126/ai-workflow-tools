@@ -210,7 +210,7 @@ fix_feedback:
 ## 참고
 
 - docs/analysis-pipeline-v3-plan-2026-04-07.md — C1, C4, C10의 구체화
-- docs/wf-pipeline-v2-plan-2026-04-07.md — C2, C3, C5, C7, C8의 구체화
+- docs/architecture/02-wf-pipeline.md — C2, C3, C5, C7, C8의 구체화
 - docs/awf-skill-composition-design-2026-04-07.md — C4, C9의 원본 교훈
 - docs/v3-implementation-roadmap-2026-04-07.md — 10개 원칙의 구현 순서
 - docs/session-efficiency-guidelines.md — C11의 운영 기준

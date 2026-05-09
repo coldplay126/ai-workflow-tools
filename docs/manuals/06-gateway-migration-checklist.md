@@ -13,7 +13,7 @@
 ## 사전 조건
 
 ```bash
-cd /Users/example/Documents/GitHub/ai-workflow-tools
+cd ~/Documents/GitHub/ai-workflow-tools
 ```
 
 fixture 기반 확인이므로 실 provider 인증은 필수가 아니다.
