@@ -358,11 +358,13 @@ Stage 1 분석 결과로 enriched된 unit 전체 번들. Stage 2 provider에 전
 
 `.analysis-state.json`에 번들 생성 조건 해시를 추가한다:
 ```json
-"layers": {
-  "bundle": {
-    "status": "completed",
-    "fileCount": 42,
-    "configHash": "sha256-of-bundle-affecting-settings"
+{
+  "layers": {
+    "bundle": {
+      "status": "completed",
+      "fileCount": 42,
+      "configHash": "sha256-of-bundle-affecting-settings"
+    }
   }
 }
 ```

@@ -104,12 +104,14 @@ class AgentInfo:
 
 `provider-config.default.json`의 phase_models (WF용):
 ```json
-"phase_models": {
-  "plan":   { "inline_thinking": "high" },
-  "review": { "inline_thinking": "high" },
-  "impl":   { "inline_model": "sonnet", "inline_thinking": "medium" },
-  "verify": { "inline_thinking": "high" },
-  "test":   { "inline_model": "sonnet", "inline_thinking": "medium" }
+{
+  "phase_models": {
+    "plan":   { "inline_thinking": "high" },
+    "review": { "inline_thinking": "high" },
+    "impl":   { "inline_model": "sonnet", "inline_thinking": "medium" },
+    "verify": { "inline_thinking": "high" },
+    "test":   { "inline_model": "sonnet", "inline_thinking": "medium" }
+  }
 }
 ```
 

@@ -484,12 +484,14 @@ Agent Card에 `"hil": true`인 Phase는 항상 인라인 실행.
 ### state.json gate 확장
 
 ```json
-"gates": {
-  "G2": {
-    "passed": true,
-    "provider": "codex|claude:sonnet|null",
-    "provider_status": "success|format_retry|fallback|timeout|parse_error|skipped",
-    "format_retries": 0
+{
+  "gates": {
+    "G2": {
+      "passed": true,
+      "provider": "codex|claude:sonnet|null",
+      "provider_status": "success|format_retry|fallback|timeout|parse_error|skipped",
+      "format_retries": 0
+    }
   }
 }
 ```
@@ -579,12 +581,14 @@ awf wf detect-class --json "concept 텍스트"
 provider-config.json에 `phase_models` 섹션이 있으면 **awf-cli가 phase별로 다른 provider를 자동 선택**합니다:
 
 ```json
-"phase_models": {
-  "plan":   { "effort": "max",  "codex_reasoning": "xhigh" },
-  "review": { "effort": "max",  "codex_reasoning": "xhigh" },
-  "impl":   { "inline_model": "sonnet", "effort": "high", "codex_reasoning": "xhigh" },
-  "verify": { "effort": "max",  "codex_reasoning": "xhigh" },
-  "test":   { "inline_model": "sonnet", "effort": "high", "codex_reasoning": "xhigh" }
+{
+  "phase_models": {
+    "plan":   { "effort": "max",  "codex_reasoning": "xhigh" },
+    "review": { "effort": "max",  "codex_reasoning": "xhigh" },
+    "impl":   { "inline_model": "sonnet", "effort": "high", "codex_reasoning": "xhigh" },
+    "verify": { "effort": "max",  "codex_reasoning": "xhigh" },
+    "test":   { "inline_model": "sonnet", "effort": "high", "codex_reasoning": "xhigh" }
+  }
 }
 ```
 
