@@ -994,7 +994,7 @@ Worker Result (§12) ──→ Orchestrator 통합 판단
 ## 참고
 
 - docs/specs/constitution.md — 각 스키마가 준수해야 하는 원칙
-- docs/analysis-pipeline-v3-plan-2026-04-07.md — §1, §2, §3, §7, §9의 설계 배경
+- docs/architecture/01-analysis-pipeline.md — analysis pipeline 설계 배경
 - docs/architecture/02-wf-pipeline.md — workflow pipeline 설계 배경
-- docs/v3-implementation-roadmap-2026-04-07.md — 구현 순서
-- docs/session-efficiency-guidelines.md — §11, §12, §13의 운영 배경
+- docs/patterns/README.md — 구현된 workflow pattern 색인
+- docs/manuals/session-efficiency-guidelines.md — §11, §12, §13의 운영 배경
