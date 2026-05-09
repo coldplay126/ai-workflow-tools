@@ -12,6 +12,10 @@ elif command -v uv >/dev/null 2>&1; then
 fi
 
 "${PYTHON_CMD[@]}" "$ROOT/cli/tests/run_discovery_fixture.py"
+"${PYTHON_CMD[@]}" "$ROOT/cli/tests/run_claude_stream_parser_fixture.py"
+"${PYTHON_CMD[@]}" "$ROOT/cli/tests/run_gateway_foundation_fixture.py"
+"${PYTHON_CMD[@]}" "$ROOT/cli/tests/run_gateway_event_fixture.py"
+"${PYTHON_CMD[@]}" "$ROOT/cli/tests/run_gateway_state_sync_fixture.py"
 "${PYTHON_CMD[@]}" "$ROOT/cli/tests/run_doctor_fixture.py"
 "${PYTHON_CMD[@]}" "$ROOT/cli/tests/run_doctor_probe_fixture.py"
 "${PYTHON_CMD[@]}" "$ROOT/cli/tests/run_doctor_ci_fixture.py"

@@ -3,8 +3,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
+CLI_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = CLI_ROOT.parent
+GITHUB_ROOT = REPO_ROOT.parent
+DOCS_ROOT = GITHUB_ROOT / "analysis-docs"
+sys.path.insert(0, str(CLI_ROOT / "src"))
 
 from awf.core.config import load_awf_config
 from awf.core.task import TaskConstraints, TaskContext, TaskDefinition, TaskType, resolve_execution_mode
@@ -13,7 +16,7 @@ from awf.providers.registry import ProviderRegistry
 
 
 def main() -> int:
-    config = load_awf_config("/Users/example/Documents/GitHub/ai-workflow-tools")
+    config = load_awf_config(str(REPO_ROOT))
     registry = ProviderRegistry(config)
 
     claude_caps = registry.capabilities("claude-code")
@@ -23,7 +26,7 @@ def main() -> int:
     assert ProviderCapability.EVENT_STREAM in claude_caps
 
     codex_caps = registry.capabilities("codex")
-    assert codex_caps == {ProviderCapability.COMPLETE}
+    assert codex_caps == {ProviderCapability.COMPLETE, ProviderCapability.ADD_DIR}
 
     task = TaskDefinition(
         task_id="task-1",
@@ -34,10 +37,10 @@ def main() -> int:
         params={"service": "sample-api", "domain": "health"},
         constraints=TaskConstraints(),
         context=TaskContext(
-            cwd="/Users/example/Documents/GitHub/ai-workflow-tools",
-            repo_root="/Users/example/Documents/GitHub/ai-workflow-tools",
-            docs_root="/Users/example/Documents/GitHub/analysis-docs",
-            github_root="/Users/example/Documents/GitHub",
+            cwd=str(REPO_ROOT),
+            repo_root=str(REPO_ROOT),
+            docs_root=str(DOCS_ROOT),
+            github_root=str(GITHUB_ROOT),
             config=config,
             provider_name="claude-code",
         ),
