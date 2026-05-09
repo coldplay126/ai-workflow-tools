@@ -6,8 +6,9 @@ import os
 import sys
 import time
 import uuid
+from pathlib import Path
 
-from awf.core.config import load_awf_config
+from awf.core.config import load_awf_config, resolve_runtime_paths
 from awf.core.artifact_manager import ArtifactManager
 from awf.core.events import EventType
 from awf.core.event_processor import EventProcessor, run_complete_with_events
@@ -1264,7 +1265,6 @@ def run_wf_expand_scope(args: argparse.Namespace) -> int:
     import graphs written by `awf analyze`, and either prints a diff
     (--dry-run) or writes back the merged payload with an audit trail.
     """
-    from awf.core.config import resolve_analysis_context
     from awf.core.wf_scope import (
         VALID_DIRECTIONS,
         apply_expansion_to_payload,
@@ -1300,16 +1300,8 @@ def run_wf_expand_scope(args: argparse.Namespace) -> int:
         print("warning: planned_files is empty; nothing to expand", file=sys.stderr)
         return 0
 
-    # Resolve docs_root via the existing analysis context plumbing so this
-    # command honors awf-config path overrides.
     try:
-        ctx = resolve_analysis_context(
-            service="__placeholder__",
-            domain="__placeholder__",
-            deep=False,
-            repo_root=str(repo_root),
-        )
-        docs_root = ctx.docs_root
+        docs_root = Path(resolve_runtime_paths(str(repo_root))["analysis_docs"])
     except Exception as exc:
         print(f"error: cannot resolve docs_root: {exc}", file=sys.stderr)
         return 2
