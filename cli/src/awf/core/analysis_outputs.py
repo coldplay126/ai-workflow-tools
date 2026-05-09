@@ -1,14 +1,26 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from awf.core.analysis_state import get_required_output_files
 from awf.core.config import AnalysisContext
+from awf.core.markdown_frontmatter import (
+    read_markdown_body,
+    render_markdown_frontmatter,
+)
 
 
 FILE_MARKER_RE = re.compile(r"^===FILE:\s*(?P<name>[^=]+?)===\s*$", re.MULTILINE)
+AI_CONTEXT_MARKDOWN_SCHEMA = "ai_context_markdown_v1"
+AI_CONTEXT_MARKDOWN_TITLES = {
+    "data-model.md": "Data model",
+    "domain-overview.md": "Domain overview",
+    "external-integration.md": "External integration",
+    "ANALYSIS_REPORT.md": "Analysis report",
+}
 
 
 def parse_stage2_output(raw: str) -> dict[str, str]:
@@ -43,6 +55,7 @@ def write_stage2_outputs(context: AnalysisContext, raw: str) -> list[Path]:
         content = parsed.get(file_name)
         if content is None:
             continue
+        content = _apply_ai_context_frontmatter(context, file_name, content)
         final_path = context.ai_context_dir / file_name
         tmp_path = tmp_dir / f"{file_name}.staging"
         tmp_path.write_text(content, encoding="utf-8")
@@ -108,7 +121,7 @@ def generate_analysis_report(context: AnalysisContext, state: dict) -> Path | No
         ext_path = ai_dir / "external-integration.md"
 
         if overview_path.exists():
-            overview_text = overview_path.read_text(encoding="utf-8")
+            overview_text = read_markdown_body(overview_path)
             debt_section = _extract_section(overview_text, "알려진 이슈", "기술 부채")
             if debt_section:
                 sections.append("## 알려진 이슈 / 기술 부채\n")
@@ -116,7 +129,7 @@ def generate_analysis_report(context: AnalysisContext, state: dict) -> Path | No
                 sections.append("")
 
         if ext_path.exists():
-            ext_text = ext_path.read_text(encoding="utf-8")
+            ext_text = read_markdown_body(ext_path)
             env_section = _extract_section(ext_text, "환경변수")
             if env_section:
                 sections.append("## 환경변수\n")
@@ -141,6 +154,7 @@ def generate_analysis_report(context: AnalysisContext, state: dict) -> Path | No
 
     report_text = "\n".join(sections) + "\n"
     report_path = ai_dir / "ANALYSIS_REPORT.md"
+    report_text = _apply_ai_context_frontmatter(context, report_path.name, report_text)
     report_path.write_text(report_text, encoding="utf-8")
     return report_path
 
@@ -173,4 +187,36 @@ def analyze_stage2_output(raw: str, analysis_mode: str = "document") -> dict[str
         "missing_files": missing,
         "extra_files": extra,
         "has_required_set": not missing,
+    }
+
+
+def _apply_ai_context_frontmatter(
+    context: AnalysisContext,
+    file_name: str,
+    content: str,
+) -> str:
+    """Stamp deterministic provenance on markdown .ai-context outputs."""
+    if file_name not in AI_CONTEXT_MARKDOWN_TITLES:
+        return content
+    return render_markdown_frontmatter(
+        _build_ai_context_frontmatter(context, file_name),
+        content,
+    )
+
+
+def _build_ai_context_frontmatter(
+    context: AnalysisContext,
+    file_name: str,
+) -> dict[str, Any]:
+    return {
+        "title": AI_CONTEXT_MARKDOWN_TITLES[file_name],
+        "schema": AI_CONTEXT_MARKDOWN_SCHEMA,
+        "last_compiled_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "service": context.service,
+        "domain": context.domain,
+        "analysis_mode": getattr(context, "analysis_mode", "document"),
+        "depth": context.mode,
+        "source_state": ".analysis-state.json",
+        "source_hashes": ".tmp/hashes.json",
+        "related": [],
     }
