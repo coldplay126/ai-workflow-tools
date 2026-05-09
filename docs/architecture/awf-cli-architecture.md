@@ -204,8 +204,8 @@ command = "claude"
 flags = ["--print", "--bare"]
 
 [paths]
-analysis_docs = "${AWF_DOCS_ROOT}"
-awf_github = "${AWF_GITHUB_ROOT}"
+analysis_docs = "~/Documents/GitHub/analysis-docs"
+awf_github = "~/Documents/GitHub"
 
 [analysis]
 default_mode = "standard"    # standard | deep
@@ -218,6 +218,11 @@ type = "stdio"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "${AWF_DOCS_ROOT}"]
 ```
+
+`[paths]` override는 `~`를 확장한 명시 경로로 해석한다. 환경변수 기반 경로를 쓰려면
+`[paths]` 항목을 생략하고 셸 환경에서 `AWF_DOCS_ROOT` / `AWF_GITHUB_ROOT`를
+설정한다. MCP `command` / `args`는 환경변수 expansion을 거치므로
+`${AWF_DOCS_ROOT}` 같은 placeholder를 사용할 수 있다.
 
 Config loader 구현:
 ```python

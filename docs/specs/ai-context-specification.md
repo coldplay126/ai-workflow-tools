@@ -476,7 +476,7 @@ Secondary evaluator(read-only 권한)로 4개 신규 파일과 기존 딥다이�
 
 ```
 AWF_DOCS_ROOT     = analysis-docs 레포 루트 (3-tier fallback: 환경변수 → ../analysis-docs → ~/Documents/GitHub/analysis-docs)
-AWF_GITHUB_ROOT   = GitHub 레포 부모 디렉토리 (3-tier fallback: 환경변수 → ../ → ~/Documents/GitHub)
+AWF_GITHUB_ROOT   = GitHub 레포 부모 디렉토리 (fallback: 환경변수 → 현재 repo의 부모 디렉토리)
 ```
 
 ### 9.2 .ai-context 출력 위치
@@ -495,14 +495,14 @@ ${AWF_DOCS_ROOT}/{service}/{domain}/.ai-context/
   "service_map": {
     "sample-api": "${AWF_GITHUB_ROOT}/sample-api",
     "sample-server": "${AWF_GITHUB_ROOT}/sample-server",
-    "sample-api": "${AWF_GITHUB_ROOT}/sample-api"
+    "sample-web": "${AWF_GITHUB_ROOT}/sample-web"
   },
   "domain_definitions": {
     "quest-challenge": {
       "directories": {
         "sample-api": ["src/domain/quest", "src/domain/challenge", "src/domain/trivia", "src/domain/attendance"],
         "sample-server": ["src/quest", "src/challenge"],
-        "sample-api": ["src/routes/quest"]
+        "sample-web": ["src/routes/quest"]
       },
       "related_domains": ["point-system", "notification"],
       "existing_docs": ["16_learning/05_quest-challenge/"]
