@@ -539,6 +539,30 @@ Judge Rules (결정론적):
 **주의**: severity 체계는 `CRITICAL|HIGH|MEDIUM|LOW`로 고정한다.
 `major/minor/info` 같은 별도 체계를 도입하지 않고, 기존 `review.json`, `verify.json`, `codex/AGENTS.md`와 동일하게 유지한다.
 
+### 3.6 Operations data layer
+
+awf 가 내보내는 운영 이벤트(transitive invalidation 요약, scope-check 판정, 향후 dispatch 결과 등)는 `<repo_root>/.awf-operations/` 아래에 프로젝트 단위로 누적된다. service 단위 분석 산출물(`.ai-context/`)과 분리되어 있고 git ignore 대상이다 (운영 텔레메트리는 로컬 누적용).
+
+```
+.awf-operations/
+├── events/<YYYY-MM-DD>.jsonl    # 원본 이벤트 스트림 (불변, append-only)
+├── log.md                        # ## [ts] type | summary 한 줄/이벤트
+├── index.md                      # 자동 재생성되는 wiki 페이지 카탈로그
+└── wiki/
+    ├── operations/<topic>.md     # LLM이 누적 컴파일하는 운영 synthesis 페이지
+    └── concepts/<topic>.md       # 차후: concept 페이지
+```
+
+각 wiki 페이지는 YAML frontmatter(`title` / `last_compiled_at` / `source_runs` / `source_commits` / `confidence` / `related`)를 가지며 `awf wiki lint` 가 orphan / stale / missing-provenance / malformed-frontmatter 를 검출한다. 컨셉은 Karpathy 의 LLM Wiki 패턴(2026-04 gist) — RAG 대신 컴파일된 LLM-friendly markdown 으로 지식을 누적. service 단위 `.ai-context/wiki/` 와 Stage 4.5 자동 컴파일은 별도 PR 에서 도입 예정.
+
+CLI:
+```bash
+awf wiki log              # 시간순 history
+awf wiki events --type stage1_invalidation   # 원본 JSONL 스트림 필터
+awf wiki lint             # orphan/stale/missing-provenance 검출
+awf wiki regenerate-index # wiki/ 변경 후 index.md 갱신
+```
+
 ---
 
 ## 4. 프로젝트 구조

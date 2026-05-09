@@ -26,10 +26,16 @@ from awf.commands.wf import (
     run_wf_scope_check,
     run_wf_status,
 )
+from awf.commands.wiki import (
+    run_wiki_events,
+    run_wiki_lint,
+    run_wiki_log,
+    run_wiki_regenerate_index,
+)
 from awf.core.router import route_natural_language
 
 
-KNOWN_COMMANDS = {"chat", "analyze", "wf", "config", "skills", "mcp", "doctor", "scan", "init", "cmux"}
+KNOWN_COMMANDS = {"chat", "analyze", "wf", "config", "skills", "mcp", "doctor", "scan", "init", "cmux", "wiki"}
 
 
 def _should_skip_execution_confirmation(args: argparse.Namespace) -> bool:
@@ -341,6 +347,48 @@ def build_parser() -> argparse.ArgumentParser:
     cmux_failures_parser.add_argument("--limit", type=int, help="Only show the most recent N failures.")
     cmux_failures_parser.add_argument("--json", action="store_true", help="Print failures as JSON.")
     cmux_failures_parser.set_defaults(handler=run_cmux_failures)
+
+    wiki_parser = subparsers.add_parser(
+        "wiki",
+        help="Operations log + LLM-friendly knowledge wiki under .awf-operations/.",
+    )
+    wiki_subparsers = wiki_parser.add_subparsers(dest="wiki_command", required=True)
+
+    wiki_log_parser = wiki_subparsers.add_parser("log", help="Print the append-only operations log.")
+    wiki_log_parser.add_argument("--repo-root", help="Repository root containing .awf-operations/. Defaults to current directory.")
+    wiki_log_parser.add_argument("--tail", type=int, help="Show only the last N entries.")
+    wiki_log_parser.set_defaults(handler=run_wiki_log)
+
+    wiki_lint_parser = wiki_subparsers.add_parser(
+        "lint",
+        help="Detect orphan/stale/missing-provenance issues across wiki pages.",
+    )
+    wiki_lint_parser.add_argument("--repo-root", help="Repository root containing .awf-operations/. Defaults to current directory.")
+    wiki_lint_parser.add_argument(
+        "--stale-days",
+        type=int,
+        default=30,
+        help="Pages whose last_compiled_at is older than this many days are flagged as stale (default 30).",
+    )
+    wiki_lint_parser.add_argument("--json", action="store_true", help="Emit issues as JSON instead of human-readable text.")
+    wiki_lint_parser.set_defaults(handler=run_wiki_lint)
+
+    wiki_regen_parser = wiki_subparsers.add_parser(
+        "regenerate-index",
+        help="Rebuild index.md from current wiki/ pages.",
+    )
+    wiki_regen_parser.add_argument("--repo-root", help="Repository root containing .awf-operations/. Defaults to current directory.")
+    wiki_regen_parser.set_defaults(handler=run_wiki_regenerate_index)
+
+    wiki_events_parser = wiki_subparsers.add_parser(
+        "events",
+        help="Print recorded operational events from .awf-operations/events/.",
+    )
+    wiki_events_parser.add_argument("--repo-root", help="Repository root containing .awf-operations/. Defaults to current directory.")
+    wiki_events_parser.add_argument("--type", help="Filter by event type (e.g. stage1_invalidation, scope_check).")
+    wiki_events_parser.add_argument("--limit", type=int, help="Show only the last N events.")
+    wiki_events_parser.add_argument("--json", action="store_true", help="Emit one JSON object per line instead of summary.")
+    wiki_events_parser.set_defaults(handler=run_wiki_events)
 
     scan_parser = subparsers.add_parser("scan", help="Auto-discover project structure for analysis config.")
     scan_parser.add_argument("repo_path", nargs="?", help="Path to a single repo to scan.")

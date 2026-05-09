@@ -41,6 +41,10 @@ Stage 1 출력 스키마는 reference 문서를 참조한다.
 
 Stage 1이 추출한 import 정보를 사용해 Layer 4가 `.ai-context/.tmp/import-graph.json`을 갱신한다. 그래프 빌드는 LLM 호출이 없는 결정론적 후처리이며, 다음 실행에서 transitive cache invalidation의 입력으로 쓰인다 — 변경 파일의 exports hash가 바뀌면 reverse-dependents도 stage1 재분석 대상으로 자동 포함된다. 비활성화는 `AWF_DISABLE_TRANSITIVE_INVALIDATION=1` 또는 `analysis-pipeline.json` → `transitive_invalidation.enabled = false`.
 
+### 부수 효과: 운영 텔레메트리 기록
+
+`Stage1GraphInvalidation` 결과는 `<repo_root>/.awf-operations/events/<YYYY-MM-DD>.jsonl` 에 한 줄로 추가되고 동시에 `.awf-operations/log.md` 에 시간순 entry 가 append 된다. 기록 실패는 분석 자체를 막지 않는다 (telemetry 실패가 게이트가 되지 않도록 try/swallow). 누적된 데이터는 over-invalidation 비율 측정 + AST adapter 도입 결정의 근거로 사용된다. 자세한 layout 은 [`docs/architecture/awf-cli-architecture.md` §3.6](../../architecture/awf-cli-architecture.md) 참조.
+
 ---
 
 ## Stage 2: 단위 합성 — Writer/Judge 패턴
