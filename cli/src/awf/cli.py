@@ -27,7 +27,9 @@ from awf.commands.wf import (
     run_wf_status,
 )
 from awf.commands.wiki import (
+    run_wiki_decision,
     run_wiki_events,
+    run_wiki_init,
     run_wiki_lint,
     run_wiki_log,
     run_wiki_regenerate_index,
@@ -353,6 +355,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="Operations log + LLM-friendly knowledge wiki under .awf-operations/.",
     )
     wiki_subparsers = wiki_parser.add_subparsers(dest="wiki_command", required=True)
+
+    wiki_init_parser = wiki_subparsers.add_parser(
+        "init",
+        help="Initialize .awf-operations/ with a profile and starter wiki dirs.",
+    )
+    wiki_init_parser.add_argument("--repo-root", help="Repository root. Defaults to current directory.")
+    wiki_init_parser.add_argument(
+        "--profile",
+        choices=["consumer", "self_improvement"],
+        help="Wiki profile (default: consumer). Determines starter dirs and decision template variant.",
+    )
+    wiki_init_parser.set_defaults(handler=run_wiki_init)
+
+    wiki_decision_parser = wiki_subparsers.add_parser(
+        "decision",
+        help="Create an ADR-style decision page under wiki/decisions/.",
+    )
+    wiki_decision_parser.add_argument("title", help="One-line decision title (used for filename slug).")
+    wiki_decision_parser.add_argument("--repo-root", help="Repository root. Defaults to current directory.")
+    wiki_decision_parser.add_argument(
+        "--profile",
+        choices=["consumer", "self_improvement"],
+        help="Override the recorded profile for this decision template.",
+    )
+    wiki_decision_parser.add_argument(
+        "--from-pr",
+        type=int,
+        metavar="N",
+        help="Prefill context_prs and body excerpt from `gh pr view N`.",
+    )
+    wiki_decision_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing decision page at the same path.",
+    )
+    wiki_decision_parser.set_defaults(handler=run_wiki_decision)
 
     wiki_log_parser = wiki_subparsers.add_parser("log", help="Print the append-only operations log.")
     wiki_log_parser.add_argument("--repo-root", help="Repository root containing .awf-operations/. Defaults to current directory.")

@@ -8,15 +8,23 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from awf.core.wiki import (
+    PROFILE_CONSUMER,
+    PROFILE_SELF_IMPROVEMENT,
     WikiPage,
     append_log_entry,
+    decision_path,
+    decision_template,
     index_path,
     lint,
     log_path,
     read_page,
+    read_profile,
     regenerate_index,
+    slugify,
+    starter_directories,
     wiki_root,
     write_page,
+    write_profile,
 )
 
 
@@ -182,3 +190,76 @@ def test_lint_flags_orphan_when_index_missing_link(tmp_path):
 
 def test_lint_returns_empty_when_no_wiki_dir(tmp_path):
     assert lint(tmp_path) == []
+
+
+# --------------------------------------------------------------------------
+# Profile + slugify + decision template
+# --------------------------------------------------------------------------
+
+
+def test_read_profile_defaults_to_consumer_when_no_marker(tmp_path):
+    assert read_profile(tmp_path) == PROFILE_CONSUMER
+
+
+def test_write_then_read_profile_round_trips(tmp_path):
+    write_profile(tmp_path, PROFILE_SELF_IMPROVEMENT)
+    assert read_profile(tmp_path) == PROFILE_SELF_IMPROVEMENT
+
+
+def test_write_profile_rejects_unknown_value(tmp_path):
+    import pytest
+    with pytest.raises(ValueError, match="unknown wiki profile"):
+        write_profile(tmp_path, "sideways")
+
+
+def test_starter_directories_differs_by_profile():
+    self_dirs = starter_directories(PROFILE_SELF_IMPROVEMENT)
+    consumer_dirs = starter_directories(PROFILE_CONSUMER)
+    # decisions and operations are common; concepts vs services is the split.
+    assert "decisions" in self_dirs and "decisions" in consumer_dirs
+    assert "concepts" in self_dirs and "concepts" not in consumer_dirs
+    assert "services" in consumer_dirs and "services" not in self_dirs
+
+
+def test_slugify_handles_korean_and_punctuation():
+    # Korean is stripped (no transliteration); ASCII portion survives.
+    assert slugify("dispatch lifecycle — 한국어 mixed!") == "dispatch-lifecycle-mixed"
+    assert slugify("Option A vs B") == "option-a-vs-b"
+    assert slugify("---!!!") == "decision"
+
+
+def test_decision_template_self_improvement_has_options_section(tmp_path):
+    page = decision_template(
+        profile=PROFILE_SELF_IMPROVEMENT,
+        title="Use stdlib for cmux bridge",
+        context_prs=["#26"],
+    )
+    assert page.frontmatter["title"] == "Use stdlib for cmux bridge"
+    assert page.frontmatter["status"] == "proposed"
+    assert page.frontmatter["context_prs"] == ["#26"]
+    assert "Options considered" in page.body
+
+
+def test_decision_template_consumer_focuses_on_configuration(tmp_path):
+    page = decision_template(
+        profile=PROFILE_CONSUMER,
+        title="Tune surface_preference for service-x",
+    )
+    assert "Configuration / policy chosen" in page.body
+    assert "Rejected alternatives" in page.body
+
+
+def test_decision_template_appends_pr_body_when_provided():
+    page = decision_template(
+        profile=PROFILE_CONSUMER,
+        title="x",
+        pr_body="Title: foo\nbody text here",
+    )
+    assert "Source PR excerpt" in page.body
+    assert "body text here" in page.body
+
+
+def test_decision_path_uses_date_and_slug(tmp_path):
+    path = decision_path(tmp_path, title="Use stdlib only", date="2026-05-09")
+    assert path.name == "2026-05-09-use-stdlib-only.md"
+    assert path.parent == wiki_root(tmp_path) / "decisions"

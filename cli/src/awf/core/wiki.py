@@ -45,6 +45,10 @@ from awf.core.operational_metrics import (
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n(.*)$", re.DOTALL)
 STALE_DAYS = 30
+PROFILE_MARKER = ".profile"
+PROFILE_CONSUMER = "consumer"
+PROFILE_SELF_IMPROVEMENT = "self_improvement"
+KNOWN_PROFILES = (PROFILE_CONSUMER, PROFILE_SELF_IMPROVEMENT)
 
 
 def wiki_root(repo_root: str | os.PathLike[str]) -> Path:
@@ -325,6 +329,178 @@ def log_event(
         append_log_entry(repo_root, event_type=event_type, summary=summary)
     except OSError:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Profile — local hint stored at .awf-operations/.profile.
+# ---------------------------------------------------------------------------
+
+
+def _profile_marker_path(repo_root: str | os.PathLike[str]) -> Path:
+    return operations_root(repo_root) / PROFILE_MARKER
+
+
+def read_profile(repo_root: str | os.PathLike[str]) -> str:
+    """Return the profile recorded for this repo, or the default ``consumer``.
+
+    The marker is a single-line file written by ``awf wiki init``. We don't
+    fall back to ``.awf.toml`` because the storage layer otherwise keeps
+    everything self-contained under ``.awf-operations/``; users who want a
+    committed, machine-portable profile can wire one via ``--profile`` on
+    each wiki command.
+    """
+    marker = _profile_marker_path(repo_root)
+    if not marker.exists():
+        return PROFILE_CONSUMER
+    try:
+        value = marker.read_text(encoding="utf-8").strip()
+    except OSError:
+        return PROFILE_CONSUMER
+    return value if value in KNOWN_PROFILES else PROFILE_CONSUMER
+
+
+def write_profile(repo_root: str | os.PathLike[str], profile: str) -> Path:
+    if profile not in KNOWN_PROFILES:
+        raise ValueError(
+            f"unknown wiki profile {profile!r}; expected one of {KNOWN_PROFILES}"
+        )
+    marker = _profile_marker_path(repo_root)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(profile + "\n", encoding="utf-8")
+    return marker
+
+
+def slugify(text: str, *, max_len: int = 60) -> str:
+    """Filesystem-safe slug: ASCII letters/digits/hyphen only.
+
+    Korean and other multi-byte input is normalized by stripping rather
+    than transliterating to keep the implementation dependency-free.
+    Falls back to ``decision`` when the input has no usable characters.
+    """
+    cleaned = re.sub(r"[^A-Za-z0-9\s-]+", "", text)
+    cleaned = re.sub(r"\s+", "-", cleaned).strip("-").lower()
+    return (cleaned[:max_len].rstrip("-") or "decision")
+
+
+def decision_template(
+    *,
+    profile: str,
+    title: str,
+    context_prs: list[str] | None = None,
+    pr_body: str | None = None,
+) -> WikiPage:
+    """Build a WikiPage with an ADR-style template suited to ``profile``.
+
+    Self-improvement variant frames the page around "Option A vs B"
+    architectural choices in awf itself; the consumer variant frames it
+    around configuration tuning + rollout decisions in a project that
+    *uses* awf. Both share the same frontmatter schema so lint and
+    downstream compile work identically.
+    """
+    today = datetime.now(timezone.utc).date().isoformat()
+    fm: dict[str, Any] = {
+        "title": title,
+        "date": today,
+        "status": "proposed",
+        "context_prs": context_prs or [],
+        "last_compiled_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if profile == PROFILE_SELF_IMPROVEMENT:
+        body = _SELF_IMPROVEMENT_DECISION_BODY
+    else:
+        body = _CONSUMER_DECISION_BODY
+    if pr_body:
+        body = body + "\n\n## Source PR excerpt\n\n" + pr_body.strip() + "\n"
+    return WikiPage(frontmatter=fm, body=body)
+
+
+_SELF_IMPROVEMENT_DECISION_BODY = """\
+# Decision
+
+(One-sentence statement of what was decided.)
+
+## Context
+
+What invariant or pressure forced this decision? Cite code paths or
+prior PRs.
+
+## Options considered
+
+- **Option A — …**: pros / cons.
+- **Option B — …**: pros / cons.
+- (Add more if relevant.)
+
+## Decision rationale
+
+Why the chosen option wins given the constraints. Reference benchmarks
+or design notes that future readers will need.
+
+## Consequences
+
+- **Now**: behavior change observable in next release.
+- **Locks-in**: future PRs that rely on this choice.
+- **Revisit when**: signal that would invalidate this decision (e.g.,
+  new metric exceeds threshold, user demand for the rejected option).
+"""
+
+_CONSUMER_DECISION_BODY = """\
+# Decision
+
+(One-sentence statement of what was decided for this project's use of awf.)
+
+## Context
+
+What problem in the project triggered this? What awf knob or workflow
+is involved?
+
+## Configuration / policy chosen
+
+The concrete change — config snippet, command flag, or workflow rule.
+
+## Rejected alternatives
+
+- **Alternative A — …**: why not.
+- **Alternative B — …**: why not.
+
+## Rollout
+
+How this lands (PR, deployment, comms).
+
+## Revisit when
+
+Conditions that would prompt reconsidering — e.g., service growth, new
+awf release, change in team size or risk tolerance.
+"""
+
+
+def decision_path(
+    repo_root: str | os.PathLike[str],
+    *,
+    title: str,
+    date: str | None = None,
+) -> Path:
+    """Compute the on-disk path for a decision page.
+
+    Filename pattern is ``<YYYY-MM-DD>-<slug>.md`` so chronological order
+    matches lexical order — convenient for ``ls``, ``grep``, and the
+    auto-generated index.
+    """
+    today = date or datetime.now(timezone.utc).date().isoformat()
+    slug = slugify(title)
+    return wiki_root(repo_root) / "decisions" / f"{today}-{slug}.md"
+
+
+def starter_directories(profile: str) -> list[str]:
+    """Return the wiki/ subdirectories to seed for a given profile.
+
+    The starter dirs differ in their conceptual focus, not their schema —
+    every directory still holds the same WikiPage shape with provenance
+    frontmatter.
+    """
+    common = ["decisions", "operations"]
+    if profile == PROFILE_SELF_IMPROVEMENT:
+        return common + ["concepts"]
+    return common + ["services"]
 
 
 def event_summary_lines(events: Iterable[dict[str, Any]]) -> list[str]:

@@ -8,6 +8,47 @@ from typing import Any
 from awf.core.agent_runner import AgentResult, MultiAgentResult, run_agent
 
 
+def _record_dispatch_complete_safe(
+    cwd: str,
+    *,
+    backend: str,
+    strategy: str,
+    mode: str,
+    worker_count: int,
+    agents: list,
+    started_at: float,
+) -> None:
+    """Persist a dispatch_complete summary keyed off ``cwd`` (project root).
+
+    Failures are swallowed: telemetry must not block multi-agent flows.
+    """
+    try:
+        from awf.core.operational_metrics import record_event
+        from awf.core.wiki import log_event
+
+        elapsed = time.monotonic() - started_at
+        success_count = sum(1 for a in agents if getattr(a, "ok", False))
+        timed_out = sum(1 for a in agents if getattr(a, "timed_out", False))
+        payload = {
+            "backend": backend,
+            "strategy": strategy,
+            "mode": mode,
+            "worker_count": worker_count,
+            "success_count": success_count,
+            "timed_out_count": timed_out,
+            "total_seconds": round(elapsed, 2),
+        }
+        record_event(cwd, "dispatch_complete", payload)
+        log_event(
+            cwd,
+            "dispatch_complete",
+            f"mode={mode} backend={backend} strategy={strategy} "
+            f"workers={worker_count} success={success_count} elapsed={elapsed:.1f}s",
+        )
+    except Exception as exc:
+        print(f"warning: dispatch_complete record failed: {exc}", file=sys.stderr)
+
+
 # Only these prefixes are shown — everything else is hidden
 _SHOW_PREFIXES = (
     "openai codex", "codex-cli",
@@ -809,7 +850,17 @@ def _run_cross(
         file=sys.stderr,
     )
 
+    _cross_started_at = time.monotonic()
     agents: list[AgentResult] = list(dispatch.run(specs, cwd=cwd, strategy="parallel"))
+    _record_dispatch_complete_safe(
+        cwd,
+        backend=dispatch.name,
+        strategy="parallel",
+        mode="cross",
+        worker_count=len(specs),
+        agents=agents,
+        started_at=_cross_started_at,
+    )
     for result in agents:
         if sys.stderr.isatty():
             sys.stderr.write("\r" + " " * 100 + "\r")
@@ -993,6 +1044,7 @@ def _run_critical(
         file=sys.stderr,
     )
 
+    _critical_started_at = time.monotonic()
     agents = list(
         dispatch.run_chained(
             [
@@ -1002,6 +1054,15 @@ def _run_critical(
             ],
             cwd=cwd,
         )
+    )
+    _record_dispatch_complete_safe(
+        cwd,
+        backend=dispatch.name,
+        strategy="chained",
+        mode="critical",
+        worker_count=3,
+        agents=agents,
+        started_at=_critical_started_at,
     )
 
     _flush_prior_summaries(agents)

@@ -6,7 +6,13 @@ build/
 dist/
 .workflow/
 .agent/
-.awf-operations/
+# .awf-operations/ holds operational telemetry + LLM-maintained wiki pages.
+# Events, log, and the auto-synthesized operations/ subtree stay local;
+# decisions/ and concepts/ are first-class committed artifacts.
+.awf-operations/events/
+.awf-operations/log.md
+.awf-operations/.profile
+.awf-operations/wiki/operations/
 .idea/
 .awf.toml
 __pycache__/

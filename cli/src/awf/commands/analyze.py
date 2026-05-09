@@ -76,6 +76,42 @@ def _accumulate_knowledge_safe(context) -> None:
         print(f"warning: knowledge accumulation failed: {exc}", file=sys.stderr)
 
 
+def _record_analysis_complete_safe(
+    context, *, started_at: float | None, mode: str | None = None
+) -> None:
+    """Persist an analysis_complete summary to .awf-operations/.
+
+    Failures are swallowed so telemetry can never block completion.
+    """
+    try:
+        import time as _time
+        from awf.core.operational_metrics import record_event
+        from awf.core.wiki import log_event
+
+        payload: dict = {
+            "service": getattr(context, "service", None),
+            "domain": getattr(context, "domain", None),
+            "mode": mode or getattr(context, "mode", None),
+        }
+        if started_at is not None:
+            elapsed = _time.monotonic() - started_at
+            payload["total_seconds"] = round(elapsed, 2)
+        record_event(context.repo_root, "analysis_complete", payload)
+        elapsed_part = (
+            f" elapsed={payload['total_seconds']}s"
+            if "total_seconds" in payload
+            else ""
+        )
+        log_event(
+            context.repo_root,
+            "analysis_complete",
+            f"{payload['service']}/{payload['domain']} mode={payload['mode']}"
+            f"{elapsed_part}",
+        )
+    except Exception as exc:
+        print(f"warning: analysis_complete record failed: {exc}", file=sys.stderr)
+
+
 def _record_stage1_invalidation_safe(
     context, invalidation, *, transitive_enabled: bool
 ) -> None:
@@ -253,6 +289,9 @@ def _resume_mode_label(resume: dict) -> str:
 
 
 def run_analyze(args: argparse.Namespace) -> int:
+    import time as _time
+    _analysis_started_at = _time.monotonic()
+
     # --check mode: drift detection across all analyzed units
     if getattr(args, "check", False):
         return _run_drift_check(args)
@@ -385,6 +424,9 @@ def run_analyze(args: argparse.Namespace) -> int:
             print(f"output_status: {finalized.get('layers', {}).get('output', {}).get('status')}")
             if finalized.get("layers", {}).get("output", {}).get("status") == "completed":
                 _accumulate_knowledge_safe(context)
+                _record_analysis_complete_safe(
+                    context, started_at=_analysis_started_at, mode="resume"
+                )
                 return 0
 
     artifact_manager = ArtifactManager()
@@ -1198,6 +1240,7 @@ def run_analyze(args: argparse.Namespace) -> int:
         if report_path:
             print(f"analysis_report: {report_path}")
         _accumulate_knowledge_safe(context)
+        _record_analysis_complete_safe(context, started_at=_analysis_started_at)
         if not non_interactive:
             print("next_step: review the generated .ai-context files; related-domain reference expansion is now applied automatically when configured")
     elif result.returncode == 124:

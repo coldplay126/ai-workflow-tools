@@ -557,11 +557,27 @@ awf 가 내보내는 운영 이벤트(transitive invalidation 요약, scope-chec
 
 CLI:
 ```bash
-awf wiki log              # 시간순 history
-awf wiki events --type stage1_invalidation   # 원본 JSONL 스트림 필터
-awf wiki lint             # orphan/stale/missing-provenance 검출
-awf wiki regenerate-index # wiki/ 변경 후 index.md 갱신
+awf wiki init --profile self_improvement|consumer  # starter dirs + .profile marker
+awf wiki decision "<title>" [--from-pr N]         # ADR-style page under wiki/decisions/
+awf wiki log                                       # 시간순 history
+awf wiki events --type stage1_invalidation         # 원본 JSONL 스트림 필터
+awf wiki lint                                      # orphan/stale/missing-provenance 검출
+awf wiki regenerate-index                          # wiki/ 변경 후 index.md 갱신
 ```
+
+**Profile 두 가지** — 같은 storage 위에서 starter set 과 decision 템플릿 variant 만 다름:
+- `self_improvement`: awf 자체 개선용 (개념: dispatch architecture, transitive invalidation 매커니즘 등). starter dirs: `decisions/ concepts/ operations/`.
+- `consumer` (기본): awf 를 사용하는 프로젝트용 (개념: per-service domain summary, awf config 튜닝 결정). starter dirs: `decisions/ services/ operations/`.
+
+Profile 선택은 `.awf-operations/.profile` 한 줄 marker 에 저장되며, 모든 wiki 명령에 `--profile` 플래그로 1회 override 가능. `awf wiki init` 이 awf 자체 레포 같은 환경(`cli/pyproject.toml::name == "awf-cli"`)에선 `self_improvement` 추천 hint 만 표시 — auto-detect 는 안 한다 (false-positive 회피).
+
+**Events** — 현재 4 종이 자동 기록된다:
+- `stage1_invalidation`: `awf analyze` 의 import-graph transitive invalidation 결과 카운트
+- `scope_check`: `awf wf scope-check` 의 위반/계획/변경 카운트
+- `analysis_complete`: `awf analyze` 성공 종료 시 (service/domain/mode/total_seconds)
+- `dispatch_complete`: cross/critical 끝 시 (backend/strategy/worker_count/success_count/total_seconds)
+
+**Gitignore 분리**: `.awf-operations/events/`, `log.md`, `.profile`, `wiki/operations/` 는 ignore. `wiki/decisions/`, `wiki/concepts/`, `wiki/services/`, `index.md` 는 commit 대상 — ADR 와 LLM 합성 페이지는 PR 에 박혀야 협업이 된다.
 
 ---
 
