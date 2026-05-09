@@ -246,6 +246,8 @@ Agent Card의 `capabilities.dual_strategy`로 실행 전략 결정:
 
 양쪽 LLM이 독립적으로 평가 후 결과 병합. generic multi-agent의 `#cross` 패턴과 동일.
 
+> **Phase 4 자동 승격 (PR #30)**: `awf wf next` 의 `--mode` 가 미지정인 경우, review/verify phase 는 자동으로 `cross` 모드로 승격된다. 명시적 `--mode solo` 가 opt-out, `provider-config.json::wf.dual_strategy_phases` 로 비활성화 가능 (빈 리스트). 자동 승격 시 `.awf-operations/events/<date>.jsonl` 에 `dual_strategy_engaged` 이벤트가 기록된다.
+
 1. **Primary**: Step 5A와 동일하게 인라인 실행. 단, SKILL.md의 Provider Dispatch 단계(Step 3.5/4.5)는 건너뜀.
 2. **Secondary**: provider-config의 secondary 프로바이더로 Task Message 생성 + 디스패치 (Step 5B).
 3. **Merge**: Primary와 Secondary 결과를 ID 기준으로 매칭:

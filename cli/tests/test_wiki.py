@@ -155,6 +155,21 @@ def test_lint_flags_missing_provenance(tmp_path):
     assert "missing_provenance" in codes
 
 
+def test_lint_accepts_context_prs_as_provenance(tmp_path):
+    # Decision pages reference PRs via context_prs even before the PR is
+    # merged; the linter must treat that as valid provenance so authoring
+    # an ADR for an open PR doesn't trip the gate.
+    _make_page(
+        tmp_path,
+        "decisions/with-pr-only.md",
+        {"title": "ADR with only PR ref", "context_prs": ["#30"]},
+    )
+    regenerate_index(tmp_path)
+    issues = lint(tmp_path)
+    codes = {i.code for i in issues}
+    assert "missing_provenance" not in codes
+
+
 def test_lint_flags_stale(tmp_path):
     old_stamp = (datetime.now(timezone.utc) - timedelta(days=120)).isoformat()
     _make_page(

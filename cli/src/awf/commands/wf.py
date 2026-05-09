@@ -722,8 +722,17 @@ def run_wf_next(args: argparse.Namespace) -> int:
         print("error: no supported provider available for wf next.", file=sys.stderr)
         return 2
 
-    # Multi-agent execution for non-solo modes
-    exec_mode = getattr(args, "mode", None)
+    # Multi-agent execution for non-solo modes. Phase 4: auto-promote
+    # solo → cross for review/verify when the user did not pass --mode,
+    # because synthesize_workflow_multi_provider_results is already tuned
+    # to combine those two phases' results meaningfully.
+    user_mode = getattr(args, "mode", None)
+    exec_mode, _dual_strategy_promoted = _maybe_auto_promote_dual_strategy(
+        user_mode=user_mode,
+        phase=phase,
+        provider_config=provider_config,
+        repo_root=repo_root,
+    )
     if exec_mode and exec_mode != "solo" and last_returncode == 0:
         from awf.core.multi_agent import run_phase, auto_promote
         from awf.core.team_config import get_phase_pattern
@@ -989,6 +998,73 @@ _PHASE_SYNTHESIS_PATTERNS: dict[str, str] = {
     "approve": "parallel_evaluate",  # HIL phase — secondary provides recommendation
     "done": "parallel_evaluate",
 }
+
+# Phases for which `parallel_evaluate` should engage automatically when the
+# user did not pass `--mode`. The synthesis policy in
+# ``synthesize_workflow_multi_provider_results`` is already tuned for these
+# phases (review = coverage-based selection, verify = compliance-based), so
+# auto-promoting solo → cross gives the gate the dual-evaluator quality
+# without forcing every project to remember the flag.
+_DEFAULT_DUAL_STRATEGY_PHASES: tuple[str, ...] = ("review", "verify")
+
+
+def _resolve_dual_strategy_phases(provider_config: dict) -> list[str]:
+    """Read ``wf.dual_strategy_phases`` from provider-config.json.
+
+    Falls back to ``_DEFAULT_DUAL_STRATEGY_PHASES`` when the section is
+    missing or malformed. Setting an explicit empty list disables the
+    auto-promotion entirely (opt-out at the project level).
+    """
+    section = (provider_config or {}).get("wf", {})
+    if not isinstance(section, dict):
+        return list(_DEFAULT_DUAL_STRATEGY_PHASES)
+    raw = section.get("dual_strategy_phases", _DEFAULT_DUAL_STRATEGY_PHASES)
+    if not isinstance(raw, list):
+        return list(_DEFAULT_DUAL_STRATEGY_PHASES)
+    return [str(item).strip() for item in raw if isinstance(item, str) and item.strip()]
+
+
+def _maybe_auto_promote_dual_strategy(
+    *,
+    user_mode: str | None,
+    phase: str,
+    provider_config: dict,
+    repo_root: str,
+) -> tuple[str | None, bool]:
+    """Decide whether to auto-promote ``solo`` → ``cross`` for this phase.
+
+    Returns a ``(promoted_mode, was_promoted)`` tuple. If the user passed
+    ``--mode`` explicitly we never touch their choice — including
+    ``--mode solo`` which is the documented opt-out path.
+    """
+    if user_mode is not None:
+        return user_mode, False
+    phases = _resolve_dual_strategy_phases(provider_config)
+    if phase not in phases:
+        return user_mode, False
+    print(
+        f"dual_strategy_auto_promote: {phase} phase → cross "
+        f"(pass --mode solo to opt out)",
+        file=sys.stderr,
+    )
+    try:
+        from awf.core.operational_metrics import record_event
+        from awf.core.wiki import log_event
+
+        record_event(
+            repo_root,
+            "dual_strategy_engaged",
+            {"phase": phase, "promoted_from": "solo", "promoted_to": "cross"},
+        )
+        log_event(
+            repo_root,
+            "dual_strategy_engaged",
+            f"{phase}: solo → cross",
+        )
+    except Exception:
+        # Telemetry is best-effort: never block phase execution.
+        pass
+    return "cross", True
 
 
 def _select_synthesis_pattern(phase: str, exec_mode: str) -> str:
