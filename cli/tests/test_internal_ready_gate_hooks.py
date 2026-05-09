@@ -46,6 +46,45 @@ def test_analyze_skips_ready_gate_for_dry_run(monkeypatch) -> None:
     assert called is False
 
 
+def test_analyze_status_skips_ready_gate(monkeypatch, capsys) -> None:
+    called = False
+
+    def fake_gate(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return 20
+
+    monkeypatch.setattr(analyze_command, "enforce_ready_gate", fake_gate)
+    monkeypatch.setattr(
+        analyze_command, "resolve_analysis_context", lambda **_kwargs: object()
+    )
+    monkeypatch.setattr(
+        analyze_command, "load_analysis_state", lambda _context: {"status": "ok"}
+    )
+    monkeypatch.setattr(
+        analyze_command, "summarize_analysis_state", lambda _state: "status summary"
+    )
+
+    rc = analyze_command.run_analyze(argparse.Namespace(
+        check=False,
+        catalog=False,
+        cycles=False,
+        all=False,
+        service="api",
+        domain="orders",
+        status=True,
+        repo_root=".",
+        docs_root=None,
+        github_root=None,
+        json=False,
+    ))
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert out == "status summary\n"
+    assert called is False
+
+
 def test_wf_init_enforces_ready_gate(monkeypatch) -> None:
     monkeypatch.setattr(wf_command, "enforce_ready_gate", lambda *args, **kwargs: 20)
 

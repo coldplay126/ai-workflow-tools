@@ -373,6 +373,26 @@ def run_analyze(args: argparse.Namespace) -> int:
         print("error: domain is required (or use --all)", file=sys.stderr)
         return 2
 
+    if bool(getattr(args, "status", False)):
+        try:
+            context = resolve_analysis_context(
+                service=args.service,
+                domain=args.domain,
+                deep=False,
+                repo_root=args.repo_root,
+                docs_root=args.docs_root,
+                github_root=args.github_root,
+            )
+            state = load_analysis_state(context)
+        except Exception as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if getattr(args, "json", False):
+            print(json.dumps(state, ensure_ascii=False, indent=2))
+        else:
+            print(summarize_analysis_state(state))
+        return 0
+
     if not getattr(args, "dry_run", False):
         gate_rc = enforce_ready_gate(
             args,
@@ -409,18 +429,6 @@ def run_analyze(args: argparse.Namespace) -> int:
     pipeline_config = _load_pipeline_config(context)
     if context.related_domains or pipeline_config.get("stage3_force", False):
         context.mode = "deep"
-
-    if bool(getattr(args, "status", False)):
-        try:
-            state = load_analysis_state(context)
-        except Exception as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 2
-        if getattr(args, "json", False):
-            print(json.dumps(state, ensure_ascii=False, indent=2))
-        else:
-            print(summarize_analysis_state(state))
-        return 0
 
     _default_provider = args.provider or config.provider_name()
     prompt = build_prompt(context, execution_mode=execution_mode, native=(_default_provider == "claude-code"))
