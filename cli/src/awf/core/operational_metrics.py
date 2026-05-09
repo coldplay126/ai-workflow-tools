@@ -115,6 +115,47 @@ def record_stage1_invalidation(
     return record_event(repo_root, "stage1_invalidation", payload)
 
 
+def _maybe_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def record_analysis_complete(
+    repo_root: str | os.PathLike[str],
+    *,
+    service: str | None = None,
+    domain: str | None = None,
+    mode: str | None = None,
+    total_seconds: float | None = None,
+    source_file_count: int | None = None,
+    bundle_line_count: int | None = None,
+    bundle_token_estimate: int | None = None,
+    output_file_count: int | None = None,
+) -> Path:
+    """Persist an ``analysis_complete`` summary with bundle/output counts."""
+    payload: dict[str, Any] = {
+        "service": service,
+        "domain": domain,
+        "mode": mode,
+    }
+    if total_seconds is not None:
+        payload["total_seconds"] = round(float(total_seconds), 2)
+    for key, value in {
+        "source_file_count": source_file_count,
+        "bundle_line_count": bundle_line_count,
+        "bundle_token_estimate": bundle_token_estimate,
+        "output_file_count": output_file_count,
+    }.items():
+        int_value = _maybe_int(value)
+        if int_value is not None:
+            payload[key] = int_value
+    return record_event(repo_root, "analysis_complete", payload)
+
+
 def record_scope_check(
     repo_root: str | os.PathLike[str],
     result,  # ScopeCheckResult; not imported to avoid cycles

@@ -24,6 +24,7 @@ from awf.core.judge import cross_secondary_candidates, explain_judge_reasons, sy
 from awf.core.analysis_state import (
     ensure_ai_context_dirs,
     finalize_analysis_run,
+    get_required_output_files,
     load_analysis_state,
     mark_stage3_skipped,
     mark_stage3_started,
@@ -76,6 +77,43 @@ def _accumulate_knowledge_safe(context) -> None:
         print(f"warning: knowledge accumulation failed: {exc}", file=sys.stderr)
 
 
+def _int_or_none(value) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _count_analysis_output_files(context) -> int:
+    names = list(get_required_output_files(getattr(context, "analysis_mode", "document")))
+    if "ANALYSIS_REPORT.md" not in names:
+        names.append("ANALYSIS_REPORT.md")
+    return sum(1 for name in names if (context.ai_context_dir / name).is_file())
+
+
+def _analysis_complete_metrics(context) -> dict[str, int]:
+    state = load_analysis_state(context)
+    bundle = state.get("layers", {}).get("bundle", {}) or {}
+    sync_bundle = (
+        (state.get("eventSync", {}) or {}).get("analysisBundle", {}) or {}
+    )
+    metrics: dict[str, int] = {}
+    for key, primary, fallback in [
+        ("source_file_count", sync_bundle.get("sourceFileCount"), bundle.get("fileCount")),
+        ("bundle_line_count", sync_bundle.get("lineCount"), bundle.get("lineCount")),
+        ("bundle_token_estimate", sync_bundle.get("tokenEstimate"), bundle.get("tokenEstimate")),
+    ]:
+        value = _int_or_none(primary)
+        if value is None:
+            value = _int_or_none(fallback)
+        if value is not None:
+            metrics[key] = value
+    metrics["output_file_count"] = _count_analysis_output_files(context)
+    return metrics
+
+
 def _record_analysis_complete_safe(
     context, *, started_at: float | None, mode: str | None = None
 ) -> None:
@@ -85,18 +123,32 @@ def _record_analysis_complete_safe(
     """
     try:
         import time as _time
-        from awf.core.operational_metrics import record_event
+        from awf.core.operational_metrics import record_analysis_complete
         from awf.core.wiki import log_event
 
+        total_seconds = None
+        if started_at is not None:
+            total_seconds = _time.monotonic() - started_at
+        metrics = _analysis_complete_metrics(context)
         payload: dict = {
             "service": getattr(context, "service", None),
             "domain": getattr(context, "domain", None),
             "mode": mode or getattr(context, "mode", None),
+            **metrics,
         }
-        if started_at is not None:
-            elapsed = _time.monotonic() - started_at
-            payload["total_seconds"] = round(elapsed, 2)
-        record_event(context.repo_root, "analysis_complete", payload)
+        if total_seconds is not None:
+            payload["total_seconds"] = round(total_seconds, 2)
+        record_analysis_complete(
+            context.repo_root,
+            service=payload["service"],
+            domain=payload["domain"],
+            mode=payload["mode"],
+            total_seconds=total_seconds,
+            source_file_count=metrics.get("source_file_count"),
+            bundle_line_count=metrics.get("bundle_line_count"),
+            bundle_token_estimate=metrics.get("bundle_token_estimate"),
+            output_file_count=metrics.get("output_file_count"),
+        )
         elapsed_part = (
             f" elapsed={payload['total_seconds']}s"
             if "total_seconds" in payload
@@ -661,7 +713,16 @@ def run_analyze(args: argparse.Namespace) -> int:
         event_type=EventType.ARTIFACT_CREATED,
         task_id=analyze_task_id,
         source="cli",
-        data={"path": str(domain_bundle_path), "kind": "analysis_bundle", "producer": "cli", "status": "final", "replaces": None},
+        data={
+            "path": str(domain_bundle_path),
+            "kind": "analysis_bundle",
+            "producer": "cli",
+            "status": "final",
+            "replaces": None,
+            "source_file_count": file_count,
+            "bundle_line_count": bundle_line_count,
+            "bundle_token_estimate": bundle_token_estimate,
+        },
     )
     project_bundle, project_bundle_log = build_project_bundle(context)
     if project_bundle is not None:

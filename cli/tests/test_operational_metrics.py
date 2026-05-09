@@ -13,6 +13,7 @@ from awf.core.operational_metrics import (
     events_dir,
     iter_events,
     operations_root,
+    record_analysis_complete,
     record_event,
     record_scope_check,
     record_stage1_invalidation,
@@ -131,6 +132,31 @@ def test_record_stage1_invalidation_extracts_counts(tmp_path):
     assert p["invalidating_count"] == 1
     assert p["unchanged_count"] == 2
     assert p["deleted_count"] == 1
+
+
+def test_record_analysis_complete_includes_bundle_and_output_counts(tmp_path):
+    record_analysis_complete(
+        tmp_path,
+        service="payments",
+        domain="checkout",
+        mode="standard",
+        total_seconds=1.234,
+        source_file_count=7,
+        bundle_line_count=120,
+        bundle_token_estimate=950,
+        output_file_count=5,
+    )
+    [event] = list(iter_events(tmp_path))
+    assert event["type"] == "analysis_complete"
+    p = event["payload"]
+    assert p["service"] == "payments"
+    assert p["domain"] == "checkout"
+    assert p["mode"] == "standard"
+    assert p["total_seconds"] == 1.23
+    assert p["source_file_count"] == 7
+    assert p["bundle_line_count"] == 120
+    assert p["bundle_token_estimate"] == 950
+    assert p["output_file_count"] == 5
 
 
 @dataclass

@@ -260,8 +260,13 @@ env 우선순위: `1`/`true`/`yes`/`on` (대소문자 무관) → 비활성화. 
 
 ## 13. 운영 텔레메트리
 
-`awf analyze` 호출 시 `stage1_invalidation` 이벤트가 `.awf-operations/events/` 에 누적된다 (페이로드: `direct_count`, `indirect_count`, `invalidating_count`, `unchanged_count`, `deleted_count`, `transitive_enabled`). 추세는 `awf wiki compile` 로 합성된 `wiki/operations/stage1-invalidation.md` 에서 확인할 수 있고, **change density** (`invalidating / (invalidating+unchanged)`) 가 낮으면 regex import extractor → AST adapter 업그레이드의 ROI 신호다. 자세한 정책은 [awf-cli-architecture §3.6](../architecture/awf-cli-architecture.md).
+`awf analyze` 호출 시 운영 이벤트가 `.awf-operations/events/` 에 누적된다.
+
+- `stage1_invalidation`: `direct_count`, `indirect_count`, `invalidating_count`, `unchanged_count`, `deleted_count`, `transitive_enabled`
+- `analysis_complete`: `service`, `domain`, `mode`, `total_seconds`, `source_file_count`, `bundle_line_count`, `bundle_token_estimate`, `output_file_count`
+
+`stage1_invalidation` 추세는 `awf wiki compile` 로 합성된 `wiki/operations/stage1-invalidation.md` 에서 확인할 수 있고, **change density** (`invalidating / (invalidating+unchanged)`) 가 낮으면 regex import extractor → AST adapter 업그레이드의 ROI 신호다. `analysis_complete`는 single-run telemetry로 남기며 compile topic은 만들지 않는다. 자세한 정책은 [awf-cli-architecture §3.6](../architecture/awf-cli-architecture.md).
 
 ### 13. Operational telemetry (English)
 
-Each `awf analyze` invocation appends a `stage1_invalidation` event to `.awf-operations/events/` with direct/indirect/invalidating/unchanged/deleted counts. Aggregate trends are visible in `wiki/operations/stage1-invalidation.md` (compiled by `awf wiki compile`); a low **change density** (`invalidating / (invalidating+unchanged)`) is the empirical signal for upgrading the regex-based import extractor to an AST adapter.
+Each `awf analyze` invocation appends operational events to `.awf-operations/events/`. `stage1_invalidation` carries direct/indirect/invalidating/unchanged/deleted counts, and `analysis_complete` carries service/domain/mode/elapsed time plus source file count, bundle line count, bundle token estimate, and output file count. Aggregate `stage1_invalidation` trends are visible in `wiki/operations/stage1-invalidation.md` (compiled by `awf wiki compile`); a low **change density** (`invalidating / (invalidating+unchanged)`) is the empirical signal for upgrading the regex-based import extractor to an AST adapter. `analysis_complete` remains single-run telemetry and is not compiled into a wiki topic.
