@@ -39,6 +39,32 @@ The Python package is `awf-cli`, and the console entrypoint is `awf`.
 
 See [docs/patterns/analysis-pipeline/03-resume-optimization.md](docs/patterns/analysis-pipeline/03-resume-optimization.md) for the full contract.
 
+### Operations wiki
+
+`awf wiki` keeps a project-scoped knowledge layer under `.awf-operations/`:
+operational events (`stage1_invalidation`, `scope_check`, `dispatch_complete`,
+`dual_strategy_engaged`, `analysis_complete`) stream into JSONL, and
+`awf wiki compile` deterministically synthesizes them into four
+`wiki/operations/<topic>.md` pages — `stage1-invalidation`, `scope-check`,
+`dispatch-performance`, `dual-strategy-promotions`. The compiler is
+stdlib-only (no LLM calls), so output is reproducible and citable from ADRs.
+Decision pages live under `wiki/decisions/` and are committed; raw events,
+`log.md`, and the compiled `operations/` pages are gitignored as local
+telemetry. See [docs/architecture/awf-cli-architecture.md §3.6](docs/architecture/awf-cli-architecture.md) for the full layout.
+
+#### 운영 wiki (한국어 요약)
+
+`awf wiki` 는 `.awf-operations/` 아래 프로젝트 단위 지식 레이어를 관리한다.
+운영 이벤트 5종 (`stage1_invalidation` / `scope_check` / `dispatch_complete` /
+`dual_strategy_engaged` / `analysis_complete`) 이 JSONL 로 누적되고,
+`awf wiki compile` 이 4 개 `wiki/operations/<topic>.md` 페이지
+(`stage1-invalidation` / `scope-check` / `dispatch-performance` /
+`dual-strategy-promotions`) 로 결정적 합성한다. LLM 호출 없는 stdlib-only
+구현이라 결과가 재현 가능하고 ADR evidence 로 인용 가능. ADR (`wiki/decisions/`)
+은 commit 대상, 원본 events / `log.md` / 합성된 `operations/` 페이지는
+gitignore (local 텔레메트리). 자세한 layout 은
+[docs/architecture/awf-cli-architecture.md §3.6](docs/architecture/awf-cli-architecture.md).
+
 ## Tests
 
 ```bash

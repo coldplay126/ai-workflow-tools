@@ -266,7 +266,12 @@ def lint(
             issues.append(LintIssue(page=rel, code="malformed_frontmatter", detail=str(exc)))
             continue
 
-        provenance_keys = ("source_runs", "source_commits", "context_prs")
+        provenance_keys = (
+            "source_runs",
+            "source_commits",
+            "context_prs",
+            "event_window",
+        )
         if not any(page.frontmatter.get(k) for k in provenance_keys):
             issues.append(
                 LintIssue(

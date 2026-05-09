@@ -114,3 +114,18 @@ Gate에서 실패하면 오케스트레이터가 자동으로 적절한 Phase로
 | `/phase-verify` | Phase 5 수동 실행 |
 | `/phase-test` | Phase 6 수동 실행 |
 | `/phase-done` | Phase 7 수동 실행 |
+
+## WF run 후 운영 wiki 컴파일
+
+WF 가 끝나면 `dispatch_complete` / `scope_check` / `dual_strategy_engaged` 이벤트가 `.awf-operations/events/` 에 누적된다. 추세를 확인하려면:
+
+```bash
+awf wiki compile --since 14    # 최근 2주 이벤트로 4개 operations 페이지 갱신
+awf wiki compile --dry-run     # 실제 갱신 없이 어떤 페이지가 어떤 confidence 로 만들어질지 점검
+```
+
+생성된 페이지(`stage1-invalidation` / `scope-check` / `dispatch-performance` / `dual-strategy-promotions`) 는 gitignore 대상이므로 머신 로컬에만 남는다. 자세한 layout 은 [awf-cli-architecture §3.6](../architecture/awf-cli-architecture.md).
+
+### After a WF run (English)
+
+Operational events accumulate under `.awf-operations/events/` after each `awf wf next`. Run `awf wiki compile --since 14` to refresh the four `wiki/operations/<topic>.md` pages from the last two weeks of data, or `awf wiki compile --dry-run` to preview what would be written and at what confidence level. Output stays local (the directory is gitignored).

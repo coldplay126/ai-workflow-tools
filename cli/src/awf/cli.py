@@ -27,6 +27,7 @@ from awf.commands.wf import (
     run_wf_status,
 )
 from awf.commands.wiki import (
+    run_wiki_compile,
     run_wiki_decision,
     run_wiki_events,
     run_wiki_init,
@@ -427,6 +428,42 @@ def build_parser() -> argparse.ArgumentParser:
     wiki_events_parser.add_argument("--limit", type=int, help="Show only the last N events.")
     wiki_events_parser.add_argument("--json", action="store_true", help="Emit one JSON object per line instead of summary.")
     wiki_events_parser.set_defaults(handler=run_wiki_events)
+
+    wiki_compile_parser = wiki_subparsers.add_parser(
+        "compile",
+        help="Synthesize wiki/operations/<topic>.md pages from the event stream.",
+    )
+    wiki_compile_parser.add_argument(
+        "--repo-root",
+        help="Repository root containing .awf-operations/. Defaults to current directory.",
+    )
+    wiki_compile_parser.add_argument(
+        "--since",
+        type=int,
+        default=None,
+        help="Only consider events from the last N days (default 90).",
+    )
+    wiki_compile_parser.add_argument(
+        "--topic",
+        help="Compile only the named topic (e.g. stage1-invalidation, scope-check, "
+        "dispatch-performance, dual-strategy-promotions). Default: all known topics.",
+    )
+    wiki_compile_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Compute pages without writing to disk.",
+    )
+    wiki_compile_parser.add_argument(
+        "--show-body",
+        action="store_true",
+        help="With --dry-run, also print each page body to stdout.",
+    )
+    wiki_compile_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit a JSON summary instead of human-readable text.",
+    )
+    wiki_compile_parser.set_defaults(handler=run_wiki_compile)
 
     scan_parser = subparsers.add_parser("scan", help="Auto-discover project structure for analysis config.")
     scan_parser.add_argument("repo_path", nargs="?", help="Path to a single repo to scan.")

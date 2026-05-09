@@ -553,7 +553,7 @@ awf 가 내보내는 운영 이벤트(transitive invalidation 요약, scope-chec
     └── concepts/<topic>.md       # 차후: concept 페이지
 ```
 
-각 wiki 페이지는 YAML frontmatter(`title` / `last_compiled_at` / `source_runs` / `source_commits` / `confidence` / `related`)를 가지며 `awf wiki lint` 가 orphan / stale / missing-provenance / malformed-frontmatter 를 검출한다. 컨셉은 Karpathy 의 LLM Wiki 패턴(2026-04 gist) — RAG 대신 컴파일된 LLM-friendly markdown 으로 지식을 누적. service 단위 `.ai-context/wiki/` 와 Stage 4.5 자동 컴파일은 별도 PR 에서 도입 예정.
+각 wiki 페이지는 YAML frontmatter(`title` / `last_compiled_at` / `source_runs` / `source_commits` / `confidence` / `related`)를 가지며 `awf wiki lint` 가 orphan / stale / missing-provenance / malformed-frontmatter 를 검출한다. 컨셉은 Karpathy 의 LLM Wiki 패턴(2026-04 gist) — RAG 대신 컴파일된 LLM-friendly markdown 으로 지식을 누적. `wiki/operations/` 페이지는 `awf wiki compile` 이 event 스트림을 결정적으로 합성해 생성한다 (LLM 호출 없음). service 단위 `.ai-context/wiki/` Stage 4.5 자동 컴파일은 추후 별도 PR.
 
 CLI:
 ```bash
@@ -563,6 +563,7 @@ awf wiki log                                       # 시간순 history
 awf wiki events --type stage1_invalidation         # 원본 JSONL 스트림 필터
 awf wiki lint                                      # orphan/stale/missing-provenance 검출
 awf wiki regenerate-index                          # wiki/ 변경 후 index.md 갱신
+awf wiki compile [--since N] [--topic ...] [--dry-run]  # events → operations/<topic>.md 합성
 ```
 
 **Profile 두 가지** — 같은 storage 위에서 starter set 과 decision 템플릿 variant 만 다름:
@@ -579,6 +580,15 @@ Profile 선택은 `.awf-operations/.profile` 한 줄 marker 에 저장되며, �
 - `dual_strategy_engaged`: `awf wf next` 가 review/verify phase 에서 solo→cross 자동 승격 시 (phase/promoted_from/promoted_to)
 
 **Gitignore 분리**: `.awf-operations/events/`, `log.md`, `.profile`, `wiki/operations/` 는 ignore. `wiki/decisions/`, `wiki/concepts/`, `wiki/services/`, `index.md` 는 commit 대상 — ADR 와 LLM 합성 페이지는 PR 에 박혀야 협업이 된다.
+
+**`awf wiki compile`** — `.awf-operations/events/*.jsonl` → `wiki/operations/<topic>.md` 결정적 합성. 정책:
+- LLM 호출 없음 (stdlib only). 합성 결과는 100% 재현 가능하며 ADR 에 evidence 로 인용 가능. LLM 소비는 *reader* 가 페이지를 읽을 때 일어난다.
+- Topic 4종 (event type 1:1 매핑, `analysis_complete` 제외): `stage1-invalidation`, `scope-check`, `dispatch-performance`, `dual-strategy-promotions`.
+- 추가 frontmatter 키: `event_window: [start_date, end_date]`, `event_count: N`, `event_types: [...]`, `metric_method: deterministic_v1`. lint 의 provenance keys 에 `event_window` 추가.
+- Confidence 자동 산정: `high` (≥50 events ∧ ≥7d), `medium` (≥10 ∧ ≥3d), `low` (그 외). `contested` 는 사람이 ADR 에서만 명시.
+- Idempotent overwrite + 자동 `regenerate_index`. 0-event topic 은 페이지 생성 안 함.
+
+**`awf wiki compile` (English)** — Deterministic synthesis from `.awf-operations/events/*.jsonl` to `wiki/operations/<topic>.md`. Stdlib only, no LLM call: results are 100% reproducible and ADR-citable; LLM consumption belongs to a reader opening the page later. Four topics (1:1 with event types, excluding `analysis_complete`): `stage1-invalidation`, `scope-check`, `dispatch-performance`, `dual-strategy-promotions`. Extra frontmatter keys: `event_window`, `event_count`, `event_types`, `metric_method: deterministic_v1`; `event_window` is recognized as provenance by `awf wiki lint`. Confidence is computed (high ≥50 ∧ ≥7d, medium ≥10 ∧ ≥3d, else low; `contested` reserved for human ADR use). Compile is idempotent, auto-regenerates the index, and skips topics with zero events in window.
 
 ---
 
