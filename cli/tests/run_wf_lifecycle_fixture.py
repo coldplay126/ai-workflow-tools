@@ -28,7 +28,7 @@ def _prepare_temp_repo(temp_repo: Path) -> None:
     (wf_dir / "artifacts" / "plan.md").write_text("# Plan\n\n- Implement fixture requirement\n", encoding="utf-8")
     (wf_dir / "artifacts" / "tasks.md").write_text("# Tasks\n\n- [X] T001 Fixture task\n", encoding="utf-8")
     (wf_dir / "artifacts" / "allowed-files.json").write_text(
-        json.dumps({"files": ["docs/awf-cli-architecture.md"]}, indent=2) + "\n",
+        json.dumps({"planned_files": ["docs/awf-cli-architecture.md"]}, indent=2) + "\n",
         encoding="utf-8",
     )
     (wf_dir / "artifacts" / "impl-log.md").write_text("# Implementation Log\n\n- Fixture implementation complete\n", encoding="utf-8")
@@ -112,6 +112,8 @@ def main() -> int:
             "review",
             "--provider",
             "fixture",
+            "--mode",
+            "solo",
             "--auto-apply",
             "--yolo",
             fixture_result=REVIEW_RESULT,
@@ -132,6 +134,8 @@ def main() -> int:
             "verify",
             "--provider",
             "fixture",
+            "--mode",
+            "solo",
             "--auto-apply",
             "--yolo",
             fixture_result=VERIFY_RESULT,

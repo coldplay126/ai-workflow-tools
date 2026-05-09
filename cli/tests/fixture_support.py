@@ -86,7 +86,7 @@ def write_minimal_workflow_artifacts(repo_root: Path) -> None:
     (artifacts / "tasks.md").write_text("# Tasks\n\n- [X] T001 Fixture task [FR-001]\n", encoding="utf-8")
     (artifacts / "test-criteria.md").write_text("# Test Criteria\n\n- ATC-001 [FR-001]\n", encoding="utf-8")
     (artifacts / "allowed-files.json").write_text(
-        json.dumps({"files": ["docs/awf-cli-architecture.md"]}, indent=2) + "\n",
+        json.dumps({"planned_files": ["docs/awf-cli-architecture.md"]}, indent=2) + "\n",
         encoding="utf-8",
     )
     (artifacts / "impl-log.md").write_text("# Implementation Log\n\n- Fixture implementation complete\n", encoding="utf-8")

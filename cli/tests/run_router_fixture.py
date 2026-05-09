@@ -19,6 +19,26 @@ from fixture_support import (
 )
 
 
+def _prepare_ready_scan_fixture(repo_root: Path) -> None:
+    (repo_root / "pyproject.toml").write_text("[project]\nname = 'router-fixture'\n", encoding="utf-8")
+    unit_dir = repo_root / "src" / "orders"
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    (unit_dir / "service.py").write_text(
+        "def handle_order():\n    return {'ok': True}\n",
+        encoding="utf-8",
+    )
+
+
+def _disable_fixture_dual_strategy(repo_root: Path) -> None:
+    provider_config_path = repo_root / ".workflow" / "provider-config.json"
+    provider_config = json.loads(provider_config_path.read_text(encoding="utf-8"))
+    provider_config.setdefault("wf", {})["dual_strategy_phases"] = []
+    provider_config_path.write_text(
+        json.dumps(provider_config, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
 def _run_awf(*args: str, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT / "cli" / "src")
@@ -42,6 +62,7 @@ def main() -> int:
         _run_awf.docs_root = tmp_docs_root
         _run_awf.db_path = db_path
         prepare_workflow_repo(temp_repo, result_file=REVIEW_RESULT)
+        _prepare_ready_scan_fixture(temp_repo)
         write_fixture_project_config(temp_repo, result_file=REVIEW_RESULT, session_db=db_path)
         prepare_analysis_docs_fixture(tmp_docs_root)
         initialized = initialize_workflow_fixture(
@@ -53,6 +74,7 @@ def main() -> int:
             if initialized.stderr:
                 print(initialized.stderr, file=sys.stderr, end="")
             return initialized.returncode
+        _disable_fixture_dual_strategy(temp_repo)
         mark_workflow_prerequisites_passed(temp_repo)
 
         routed_status = _run_awf("workflow", "status", "보여줘")
