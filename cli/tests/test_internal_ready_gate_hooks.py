@@ -93,6 +93,49 @@ def test_wf_init_enforces_ready_gate(monkeypatch) -> None:
     assert rc == 20
 
 
+def test_wf_next_dry_run_writes_no_state_or_prompt(monkeypatch, capsys) -> None:
+    gate_called = False
+
+    def fake_gate(*_args, **_kwargs):
+        nonlocal gate_called
+        gate_called = True
+        return 20
+
+    def fail_write(*_args, **_kwargs):
+        raise AssertionError("dry-run must not write workflow state or prompt files")
+
+    monkeypatch.setattr(wf_command, "enforce_ready_gate", fake_gate)
+    monkeypatch.setattr(wf_command, "load_awf_config", lambda _repo_root: object())
+    monkeypatch.setattr(
+        wf_command, "load_workflow_state", lambda _repo_root: {"phases": {}}
+    )
+    monkeypatch.setattr(
+        wf_command, "load_workflow_provider_config", lambda _repo_root: {}
+    )
+    monkeypatch.setattr(wf_command, "resolve_next_phase", lambda _state, _phase: "plan")
+    monkeypatch.setattr(wf_command, "build_workflow_prompt", lambda *_args: "PROMPT")
+    monkeypatch.setattr(wf_command, "save_workflow_prompt", fail_write)
+    monkeypatch.setattr("awf.core.state.save_workflow_state_snapshot", fail_write)
+
+    rc = wf_command.run_wf_next(argparse.Namespace(
+        repo_root=".",
+        auto_apply=False,
+        dry_run=True,
+        output_format="text",
+        phase=None,
+        provider="fixture",
+        mode=None,
+        print_prompt=False,
+        non_interactive=False,
+    ))
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert gate_called is False
+    assert "prompt_file: (dry-run, not written)" in out
+    assert "PROMPT" in out
+
+
 def test_wiki_decision_enforces_ready_gate(monkeypatch) -> None:
     monkeypatch.setattr(wiki_command, "enforce_ready_gate", lambda *args, **kwargs: 20)
 
