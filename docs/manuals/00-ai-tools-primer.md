@@ -85,5 +85,5 @@ awf은 **파일 기반 워크플로우**를 사용합니다. AI 도구에 의존
 
 ## 5. 다음 단계
 
-- [00-awf-concepts.md](00-awf-concepts.md) — AI workflow 개념 학습
+- [07-glossary.md](07-glossary.md) — AI workflow 용어 학습
 - [01-getting-started.md](01-getting-started.md) — 실습 시작

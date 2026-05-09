@@ -123,7 +123,7 @@ done (P7)  | —    | 완료                 | —
 | Claude | codex | `["codex", "claude:sonnet"]` |
 | Codex | claude:sonnet | `["claude:sonnet", "codex"]` |
 
-Codex host 예시는 [provider-config.codex-primary.json](../codex/templates/provider-config.codex-primary.json)에 있습니다.
+Codex host 예시는 [provider-config.codex-primary.json](../../codex/templates/provider-config.codex-primary.json)에 있습니다.
 
 ## 안전장치
 

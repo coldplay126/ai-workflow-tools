@@ -132,7 +132,7 @@ Agent Teams API가 안정화되면 Layer 3(Worker) 내부 구현만 교체 가�
 
 ## References
 
-- [Agent Team Design](../working/agent-team-design.md) — WF-005/MA-002 설계 문서
+- [Team Blackboard Pattern](../patterns/multi-agent/04-team-blackboard.md) — agent team worker coordination pattern
 - [State Corruption 분석](https://github.com/kimchanhyung98/agentic-workflows/pull/28) — threading.Lock vs filelock 검토 계기
 - `cli/src/awf/core/multi_agent.py` — 기존 5-mode 멀티에이전트
 - `cli/src/awf/core/agent_runner.py` — `run_agent()`, `AgentResult`
