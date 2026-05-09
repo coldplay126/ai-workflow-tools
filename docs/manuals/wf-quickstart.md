@@ -28,7 +28,7 @@
 
 오케스트레이터가 Phase를 순차적으로 진행합니다:
 
-**Phase 1 (plan)**: spec.md, plan.md, tasks.md 생성 → (선택) `awf wf expand-scope`로 reverse-dependents 자동 추가 → G1 검증
+**Phase 1 (plan)**: spec.md, plan.md, tasks.md 생성 → `awf wf expand-scope --direction dependents`로 reverse-dependents 자동 추가(그래프 없으면 no-op) → G1 검증
 **Phase 2 (review)**: spec↔plan↔tasks 교차 검증 → G2 검증
 **Phase 3 (approve)**: 사용자에게 승인 요청 (HIL) → scope hash 잠금
 **Phase 4 (impl)**: tasks.md 순서대로 구현 + lint → G4 검증

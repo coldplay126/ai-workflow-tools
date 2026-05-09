@@ -127,7 +127,7 @@ commit 실패 시: 에러 기록, 다음 Phase 계속
 - impl-log.md에 `SCOPE_WARNING` 기록
 - Phase 5에서 `awf wf scope-check`로 결정론적 최종 검증 (detective control)
 
-`expanded_files`가 비어 있다면 plan phase의 `awf wf expand-scope` 단계가 생략됐거나 그래프가 아직 없는 경우다. 분석된 unit이 있다면 plan에서 미리 채우는 편이 false positive를 줄여 준다.
+`expanded_files`가 비어 있다면 plan phase의 `awf wf expand-scope` hook에서 추가할 graph edge가 없었거나 분석 graph가 아직 없는 경우다. 분석된 unit이 있다면 plan hook이 미리 채워 G5 false positive를 줄여 준다.
 
 ### 9. Gate G4 검증
 - [ ] tasks.md의 모든 task가 `[X]`

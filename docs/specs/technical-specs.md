@@ -288,7 +288,7 @@ fallback 발동 조건: Writer가 특정 observation에 대해 `confidence: low`
 ## 4. Plan Contract (WF v2 Execution Contract)
 
 > 관련 원칙: **C2** (계약 기반), **C3** (결정론적 gate), **C5** (위험도 비례)
-> 현재: `allowed-files.json` (`planned_files` + 선택적 `expanded_files` + audit)
+> 현재: `allowed-files.json` (`planned_files` + graph 기반 `expanded_files` + audit)
 > 변경: 완전한 실행 계약
 
 ### 4.1 plan-contract.json Schema
@@ -336,7 +336,7 @@ fallback 발동 조건: Writer가 특정 observation에 대해 `confidence: low`
 
 | 시점 | 검증 내용 | 실패 시 |
 |------|----------|---------|
-| plan 직후 (선택) | `awf wf expand-scope`가 import graph reverse-dependents/imports를 `expanded_files`로 추가하고 `graph_expansion` audit를 기록 | — |
+| plan 직후 (기본 hook) | `awf wf expand-scope --direction dependents`가 import graph reverse-dependents를 `expanded_files`로 추가하고 `graph_expansion` audit를 기록. graph 없음/추가 파일 없음은 no-op | — |
 | impl 시작 전 (선제 scope gate) | executor 프롬프트에 `planned_files ∪ expanded_files` + forbidden_paths 주입 | — |
 | impl 실행 중 (patch 적용 전) | changed_files ⊂ (planned ∪ expanded), forbidden path 미접근, 신규 파일 수 ≤ max_new_files | patch 거부 → fix_feedback |
 | impl 실행 후 (verify, G5) | `awf wf scope-check`가 결정론적으로 분류 (planned/expanded/violation), `.workflow/` 경로는 자동 제외 | 구조화된 피드백 → 재시도 |

@@ -38,7 +38,7 @@
 - spec에는 user story, requirements, acceptance scenarios 포함
 - plan은 구현 전략과 검증 방향 포함
 - tasks는 파일 경로와 task ID 포함
-- allowed-files의 `planned_files`는 tasks에서 추출. 분석된 import graph가 있다면 plan 직후 `awf wf expand-scope`를 실행해 `expanded_files`/`graph_expansion`도 채워둔다 (verify 단계에서 G5 false positive 감소).
+- allowed-files의 `planned_files`는 tasks에서 추출. plan 직후 `awf wf expand-scope --direction dependents`를 실행해 `expanded_files`/`graph_expansion`을 기본으로 채운다. 분석된 import graph가 없으면 정상 no-op이며, graph가 있으면 verify 단계의 G5 false positive를 줄인다.
 - 기존 `.workflow` 계약과 호환되게 작성
 ```
 
