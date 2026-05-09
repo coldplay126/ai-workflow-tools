@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import textwrap
 import urllib.parse
 from functools import lru_cache
 from pathlib import Path
@@ -16,8 +17,15 @@ except ModuleNotFoundError:  # pragma: no cover
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MACHINE_SPECIFIC_EXAMPLE_ROOT = "/Users/" + "example"
 MARKDOWN_LINK_RE = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
-JSON_FENCE_RE = re.compile(r"```json\s*\n(.*?)\n```", re.DOTALL)
-TOML_FENCE_RE = re.compile(r"```toml\s*\n(.*?)\n```", re.DOTALL)
+JSON_FENCE_RE = re.compile(
+    r"^[ \t]*```json\s*\n(.*?)\n[ \t]*```", re.DOTALL | re.MULTILINE
+)
+TOML_FENCE_RE = re.compile(
+    r"^[ \t]*```toml\s*\n(.*?)\n[ \t]*```", re.DOTALL | re.MULTILINE
+)
+PYTHON_FENCE_RE = re.compile(
+    r"^[ \t]*```python\s*\n(.*?)\n[ \t]*```", re.DOTALL | re.MULTILINE
+)
 URL_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
 
 
@@ -133,5 +141,23 @@ def test_markdown_toml_fences_are_parseable_when_not_placeholders() -> None:
                 tomllib.loads(block)
             except tomllib.TOMLDecodeError as exc:
                 invalid.append(f"{path.relative_to(REPO_ROOT)}:{line} {exc}")
+
+    assert invalid == []
+
+
+def test_markdown_python_fences_are_parseable_when_not_placeholders() -> None:
+    invalid: list[str] = []
+    for path in _markdown_files():
+        text = path.read_text(encoding="utf-8")
+        for match in PYTHON_FENCE_RE.finditer(text):
+            block = match.group(1)
+            if "..." in block or "<" in block:
+                continue
+
+            line = _line_number(text, match.start())
+            try:
+                compile(textwrap.dedent(block), str(path), "exec")
+            except SyntaxError as exc:
+                invalid.append(f"{path.relative_to(REPO_ROOT)}:{line} {exc.msg}")
 
     assert invalid == []
