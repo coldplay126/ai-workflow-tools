@@ -35,7 +35,7 @@
 - `awf mcp invoke <name> <tool> --input '{"key":"value"}'`: MCP tool 호출. 현재는 `stdio`, `http` transport 지원
 - `awf mcp read <name> <uri>`: MCP resource 읽기. 현재는 `stdio`, `http` transport 지원
 - `awf doctor [--probe] [--ci]`: provider readiness MVP. 기본은 installed/configured 상태와 default provider, session DB, MCP server count를 보여주고, `--probe`는 가능한 provider에 대해 lightweight subprocess probe를 추가한다. `--ci`는 default provider readiness가 충분하지 않으면 non-zero exit를 반환한다
-- `awf ready [--probe]`: repo별 자동화 준비 상태를 read-only로 요약한다. `doctor`/heuristic `scan`/skill discovery/workflow/operations 상태를 한 보고서로 모아 automation level(L0 inspect → L3 workflow)과 다음 추천 명령을 출력한다
+- `awf ready [--probe] [--gate inspect|analysis|workflow-init|workflow-run|operations]`: repo별 자동화 준비 상태를 read-only로 요약한다. `doctor`/heuristic `scan`/skill discovery/workflow/operations 상태를 한 보고서로 모아 automation level(L0 inspect → L3 workflow)과 다음 추천 명령을 출력한다. `--gate`는 `decision: allow|dry_run_only|block`을 JSON에 포함하고 `allow` 외에는 non-zero exit로 Claude/Codex entrypoint를 중단시킨다
 - `awf cmux tail [path] [-f] [--run-id ...] [--event ...] [--limit N] [--json]`: cmux-agent `.agent/events.jsonl`을 구조화된 4컬럼(`ts / run_id-prefix / event / summary`)으로 출력한다. `-f/--follow`는 폴링 기반 tail이며 `Ctrl-C`로 정상 종료한다. cmux-agent 패키지를 import하지 않는 read-only consumer다
 - `awf cmux runs [path] [--json] [--limit N]`: 로그를 1회 스캔해 run_id별 `STARTED / STATUS / EVENTS / DURATION`을 요약한다. 마지막 `run.status_changed.new`가 `completed/failed/aborted`면 해당 값, 아니면 `running`으로 표시한다
 - `awf cmux failures [path] [--run-id ...] [--limit N] [--json]`: `artifact.validation_failed`와 `message.failed`를 한 번에 필터링해 timestamp, run_id, target, reason을 보여준다. JSON 모드는 structured array를 출력한다
@@ -66,6 +66,7 @@
 uv run --project cli --no-editable awf config show --repo-root .
 uv run --project cli --no-editable awf ready --repo-root .
 uv run --project cli --no-editable awf ready --repo-root . --json
+uv run --project cli --no-editable awf ready --repo-root . --gate analysis --json
 uv run --project cli --no-editable awf chat --repo-root . --provider fixture --message "hello" --json --yolo
 uv run --project cli --no-editable awf chat --repo-root . --latest --message "continue" --json --yolo
 uv run --project cli --no-editable awf chat --repo-root . --show-latest --json

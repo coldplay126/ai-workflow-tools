@@ -3,6 +3,7 @@
 set -euo pipefail
 
 ROOT="${PWD}"
+TOOL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WF_DIR="${ROOT}/.workflow"
 STATE_FILE="${WF_DIR}/state.json"
 PROVIDER_FILE="${WF_DIR}/provider-config.json"
@@ -34,6 +35,40 @@ require_file() {
 
 command_exists() {
   command -v "$1" >/dev/null 2>&1
+}
+
+run_awf_ready_gate() {
+  local gate="$1"
+  local allow_dry_run_only="${2:-false}"
+  local tmp_file rc
+  tmp_file="$(mktemp)"
+
+  set +e
+  if command_exists uv && [[ -f "${TOOL_ROOT}/cli/pyproject.toml" ]]; then
+    PYTHONPATH="${TOOL_ROOT}/cli/src" uv run --project "${TOOL_ROOT}/cli" python -m awf.cli ready --gate "$gate" --repo-root "$ROOT" --json > "$tmp_file"
+  elif command_exists awf; then
+    awf ready --gate "$gate" --repo-root "$ROOT" --json > "$tmp_file"
+  else
+    echo "Missing awf CLI. Install awf or run from an ai-workflow-tools checkout with uv available." >&2
+    rm -f "$tmp_file"
+    exit 127
+  fi
+  rc=$?
+  set -e
+
+  if [[ "$rc" -eq 0 ]]; then
+    rm -f "$tmp_file"
+    return 0
+  fi
+  if [[ "$rc" -eq 10 && "$allow_dry_run_only" == "true" ]]; then
+    echo "ready_gate: dry_run_only (${gate})" >&2
+    rm -f "$tmp_file"
+    return 0
+  fi
+
+  cat "$tmp_file" >&2
+  rm -f "$tmp_file"
+  exit "$rc"
 }
 
 json_get() {
@@ -307,6 +342,7 @@ NODE
 }
 
 status_cmd() {
+  run_awf_ready_gate workflow-run true
   require_file "$STATE_FILE"
   echo "repo: $(json_get repo)"
   echo "phase: $(json_get currentPhase)"
@@ -318,6 +354,7 @@ status_cmd() {
 }
 
 dispatch_cmd() {
+  run_awf_ready_gate workflow-run true
   require_file "$STATE_FILE"
   require_file "$PROVIDER_FILE"
 
@@ -339,6 +376,7 @@ dispatch_cmd() {
 }
 
 phase_cmd() {
+  run_awf_ready_gate workflow-run true
   local requested_phase="${1:-}"
   if [[ -z "$requested_phase" ]]; then
     echo "Missing phase name" >&2
@@ -358,6 +396,7 @@ phase_cmd() {
 }
 
 prompt_cmd() {
+  run_awf_ready_gate workflow-run true
   local phase provider prompt_file
   phase="$(resolve_phase "${1:-}")"
   provider="$(resolve_provider "$phase" "${2:-}")"
@@ -372,6 +411,7 @@ prompt_cmd() {
 }
 
 run_secondary_cmd() {
+  run_awf_ready_gate workflow-run false
   local phase provider prompt_file output_file provider_type
   phase="$(resolve_phase "${1:-}")"
   provider="$(resolve_provider "$phase" "${2:-}")"
@@ -402,6 +442,7 @@ run_secondary_cmd() {
 }
 
 apply_secondary_cmd() {
+  run_awf_ready_gate workflow-run true
   local phase result_file provider
   phase="$(resolve_phase "${1:-}")"
   provider="$(resolve_provider "$phase" "")"

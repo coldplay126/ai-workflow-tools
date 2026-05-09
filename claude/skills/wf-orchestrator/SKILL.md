@@ -32,6 +32,24 @@ allowed-tools:
 
 # WF Orchestrator — A2A-Inspired Pipeline Router
 
+## Deterministic Preflight
+
+워크플로우를 처음 시작할 때는 repo root에서 다음 gate를 실행합니다:
+
+```bash
+awf ready --gate workflow-init --repo-root . --json
+```
+
+기존 `.workflow/state.json`을 이어서 진행할 때는 다음 gate를 실행합니다:
+
+```bash
+awf ready --gate workflow-run --repo-root . --json
+```
+
+- exit code `0` (`decision: "allow"`)일 때만 `.workflow/` 생성 또는 Phase 실행으로 진행합니다.
+- exit code `10` (`decision: "dry_run_only"`)이면 provider 호출 없이 `awf wf next --dry-run` 또는 상태 점검까지만 수행합니다.
+- 그 외 non-zero는 오케스트레이션을 중단하고 `gate.recommended_next`의 명령만 제안합니다.
+
 ## Quick Resume (세션 컴팩션 후 우선 실행)
 
 이 블록은 세션 재개 시 가장 먼저 실행합니다:

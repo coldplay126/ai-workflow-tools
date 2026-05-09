@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from awf.commands.ready import run_ready
-from awf.core.ready import collect_ready_report
+from awf.core.ready import collect_ready_report, evaluate_ready_gate
 
 
 _WF_SKILLS = [
@@ -134,3 +134,92 @@ def test_run_ready_json_and_human_output(tmp_path: Path, monkeypatch, capsys) ->
     out = capsys.readouterr().out
     assert "automation_level: 2 (provider execution)" in out
     assert "recommended_next:" in out
+
+
+def test_evaluate_analysis_gate_allows_provider_run(tmp_path: Path, monkeypatch) -> None:
+    repo, skills = _prepare_repo(tmp_path)
+    monkeypatch.setenv("AWF_SKILLS_DIR", str(skills))
+
+    report = collect_ready_report(str(repo))
+    gate = evaluate_ready_gate(report, "analysis")
+
+    assert gate["decision"] == "allow"
+    assert gate["exit_code"] == 0
+    assert gate["required_capabilities"] == ["analysis_run"]
+
+
+def test_evaluate_analysis_gate_allows_provider_caution(tmp_path: Path, monkeypatch) -> None:
+    repo, skills = _prepare_repo(tmp_path)
+    monkeypatch.setenv("AWF_SKILLS_DIR", str(skills))
+
+    report = collect_ready_report(str(repo))
+    report["provider"]["status"] = "caution"
+    gate = evaluate_ready_gate(report, "analysis")
+
+    assert gate["decision"] == "allow"
+    assert gate["exit_code"] == 0
+    assert gate["required_capabilities"] == ["analysis_run"]
+
+
+def test_evaluate_analysis_gate_downgrades_when_provider_blocked(tmp_path: Path, monkeypatch) -> None:
+    repo, skills = _prepare_repo(tmp_path)
+    monkeypatch.setenv("AWF_SKILLS_DIR", str(skills))
+
+    report = collect_ready_report(str(repo))
+    report["provider"]["status"] = "blocked"
+    gate = evaluate_ready_gate(report, "analysis")
+
+    assert gate["decision"] == "dry_run_only"
+    assert gate["exit_code"] == 10
+    assert gate["required_capabilities"] == ["analysis_dry_run"]
+
+
+def test_evaluate_analysis_gate_blocks_without_scan_unit(tmp_path: Path, monkeypatch) -> None:
+    repo, skills = _prepare_repo(tmp_path)
+    monkeypatch.setenv("AWF_SKILLS_DIR", str(skills))
+    (repo / "pyproject.toml").unlink()
+    (repo / "src" / "orders" / "service.py").unlink()
+    nested = repo / "cli"
+    nested.mkdir()
+    (nested / "pyproject.toml").write_text("[project]\nname = 'cli'\n", encoding="utf-8")
+
+    report = collect_ready_report(str(repo))
+    gate = evaluate_ready_gate(report, "analysis")
+
+    assert gate["decision"] == "block"
+    assert gate["exit_code"] == 20
+    assert gate["recommended_next"][0]["command"] == "awf scan cli --no-ai"
+
+
+def test_run_ready_gate_json_returns_gate_exit(tmp_path: Path, monkeypatch, capsys) -> None:
+    repo, skills = _prepare_repo(tmp_path)
+    monkeypatch.setenv("AWF_SKILLS_DIR", str(skills))
+
+    rc = run_ready(argparse.Namespace(repo_root=str(repo), json=True, probe=False, gate="workflow-run"))
+
+    assert rc == 20
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["gate"]["name"] == "workflow-run"
+    assert payload["gate"]["decision"] == "block"
+    assert payload["gate"]["exit_code"] == 20
+
+
+def test_run_ready_workflow_run_gate_allows_started_workflow(tmp_path: Path, monkeypatch) -> None:
+    repo, skills = _prepare_repo(tmp_path, workflow_started=True)
+    monkeypatch.setenv("AWF_SKILLS_DIR", str(skills))
+
+    rc = run_ready(argparse.Namespace(repo_root=str(repo), json=False, probe=False, gate="workflow-run"))
+
+    assert rc == 0
+
+
+def test_evaluate_workflow_run_gate_allows_provider_caution(tmp_path: Path, monkeypatch) -> None:
+    repo, skills = _prepare_repo(tmp_path, workflow_started=True)
+    monkeypatch.setenv("AWF_SKILLS_DIR", str(skills))
+
+    report = collect_ready_report(str(repo))
+    report["provider"]["status"] = "caution"
+    gate = evaluate_ready_gate(report, "workflow-run")
+
+    assert gate["decision"] == "allow"
+    assert gate["exit_code"] == 0

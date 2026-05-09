@@ -21,6 +21,16 @@ AUTOMATION_LEVELS = {
 }
 
 
+READY_GATES = ("inspect", "analysis", "workflow-init", "workflow-run", "operations")
+
+
+GATE_EXIT_CODES = {
+    "allow": 0,
+    "dry_run_only": 10,
+    "block": 20,
+}
+
+
 def _detect_subprojects(repo_root: Path) -> list[dict[str, str]]:
     subprojects: list[dict[str, str]] = []
     try:
@@ -326,6 +336,180 @@ def _recommended_next(report: dict[str, Any]) -> list[dict[str, str]]:
             "why": "initialize local operations history before decisions accumulate",
         })
     return recommendations[:4]
+
+
+def _gate_payload(
+    *,
+    gate: str,
+    decision: str,
+    reason: str,
+    required_capabilities: list[str],
+    recommended_next: list[dict[str, str]],
+) -> dict[str, Any]:
+    return {
+        "name": gate,
+        "decision": decision,
+        "exit_code": GATE_EXIT_CODES[decision],
+        "reason": reason,
+        "required_capabilities": required_capabilities,
+        "recommended_next": recommended_next,
+    }
+
+
+def _first_recommendation(report: dict[str, Any], command_prefix: str | None = None) -> list[dict[str, str]]:
+    items = report.get("recommended_next", []) or []
+    if command_prefix is None:
+        return list(items[:1])
+    for item in items:
+        if str(item.get("command", "")).startswith(command_prefix):
+            return [item]
+    return list(items[:1])
+
+
+def evaluate_ready_gate(report: dict[str, Any], gate: str) -> dict[str, Any]:
+    """Return a deterministic allow/block decision for automation entrypoints."""
+    if gate not in READY_GATES:
+        raise ValueError(f"unsupported ready gate: {gate}")
+
+    provider_status = str(report["provider"]["status"])
+    scan_status = str(report["scan"]["status"])
+    skills_status = str(report["skills"]["status"])
+    workflow_status = str(report["workflow"]["status"])
+    operations_status = str(report["operations"]["status"])
+
+    if gate == "inspect":
+        return _gate_payload(
+            gate=gate,
+            decision="allow",
+            reason="repo root resolved; read-only diagnostics are available",
+            required_capabilities=["inspect"],
+            recommended_next=_first_recommendation(report),
+        )
+
+    if gate == "analysis":
+        if scan_status != "ready":
+            return _gate_payload(
+                gate=gate,
+                decision="block",
+                reason="analysis unit discovery is not deterministic yet",
+                required_capabilities=["analysis_dry_run", "analysis_run"],
+                recommended_next=_first_recommendation(report, "awf scan"),
+            )
+        if provider_status != "blocked":
+            reason = (
+                "analysis units and default provider are ready"
+                if provider_status == "ready"
+                else f"analysis units are ready; default provider is {provider_status}"
+            )
+            return _gate_payload(
+                gate=gate,
+                decision="allow",
+                reason=reason,
+                required_capabilities=["analysis_run"],
+                recommended_next=_first_recommendation(report, "awf analyze"),
+            )
+        return _gate_payload(
+            gate=gate,
+            decision="dry_run_only",
+            reason=f"default provider is {provider_status}; provider-backed analysis is blocked",
+            required_capabilities=["analysis_dry_run"],
+            recommended_next=_first_recommendation(report, "awf analyze"),
+        )
+
+    if gate == "workflow-init":
+        if skills_status != "ready":
+            return _gate_payload(
+                gate=gate,
+                decision="block",
+                reason="required workflow skills are missing",
+                required_capabilities=["workflow"],
+                recommended_next=[{
+                    "command": "awf skills list --repo-root .",
+                    "why": "inspect installed workflow skills before initializing .workflow",
+                }],
+            )
+        return _gate_payload(
+            gate=gate,
+            decision="allow",
+            reason="workflow skills are available for initialization",
+            required_capabilities=["workflow"],
+            recommended_next=[{
+                "command": 'awf wf init "small feature" --repo-root .',
+                "why": "create deterministic .workflow state before phase execution",
+            }],
+        )
+
+    if gate == "workflow-run":
+        if workflow_status != "ready":
+            return _gate_payload(
+                gate=gate,
+                decision="block",
+                reason=".workflow/state.json is required before workflow execution",
+                required_capabilities=["workflow"],
+                recommended_next=[{
+                    "command": 'awf wf init "small feature" --repo-root .',
+                    "why": "initialize workflow state before running phases",
+                }],
+            )
+        if skills_status != "ready":
+            return _gate_payload(
+                gate=gate,
+                decision="block",
+                reason="required workflow skills are missing",
+                required_capabilities=["workflow"],
+                recommended_next=[{
+                    "command": "awf skills list --repo-root .",
+                    "why": "inspect installed workflow skills before running phases",
+                }],
+            )
+        if provider_status == "blocked":
+            return _gate_payload(
+                gate=gate,
+                decision="dry_run_only",
+                reason=f"default provider is {provider_status}; delegated workflow execution is blocked",
+                required_capabilities=["workflow"],
+                recommended_next=[{
+                    "command": "awf wf next --repo-root . --dry-run",
+                    "why": "prepare the next phase prompt without provider execution",
+                }],
+            )
+        reason = (
+            "workflow state, skills, and default provider are ready"
+            if provider_status == "ready"
+            else f"workflow state and skills are ready; default provider is {provider_status}"
+        )
+        return _gate_payload(
+            gate=gate,
+            decision="allow",
+            reason=reason,
+            required_capabilities=["workflow"],
+            recommended_next=[{
+                "command": "awf wf next --repo-root .",
+                "why": "run the next gated workflow phase",
+            }],
+        )
+
+    if operations_status != "ready":
+        return _gate_payload(
+            gate=gate,
+            decision="block",
+            reason=".awf-operations profile is not initialized",
+            required_capabilities=["operations_wiki"],
+            recommended_next=[{
+                "command": "awf wiki init --repo-root .",
+                "why": "initialize local operations history before recording decisions",
+            }],
+        )
+    return _gate_payload(
+        gate=gate,
+        decision="allow",
+        reason="operations profile is initialized",
+        required_capabilities=["operations_wiki"],
+        recommended_next=[{
+            "command": "awf wiki compile --repo-root .",
+            "why": "refresh deterministic operations wiki pages",
+        }],
+    )
 
 
 def collect_ready_report(repo_root: str | None = None, *, probe: bool = False) -> dict[str, Any]:
