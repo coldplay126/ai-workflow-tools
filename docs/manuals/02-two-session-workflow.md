@@ -38,10 +38,10 @@
 ```
 
 확인할 파일:
-- [concept.md](/Users/example/Documents/GitHub/ai-workflow-tools/.workflow/concept.md)
-- [spec.md](/Users/example/Documents/GitHub/ai-workflow-tools/.workflow/artifacts/spec.md)
-- [plan.md](/Users/example/Documents/GitHub/ai-workflow-tools/.workflow/artifacts/plan.md)
-- [tasks.md](/Users/example/Documents/GitHub/ai-workflow-tools/.workflow/artifacts/tasks.md)
+- `.workflow/concept.md`
+- `.workflow/artifacts/spec.md`
+- `.workflow/artifacts/plan.md`
+- `.workflow/artifacts/tasks.md`
 
 세션 A가 하는 질문:
 - 요구사항이 빠졌나?
