@@ -74,8 +74,8 @@ gitignore (local 텔레메트리). 자세한 layout 은
 ## Tests
 
 ```bash
-uv run --project cli pytest cli/tests
-uv run --project cmux-agent pytest cmux-agent/tests
+cd cli && uv run --group dev pytest -q --ignore=tests/test_e2e_live.py
+uv run --project cmux-agent --group dev python -m pytest cmux-agent/tests -q
 ```
 
 ## cmux-agent Runtime
