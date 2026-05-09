@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from awf.core.config import AnalysisContext
+from awf.core.markdown_frontmatter import read_markdown_body
 
 
 # Sections in project-context.md
@@ -43,7 +44,7 @@ def _extract_unit_summary(context: AnalysisContext) -> Optional[dict]:
         return None
 
     # Extract summary from domain-overview.md (first paragraph after # heading)
-    overview_text = overview_path.read_text(encoding="utf-8", errors="ignore")
+    overview_text = read_markdown_body(overview_path)
     summary_lines: list[str] = []
     in_summary = False
     for line in overview_text.splitlines():

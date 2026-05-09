@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from awf.core.config import AnalysisContext
+from awf.core.markdown_frontmatter import read_markdown_body
 from awf.tools.file_ops import FileOpsToolset
 
 FANOUT_TARGETS = [
@@ -573,11 +574,19 @@ def _read_existing_docs(context: AnalysisContext) -> str:
     for relative_path in context.existing_docs:
         path = context.docs_root / relative_path
         if path.is_file():
-            sections.append(f"### {relative_path}\n{path.read_text(encoding='utf-8', errors='ignore').strip()}")
+            if path.suffix == ".md":
+                body = read_markdown_body(path)
+            else:
+                body = path.read_text(encoding="utf-8", errors="ignore")
+            sections.append(f"### {relative_path}\n{body.strip()}")
     for name in ("api-spec.json", "data-model.md", "domain-overview.md", "external-integration.md"):
         path = context.ai_context_dir / name
         if path.exists():
-            sections.append(f"### generated:{name}\n{path.read_text(encoding='utf-8', errors='ignore').strip()}")
+            if path.suffix == ".md":
+                body = read_markdown_body(path)
+            else:
+                body = path.read_text(encoding="utf-8", errors="ignore")
+            sections.append(f"### generated:{name}\n{body.strip()}")
     return "\n\n".join(section for section in sections if section.strip())
 
 
@@ -686,7 +695,10 @@ def _make_reference_candidate(
 ) -> dict[str, object] | None:
     if not path.is_file():
         return None
-    content = path.read_text(encoding="utf-8", errors="ignore").strip()
+    if path.suffix == ".md":
+        content = read_markdown_body(path).strip()
+    else:
+        content = path.read_text(encoding="utf-8", errors="ignore").strip()
     if not content:
         return None
     return {

@@ -25,6 +25,35 @@ analysis-docs/{service}/{domain}/.ai-context/
     └── hashes.json            ← SHA-256 파일 해시 (증분 분석용, 보존)
 ```
 
+### 1.1 Markdown frontmatter
+
+`.ai-context`의 Markdown 산출물은 운영 wiki와 동일하게 YAML frontmatter를 가진다. 대상은 Markdown 파일만이며, `api-spec.json` 같은 JSON 산출물에는 frontmatter를 붙이지 않는다.
+
+대상 파일:
+- `data-model.md`
+- `domain-overview.md`
+- `external-integration.md`
+- `ANALYSIS_REPORT.md`
+
+최소 frontmatter:
+
+```yaml
+---
+title: Domain overview
+schema: ai_context_markdown_v1
+last_compiled_at: 2026-05-09T00:00:00+00:00
+service: sample-api
+domain: quest-challenge
+analysis_mode: document
+depth: standard
+source_state: .analysis-state.json
+source_hashes: .tmp/hashes.json
+related: []
+---
+```
+
+소비자는 본문 분석, 요약 추출, LLM prompt 주입 전에 frontmatter를 제거해야 한다. frontmatter는 provenance와 schema 식별용 metadata이며 도메인 본문으로 취급하지 않는다.
+
 ---
 
 ## 2. 필수 파일 4종

@@ -20,6 +20,8 @@
 자동 생성 부가 파일:
 - `ANALYSIS_REPORT.md` — 분석 요약 리포트 (엔드포인트 수, 이슈, 환경변수 등)
 
+Markdown 산출물(`data-model.md`, `domain-overview.md`, `external-integration.md`, `ANALYSIS_REPORT.md`)은 `ai_context_markdown_v1` frontmatter를 가진다. `api-spec.json`은 JSON 소비자 호환성을 위해 frontmatter 대상에서 제외한다.
+
 ### 리뷰 모드 (review) — 계획중
 
 | 파일 | 형식 | 역할 |
