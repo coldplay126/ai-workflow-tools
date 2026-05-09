@@ -43,8 +43,10 @@ Claude 중심 설치가 되어 있다면:
 Python CLI를 같이 보고 싶다면:
 
 ```bash
-uv run --project cli --no-editable awf config show --repo-root .
+uv run --project cli --no-editable awf ready --repo-root .
 ```
+
+`ready`는 설정, provider, skill, scan, workflow, operations wiki 상태를 읽기 전용으로 모아 현재 repo에서 어느 자동화 레벨까지 안전한지 보여줍니다.
 
 ## 3. 실습 A: `/wf` 상태 읽기
 

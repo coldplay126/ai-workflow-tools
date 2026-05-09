@@ -11,6 +11,7 @@ from awf.commands.cmux import run_cmux_failures, run_cmux_runs, run_cmux_tail
 from awf.commands.config import run_config_show
 from awf.commands.doctor import run_doctor
 from awf.commands.mcp import run_mcp_check, run_mcp_invoke, run_mcp_list, run_mcp_read
+from awf.commands.ready import run_ready
 from awf.commands.skills import run_skills_list
 from awf.commands.init import run_init
 from awf.commands.scan import run_scan
@@ -38,7 +39,7 @@ from awf.commands.wiki import (
 from awf.core.router import route_natural_language
 
 
-KNOWN_COMMANDS = {"chat", "analyze", "wf", "config", "skills", "mcp", "doctor", "scan", "init", "cmux", "wiki"}
+KNOWN_COMMANDS = {"chat", "analyze", "wf", "config", "skills", "mcp", "doctor", "ready", "scan", "init", "cmux", "wiki"}
 
 
 def _should_skip_execution_confirmation(args: argparse.Namespace) -> bool:
@@ -307,6 +308,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Exit non-zero when the default provider is not ready for installed/configured checks; includes probe when --probe is set.",
     )
     doctor_parser.set_defaults(handler=run_doctor)
+
+    ready_parser = subparsers.add_parser(
+        "ready",
+        help="Summarize repo readiness and recommended next automation steps.",
+    )
+    ready_parser.add_argument("--repo-root", help="Repository root. Defaults to current or parent directories.")
+    ready_parser.add_argument("--json", action="store_true", help="Print raw JSON.")
+    ready_parser.add_argument("--probe", action="store_true", help="Run lightweight provider probes where supported.")
+    ready_parser.set_defaults(handler=run_ready)
 
     init_parser = subparsers.add_parser("init", help="Initialize .awf.toml in the current project.")
     init_parser.add_argument("--repo-root", help="Target directory. Defaults to current directory.")
