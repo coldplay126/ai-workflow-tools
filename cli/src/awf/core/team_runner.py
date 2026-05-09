@@ -16,6 +16,12 @@ from typing import Any
 
 from awf.core.agent_runner import AgentResult, MultiAgentResult, run_agent
 from awf.core.blackboard import Blackboard, TeamFinding
+from awf.core.dispatch import (
+    WorkerSpec,
+    resolve_cmux_options_from_config,
+    resolve_preference_from_config,
+    select_dispatch,
+)
 
 
 @dataclass
@@ -143,6 +149,7 @@ def run_team(
             phase=phase,
             effort=_effort,
             codex_reasoning=_codex_re,
+            provider_config=provider_config,
         )
         all_agents.extend(turn_results)
 
@@ -283,21 +290,47 @@ def _execute_workers(
     phase: str = "",
     effort: str | None = None,
     codex_reasoning: str | None = None,
+    provider_config: dict[str, Any] | None = None,
 ) -> list[AgentResult]:
     """Execute all workers for a turn.
 
     Sequential: one by one (each sees previous worker's output).
-    Parallel: all at once via ThreadPoolExecutor.
+    Parallel: all at once via the dispatch backend.
     """
     if config.execution == "parallel":
         return _execute_parallel(bb, turn, config, registry, cwd,
                                  timeout_sec=timeout_sec, add_dirs=add_dirs,
                                  processor=processor, phase=phase,
-                                 effort=effort, codex_reasoning=codex_reasoning)
+                                 effort=effort, codex_reasoning=codex_reasoning,
+                                 provider_config=provider_config)
     return _execute_sequential(bb, turn, config, registry, cwd,
                                timeout_sec=timeout_sec, add_dirs=add_dirs,
                                processor=processor, phase=phase,
-                               effort=effort, codex_reasoning=codex_reasoning)
+                               effort=effort, codex_reasoning=codex_reasoning,
+                               provider_config=provider_config)
+
+
+def _resolve_team_dispatch(
+    *,
+    cwd: str,
+    worker_count: int,
+    estimated_seconds: float,
+    provider_config: dict[str, Any] | None,
+):
+    """Pick a dispatch backend honoring ``provider-config.json::dispatch``.
+
+    Single-call helper so both parallel and sequential paths agree on
+    surface preference and cmux options. Uses the same heuristic as the
+    rest of awf — auto picks cmux only when the project has it ready and
+    the workload shape fits.
+    """
+    return select_dispatch(
+        worker_count=max(worker_count, 1),
+        estimated_seconds=estimated_seconds,
+        preference=resolve_preference_from_config(provider_config),
+        cwd=cwd,
+        options=resolve_cmux_options_from_config(provider_config),
+    )
 
 
 def _execute_sequential(
@@ -313,8 +346,18 @@ def _execute_sequential(
     phase: str = "",
     effort: str | None = None,
     codex_reasoning: str | None = None,
+    provider_config: dict[str, Any] | None = None,
 ) -> list[AgentResult]:
-    """Run workers one at a time. Each can read previous workers' output."""
+    """Run workers one at a time. Each can read previous workers' output.
+
+    Per-worker prompt building stays inline because the next worker's
+    prompt depends on the prior worker's blackboard write — that's the
+    blackboard-mediated equivalent of ``ChainedStep.factory(prior_results)``.
+    Each worker is dispatched individually so the project's configured
+    surface (inline or cmux) and the dispatch_complete telemetry both
+    apply, even though we don't use ``run_chained`` (workers have
+    distinct roles, so cmux's role-pinning doesn't apply here).
+    """
     results: list[AgentResult] = []
     role_count = max(len(config.roles), 1)
     per_worker_timeout = min(timeout_sec, max(30, timeout_sec // role_count))
@@ -337,15 +380,21 @@ def _execute_sequential(
         _log(f"  worker: {role_cfg.id} ({role_cfg.provider})")
         _emit_worker_event(processor, phase, turn, role_cfg.id, "spawned")
 
-        result = run_agent(
-            provider,
-            worker_prompt,
-            role_cfg.id,
-            cwd,
+        spec = WorkerSpec(
+            role=role_cfg.id,
+            provider=provider,
+            prompt=worker_prompt,
             timeout_sec=actual_timeout,
             require_json=True,
-            add_dirs=add_dirs,
+            add_dirs=tuple(add_dirs or ()),
         )
+        dispatch = _resolve_team_dispatch(
+            cwd=cwd,
+            worker_count=1,
+            estimated_seconds=float(actual_timeout),
+            provider_config=provider_config,
+        )
+        result = dispatch.run([spec], cwd=cwd, strategy="sequential")[0]
         results.append(result)
 
         _emit_worker_event(processor, phase, turn, role_cfg.id, "completed", data={
@@ -374,57 +423,75 @@ def _execute_parallel(
     phase: str = "",
     effort: str | None = None,
     codex_reasoning: str | None = None,
+    provider_config: dict[str, Any] | None = None,
 ) -> list[AgentResult]:
-    """Run workers concurrently. Workers see board/ but not each other's discussion."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    """Run workers concurrently through the dispatch backend.
 
-    results: list[AgentResult] = []
-    futures = {}
+    All worker prompts are built upfront — parallel execution can't
+    incorporate within-turn prior outputs. Cross-turn context still
+    flows via the leader's mission update (turn N reads turn N-1
+    findings via ``_build_mission``).
+    """
+    available: list[tuple] = []
+    for role_cfg in config.roles:
+        provider = _resolve_provider(
+            registry, role_cfg.provider, effort=effort, codex_reasoning=codex_reasoning
+        )
+        if provider is None:
+            _log(f"  skip {role_cfg.id}: provider '{role_cfg.provider}' unavailable")
+            _save_skipped_worker(bb, turn, role_cfg)
+            continue
+        worker_prompt = _build_worker_prompt(bb, turn, role_cfg)
+        available.append((role_cfg, provider, worker_prompt))
+        _emit_worker_event(processor, phase, turn, role_cfg.id, "spawned")
 
-    with ThreadPoolExecutor(max_workers=max(len(config.roles), 1)) as pool:
-        for role_cfg in config.roles:
-            provider = _resolve_provider(registry, role_cfg.provider, effort=effort, codex_reasoning=codex_reasoning)
-            if provider is None:
-                _log(f"  skip {role_cfg.id}: provider '{role_cfg.provider}' unavailable")
-                _save_skipped_worker(bb, turn, role_cfg)
-                continue
+    if not available:
+        return []
 
-            worker_prompt = _build_worker_prompt(bb, turn, role_cfg)
+    specs = [
+        WorkerSpec(
+            role=role_cfg.id,
+            provider=provider,
+            prompt=prompt,
+            timeout_sec=timeout_sec,
+            require_json=True,
+            add_dirs=tuple(add_dirs or ()),
+        )
+        for role_cfg, provider, prompt in available
+    ]
+    dispatch = _resolve_team_dispatch(
+        cwd=cwd,
+        worker_count=len(specs),
+        estimated_seconds=float(timeout_sec),
+        provider_config=provider_config,
+    )
 
-            _emit_worker_event(processor, phase, turn, role_cfg.id, "spawned")
-
-            future = pool.submit(
-                run_agent,
-                provider,
-                worker_prompt,
-                role_cfg.id,
-                cwd,
-                timeout_sec=timeout_sec,
-                require_json=True,
-                add_dirs=add_dirs,
+    try:
+        results = list(dispatch.run(specs, cwd=cwd, strategy="parallel"))
+    except Exception as exc:
+        # Dispatch backend failure (e.g., cmux unavailable mid-batch). Synthesize
+        # failure rows so blackboard termination sees the problem rather than
+        # losing the whole turn silently.
+        _log(f"  dispatch failure: {exc}")
+        results = [
+            AgentResult(
+                provider_name=role_cfg.provider,
+                role=role_cfg.id,
+                stdout="",
+                stderr=f"dispatch failure: {exc}",
+                returncode=2,
+                elapsed_sec=0.0,
             )
-            futures[future] = role_cfg
+            for role_cfg, _, _ in available
+        ]
 
-        for future in as_completed(futures, timeout=timeout_sec + 10):
-            role_cfg = futures[future]
-            try:
-                result = future.result()
-            except Exception as exc:
-                result = AgentResult(
-                    provider_name=role_cfg.provider,
-                    role=role_cfg.id,
-                    stdout="",
-                    stderr=str(exc),
-                    returncode=2,
-                    elapsed_sec=0.0,
-                )
-            results.append(result)
-            _save_worker_output(bb, turn, role_cfg.id, result)
-            _emit_worker_event(processor, phase, turn, role_cfg.id, "completed", data={
-                "passed": _worker_passed(result),
-                "duration_sec": round(result.elapsed_sec, 1),
-            })
-            _log(f"  {role_cfg.id}: {'ok' if result.ok else 'FAIL'} ({result.elapsed_sec:.0f}s)")
+    for (role_cfg, _, _), result in zip(available, results):
+        _save_worker_output(bb, turn, role_cfg.id, result)
+        _emit_worker_event(processor, phase, turn, role_cfg.id, "completed", data={
+            "passed": _worker_passed(result),
+            "duration_sec": round(result.elapsed_sec, 1),
+        })
+        _log(f"  {role_cfg.id}: {'ok' if result.ok else 'FAIL'} ({result.elapsed_sec:.0f}s)")
 
     return results
 
