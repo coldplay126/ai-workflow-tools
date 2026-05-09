@@ -119,6 +119,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("--dry-run", action="store_true", help="Print resolved paths and prompt without invoking the provider.")
     analyze_parser.add_argument("--print-prompt", action="store_true", help="Print the delegated prompt before execution.")
     analyze_parser.add_argument("--output-format", choices=["text", "json"], default="text", help="Output format. json outputs structured data to stdout.")
+    analyze_parser.add_argument("--no-ready-gate", action="store_true", help="Bypass the internal awf ready --gate analysis preflight.")
     analyze_parser.add_argument("--check", action="store_true", help="Detect stale .ai-context by comparing hashes. No analysis run.")
     analyze_parser.add_argument("--catalog", action="store_true", help="Show analysis status for all units in a service.")
     analyze_parser.add_argument("--cycles", action="store_true", help="Report import cycles in each analyzed unit's saved import graph. No analysis run.")
@@ -130,6 +131,7 @@ def build_parser() -> argparse.ArgumentParser:
     wf_init_parser.add_argument("concept", help="Initial workflow concept text.")
     wf_init_parser.add_argument("--repo-root", help="Repository root containing .workflow/. Defaults to current or parent directories.")
     wf_init_parser.add_argument("--force", action="store_true", help="Overwrite existing workflow state and concept if present.")
+    wf_init_parser.add_argument("--no-ready-gate", action="store_true", help="Bypass the internal awf ready --gate workflow-init preflight.")
     wf_init_parser.set_defaults(handler=run_wf_init)
 
     wf_status_parser = wf_subparsers.add_parser("status", help="Show .workflow/state.json summary.")
@@ -159,6 +161,7 @@ def build_parser() -> argparse.ArgumentParser:
     wf_next_parser.add_argument("--print-prompt", action="store_true", help="Print the delegated prompt before execution.")
     wf_next_parser.add_argument("--auto-apply", action="store_true", help="Automatically apply review/verify results into workflow artifacts when possible.")
     wf_next_parser.add_argument("--output-format", choices=["text", "json"], default="text", help="Output format. json outputs structured data to stdout.")
+    wf_next_parser.add_argument("--no-ready-gate", action="store_true", help="Bypass the internal awf ready --gate workflow-run preflight.")
     wf_next_parser.set_defaults(handler=run_wf_next)
 
     wf_decide_parser = wf_subparsers.add_parser(
@@ -406,6 +409,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Overwrite an existing decision page at the same path.",
     )
+    wiki_decision_parser.add_argument("--no-ready-gate", action="store_true", help="Bypass the internal awf ready --gate operations preflight.")
     wiki_decision_parser.set_defaults(handler=run_wiki_decision)
 
     wiki_log_parser = wiki_subparsers.add_parser("log", help="Print the append-only operations log.")
@@ -432,6 +436,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Rebuild index.md from current wiki/ pages.",
     )
     wiki_regen_parser.add_argument("--repo-root", help="Repository root containing .awf-operations/. Defaults to current directory.")
+    wiki_regen_parser.add_argument("--no-ready-gate", action="store_true", help="Bypass the internal awf ready --gate operations preflight.")
     wiki_regen_parser.set_defaults(handler=run_wiki_regenerate_index)
 
     wiki_events_parser = wiki_subparsers.add_parser(
@@ -478,6 +483,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit a JSON summary instead of human-readable text.",
     )
+    wiki_compile_parser.add_argument("--no-ready-gate", action="store_true", help="Bypass the internal awf ready --gate operations preflight.")
     wiki_compile_parser.set_defaults(handler=run_wiki_compile)
 
     scan_parser = subparsers.add_parser("scan", help="Auto-discover project structure for analysis config.")

@@ -31,6 +31,7 @@ def _run_analyze(tmp_docs_root: Path) -> subprocess.CompletedProcess[str]:
             "--provider",
             "fixture",
             "--yolo",
+            "--no-ready-gate",
         ],
         cwd=str(ROOT),
         env=env,

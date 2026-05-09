@@ -46,6 +46,7 @@ from awf.core.judge import explain_judge_reasons, synthesize_workflow_multi_prov
 from awf.core.task import TaskConstraints, TaskContext, TaskDefinition, TaskType, resolve_execution_mode
 from awf.core.workflow_results import apply_workflow_result
 from awf.core.workflow_envelope import normalize_worker_result
+from awf.commands.ready_gate import enforce_ready_gate
 from awf.providers.registry import ProviderRegistry, UnknownProviderError
 
 
@@ -279,6 +280,10 @@ def run_wf_status(args: argparse.Namespace) -> int:
 
 
 def run_wf_init(args: argparse.Namespace) -> int:
+    gate_rc = enforce_ready_gate(args, "workflow-init")
+    if gate_rc != 0:
+        return gate_rc
+
     try:
         state = initialize_workflow(args.repo_root, args.concept, force=args.force)
     except Exception as exc:
@@ -359,6 +364,14 @@ def run_wf_decide(args: argparse.Namespace) -> int:
 def run_wf_next(args: argparse.Namespace) -> int:
     non_interactive = bool(getattr(args, "non_interactive", False))
     auto_apply = bool(args.auto_apply)
+    if not getattr(args, "dry_run", False):
+        gate_rc = enforce_ready_gate(
+            args,
+            "workflow-run",
+            json_output=getattr(args, "output_format", "text") == "json",
+        )
+        if gate_rc != 0:
+            return gate_rc
     try:
         config = load_awf_config(args.repo_root)
         state = load_workflow_state(args.repo_root)

@@ -47,6 +47,7 @@ def main() -> int:
                 "--provider",
                 "fixture",
                 "--yolo",
+                "--no-ready-gate",
             ],
             cwd=str(ROOT),
             env=env,

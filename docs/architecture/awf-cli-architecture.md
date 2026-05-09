@@ -744,6 +744,7 @@ Phase 5 첫 범위 권장:
 - chat turn 결과와 session 조회에는 estimated input/output token, session 누적 token, estimated session cost가 포함된다
 - `awf ready`는 repo별 config/provider/skill/heuristic scan/workflow/operations 상태를 read-only로 합쳐 automation level과 다음 안전 명령을 출력한다. 처음 쓰는 repo에서는 `doctor`, `scan`, `skills list`를 따로 추측하기 전에 이 명령을 먼저 본다
 - `awf ready --gate inspect|analysis|workflow-init|workflow-run|operations --json`은 Claude/Codex entrypoint용 deterministic preflight다. JSON에 `decision: allow|dry_run_only|block`을 포함하고, `allow` 외 decision은 non-zero exit로 provider 호출이나 workflow 진행을 막는다
+- `awf analyze`, `awf wf init`, `awf wf next`, `awf wiki decision`, `awf wiki regenerate-index`, `awf wiki compile`은 내부에서도 해당 ready gate를 기본 실행한다. 조회성 경로(`--dry-run`, `--check`, `--catalog`, `status`, `log`, `events`, `lint`)는 gate로 막지 않으며, 명시적 escape hatch는 `--no-ready-gate`다
 - `awf doctor`는 provider readiness를 installed/configured 수준으로 점검하고, `--probe`로 subprocess provider 접근성, `--ci`로 default provider readiness에 대한 CI/CD exit code 게이트를 제공한다
 - provider 실행 실패 시에는 `hint: run awf doctor`를 통해 readiness 진단 경로를 안내한다
 - top-level 자연어 라우팅은 안전한 조회 의도(`wf status`/`config show`/`skills list`/`mcp list`/session list-show)를 직접 보낸다

@@ -124,7 +124,7 @@ class TestDryRun:
     def test_wf_init_and_status(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             _make_fake_repo(tmpdir)
-            rc, _, err = _capture_main(["wf", "init", "Add user profile endpoint", "--repo-root", tmpdir])
+            rc, _, err = _capture_main(["wf", "init", "Add user profile endpoint", "--repo-root", tmpdir, "--no-ready-gate"])
             assert rc == 0, f"wf init failed: {err}"
             state_path = Path(tmpdir) / ".workflow" / "state.json"
             assert state_path.exists()
@@ -139,7 +139,7 @@ class TestDryRun:
     def test_wf_next_dry_run_plan(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             _make_fake_repo(tmpdir)
-            _capture_main(["wf", "init", "Add user profile endpoint", "--repo-root", tmpdir])
+            _capture_main(["wf", "init", "Add user profile endpoint", "--repo-root", tmpdir, "--no-ready-gate"])
 
             # Copy agent-cards from the repo templates
             cards_src = Path(REPO_ROOT) / "claude" / "skills" / "wf-orchestrator" / "templates" / "agent-cards"
@@ -157,7 +157,7 @@ class TestDryRun:
     def test_wf_gate_plan_fails_on_empty(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             _make_fake_repo(tmpdir)
-            _capture_main(["wf", "init", "test concept", "--repo-root", tmpdir])
+            _capture_main(["wf", "init", "test concept", "--repo-root", tmpdir, "--no-ready-gate"])
 
             rc, out, _ = _capture_main(["wf", "gate", "plan", "--repo-root", tmpdir])
             # Gate should fail because no artifacts exist yet
@@ -195,7 +195,7 @@ class TestLive:
             wf_dir = Path(tmpdir) / ".workflow"
 
             # Init
-            rc, _, err = _capture_main(["wf", "init", "Add a /health endpoint that returns 200 OK", "--repo-root", tmpdir])
+            rc, _, err = _capture_main(["wf", "init", "Add a /health endpoint that returns 200 OK", "--repo-root", tmpdir, "--no-ready-gate"])
             assert rc == 0, f"wf init failed: {err}"
 
             # Copy agent-cards so the orchestrator can find them

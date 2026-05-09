@@ -45,6 +45,7 @@ from awf.core.wiki_compile import (
     compile_from_events,
     known_topics,
 )
+from awf.commands.ready_gate import enforce_ready_gate
 
 
 def _resolve_repo_root(args: argparse.Namespace) -> Path:
@@ -118,6 +119,10 @@ def run_wiki_lint(args: argparse.Namespace) -> int:
 
 
 def run_wiki_regenerate_index(args: argparse.Namespace) -> int:
+    gate_rc = enforce_ready_gate(args, "operations")
+    if gate_rc != 0:
+        return gate_rc
+
     repo_root = _resolve_repo_root(args)
     target = regenerate_index(repo_root)
     print(f"regenerated {target}")
@@ -199,6 +204,10 @@ def _gh_pr_body(pr_number: int) -> tuple[list[str], str]:
 
 
 def run_wiki_decision(args: argparse.Namespace) -> int:
+    gate_rc = enforce_ready_gate(args, "operations")
+    if gate_rc != 0:
+        return gate_rc
+
     repo_root = _resolve_repo_root(args)
     profile = args.profile or read_profile(repo_root)
     if profile not in KNOWN_PROFILES:
@@ -244,6 +253,11 @@ def run_wiki_compile(args: argparse.Namespace) -> int:
     eyeball the result, plus a final hint when no events qualified
     (typical right after ``awf wiki init`` before any awf runs land).
     """
+    if not getattr(args, "dry_run", False):
+        gate_rc = enforce_ready_gate(args, "operations", json_output=bool(getattr(args, "json", False)))
+        if gate_rc != 0:
+            return gate_rc
+
     repo_root = _resolve_repo_root(args)
     topic = getattr(args, "topic", None)
     if topic is not None and topic not in known_topics():
