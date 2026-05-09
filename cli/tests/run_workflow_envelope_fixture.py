@@ -51,6 +51,8 @@ def _run_wf_with_fixture(
             "next",
             "--phase",
             "review",
+            "--mode",
+            "solo",
             "--auto-apply",
             extra_env={
                 "AWF_FIXTURE_RESULT_FILE": str(result_file),

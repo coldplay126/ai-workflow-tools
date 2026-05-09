@@ -35,6 +35,8 @@ def main() -> int:
             "next",
             "--phase",
             "review",
+            "--mode",
+            "solo",
             "--auto-apply",
             extra_env={"AWF_FIXTURE_RESULT_FILE": str(REVIEW_RESULT)},
         )
