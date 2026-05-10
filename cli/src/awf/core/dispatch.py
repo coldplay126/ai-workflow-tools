@@ -16,6 +16,7 @@ state machine).
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import sys
 import time
@@ -671,7 +672,11 @@ def pi_dispatch_available(config: PiRunnerConfig | None = None) -> bool:
 
 
 def _dispatch_readiness_hint(cwd: str | os.PathLike[str]) -> str:
-    return f"hint: run `awf doctor --repo-root {cwd} --json` to inspect dispatch readiness"
+    repo_root = shlex.quote(os.fspath(cwd))
+    return (
+        f"hint: run `awf doctor --repo-root {repo_root} --json` "
+        "to inspect dispatch readiness"
+    )
 
 
 def _print_dispatch_fallback_warning(

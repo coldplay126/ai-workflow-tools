@@ -389,6 +389,23 @@ def test_select_dispatch_pi_preference_falls_back_when_unavailable(capsys, tmp_p
     assert "run_pi_field_smoke.py" in err
 
 
+def test_select_dispatch_fallback_warning_quotes_repo_root_with_spaces(capsys, tmp_path):
+    repo_root = tmp_path / "repo with spaces"
+    selected = select_dispatch(
+        worker_count=2,
+        estimated_seconds=300,
+        preference="pi",
+        cwd=repo_root,
+        pi_options=PiDispatchOptions(
+            config=PiRunnerConfig(command=str(tmp_path / "missing"))
+        ),
+    )
+
+    assert isinstance(selected, InlineDispatch)
+    err = capsys.readouterr().err
+    assert f"awf doctor --repo-root '{repo_root}' --json" in err
+
+
 def test_select_dispatch_auto_picks_inline_when_cmux_unavailable(tmp_path):
     selected = select_dispatch(
         worker_count=3, estimated_seconds=120,
