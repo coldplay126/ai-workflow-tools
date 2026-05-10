@@ -102,6 +102,61 @@ def test_wf_next_runtime_smoke_blocks_phase_when_required_artifact_missing(
     assert state["gates"]["G2"]["passed"] is None
 
 
+def test_wf_reset_runtime_smoke_resets_state_and_preserves_runtime_files(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    prepare_workflow_repo(repo_root)
+    concept = "fix typo in docs"
+
+    initialized = initialize_workflow_fixture(repo_root, concept)
+    _assert_success(initialized)
+    mark_workflow_prerequisites_passed(repo_root)
+
+    reviewed = run_awf(
+        repo_root,
+        "wf",
+        "next",
+        "--phase",
+        "review",
+        "--provider",
+        "fixture",
+        "--mode",
+        "solo",
+        "--auto-apply",
+        "--yolo",
+        extra_env={"AWF_FIXTURE_RESULT_FILE": str(REVIEW_RESULT)},
+    )
+    _assert_success(reviewed)
+
+    concept_path = repo_root / ".workflow" / "concept.md"
+    concept_before = concept_path.read_text(encoding="utf-8")
+    review_report = repo_root / ".workflow" / "artifacts" / "review-report.md"
+    assert review_report.is_file()
+
+    reset = run_awf(repo_root, "wf", "reset")
+    _assert_success(reset)
+    assert "workflow reset" in reset.stdout
+
+    state = _workflow_state(repo_root)
+    assert state["currentPhase"] == "plan"
+    assert state["changeClass"] == "small"
+    assert state["totalExecutions"] == 0
+    assert state["history"] == []
+    assert state["loop"]["replanCount"] == 0
+    assert all(phase["status"] == "pending" for phase in state["phases"].values())
+    assert all(gate["passed"] is None for gate in state["gates"].values())
+
+    assert concept_path.read_text(encoding="utf-8") == concept_before
+    assert (repo_root / ".workflow" / "provider-config.json").is_file()
+    assert (repo_root / ".workflow" / "agent-cards" / "review.json").is_file()
+    assert review_report.is_file()
+
+    status = run_awf(repo_root, "wf", "status", "--json")
+    _assert_success(status)
+    assert json.loads(status.stdout)["currentPhase"] == "plan"
+
+
 def test_wf_next_runtime_smoke_uses_agent_cards_and_updates_status(
     tmp_path: Path,
 ) -> None:
