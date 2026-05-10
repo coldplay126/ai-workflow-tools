@@ -949,7 +949,7 @@ def run_wf_next(args: argparse.Namespace) -> int:
             )
             if has_synthesis:
                 gate_passed = gate_passed and bool(synthesis["final_passed"])
-            apply_gate_result(args.repo_root, phase, gate_passed)
+                apply_gate_result(args.repo_root, phase, gate_passed)
             processor.emit(
                 event_type=EventType.GATE_EVALUATED,
                 task_id=f"wf-{phase}",
