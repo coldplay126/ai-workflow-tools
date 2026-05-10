@@ -149,18 +149,22 @@ def check_provider_probe(provider_name: str, config: AwfConfig) -> dict[str, Any
 def check_runner_readiness(runner_name: str) -> dict[str, Any]:
     if runner_name == "pi":
         command = os.environ.get("AWF_PI_COMMAND", "pi").strip() or "pi"
+        installed = check_command_installed(command)
+        backend_status = "ok" if installed["status"] == "ok" else "skip"
+        backend_detail = (
+            "Pi dispatch adapter available; enable with dispatch.surface_preference=pi"
+            if installed["status"] == "ok"
+            else "Pi dispatch adapter available but command is not on PATH; inline remains default"
+        )
         return {
             "runner": runner_name,
             "kind": "terminal_harness",
-            "installed": check_command_installed(command),
+            "installed": installed,
             "configured": readiness_item(
                 "skip",
                 "Pi authentication and session state are managed by Pi; awf only detects the harness",
             ),
-            "backend": readiness_item(
-                "skip",
-                "awf Pi execution adapter is planned; Pi is not selected as a dispatch backend yet",
-            ),
+            "backend": readiness_item(backend_status, backend_detail),
         }
     return {
         "runner": runner_name,
@@ -205,17 +209,31 @@ def _collect_dispatch_status(repo_root: str | None = None) -> dict[str, Any]:
     """
     import shutil
 
-    from awf.core.dispatch import SURFACE_INLINE, cmux_dispatch_available
+    from awf.core.dispatch import (
+        SURFACE_CMUX,
+        SURFACE_INLINE,
+        SURFACE_PI,
+        cmux_dispatch_available,
+        pi_dispatch_available,
+    )
 
     cwd = repo_root or os.getcwd()
     cmux_on_path = shutil.which("cmux-agent") is not None
-    backend_ready = cmux_dispatch_available(cwd)
+    cmux_backend_ready = cmux_dispatch_available(cwd)
+    pi_backend_ready = pi_dispatch_available()
+    available_surfaces = [SURFACE_INLINE]
+    if cmux_backend_ready:
+        available_surfaces.append(SURFACE_CMUX)
+    if pi_backend_ready:
+        available_surfaces.append(SURFACE_PI)
     return {
         "default_surface": SURFACE_INLINE,
         "cmux_binary_on_path": cmux_on_path,
-        "cmux_backend_ready": backend_ready,
+        "cmux_backend_ready": cmux_backend_ready,
+        "pi_binary_on_path": pi_backend_ready,
+        "pi_backend_ready": pi_backend_ready,
         "cwd_checked": str(cwd),
-        "available_surfaces": ["inline"] + (["cmux"] if backend_ready else []),
+        "available_surfaces": available_surfaces,
     }
 
 

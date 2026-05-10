@@ -46,30 +46,33 @@ that can already normalize Pi output into awf's existing result shapes:
 - `awf.runners.pi.run_pi_agent()` converts one Pi print-mode worker response
   into `AgentResult`, including role, JSON parse status, timeout status, and
   parsed findings when requested.
-- Pi is not added to `available_surfaces` until an awf execution adapter exists.
+- `dispatch.surface_preference = "pi"` selects a Pi-backed dispatch surface
+  only when the Pi command is installed. `auto` still chooses only the existing
+  inline/cmux surfaces.
 
 ## Consequences
 
 Positive:
 
 - Pi can be integrated without installing it in CI.
-- cmux-agent remains the process/surface manager.
+- cmux-agent remains the multi-surface runtime; Pi opt-in dispatch is a
+  separate per-worker harness path.
 - awf state, gate, and operations memory stay canonical.
-- Future work can wrap Pi print/JSON/RPC mode behind `ResultEnvelope` without
-  changing workflow contracts.
+- Pi print mode can now be exercised through the same `MultiAgentDispatch`
+  contract as inline/cmux, without changing workflow result contracts.
 
 Negative:
 
 - Pi session state and awf workflow state will both exist once execution is
   added; awf must record Pi session IDs as provenance, not as canonical state.
 - Pi permissions or extensions cannot replace `awf ready --gate`.
-- The adapter skeleton is intentionally not wired into workflow execution yet;
-  detection still only proves that Pi is available on PATH.
+- The first dispatch adapter uses print mode and no saved Pi sessions, so it
+  proves the execution contract but does not yet capture Pi's full session-tree
+  advantage.
 
 ## Follow-up
 
-1. Decide whether workflow execution should use Pi print/JSON mode or RPC mode.
-2. Add a real `awf` dispatch/backend selector for Pi after the opt-in config
-   contract is approved.
-3. Record Pi session/export IDs in `.awf-operations` events as provenance when sessions are enabled.
-4. Keep live Pi execution smoke tests outside the default CI suite.
+1. Decide whether the long-lived Pi backend should stay on print mode or move
+   to JSON/RPC mode for richer event capture.
+2. Record Pi session/export IDs in `.awf-operations` events as provenance when sessions are enabled.
+3. Keep live Pi execution smoke tests outside the default CI suite.

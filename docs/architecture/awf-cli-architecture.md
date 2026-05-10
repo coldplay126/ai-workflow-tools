@@ -535,7 +535,7 @@ awf wf next --mode critical                    # Codex → Sonnet → Primary �
 - `run(workers, *, cwd, strategy)` — 고정 리스트의 워커를 parallel/sequential 로 실행. cross / agent team (Phase 5) 가 사용.
 - `run_chained(steps, *, cwd)` — 각 step의 prompt 가 이전 `AgentResult` 리스트에 의존하는 체인. critical 이 사용. agent team 은 prior threading 이 blackboard 기반(파일 side-effect)이라 `run` 으로 회귀.
 
-백엔드는 `InlineDispatch` (ThreadPoolExecutor) 와 `CmuxDispatch` (cmux-agent `.agent/` artifact 프로토콜) 두 가지가 있고, `provider-config.json` 의 `dispatch.surface_preference` 로 선택한다 (`auto`/`inline`/`cmux`). cmux 라우팅에서 `run_chained` 는 step 별 worker 를 role 로 고정해 같은 터미널 컨텍스트가 chain 동안 누적되도록 한다.
+백엔드는 `InlineDispatch` (ThreadPoolExecutor), `CmuxDispatch` (cmux-agent `.agent/` artifact 프로토콜), `PiDispatch` (Pi print-mode terminal harness)가 있고, `provider-config.json` 의 `dispatch.surface_preference` 로 선택한다 (`auto`/`inline`/`cmux`/`pi`). `auto` 는 기존처럼 inline/cmux만 선택하며, Pi는 명시적 opt-in일 때만 사용한다. cmux 라우팅에서 `run_chained` 는 step 별 worker 를 role 로 고정해 같은 터미널 컨텍스트가 chain 동안 누적되도록 한다.
 
 Judge Rules (결정론적):
 1. `CRITICAL` finding 1건 이상 → FAIL

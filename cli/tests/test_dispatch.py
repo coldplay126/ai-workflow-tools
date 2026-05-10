@@ -15,14 +15,19 @@ from awf.core.dispatch import (
     CmuxDispatchError,
     InlineDispatch,
     MultiAgentDispatch,
+    PiDispatch,
+    PiDispatchOptions,
     SURFACE_CMUX,
     SURFACE_INLINE,
+    SURFACE_PI,
     WorkerSpec,
     cmux_dispatch_available,
+    pi_dispatch_available,
     resolve_cmux_options_from_config,
     resolve_preference_from_config,
     select_dispatch,
 )
+from awf.runners.pi import PiRunnerConfig
 
 
 # --------------------------------------------------------------------------
@@ -56,6 +61,12 @@ def _spec(role: str, provider: _FakeProvider, **kw) -> WorkerSpec:
     defaults = {"prompt": "test", "timeout_sec": 90, "require_json": False}
     defaults.update(kw)
     return WorkerSpec(role=role, provider=provider, **defaults)
+
+
+def _write_fake_pi(path: Path, body: str) -> Path:
+    path.write_text(body, encoding="utf-8")
+    path.chmod(0o755)
+    return path
 
 
 # --------------------------------------------------------------------------
@@ -199,6 +210,99 @@ def test_inline_chained_empty_steps_returns_empty_list():
 
 
 # --------------------------------------------------------------------------
+# PiDispatch
+# --------------------------------------------------------------------------
+
+
+def test_pi_dispatch_runs_worker_through_pi_print_mode(tmp_path):
+    fake_pi = _write_fake_pi(
+        tmp_path / "pi",
+        "#!/bin/sh\nprintf '%s\\n' '{\"conclusion\":\"PASS\",\"findings\":[]}'\n",
+    )
+    dispatch = PiDispatch(
+        PiDispatchOptions(config=PiRunnerConfig(command=str(fake_pi)))
+    )
+
+    results = dispatch.run(
+        [
+            _spec(
+                "plan_conformance",
+                _FakeProvider("ignored", "{}"),
+                prompt="review",
+                require_json=True,
+            )
+        ],
+        cwd=str(tmp_path),
+    )
+
+    assert len(results) == 1
+    assert results[0].provider_name == SURFACE_PI
+    assert results[0].role == "plan_conformance"
+    assert results[0].parse_error is False
+    assert results[0].conclusion == "PASS"
+
+
+def test_pi_dispatch_preserves_input_order_under_parallel(tmp_path):
+    fake_pi = _write_fake_pi(
+        tmp_path / "pi",
+        "\n".join([
+            "#!/bin/sh",
+            'prompt=""',
+            'while [ "$#" -gt 0 ]; do',
+            '  if [ "$1" = "-p" ]; then shift; prompt="$1"; fi',
+            "  shift",
+            "done",
+            'case "$prompt" in *slow*) sleep 0.05 ;; esac',
+            'printf "reply:%s\\n" "$prompt"',
+            "",
+        ]),
+    )
+    dispatch = PiDispatch(
+        PiDispatchOptions(config=PiRunnerConfig(command=str(fake_pi)))
+    )
+
+    results = dispatch.run(
+        [
+            _spec("first", _FakeProvider("ignored", "{}"), prompt="slow"),
+            _spec("second", _FakeProvider("ignored", "{}"), prompt="fast"),
+        ],
+        cwd=str(tmp_path),
+        strategy="parallel",
+    )
+
+    assert [r.role for r in results] == ["first", "second"]
+    assert [r.stdout for r in results] == ["reply:slow", "reply:fast"]
+
+
+def test_pi_chained_runs_steps_with_prior_results(tmp_path):
+    fake_pi = _write_fake_pi(
+        tmp_path / "pi",
+        "#!/bin/sh\nprintf chain\n",
+    )
+    dispatch = PiDispatch(
+        PiDispatchOptions(config=PiRunnerConfig(command=str(fake_pi)))
+    )
+    captured_priors: list[list[str]] = []
+
+    def factory_for(label: str):
+        def _f(prior):
+            captured_priors.append([r.role for r in prior])
+            return _spec(label, _FakeProvider("ignored", "{}"), prompt=label)
+        return _f
+
+    results = dispatch.run_chained(
+        [
+            ChainedStep(role="a", factory=factory_for("a")),
+            ChainedStep(role="b", factory=factory_for("b")),
+        ],
+        cwd=str(tmp_path),
+    )
+
+    assert [r.role for r in results] == ["a", "b"]
+    assert captured_priors == [[], ["a"]]
+
+
+# --------------------------------------------------------------------------
 # CmuxDispatch — surface-level checks (full integration in test_dispatch_cmux)
 # --------------------------------------------------------------------------
 
@@ -226,6 +330,13 @@ def test_cmux_dispatch_unavailable_when_no_active_run(tmp_path):
     assert cmux_dispatch_available(str(tmp_path)) is False
 
 
+def test_pi_dispatch_available_uses_configured_command(tmp_path):
+    fake_pi = _write_fake_pi(tmp_path / "pi", "#!/bin/sh\n")
+
+    assert pi_dispatch_available(PiRunnerConfig(command=str(fake_pi))) is True
+    assert pi_dispatch_available(PiRunnerConfig(command=str(tmp_path / "missing"))) is False
+
+
 def test_select_dispatch_inline_preference_always_inline(tmp_path):
     selected = select_dispatch(
         worker_count=3, estimated_seconds=300,
@@ -242,6 +353,36 @@ def test_select_dispatch_cmux_preference_falls_back_when_unavailable(capsys, tmp
     assert isinstance(selected, InlineDispatch)
     err = capsys.readouterr().err
     assert "cmux" in err and "inline" in err
+
+
+def test_select_dispatch_pi_preference_uses_pi_when_available(tmp_path):
+    fake_pi = _write_fake_pi(tmp_path / "pi", "#!/bin/sh\n")
+
+    selected = select_dispatch(
+        worker_count=2,
+        estimated_seconds=300,
+        preference="pi",
+        cwd=str(tmp_path),
+        pi_options=PiDispatchOptions(config=PiRunnerConfig(command=str(fake_pi))),
+    )
+
+    assert isinstance(selected, PiDispatch)
+
+
+def test_select_dispatch_pi_preference_falls_back_when_unavailable(capsys, tmp_path):
+    selected = select_dispatch(
+        worker_count=2,
+        estimated_seconds=300,
+        preference="pi",
+        cwd=str(tmp_path),
+        pi_options=PiDispatchOptions(
+            config=PiRunnerConfig(command=str(tmp_path / "missing"))
+        ),
+    )
+
+    assert isinstance(selected, InlineDispatch)
+    err = capsys.readouterr().err
+    assert "pi" in err and "inline" in err
 
 
 def test_select_dispatch_auto_picks_inline_when_cmux_unavailable(tmp_path):
@@ -328,9 +469,15 @@ def test_resolve_preference_reads_explicit_cmux():
     assert resolve_preference_from_config(cfg) == "cmux"
 
 
+def test_resolve_preference_reads_explicit_pi():
+    cfg = {"dispatch": {"surface_preference": "pi"}}
+    assert resolve_preference_from_config(cfg) == "pi"
+
+
 def test_resolve_preference_normalizes_case_and_whitespace():
-    cfg = {"dispatch": {"surface_preference": "  CMUX "}}
-    assert resolve_preference_from_config(cfg) == "cmux"
+    for raw, expected in (("  CMUX ", "cmux"), ("  PI ", "pi")):
+        cfg = {"dispatch": {"surface_preference": raw}}
+        assert resolve_preference_from_config(cfg) == expected
 
 
 def test_resolve_preference_falls_back_to_auto_on_garbage():
@@ -353,6 +500,8 @@ def test_inline_and_cmux_satisfy_protocol():
     # Smoke check that both backends declare the expected interface.
     inline: MultiAgentDispatch = InlineDispatch()
     cmux: MultiAgentDispatch = CmuxDispatch()
+    pi: MultiAgentDispatch = PiDispatch()
     assert inline.name == SURFACE_INLINE
     assert cmux.name == SURFACE_CMUX
-    assert callable(inline.run) and callable(cmux.run)
+    assert pi.name == SURFACE_PI
+    assert callable(inline.run) and callable(cmux.run) and callable(pi.run)
