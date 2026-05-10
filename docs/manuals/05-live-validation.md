@@ -180,3 +180,22 @@ uv run --project cli --no-editable awf analyze sample-api quest-challenge --repo
 ```
 
 이 경로는 현재 기본 운영 경로가 아니라 optional 실험 경로입니다.
+
+## 10. 선택 검증: Pi dispatch
+
+Pi는 기본 dispatch surface가 아닙니다. `surface_preference=pi`는 실제 Pi
+설치와 provider 인증이 있는 머신에서만 검증합니다.
+
+```bash
+python3 cli/tests/run_pi_field_smoke.py --json
+```
+
+전역 설치 없이 npm으로 임시 실행하려면:
+
+```bash
+python3 cli/tests/run_pi_field_smoke.py --npm-exec --json
+```
+
+이 검증은 fake binary test가 아니라 실제 Pi print-mode provider 호출을
+수행합니다. `No API key found`가 나오면 Pi CLI는 실행됐지만 provider 인증이
+없는 상태입니다. 자세한 판정 기준은 [Pi Field Validation](./pi-field-validation.md)을 참고합니다.
