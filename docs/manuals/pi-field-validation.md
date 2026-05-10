@@ -1,0 +1,99 @@
+# Pi Field Validation
+
+This checklist answers one question: does Pi improve awf field operation, or is
+it only a technical integration?
+
+Pi is not part of default CI. Default CI uses fake binaries and contract tests
+so the repository stays deterministic. Field validation must run on a machine
+with Pi plus a configured provider.
+
+## Preconditions
+
+- Node/npm are available.
+- Pi is installed, or `--npm-exec` is allowed for a temporary npm execution.
+- Pi has provider authentication through `/login` or an API key environment
+  variable such as `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`.
+
+Current package scope:
+
+```bash
+npm view @earendil-works/pi-coding-agent version
+```
+
+Legacy package scope:
+
+```bash
+npm view @mariozechner/pi-coding-agent version
+```
+
+As of the 2026-05-07 Pi migration, the new package scope is
+`@earendil-works/pi-coding-agent`. The CLI remains `pi`.
+
+## Smoke
+
+Use a globally installed Pi:
+
+```bash
+cd ~/Documents/GitHub/ai-workflow-tools
+python3 cli/tests/run_pi_field_smoke.py --json
+```
+
+Use npm without global installation:
+
+```bash
+cd ~/Documents/GitHub/ai-workflow-tools
+python3 cli/tests/run_pi_field_smoke.py --npm-exec --json
+```
+
+Expected pass:
+
+- `ok: true`
+- `pi_version.ok: true`
+- `pi_dispatch.ok: true`
+- `pi_dispatch.conclusion: "PASS"`
+- `pi_dispatch.parse_error: false`
+
+Expected blocked states:
+
+- `pi command not found`: Pi is not installed and `--npm-exec` was not used.
+- `No API key found`: Pi runs, but provider authentication is not configured.
+- `parse_error: true`: Pi/provider responded, but the result contract is not
+  stable enough for awf dispatch.
+
+## Field Comparison
+
+After smoke passes, compare Pi against the existing surface on the same small
+workflow task:
+
+```bash
+# Baseline
+awf wf next --repo-root . --phase review --provider codex --dry-run
+
+# Pi opt-in dispatch
+awf wf next --repo-root . --phase review --provider codex --dry-run
+# with .workflow/provider-config.json containing:
+# {
+#   "dispatch": {
+#     "surface_preference": "pi"
+#   }
+# }
+```
+
+Record:
+
+- success/failure
+- elapsed seconds
+- JSON parse success
+- generated artifacts
+- whether the output is easier to inspect or resume
+
+Pi is useful only if it improves at least one field property without harming
+the existing gate/state contract:
+
+- better worker isolation
+- better session traceability
+- better extension/package customization
+- lower operator friction for repeated worker runs
+
+If it only adds another provider invocation path, keep it opt-in and do not move
+it into `auto`.
