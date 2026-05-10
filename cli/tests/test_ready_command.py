@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 from awf.commands.ready import run_ready
+from awf.core.pi_field_smoke import write_pi_field_smoke_result
 from awf.core.ready import collect_ready_report, evaluate_ready_gate
 
 
@@ -123,6 +124,18 @@ def test_collect_ready_report_recommends_subproject_scan(tmp_path: Path, monkeyp
 def test_run_ready_json_and_human_output(tmp_path: Path, monkeypatch, capsys) -> None:
     repo, skills = _prepare_repo(tmp_path)
     monkeypatch.setenv("AWF_SKILLS_DIR", str(skills))
+    write_pi_field_smoke_result(
+        repo,
+        {
+            "schema": "awf_pi_field_smoke_v1",
+            "ok": True,
+            "reason": "dispatch_ok",
+            "pi_command_source": "PATH",
+            "pi_command": "/bin/pi",
+            "diagnosis": {"kind": "dispatch_ok"},
+        },
+        recorded_at="2026-05-10T00:00:00+00:00",
+    )
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     pi = bin_dir / "pi"
@@ -139,6 +152,8 @@ def test_run_ready_json_and_human_output(tmp_path: Path, monkeypatch, capsys) ->
     assert payload["doctor"]["runners"][0]["installed"]["status"] == "ok"
     assert payload["doctor"]["pi_readiness"]["status"] == "ready"
     assert payload["doctor"]["pi_readiness"]["dispatch_surface"] == "opt_in_only"
+    assert payload["doctor"]["pi_readiness"]["last_field_smoke"]["status"] == "found"
+    assert payload["doctor"]["pi_readiness"]["last_field_smoke"]["reason"] == "dispatch_ok"
     assert payload["doctor"]["dispatch"]["surface_preference"]["surface_preference"] == "auto"
 
     rc = run_ready(argparse.Namespace(repo_root=str(repo), json=False, probe=False))
@@ -147,6 +162,7 @@ def test_run_ready_json_and_human_output(tmp_path: Path, monkeypatch, capsys) ->
     assert "automation_level: 2 (provider execution)" in out
     assert "runners: pi=ok" in out
     assert "pi: ready (version=ok, surface=opt_in_only)" in out
+    assert "last_field_smoke: ok=True reason=dispatch_ok" in out
     assert "dispatch: preference=auto (ok)" in out
     assert "recommended_next:" in out
 

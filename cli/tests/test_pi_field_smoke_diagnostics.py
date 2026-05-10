@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 from types import ModuleType
 
@@ -82,3 +83,28 @@ def test_set_diagnosis_promotes_machine_reason_and_next_action() -> None:
     assert payload["reason"] == "provider_quota_exhausted"
     assert payload["next_action"] == "Add usage."
     assert payload["billing_context"] == "anthropic_extra_usage"
+
+
+def test_main_can_write_latest_result_without_real_provider(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    rc = SMOKE.main(
+        [
+            "--pi-command",
+            str(tmp_path / "missing-pi"),
+            "--repo-root",
+            str(tmp_path),
+            "--write-result",
+            "--json",
+        ]
+    )
+
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reason"] == "pi_not_found"
+    result_path = Path(payload["result_path"])
+    assert result_path == tmp_path / ".awf-operations" / "pi-field-smoke" / "latest.json"
+    envelope = json.loads(result_path.read_text(encoding="utf-8"))
+    assert envelope["schema"] == "awf_pi_field_smoke_latest_v1"
+    assert envelope["payload"]["reason"] == "pi_not_found"

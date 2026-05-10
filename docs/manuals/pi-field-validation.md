@@ -35,14 +35,14 @@ Use a globally installed Pi:
 
 ```bash
 cd ~/Documents/GitHub/ai-workflow-tools
-python3 cli/tests/run_pi_field_smoke.py --json
+python3 cli/tests/run_pi_field_smoke.py --json --write-result
 ```
 
 Use npm without global installation:
 
 ```bash
 cd ~/Documents/GitHub/ai-workflow-tools
-python3 cli/tests/run_pi_field_smoke.py --npm-exec --json
+python3 cli/tests/run_pi_field_smoke.py --npm-exec --json --write-result
 ```
 
 Expected pass:
@@ -73,6 +73,11 @@ Expected blocked states:
 The JSON payload includes `diagnosis.summary` and `next_action` so field
 operators can distinguish local installation problems from provider auth,
 quota, billing, and output-contract problems.
+
+When `--write-result` is used, the latest result is stored at
+`.awf-operations/pi-field-smoke/latest.json`. `awf doctor --repo-root . --json`
+and `awf ready --repo-root . --json` summarize that latest result under
+`pi_readiness.last_field_smoke`, including `ok`, `reason`, and `recorded_at`.
 
 ### Anthropic subscription auth
 
