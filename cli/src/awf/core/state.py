@@ -576,19 +576,32 @@ def _agent_card_retry_max(agent_card: dict, default: int = 3) -> int:
     return default
 
 
-def _agent_card_on_fail_next_phase(
+def _agent_card_on_fail_action(
     on_fail: dict,
     failure_context: Optional[dict],
-) -> str | None:
+) -> object | None:
     if not isinstance(on_fail, dict):
         return None
 
     ctx = failure_context or {}
-    action = None
     if ctx.get("has_critical") and "critical_found" in on_fail:
-        action = on_fail["critical_found"]
-    elif "default" in on_fail:
-        action = on_fail["default"]
+        return on_fail["critical_found"]
+
+    high_count = ctx.get("high_count", 0)
+    if isinstance(high_count, int) and high_count > 0 and "high_only" in on_fail:
+        return on_fail["high_only"]
+
+    if "default" in on_fail:
+        return on_fail["default"]
+
+    return None
+
+
+def _agent_card_on_fail_next_phase(
+    on_fail: dict,
+    failure_context: Optional[dict],
+) -> str | None:
+    action = _agent_card_on_fail_action(on_fail, failure_context)
 
     if isinstance(action, dict):
         next_phase = action.get("next_phase") or action.get("target_phase")
@@ -603,6 +616,16 @@ def _agent_card_on_fail_next_phase(
         return None
 
     return None
+
+
+def _agent_card_on_fail_prompts_user(
+    on_fail: dict,
+    failure_context: Optional[dict],
+) -> bool:
+    action = _agent_card_on_fail_action(on_fail, failure_context)
+    if isinstance(action, dict):
+        return action.get("prompt_user") is True
+    return action == "prompt_user"
 
 
 def apply_gate_result(
@@ -695,15 +718,29 @@ def apply_gate_result(
 
         # --- on_fail routing from agent card ---
         on_fail_target = None
+        on_fail_prompts_user = False
         if agent_card:
             on_fail = agent_card.get("gate", {}).get("on_fail", {})
             on_fail_target = _agent_card_on_fail_next_phase(on_fail, failure_context)
+            on_fail_prompts_user = _agent_card_on_fail_prompts_user(
+                on_fail,
+                failure_context,
+            )
 
         if on_fail_target:
             phase_state["status"] = "failed"
             # Delegate to replan_workflow for proper state cleanup
             _save_workflow_state(explicit_root, state)
             return replan_workflow(explicit_root, phase, on_fail_target)
+        elif on_fail_prompts_user:
+            phase_state["status"] = "failed"
+            _save_workflow_state(explicit_root, state)
+            return record_orchestrator_decision(
+                explicit_root,
+                phase,
+                decision="escalate_user",
+                reason="agent-card on_fail.prompt_user matched",
+            )
         else:
             # Default: mark failed, stay on current phase for retry or user decision
             phase_state["status"] = "failed"

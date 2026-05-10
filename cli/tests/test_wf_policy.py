@@ -365,6 +365,53 @@ def test_agent_card_on_fail_next_phase_replans_critical_failure(tmp_path: Path):
     assert replanned["history"][-1]["action"] == "replanned"
 
 
+def test_agent_card_on_fail_prompt_user_enters_deciding_state(tmp_path: Path):
+    """Agent card on_fail.*.prompt_user should pause for user decision."""
+    state = _make_state("standard", current_phase="review")
+    state["phases"]["review"]["status"] = "in_progress"
+    state["gates"]["G1"]["passed"] = True
+    _write_workflow_state(tmp_path, state)
+    cards_dir = tmp_path / ".workflow" / "agent-cards"
+    cards_dir.mkdir(parents=True, exist_ok=True)
+    (cards_dir / "review.json").write_text(
+        json.dumps(
+            {
+                "name": "phase-review",
+                "retry": {"max": 2},
+                "gate": {
+                    "id": "G2",
+                    "on_fail": {"high_only": {"prompt_user": True}},
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    deciding = apply_gate_result(
+        str(tmp_path),
+        "review",
+        False,
+        failure_context={"has_critical": False, "high_count": 1},
+    )
+
+    assert deciding["currentPhase"] == "review"
+    assert deciding["phases"]["review"]["status"] == "deciding"
+    assert deciding["phases"]["review"]["decision"] == "escalate_user"
+    assert (
+        deciding["phases"]["review"]["decisionReason"]
+        == "agent-card on_fail.prompt_user matched"
+    )
+    assert deciding["phases"]["review"]["retries"] == 1
+    assert deciding["gates"]["G2"]["passed"] is False
+    pending = deciding["loop"]["pendingDecision"]
+    assert pending["phase"] == "review"
+    assert pending["decision"] == "escalate_user"
+    assert deciding["history"][-1]["action"] == "deciding"
+
+
 # ===========================================================================
 # WF-TEST-006: risk-based 투자 차등
 # ===========================================================================
