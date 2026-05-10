@@ -300,6 +300,7 @@ def check_runner_readiness(
 
 def collect_doctor_report(config: AwfConfig, repo_root: str | None, *, probe: bool = False) -> dict[str, Any]:
     runtime_paths = resolve_runtime_paths(repo_root)
+    resolved_repo_root = str(runtime_paths["repo_root"])
     provider_names = ["claude-code", "codex", "claude-sdk", "openai", "fixture"]
     providers = [check_provider_readiness(name, config) for name in provider_names]
     if probe:
@@ -322,7 +323,7 @@ def collect_doctor_report(config: AwfConfig, repo_root: str | None, *, probe: bo
         "providers": providers,
         "runners": [check_runner_readiness("pi", pi_readiness=pi_readiness)],
         "pi_readiness": pi_readiness,
-        "dispatch": _collect_dispatch_status(repo_root),
+        "dispatch": _collect_dispatch_status(resolved_repo_root),
     }
 
 

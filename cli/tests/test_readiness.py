@@ -71,6 +71,24 @@ def test_doctor_report_detects_pi_runner_without_requiring_backend(
     assert "pi" in report["dispatch"]["available_surfaces"]
 
 
+def test_doctor_report_normalizes_dispatch_paths_from_relative_repo_root(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo = _repo_root(tmp_path / "repo")
+    monkeypatch.chdir(repo)
+
+    config = load_awf_config(".")
+    report = collect_doctor_report(config, ".")
+
+    assert report["paths"]["repo_root"] == str(repo.resolve())
+    assert report["dispatch"]["cwd_checked"] == str(repo.resolve())
+    assert (
+        report["dispatch"]["surface_preference"]["provider_config_path"]
+        == str(repo.resolve() / ".workflow" / "provider-config.json")
+    )
+
+
 def test_doctor_report_honors_awf_pi_command_override(
     tmp_path: Path,
     monkeypatch,
