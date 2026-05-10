@@ -411,6 +411,7 @@ def reset_workflow(explicit_root: Optional[str], concept: Optional[str] = None) 
         concept = _extract_concept_text(concept_path.read_text(encoding="utf-8"))
 
     new_state = _initial_workflow_state(root, concept)
+    new_state["changeClass"] = detect_change_class(concept)
     # Keep existing concept/manifest/provider config/agent cards/artifacts files intact.
     _save_workflow_state(explicit_root, new_state)
     return new_state
