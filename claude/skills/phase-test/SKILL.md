@@ -26,6 +26,15 @@ runtime_contract: ".workflow/agent-cards/test.json"
 
 **Phase 4(개발자 TDD)와의 구분**: Phase 4는 구현 중 단위/통합 테스트. Phase 6는 전체 회귀 + 수락 테스트 + 수동 서명.
 
+## Deterministic Phase Preflight
+
+수동으로 이 phase를 실행할 때도 [wf-orchestrator/reference/deterministic-preflight.md](../wf-orchestrator/reference/deterministic-preflight.md)의
+Phase Skill Preflight를 따릅니다. 이 phase의 dry-run 명령은 다음과 같습니다:
+
+```bash
+awf wf next --phase test --repo-root . --dry-run --output-format json
+```
+
 ## 게이트 프리앰블
 
 1. `.workflow/state.json` 읽기.

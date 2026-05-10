@@ -8,8 +8,9 @@
 - 실패 시 어디를 봐야 하는지 빠르게 판단한다.
 
 현재 운영 가정:
-- **Analysis**: Claude Code `/analysis`가 primary, `awf analyze --dry-run`이 보조 준비 도구
-- **WF pipeline**: Claude Code `wf-*`/`phase-*` skills가 primary, `awf wf next --dry-run`이 보조 (Codex review/verify는 `awf wf next --provider codex` 경로 사용 가능)
+- **Analysis**: Claude Code `/analysis`가 primary이며, 실행 전 `awf ready --gate analysis`와 `awf analyze --dry-run --output-format json`을 기본 preflight contract로 사용
+- **WF pipeline**: Claude Code `wf-*`/`phase-*` skills가 primary이며, 실행 전 `awf ready --gate workflow-run`과 `awf wf next --dry-run --output-format json`을 기본 preflight contract로 사용
+- **Dispatch surface**: inline/cmux-agent/Pi는 실행 surface이고 `.workflow/state.json`이 canonical state. cmux-agent와 Pi는 readiness/evidence가 있을 때만 선택
 - `awf analyze --provider claude-code`는 small domain에서 먼저 검증
 - large domain 또는 Stage 3 자동 승격 케이스는 timeout 가능성이 있으므로 `/analysis` 권장
 

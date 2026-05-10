@@ -24,6 +24,15 @@ runtime_contract: ".workflow/agent-cards/review.json"
 
 # Phase 2: 검토 (Review)
 
+## Deterministic Phase Preflight
+
+수동으로 이 phase를 실행할 때도 [wf-orchestrator/reference/deterministic-preflight.md](../wf-orchestrator/reference/deterministic-preflight.md)의
+Phase Skill Preflight를 따릅니다. 이 phase의 dry-run 명령은 다음과 같습니다:
+
+```bash
+awf wf next --phase review --repo-root . --dry-run --output-format json
+```
+
 ## 게이트 프리앰블
 
 1. `.workflow/state.json` 읽기.
