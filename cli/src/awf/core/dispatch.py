@@ -27,14 +27,16 @@ from typing import Any, Callable, Literal, Protocol
 
 from awf.core import _cmux_bridge as bridge
 from awf.core.agent_runner import AgentResult, run_agent
+from awf.runners.pi import PiRunnerConfig, run_pi_agent
 
 
 Strategy = Literal["parallel", "sequential"]
-Preference = Literal["auto", "inline", "cmux"]
+Preference = Literal["auto", "inline", "cmux", "pi"]
 Lifecycle = Literal["ephemeral", "reusable"]
 
 SURFACE_INLINE = "inline"
 SURFACE_CMUX = "cmux"
+SURFACE_PI = "pi"
 
 # Heuristic thresholds for auto selection.
 _CMUX_MIN_WORKERS = 2
@@ -107,6 +109,17 @@ class CmuxDispatchOptions:
     role_to_worker: dict[str, dict[str, str]] = field(default_factory=dict)
     spawn_timeout_sec: float = 60.0
     poll_interval_sec: float = 0.5
+
+
+@dataclass(frozen=True)
+class PiDispatchOptions:
+    """Configuration for ``PiDispatch``.
+
+    Pi owns model/provider selection and session behavior. awf only passes one
+    worker prompt at a time and keeps the canonical workflow state.
+    """
+
+    config: PiRunnerConfig = field(default_factory=PiRunnerConfig.from_env)
 
 
 class MultiAgentDispatch(Protocol):
@@ -203,6 +216,73 @@ class InlineDispatch:
             if spec is None:
                 continue
             completed.append(_run_single(spec, cwd))
+        return completed
+
+
+# ---------------------------------------------------------------------------
+# PiDispatch — opt-in per-worker terminal harness backend.
+# ---------------------------------------------------------------------------
+
+
+def _run_pi_single(spec: WorkerSpec, cwd: str, options: PiDispatchOptions) -> AgentResult:
+    return run_pi_agent(
+        spec.prompt,
+        role=spec.role,
+        cwd=cwd,
+        require_json=spec.require_json,
+        config=options.config,
+        timeout_sec=spec.timeout_sec,
+    )
+
+
+class PiDispatch:
+    """Dispatch backend that runs each worker through Pi print mode.
+
+    This is intentionally opt-in. Pi is useful as a per-worker harness, but it
+    is not selected by ``auto`` because Pi's provider/model policy lives in Pi
+    configuration rather than awf provider routing.
+    """
+
+    name = SURFACE_PI
+
+    def __init__(self, options: PiDispatchOptions | None = None) -> None:
+        self._options = options or PiDispatchOptions()
+
+    def run(
+        self,
+        workers: list[WorkerSpec],
+        *,
+        cwd: str,
+        strategy: Strategy = "parallel",
+    ) -> list[AgentResult]:
+        if not workers:
+            return []
+        if strategy == "sequential" or len(workers) == 1:
+            return [_run_pi_single(spec, cwd, self._options) for spec in workers]
+
+        results: list[AgentResult | None] = [None] * len(workers)
+        with ThreadPoolExecutor(max_workers=len(workers)) as pool:
+            futures = {
+                pool.submit(_run_pi_single, spec, cwd, self._options): idx
+                for idx, spec in enumerate(workers)
+            }
+            for future in as_completed(futures):
+                idx = futures[future]
+                results[idx] = future.result()
+        return [r for r in results if r is not None]
+
+    def run_chained(
+        self,
+        steps: list[ChainedStep],
+        *,
+        cwd: str,
+    ) -> list[AgentResult]:
+        completed: list[AgentResult] = []
+        for step in steps:
+            spec = step.factory(list(completed))
+            if spec is None:
+                continue
+            completed.append(_run_pi_single(spec, cwd, self._options))
         return completed
 
 
@@ -584,6 +664,12 @@ def cmux_dispatch_available(cwd: str | os.PathLike[str]) -> bool:
     return bridge.find_active_run(cwd) is not None
 
 
+def pi_dispatch_available(config: PiRunnerConfig | None = None) -> bool:
+    """True when the configured Pi command is executable on this host."""
+    cfg = config or PiRunnerConfig.from_env()
+    return shutil.which(cfg.command) is not None
+
+
 def select_dispatch(
     *,
     worker_count: int,
@@ -591,12 +677,15 @@ def select_dispatch(
     estimated_seconds: float = _CMUX_MIN_DURATION_SEC,
     preference: Preference = "auto",
     options: CmuxDispatchOptions | None = None,
+    pi_options: PiDispatchOptions | None = None,
 ) -> MultiAgentDispatch:
     """Pick a dispatch backend.
 
     - ``"inline"`` → always InlineDispatch
     - ``"cmux"`` → CmuxDispatch if available, otherwise InlineDispatch with a
       stderr warning so operators see the fallback
+    - ``"pi"`` → PiDispatch if the Pi command is available, otherwise
+      InlineDispatch with a stderr warning
     - ``"auto"`` → CmuxDispatch only when worker_count is 2-5 AND each call
       is expected to take ≥60s AND the backend is available; otherwise
       InlineDispatch
@@ -608,6 +697,15 @@ def select_dispatch(
             return CmuxDispatch(options)
         print(
             "warning: dispatch surface_preference=cmux requested but cmux "
+            "backend is unavailable; falling back to inline",
+            file=sys.stderr,
+        )
+        return InlineDispatch()
+    if preference == SURFACE_PI:
+        if pi_dispatch_available((pi_options or PiDispatchOptions()).config):
+            return PiDispatch(pi_options)
+        print(
+            "warning: dispatch surface_preference=pi requested but pi "
             "backend is unavailable; falling back to inline",
             file=sys.stderr,
         )
@@ -632,7 +730,7 @@ def resolve_preference_from_config(provider_config: dict | None) -> Preference:
     if not isinstance(section, dict):
         return "auto"
     value = str(section.get("surface_preference", "auto")).strip().lower()
-    if value in (SURFACE_INLINE, SURFACE_CMUX, "auto"):
+    if value in (SURFACE_INLINE, SURFACE_CMUX, SURFACE_PI, "auto"):
         return value  # type: ignore[return-value]
     return "auto"
 

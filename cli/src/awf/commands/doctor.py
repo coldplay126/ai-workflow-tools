@@ -41,7 +41,8 @@ def run_doctor(args: argparse.Namespace) -> int:
                 else "binary not on PATH"
             )
         )
-        print(f"dispatch_surfaces: {surfaces} (cmux: {cmux_note})")
+        pi_note = "ready" if dispatch.get("pi_backend_ready") else "binary not on PATH"
+        print(f"dispatch_surfaces: {surfaces} (cmux: {cmux_note}; pi: {pi_note})")
     runners = payload.get("runners", []) or []
     if runners:
         print("runners:")

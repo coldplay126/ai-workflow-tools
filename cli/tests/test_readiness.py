@@ -43,8 +43,9 @@ def test_doctor_report_detects_pi_runner_without_requiring_backend(
     assert runners["pi"]["installed"]["status"] == "ok"
     assert runners["pi"]["installed"]["path"] == str(pi)
     assert runners["pi"]["configured"]["status"] == "skip"
-    assert runners["pi"]["backend"]["status"] == "skip"
-    assert "dispatch backend yet" in runners["pi"]["backend"]["detail"]
+    assert runners["pi"]["backend"]["status"] == "ok"
+    assert "surface_preference=pi" in runners["pi"]["backend"]["detail"]
+    assert "pi" in report["dispatch"]["available_surfaces"]
 
 
 def test_doctor_report_honors_awf_pi_command_override(
@@ -67,3 +68,4 @@ def test_doctor_report_honors_awf_pi_command_override(
     assert runner["runner"] == "pi"
     assert runner["installed"]["command"] == "custom-pi"
     assert runner["installed"]["path"] == str(custom_pi)
+    assert report["dispatch"]["pi_backend_ready"] is True
