@@ -62,6 +62,46 @@ def test_wf_next_runtime_smoke_blocks_phase_when_required_gate_missing(
     assert state["gates"]["G2"]["passed"] is None
 
 
+def test_wf_next_runtime_smoke_blocks_phase_when_required_artifact_missing(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    prepare_workflow_repo(repo_root)
+
+    initialized = initialize_workflow_fixture(
+        repo_root,
+        "Fixture negative runtime smoke concept covering missing artifacts",
+    )
+    _assert_success(initialized)
+    mark_workflow_prerequisites_passed(repo_root)
+
+    missing_spec = repo_root / ".workflow" / "artifacts" / "spec.md"
+    missing_spec.unlink()
+
+    blocked = run_awf(
+        repo_root,
+        "wf",
+        "next",
+        "--phase",
+        "review",
+        "--provider",
+        "fixture",
+        "--mode",
+        "solo",
+        "--dry-run",
+    )
+    assert blocked.returncode == 2
+    assert "Missing required workflow artifact" in blocked.stderr
+    assert ".workflow/artifacts/spec.md" in blocked.stderr
+
+    state = _workflow_state(repo_root)
+    assert state["currentPhase"] == "plan"
+    assert state["phases"]["plan"]["status"] == "completed"
+    assert state["phases"]["review"]["status"] == "pending"
+    assert state["gates"]["G1"]["passed"] is True
+    assert state["gates"]["G2"]["passed"] is None
+
+
 def test_wf_next_runtime_smoke_uses_agent_cards_and_updates_status(
     tmp_path: Path,
 ) -> None:
