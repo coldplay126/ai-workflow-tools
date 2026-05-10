@@ -1,0 +1,112 @@
+name: ai-workflow-tools field trial
+description: Record a real-repository trial and decide whether AWF helped.
+title: "Field trial: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this issue form after running the real-repository field trial.
+        See `docs/manuals/10-field-trial-checklist.en.md` or
+        `docs/manuals/10-field-trial-checklist.ko.md` before filing.
+  - type: input
+    id: repo_branch
+    attributes:
+      label: Repository and branch
+      description: Target repository, subproject if relevant, and trial branch.
+      placeholder: billing-api / trial-awf-readiness
+    validations:
+      required: true
+  - type: textarea
+    id: task
+    attributes:
+      label: Task
+      description: The small task used for the field trial.
+      placeholder: record retry reason in failed payment logs
+    validations:
+      required: true
+  - type: input
+    id: test_command
+    attributes:
+      label: Existing test command
+      placeholder: pytest tests/payments -q
+    validations:
+      required: true
+  - type: dropdown
+    id: host
+    attributes:
+      label: Host
+      options:
+        - Claude Code
+        - Codex CLI
+        - local CLI
+        - mixed
+    validations:
+      required: true
+  - type: dropdown
+    id: provider_calls
+    attributes:
+      label: Provider calls
+      options:
+        - none
+        - dry-run only
+        - real provider calls
+    validations:
+      required: true
+  - type: dropdown
+    id: runner_surface
+    attributes:
+      label: Runner surface
+      options:
+        - not used
+        - cmux-agent
+        - Pi
+        - other
+    validations:
+      required: true
+  - type: checkboxes
+    id: commands
+    attributes:
+      label: Commands run
+      options:
+        - label: awf ready --repo-root .
+        - label: awf scan . --no-ai
+        - label: awf analyze <service> <unit> --repo-root . --dry-run --output-format json
+        - label: awf wf init "small scoped improvement" --repo-root .
+        - label: awf ready --repo-root . --gate workflow-run --json
+        - label: awf wf next --repo-root . --dry-run --output-format json
+        - label: python3 cli/tests/run_pi_field_smoke.py --json --write-result
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Summarize readiness, scan units, analysis paths, workflow dry-run, confusing output, and missing guards.
+      value: |
+        - ready recommendation:
+        - scan service/unit:
+        - analysis dry-run paths:
+        - workflow dry-run phase/provider:
+        - confusing output:
+        - missing guard:
+    validations:
+      required: true
+  - type: dropdown
+    id: decision
+    attributes:
+      label: Decision
+      options:
+        - keep using
+        - use only for analysis
+        - use only for review-verify
+        - do not use here
+    validations:
+      required: true
+  - type: textarea
+    id: reason
+    attributes:
+      label: Reason and next small improvement
+      value: |
+        Reason:
+
+        Next small improvement:
+    validations:
+      required: true
