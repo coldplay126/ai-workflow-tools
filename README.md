@@ -1,5 +1,95 @@
 # ai-workflow-tools
 
+[한국어](#한국어) | [English](#english)
+
+## 한국어
+
+Claude Code, Codex, local CLI workflow를 위한 AI 작업 오케스트레이션 및
+분석 도구입니다. 이 저장소는 workflow 계약, provider adapter, CLI, agent
+prompt를 한 곳에 모아 재사용 가능한 자동화 루프를 제공합니다.
+
+### 구성
+
+```text
+ai-workflow-tools/
+├── cli/            # Python CLI: awf analyze, awf wf, awf chat, awf doctor
+├── claude/         # Claude Code skills and agent definitions
+├── codex/          # Codex runner and delegated worker rules
+├── cmux-agent/     # cmux worker support package
+├── docs/           # Architecture, specs, and operating guides
+├── snippets/       # CLAUDE.md snippets
+├── templates/      # cmux protocol templates
+└── setup.sh        # Claude Code skill/agent symlink installer
+```
+
+### CLI
+
+```bash
+uv run --project cli --no-editable awf --help
+uv run --project cli --no-editable awf ready --repo-root .
+uv run --project cli --no-editable awf doctor --repo-root . --json --ci
+uv run --project cli --no-editable awf wf status --repo-root .
+uv run --project cli --no-editable awf analyze sample-api health --repo-root . --dry-run
+```
+
+`awf ready`는 프로젝트에서 가장 먼저 실행하는 read-only 점검입니다. 설정,
+provider, skill, scan, workflow, operations wiki 상태를 한 번에 모아 현재
+안전한 자동화 레벨과 다음 명령을 알려줍니다.
+
+### 첫 workflow 순서
+
+처음에는 작은 gated loop로 시작합니다.
+
+```bash
+awf ready --repo-root .
+awf scan cli --no-ai
+awf analyze ai-workflow-tools <unit> --repo-root . --dry-run
+awf wf init "small scoped improvement" --repo-root .
+awf ready --repo-root . --gate workflow-run
+awf wf next --repo-root .
+awf ready --repo-root .
+```
+
+Pi는 기본 dispatch surface가 아니라 opt-in runner입니다. Pi를 쓰려면 먼저
+field-smoke evidence를 남기고 `ready`가 그 결과를 읽게 합니다.
+
+```bash
+python3 cli/tests/run_pi_field_smoke.py --json --write-result
+awf doctor --repo-root . --json
+awf ready --repo-root .
+```
+
+자세한 첫 작업 흐름:
+
+- [첫 ai-workflow-tools 작업 흐름](docs/manuals/08-first-workflow.ko.md)
+- [First Workflow](docs/manuals/08-first-workflow.en.md)
+
+### 운영 wiki
+
+`awf wiki`는 `.awf-operations/` 아래에 프로젝트 단위 운영 지식 레이어를
+관리합니다. `stage1_invalidation`, `scope_check`, `dispatch_complete`,
+`dual_strategy_engaged`, `analysis_complete` 이벤트가 JSONL로 누적되고,
+`awf wiki compile`이 이를 결정적 operations page로 합성합니다. raw events와
+compiled operations pages는 local telemetry이고, 결정/ADR page는 commit
+대상입니다.
+
+### 테스트
+
+```bash
+cd cli && uv run --group dev pytest -q --ignore=tests/test_e2e_live.py
+uv run --project cmux-agent --group dev python -m pytest cmux-agent/tests -q
+```
+
+### 핵심 개념
+
+- `.workflow/`는 gated feature 작업의 phase state와 artifact를 보관합니다.
+- `.ai-context/`는 분석 결과를 보관합니다.
+- `.awf-operations/`는 운영 evidence와 후속 판단 입력을 보관합니다.
+- provider adapter는 Claude, Codex, OpenAI, subprocess, fixture 실행을 정규화합니다.
+- runner backend는 workflow state와 분리됩니다. inline/cmux/Pi는 실행 surface이고, awf state가 canonical source입니다.
+
+## English
+
 AI workflow and analysis tooling for Claude Code, Codex, and local CLI workflows.
 
 This repository keeps the reusable workflow contracts, provider adapters, CLI, and agent prompts in one place. It is imported as a clean personal repository with no upstream Git history.
