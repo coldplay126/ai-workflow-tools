@@ -286,3 +286,78 @@ def test_wf_next_runtime_smoke_uses_agent_cards_and_updates_status(
     assert after["gates"]["G5"]["passed"] is True
     assert after["currentPhase"] == "test"
     assert (repo_root / ".workflow" / "artifacts" / "verification-report.md").is_file()
+
+
+def test_wf_next_auto_apply_failure_applies_gate_once(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    prepare_workflow_repo(repo_root)
+
+    initialized = initialize_workflow_fixture(
+        repo_root,
+        "Fixture runtime smoke concept covering failed review decision routing",
+    )
+    _assert_success(initialized)
+    mark_workflow_prerequisites_passed(repo_root)
+
+    failing_review = repo_root / "failing-review.json"
+    failing_review.write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "phase": "review",
+                "provider": "fixture",
+                "result": {
+                    "conclusion": "FAIL - unresolved high review finding",
+                    "findings": [
+                        {
+                            "id": "F-HIGH",
+                            "category": "scope",
+                            "severity": "HIGH",
+                            "locations": ["artifacts/tasks.md:T001"],
+                            "summary": "High severity finding needs user decision",
+                        }
+                    ],
+                    "coverage": {
+                        "total_requirements": 1,
+                        "mapped_requirements": 1,
+                        "percentage": 100,
+                        "gaps": [],
+                    },
+                    "evidence": [],
+                    "risks": [],
+                    "action_items": [],
+                },
+                "escape": None,
+                "meta": {"format_version": 1},
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    reviewed = run_awf(
+        repo_root,
+        "wf",
+        "next",
+        "--phase",
+        "review",
+        "--provider",
+        "fixture",
+        "--mode",
+        "solo",
+        "--auto-apply",
+        "--yolo",
+        extra_env={"AWF_FIXTURE_RESULT_FILE": str(failing_review)},
+    )
+
+    assert reviewed.returncode == 3
+    assert "applied_gate: FAIL" in reviewed.stdout
+    state = _workflow_state(repo_root)
+    review_state = state["phases"]["review"]
+    assert review_state["status"] == "deciding"
+    assert review_state["retries"] == 1
+    assert review_state["decision"] == "escalate_user"
+    assert state["loop"]["pendingDecision"]["phase"] == "review"
+    assert state["loop"]["pendingDecision"]["decision"] == "escalate_user"
+    assert [entry["action"] for entry in state["history"]].count("deciding") == 1
