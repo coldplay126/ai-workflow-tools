@@ -1,17 +1,18 @@
-# Colleague Onboarding Guide
+# Onboarding Guide for First-Time Developers
 
-Use this short guide when explaining `ai-workflow-tools` to another developer
-and running a first 15-minute trial on a small repository.
+Use this short guide when opening `ai-workflow-tools` for the first time. The
+goal is to decide whether the tool fits your task, then reach the first dry-run
+on a small repository within 15 minutes without calling a provider.
 
-Korean version: [동료 개발자 온보딩 가이드](./09-colleague-onboarding.ko.md)
+Korean version: [처음 쓰는 개발자를 위한 온보딩 가이드](./09-colleague-onboarding.ko.md)
 
-## One-Sentence Explanation
+## Understand It in One Sentence
 
 `ai-workflow-tools` turns Claude Code, Codex CLI, and local CLI work into a
 checked workflow: read repo readiness, discover units deterministically, preview
 prompts with dry-runs, then run gated workflow phases with repo-local artifacts.
 
-## Good Fits
+## Use It When
 
 - A new repository where it is unclear what the AI should inspect first
 - Feature work that benefits from `plan -> review -> approve -> impl -> verify
@@ -21,17 +22,17 @@ prompts with dry-runs, then run gated workflow phases with repo-local artifacts.
 - Persistent `.ai-context` documentation for code understanding
 - Independent review/verify through another provider or runner surface
 
-## Poor Fits
+## Do Not Use It When
 
 - A one-line or two-line obvious edit
 - Early product discussion where human alignment comes before repo analysis
 - Emergency hotfixes that must bypass workflow artifacts
 - Work where the workflow overhead is larger than the task
 
-## First 15-Minute Trial
+## Your First 15 Minutes
 
-Start on a small Python/TypeScript repository or subproject and stop before any
-provider-backed execution.
+Start on a small Python/TypeScript repository or subproject. Do not call a
+provider yet. Stop after the dry-run commands below.
 
 ```bash
 awf ready --repo-root .
@@ -57,8 +58,9 @@ If the dry-run output is unclear, do not move to provider-backed execution.
 
 ### Example A: Unfamiliar Python Script Repository
 
-Situation: the repository has root-level source directories such as
-`collectors/`, `analyzers/`, or `importers/`.
+If the repository has root-level source directories such as `collectors/`,
+`analyzers/`, or `importers/`, first use read-only commands to identify the
+analysis units.
 
 ```bash
 awf ready --repo-root .
@@ -66,7 +68,7 @@ awf scan . --no-ai
 awf analyze collectors naver --repo-root . --dry-run --output-format json
 ```
 
-Decision:
+How to decide:
 
 - If `scan` identifies real source directories as units, the target is likely
   usable.
@@ -77,8 +79,8 @@ Decision:
 
 ### Example B: Start a Small Feature Workflow
 
-Situation: the task is narrow, such as "record the retry reason in payment
-failure logs."
+For a narrow task such as "record the retry reason in payment failure logs,"
+starting a workflow can be useful.
 
 ```bash
 awf wf init "record retry reason in payment failure logs" --repo-root .
@@ -86,7 +88,7 @@ awf ready --repo-root . --gate workflow-run --json
 awf wf next --repo-root . --dry-run --output-format json
 ```
 
-Decision:
+How to decide:
 
 - If the phase is `plan`, the tool is preparing planning artifacts, not
   implementation.
@@ -95,15 +97,15 @@ Decision:
 
 ### Example C: Use Codex for Review or Verify Only
 
-Situation: Claude Code is the main host, but you want a Codex review/verify
-perspective.
+If Claude Code is your main host but you want a Codex review/verify
+perspective, use the Codex adapter.
 
 ```bash
 ../ai-workflow-tools/codex/run-wf.sh preflight review codex
 ../ai-workflow-tools/codex/run-wf.sh prompt review codex
 ```
 
-Decision:
+How to decide:
 
 - If `preflight` fails, follow `ready` recommendations before running Codex.
 - The generated prompt should make the review goal and artifacts clear.
@@ -111,7 +113,7 @@ Decision:
 
 ### Example D: A Task That Should Not Use AWF
 
-Situation: fix one README typo or reorder imports.
+If the task is one README typo or import ordering, AWF is probably too much.
 
 Recommended path:
 
@@ -120,13 +122,13 @@ git diff
 pytest <relevant tests>
 ```
 
-Decision:
+How to decide:
 
 - If creating `.workflow` costs more than the edit, do not use it.
 - Keep simple edits in the normal development flow. If the pattern repeats,
   consider only a wiki decision or docs update later.
 
-## Example Conversation
+## FAQ
 
 Question: "Does this mean the AI implements the feature by itself?"
 
@@ -137,7 +139,7 @@ Answer:
 > runs gated phases. It is too much for tiny edits, but useful for unfamiliar
 > repo analysis and feature work that needs review or verification.
 
-## Claude Code
+## Using Claude Code
 
 Install the skills with:
 
@@ -156,7 +158,7 @@ Common entrypoints:
 Claude skills follow the same rule: read `awf ready` and dry-run JSON before
 provider-backed execution.
 
-## Codex CLI
+## Using Codex CLI
 
 Codex does not replicate Claude's skill UX. Use the `awf` CLI and Codex adapter.
 
@@ -168,13 +170,14 @@ Codex does not replicate Claude's skill UX. Use the `awf` CLI and Codex adapter.
 `preflight` checks the same `awf ready --gate workflow-run` and
 `awf wf next --dry-run --output-format json` contract.
 
-## Avoid Saying
+## Avoid These Misunderstandings
 
-- "The AI just develops the feature by itself."
-- "Use this for every task."
-- "cmux-agent or Pi is the default path." They are optional execution surfaces.
+- The AI does not just develop the feature by itself.
+- You should not use this for every task.
+- cmux-agent and Pi are not the default path. They are optional execution
+  surfaces.
 
-## Better Explanation
+## The Main Point
 
 > This tool keeps AI coding grounded in repo-local artifacts, dry-runs, and
 > gates. It is too much for tiny edits, but useful for unfamiliar repo analysis,

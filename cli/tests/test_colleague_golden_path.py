@@ -171,7 +171,10 @@ def test_colleague_onboarding_docs_include_scenario_examples() -> None:
         assert "codex/run-wf.sh preflight review codex" in text
         assert "pytest <" in text
 
-    assert "상황별 예시" in ko
-    assert "동료에게 말하는 예시" in ko
+    assert "처음 쓰는 개발자를 위한 온보딩 가이드" in ko
+    assert "이럴 때 쓰세요" in ko
+    assert "자주 묻는 질문" in ko
     assert "Scenario Examples" in en
-    assert "Example Conversation" in en
+    assert "Onboarding Guide for First-Time Developers" in en
+    assert "Use It When" in en
+    assert "FAQ" in en
