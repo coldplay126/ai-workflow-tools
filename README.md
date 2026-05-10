@@ -52,6 +52,18 @@ workflow review/verify, critical mode 같은 고위험 구간에서 실행 품�
 운영 evidence를 보관합니다. inline, cmux, Pi는 실행 표면이고, canonical
 state는 awf가 관리합니다.
 
+### 주요 플로우
+
+| 플로우 | 언제 쓰나 | 대표 순서 | 주요 산출물/확인 |
+|--------|-----------|-----------|------------------|
+| 첫 도입 | 새 repo나 subproject에서 자동화 가능 수준을 확인할 때 | `ready → scan → analyze --dry-run → wf init → ready --gate workflow-run → wf next` | automation level, 추천 명령, `.workflow/state.json` |
+| 분석 문서화 | 코드 단위를 `.ai-context` 문서로 만들거나 갱신할 때 | `scan → analyze → output split → check/catalog` | `.ai-context/*`, `.analysis-state.json`, `hashes.json` |
+| 기능 작업 | 실제 변경을 gated workflow로 진행할 때 | `wf init → plan → review → approve → impl → verify → test → done` | `.workflow/artifacts/*`, gate 결과, phase state |
+| 멀티에이전트 검증 | review/verify 또는 고위험 분석을 교차 검증할 때 | `phase/run request → subagents → judge/synthesis → gate result` | result envelope, verdict, fallback decision |
+| cmux/Pi 실행 | worker terminal surface나 Pi runner를 사용할 때 | `doctor/field-smoke → dispatch preference → worker run → events 확인` | `.agent/events.jsonl`, Pi smoke evidence, dispatch diagnostics |
+| 운영 wiki | 반복 작업의 evidence와 결정을 남길 때 | `events 기록 → wiki compile → decision 작성 → wiki lint` | `.awf-operations/events/*`, `wiki/decisions/*`, operations pages |
+| Claude/Codex 통합 | CLI 계약을 agent 환경에서 재사용할 때 | `setup/snippets/skills → awf ready → awf/analyze/wf 계약 실행` | `claude/skills/*`, `codex/*`, project-local artifacts |
+
 ### CLI
 
 ```bash
@@ -172,6 +184,18 @@ The source of truth is repo-local state, not the terminal surface. `.workflow`
 stores feature workflow state, `.ai-context` stores analysis output, and
 `.awf-operations` stores operating evidence. Inline dispatch, cmux, and Pi are
 execution surfaces; awf owns the canonical state and provenance.
+
+## Core Flows
+
+| Flow | When to use it | Typical sequence | Main output or check |
+|------|----------------|------------------|----------------------|
+| First adoption | Check how far a new repo or subproject can be automated | `ready → scan → analyze --dry-run → wf init → ready --gate workflow-run → wf next` | automation level, recommended commands, `.workflow/state.json` |
+| Analysis documentation | Create or refresh `.ai-context` docs for a code unit | `scan → analyze → output split → check/catalog` | `.ai-context/*`, `.analysis-state.json`, `hashes.json` |
+| Feature workflow | Run a real change through gated phases | `wf init → plan → review → approve → impl → verify → test → done` | `.workflow/artifacts/*`, gate results, phase state |
+| Multi-agent validation | Cross-check review/verify or high-risk analysis | `phase/run request → subagents → judge/synthesis → gate result` | result envelopes, verdict, fallback decision |
+| cmux/Pi execution | Use worker terminal surfaces or the opt-in Pi runner | `doctor/field-smoke → dispatch preference → worker run → inspect events` | `.agent/events.jsonl`, Pi smoke evidence, dispatch diagnostics |
+| Operations wiki | Preserve recurring evidence and decisions | `record events → wiki compile → write decision → wiki lint` | `.awf-operations/events/*`, `wiki/decisions/*`, operations pages |
+| Claude/Codex integration | Reuse the CLI contracts inside agent environments | `setup/snippets/skills → awf ready → run awf/analyze/wf contracts` | `claude/skills/*`, `codex/*`, project-local artifacts |
 
 ## CLI
 
