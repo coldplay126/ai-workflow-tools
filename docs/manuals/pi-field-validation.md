@@ -52,13 +52,35 @@ Expected pass:
 - `pi_dispatch.ok: true`
 - `pi_dispatch.conclusion: "PASS"`
 - `pi_dispatch.parse_error: false`
+- `reason: "dispatch_ok"` or `reason: "dispatch_ok_with_anthropic_extra_usage"`
 
 Expected blocked states:
 
-- `pi command not found`: Pi is not installed and `--npm-exec` was not used.
-- `No API key found`: Pi runs, but provider authentication is not configured.
-- `parse_error: true`: Pi/provider responded, but the result contract is not
-  stable enough for awf dispatch.
+- `reason: "pi_not_found"`: Pi is not installed and `--npm-exec` was not used.
+- `reason: "missing_provider_auth"`: Pi runs, but provider authentication is
+  not configured.
+- `reason: "provider_quota_exhausted"` with
+  `billing_context: "anthropic_extra_usage"`: Pi reached Anthropic, but Claude
+  Extra Usage is exhausted. This is the expected failure when Anthropic
+  subscription auth is active and no Extra Usage budget remains.
+- `reason: "provider_auth_failed"`: Pi reached the provider, but the provider
+  rejected the credential.
+- `reason: "provider_rate_limited"`: Pi reached the provider, but the request
+  was rate-limited.
+- `reason: "provider_contract_parse_error"`: Pi/provider responded, but the
+  result contract is not stable enough for awf dispatch.
+
+The JSON payload includes `diagnosis.summary` and `next_action` so field
+operators can distinguish local installation problems from provider auth,
+quota, billing, and output-contract problems.
+
+### Anthropic subscription auth
+
+Pi may use Anthropic subscription auth from a Claude Pro/Max account. In that
+mode, third-party harness calls are billed through Claude Extra Usage instead
+of Claude plan limits. A failure such as `You're out of extra usage` means the
+Pi command and awf dispatch path reached Anthropic, but the account needs Extra
+Usage enabled/increased or a different provider/API key for Pi runs.
 
 ## Field Comparison
 

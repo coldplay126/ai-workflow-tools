@@ -34,6 +34,161 @@ AUTH_ENV_NAMES = (
 )
 
 
+def _diagnosis(
+    kind: str,
+    summary: str,
+    next_action: str,
+    *,
+    billing_context: str | None = None,
+) -> dict[str, str]:
+    payload = {
+        "kind": kind,
+        "summary": summary,
+        "next_action": next_action,
+    }
+    if billing_context:
+        payload["billing_context"] = billing_context
+    return payload
+
+
+def _combined_output(check: dict[str, Any]) -> str:
+    parts = [
+        str(check.get("stdout") or ""),
+        str(check.get("stderr") or ""),
+        str(check.get("stdout_preview") or ""),
+        str(check.get("stderr_preview") or ""),
+    ]
+    return "\n".join(parts).lower()
+
+
+def _diagnose_version(check: dict[str, Any]) -> dict[str, str]:
+    if check.get("returncode") == 127:
+        return _diagnosis(
+            "pi_not_found",
+            "Pi command could not be executed.",
+            "Install Pi, set AWF_PI_COMMAND, or rerun with --npm-exec.",
+        )
+    if check.get("returncode") == 124:
+        return _diagnosis(
+            "pi_version_timeout",
+            "Pi did not return a version before the timeout.",
+            "Retry with a larger --timeout-sec or inspect the Pi installation.",
+        )
+    return _diagnosis(
+        "pi_version_failed",
+        "Pi started, but `pi --version` failed.",
+        "Run `pi --version` directly and fix the local Pi installation first.",
+    )
+
+
+def _diagnose_dispatch(check: dict[str, Any]) -> dict[str, str]:
+    output = _combined_output(check)
+    if check.get("ok"):
+        if "subscription auth" in output and "extra usage" in output:
+            return _diagnosis(
+                "dispatch_ok_with_anthropic_extra_usage",
+                (
+                    "Pi dispatch passed, but Anthropic subscription auth may "
+                    "bill through Extra Usage."
+                ),
+                "Review Claude Extra Usage limits before repeated Pi runs.",
+                billing_context="anthropic_extra_usage",
+            )
+        return _diagnosis(
+            "dispatch_ok",
+            "Pi dispatch field smoke passed.",
+            "No action required.",
+        )
+    if check.get("timed_out"):
+        return _diagnosis(
+            "pi_dispatch_timeout",
+            "Pi dispatch did not finish before the timeout.",
+            "Retry with a larger --timeout-sec or inspect the provider session.",
+        )
+    if (
+        "out of extra usage" in output
+        or "add more at claude.ai/settings/usage" in output
+    ):
+        return _diagnosis(
+            "provider_quota_exhausted",
+            (
+                "Anthropic rejected the Pi request because Claude Extra "
+                "Usage is exhausted."
+            ),
+            "Enable or increase Claude Extra Usage, or use a different provider/API key.",
+            billing_context="anthropic_extra_usage",
+        )
+    if "subscription auth" in output and "extra usage" in output:
+        return _diagnosis(
+            "anthropic_extra_usage_warning",
+            (
+                "Pi is using Anthropic subscription auth, which bills "
+                "third-party harness calls through Extra Usage."
+            ),
+            "Confirm Extra Usage settings before continuing repeated Pi runs.",
+            billing_context="anthropic_extra_usage",
+        )
+    if "no api key found" in output or (
+        "api key" in output and ("not found" in output or "missing" in output)
+    ):
+        return _diagnosis(
+            "missing_provider_auth",
+            "Pi runs, but no usable provider authentication was found.",
+            (
+                "Log in through Pi or set a provider API key such as "
+                "ANTHROPIC_API_KEY or OPENAI_API_KEY."
+            ),
+        )
+    if (
+        "authentication_error" in output
+        or "invalid_api_key" in output
+        or "invalid x-api-key" in output
+        or "unauthorized" in output
+    ):
+        return _diagnosis(
+            "provider_auth_failed",
+            "Pi reached the provider, but provider authentication was rejected.",
+            "Refresh Pi login or replace the provider API key.",
+        )
+    if "rate_limit" in output or "rate limit" in output:
+        return _diagnosis(
+            "provider_rate_limited",
+            "Pi reached the provider, but the provider rate-limited the request.",
+            (
+                "Wait for the provider rate limit to reset or use a different "
+                "provider/model."
+            ),
+        )
+    if check.get("parse_error"):
+        return _diagnosis(
+            "provider_contract_parse_error",
+            "Pi/provider responded, but not with the JSON contract awf requires.",
+            (
+                "Inspect stdout_preview and stderr_preview, then retry with a "
+                "stable provider/model."
+            ),
+        )
+    if int(check.get("returncode") or 0) != 0:
+        return _diagnosis(
+            "provider_error",
+            "Pi dispatch failed after reaching the provider path.",
+            "Inspect stderr_preview for provider-specific details.",
+        )
+    return _diagnosis(
+        "provider_contract_failed",
+        "Pi dispatch completed, but the response did not satisfy the PASS contract.",
+        "Inspect stdout_preview and rerun after adjusting the provider/model.",
+    )
+
+
+def _set_diagnosis(payload: dict[str, Any], diagnosis: dict[str, str]) -> None:
+    payload["reason"] = diagnosis["kind"]
+    payload["diagnosis"] = diagnosis
+    for key in ("billing_context", "next_action"):
+        if key in diagnosis:
+            payload[key] = diagnosis[key]
+
+
 def _auth_env_status() -> dict[str, bool]:
     return {name: bool(os.environ.get(name, "").strip()) for name in AUTH_ENV_NAMES}
 
@@ -85,9 +240,19 @@ def _check_version(command: str, cwd: Path, timeout_sec: int) -> dict[str, Any]:
             check=False,
         )
     except FileNotFoundError:
-        return {"ok": False, "returncode": 127, "stdout": "", "stderr": f"not found: {command}"}
+        return {
+            "ok": False,
+            "returncode": 127,
+            "stdout": "",
+            "stderr": f"not found: {command}",
+        }
     except subprocess.TimeoutExpired:
-        return {"ok": False, "returncode": 124, "stdout": "", "stderr": f"timed out after {timeout_sec}s"}
+        return {
+            "ok": False,
+            "returncode": 124,
+            "stdout": "",
+            "stderr": f"timed out after {timeout_sec}s",
+        }
     return {
         "ok": completed.returncode == 0,
         "returncode": completed.returncode,
@@ -146,24 +311,29 @@ def _build_payload(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             "checks": [],
         }
         if command is None:
-            payload["reason"] = (
-                "pi command not found; install Pi or rerun with --npm-exec"
+            _set_diagnosis(
+                payload,
+                _diagnosis(
+                    "pi_not_found",
+                    "Pi command was not found.",
+                    "Install Pi, set AWF_PI_COMMAND, or rerun with --npm-exec.",
+                ),
             )
             return 2, payload
 
         version = _check_version(command, tmpdir, args.timeout_sec)
         payload["checks"].append({"name": "pi_version", **version})
         if not version["ok"]:
-            payload["reason"] = "pi --version failed"
+            _set_diagnosis(payload, _diagnose_version(version))
             return 2, payload
 
         dispatch = _run_dispatch(command, tmpdir, args.timeout_sec)
         payload["checks"].append({"name": "pi_dispatch", **dispatch})
         payload["ok"] = bool(dispatch["ok"])
+        diagnosis = _diagnose_dispatch(dispatch)
+        _set_diagnosis(payload, diagnosis)
         if payload["ok"]:
-            payload["reason"] = "pi dispatch field smoke passed"
             return 0, payload
-        payload["reason"] = "pi dispatch field smoke failed"
         return 1, payload
 
 
@@ -193,8 +363,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"pi_command: {payload.get('pi_command') or '(missing)'}")
         print(f"pi_command_source: {payload['pi_command_source']}")
         print(f"auth_env_present: {payload['auth_env_present']}")
+        diagnosis = payload.get("diagnosis") or {}
+        if diagnosis.get("summary"):
+            print(f"diagnosis: {diagnosis['summary']}")
+        if diagnosis.get("billing_context"):
+            print(f"billing_context: {diagnosis['billing_context']}")
+        if diagnosis.get("next_action"):
+            print(f"next_action: {diagnosis['next_action']}")
         for check in payload["checks"]:
-            print(f"- {check['name']}: ok={check['ok']} returncode={check.get('returncode')}")
+            print(
+                f"- {check['name']}: "
+                f"ok={check['ok']} returncode={check.get('returncode')}"
+            )
             stderr = str(check.get("stderr") or check.get("stderr_preview") or "")
             if stderr:
                 print(f"  stderr: {stderr}")
