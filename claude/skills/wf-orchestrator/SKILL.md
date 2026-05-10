@@ -34,6 +34,19 @@ allowed-tools:
 
 ## Deterministic Preflight
 
+Claude skill은 repo 상태를 추측하지 않고 `awf`의 결정론적 결과를 먼저 읽습니다.
+공통 규칙은 [reference/deterministic-preflight.md](reference/deterministic-preflight.md)를
+따릅니다. 처음 도입하는 repo에서는 다음 순서를 기본 계약으로 사용합니다:
+
+```bash
+awf ready --repo-root . --json
+awf scan . --no-ai
+awf analyze <service> <unit> --repo-root . --dry-run --output-format json
+awf wf init "작업 설명" --repo-root .
+awf ready --repo-root . --gate workflow-run --json
+awf wf next --repo-root . --dry-run --output-format json
+```
+
 워크플로우를 처음 시작할 때는 repo root에서 다음 gate를 실행합니다:
 
 ```bash
@@ -49,8 +62,16 @@ awf ready --gate workflow-run --repo-root . --json
 - exit code `0` (`decision: "allow"`)일 때만 `.workflow/` 생성 또는 Phase 실행으로 진행합니다.
 - exit code `10` (`decision: "dry_run_only"`)이면 provider 호출 없이 `awf wf next --dry-run` 또는 상태 점검까지만 수행합니다.
 - 그 외 non-zero는 오케스트레이션을 중단하고 `gate.recommended_next`의 명령만 제안합니다.
+- `awf wf next --dry-run --output-format json` 결과에서 다음 phase, provider prompt, artifact 경로가 이해되지 않으면 provider-backed 실행으로 넘어가지 않습니다.
 
 `awf wf init`과 provider-backed `awf wf next`도 같은 gate를 내부에서 다시 확인합니다. 상위 wrapper가 이미 같은 판정을 수행한 경우에만 `--no-ready-gate`를 사용합니다.
+
+## Dispatch Surface Policy
+
+`.workflow/state.json`과 `.workflow/artifacts/*`가 canonical state입니다. inline,
+cmux-agent, Pi는 모두 실행 surface일 뿐이며 workflow state를 대체하지 않습니다.
+세부 규칙은 [reference/deterministic-preflight.md](reference/deterministic-preflight.md)의
+Dispatch Surface Policy를 따릅니다.
 
 ## Quick Resume (세션 컴팩션 후 우선 실행)
 

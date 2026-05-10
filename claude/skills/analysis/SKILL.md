@@ -49,6 +49,7 @@ Stage 3은 `related_domains`, `stage3_force`, `stage_routing`을 바탕으로 �
 모든 프로젝트 구조(TypeScript, PHP, Python, Go, Terraform, K8s 등)를 지원합니다.
 
 **상세 파이프라인 지침은 [reference.md](reference.md)를 참조하세요.**
+공통 preflight 계약은 [wf-orchestrator/reference/deterministic-preflight.md](../wf-orchestrator/reference/deterministic-preflight.md)를 참조하세요.
 
 ## 사용법
 
@@ -80,9 +81,18 @@ awf analyze {service} --cycles       # import cycle report
 awf ready --gate analysis --repo-root . --json
 ```
 
+분석 대상이 명확하지 않거나 auto-discovery가 필요한 경우에는 공통 preflight
+계약에 따라 provider 호출 전에 deterministic scan과 dry-run JSON을 먼저 확인합니다:
+
+```bash
+awf scan . --no-ai
+awf analyze {service} {unit} --repo-root . --dry-run --output-format json
+```
+
 - exit code `0` (`decision: "allow"`)일 때만 provider-backed 분석을 실행합니다.
 - exit code `10` (`decision: "dry_run_only"`)이면 provider 호출 없이 `awf analyze ... --dry-run`까지만 실행합니다.
 - 그 외 non-zero는 분석을 중단하고 `gate.recommended_next`의 명령만 제안합니다.
+- dry-run JSON에서 분석 단위, 입력 경로, 생성될 artifact 경로가 이해되지 않으면 provider-backed 분석으로 넘어가지 않습니다.
 
 `awf analyze`도 provider-backed 실행 전 같은 gate를 내부에서 다시 확인합니다. 상위 wrapper가 이미 같은 판정을 수행한 경우에만 `--no-ready-gate`를 사용합니다.
 

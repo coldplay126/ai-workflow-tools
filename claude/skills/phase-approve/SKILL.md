@@ -22,6 +22,15 @@ contract_template: "repo/claude/skills/wf-orchestrator/templates/agent-cards/app
 runtime_contract: ".workflow/agent-cards/approve.json"
 ---
 
+## Deterministic Phase Preflight
+
+수동으로 이 phase를 실행할 때도 [wf-orchestrator/reference/deterministic-preflight.md](../wf-orchestrator/reference/deterministic-preflight.md)의
+Phase Skill Preflight를 따릅니다. 이 phase의 dry-run 명령은 다음과 같습니다:
+
+```bash
+awf wf next --phase approve --repo-root . --dry-run --output-format json
+```
+
 ## 수동 실행 모드
 
 이 스킬은 Phase 3(승인)을 **수동으로** 실행하는 진입점입니다.
