@@ -17,6 +17,10 @@
 | 작업 이력 | `.work_history/` | 누적 이력 |
 | 프로젝트 지식 | `project-context.md` | 도메인 지식 |
 
+`.workflow/`가 target repo의 `.gitignore`에 포함되어 있으면 workflow state는
+local-only 운영 상태로 취급한다. `awf ready`는 이 경우 warning을 표시하지만,
+workflow 실행 자체를 막지는 않는다.
+
 ---
 
 ## 2. Config 설정 키
@@ -35,6 +39,15 @@
 | System | 코드 내 defaults |
 | User | `~/.config/awf/config.toml` |
 | Project | `{repo_root}/.awf.toml` |
+
+## 2.1 Readiness / scan 구현값
+
+| 항목 | 값 |
+|------|----|
+| Python project markers | `pyproject.toml`, `setup.py`, `setup.cfg`, `requirements.txt`, `Pipfile`, `poetry.lock` |
+| deterministic unit patterns | `src/domains/{unit}`, `src/domain/{unit}`, `src/modules/{unit}`, `src/features/{unit}`, `src/{unit}`, root-level `{unit}` |
+| root-level source unit 예시 | `collectors`, `analyzers`, `importers`, `exporters`, `monitors`, `matchers` |
+| dry-run JSON | `awf analyze ... --dry-run --output-format json`, `awf wf next ... --dry-run --output-format json` |
 
 ---
 

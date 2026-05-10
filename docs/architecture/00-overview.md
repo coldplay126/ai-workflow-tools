@@ -64,7 +64,7 @@ graph TD
 | 컴포넌트 | 파일 | 책임 | 진실 공급원 참조 |
 |---------|------|------|--------------|
 | **spec_loader** | `core/spec_loader.py` | 프롬프트 템플릿 로드 + 변수 치환 | `skills/*/prompts/*.md` |
-| **scanner** | `core/scanner.py` | 프로젝트 구조 탐색 (heuristic + AI) | — |
+| **scanner** | `core/scanner.py` | 프로젝트 구조 탐색. deterministic marker/root-unit 탐색 후 필요한 경우 AI fallback | — |
 | **imports** | `core/imports.py` | import 추출 + 시그니처 + context 수집 | — |
 | **analysis_stage1** | `core/analysis_stage1.py` | 파일별 XML 번들 분석 | `skills/analysis/prompts/stage1-file.md` |
 | **analysis_prompt** | `core/analysis_prompt.py` | Stage 2/3 프롬프트 조립 | `skills/analysis/prompts/stage2.md`, `stage3.md` |
@@ -151,6 +151,15 @@ ai-workflow-tools/
     ├── architecture/                ← 이 문서들
     └── ...
 ```
+
+### Scanner onboarding 규칙
+
+`awf ready`와 `awf scan --no-ai`는 provider 호출 없이 같은 deterministic
+scanner를 사용한다. Python repo는 `pyproject.toml`, `setup.py`,
+`setup.cfg`, `requirements.txt`, `Pipfile`, `poetry.lock`를 marker로 인식한다.
+`src/`/`domain`/`modules` 패턴이 없는 script repo도 `collectors/`,
+`analyzers/`, `importers/`, `exporters/`, `monitors/`, `matchers/` 같은
+root-level source directory를 분석 unit으로 노출할 수 있다.
 
 ## 기능별 상세
 

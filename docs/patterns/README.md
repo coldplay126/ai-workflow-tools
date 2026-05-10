@@ -47,6 +47,7 @@ ai-workflow-tools에서 추출한 도메인 비종속적 AI 워크플로우 패�
 | **phase** | workflow | 워크플로우의 실행 단위. plan, review, approve, impl, verify, test, done |
 | **stage** | analysis | 분석 파이프라인의 처리 단계. Stage 1 (파일별), Stage 2 (단위 합성), Stage 3 (교차 검증) |
 | **mode** | multi-agent | 다중 에이전트 실행 모드. solo, quick, precise, cross, critical |
+| **unit** | analysis | 한 번의 분석 대상으로 묶는 코드 그룹. DDD domain일 필요는 없으며, script repo의 `collectors/`, `analyzers/`, `importers/` 같은 root-level source directory도 unit이 될 수 있다 |
 
 ### Evaluator
 

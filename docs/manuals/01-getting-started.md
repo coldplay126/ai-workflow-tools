@@ -51,6 +51,9 @@ uv run --project cli awf ready --repo-root . --gate workflow-init --json
 
 `ready`는 설정, provider, skill, scan, workflow, operations wiki 상태를 읽기 전용으로 모아 현재 repo에서 어느 자동화 레벨까지 안전한지 보여줍니다.
 `--gate`는 Claude/Codex가 첫 실행 전에 따를 수 있는 결정론적 preflight이며, `allow`가 아니면 non-zero exit로 진행을 멈춥니다.
+script형 Python repo는 `requirements.txt`만 있어도 Python 프로젝트로 인식됩니다.
+`ready`의 scan 결과가 ready라면 `collectors/`, `analyzers/`, `importers/`처럼
+root-level에 있는 소스 디렉토리도 분석 단위 후보로 볼 수 있습니다.
 
 ## 3. 실습 A: workflow 상태 읽기
 
@@ -83,13 +86,16 @@ uv run --project cli awf wf status --repo-root .
 
 ## 4. 실습 B: `awf wf next`가 만드는 것 보기
 
-실제 provider를 부르지 않고 prompt만 확인합니다.
+실제 provider를 부르지 않고 prompt만 확인합니다. JSON 출력은 자동화나 다른
+agent가 prompt preview를 파싱해야 할 때 사용합니다.
 
 ```bash
 uv run --project cli awf wf next --repo-root . --phase review --provider codex --dry-run
+uv run --project cli awf wf next --repo-root . --phase review --provider codex --dry-run --output-format json
 ```
 
-실행 후 확인할 파일:
+dry-run에서는 파일을 쓰지 않습니다. 실제 provider 실행 후에는 다음 위치에
+prompt/result가 남습니다.
 - `.workflow/tmp`
 
 핵심 포인트:
@@ -105,7 +111,7 @@ uv run --project cli awf wf next --repo-root . --phase review --provider codex -
 도메인 분석 prompt가 어떤 입력을 받는지 확인합니다.
 
 ```bash
-uv run --project cli awf analyze sample-api quest-challenge --repo-root . --dry-run
+uv run --project cli awf analyze sample-api quest-challenge --repo-root . --dry-run --output-format json
 ```
 
 확인할 것:
