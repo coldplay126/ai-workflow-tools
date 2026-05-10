@@ -405,6 +405,7 @@ def reset_workflow(explicit_root: Optional[str], concept: Optional[str] = None) 
     wf_dir = root / ".workflow"
     state = load_workflow_state(explicit_root)
     concept_path = wf_dir / "concept.md"
+    replacement_concept = concept is not None
     if concept is None:
         if not concept_path.exists():
             raise FileNotFoundError(f"Missing workflow concept: {concept_path}")
@@ -413,6 +414,8 @@ def reset_workflow(explicit_root: Optional[str], concept: Optional[str] = None) 
     new_state = _initial_workflow_state(root, concept)
     new_state["changeClass"] = detect_change_class(concept)
     # Keep existing concept/manifest/provider config/agent cards/artifacts files intact.
+    if replacement_concept:
+        concept_path.write_text(_concept_markdown(concept), encoding="utf-8")
     _save_workflow_state(explicit_root, new_state)
     return new_state
 

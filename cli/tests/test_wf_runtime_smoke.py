@@ -157,6 +157,41 @@ def test_wf_reset_runtime_smoke_resets_state_and_preserves_runtime_files(
     assert json.loads(status.stdout)["currentPhase"] == "plan"
 
 
+def test_wf_reset_runtime_smoke_replaces_explicit_concept_consistently(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    prepare_workflow_repo(repo_root)
+
+    initialized = initialize_workflow_fixture(repo_root, "fix typo in docs")
+    _assert_success(initialized)
+
+    replacement = "payment production migration"
+    reset = run_awf(repo_root, "wf", "reset", "--concept", replacement)
+    _assert_success(reset)
+    assert "workflow reset" in reset.stdout
+
+    state = _workflow_state(repo_root)
+    assert state["currentPhase"] == "plan"
+    assert state["changeClass"] == "high_risk"
+    assert "payment-production-migration" in state["id"]
+    assert all(phase["status"] == "pending" for phase in state["phases"].values())
+    assert all(gate["passed"] is None for gate in state["gates"].values())
+
+    concept_text = (repo_root / ".workflow" / "concept.md").read_text(
+        encoding="utf-8"
+    )
+    assert "fix typo in docs" not in concept_text
+    assert replacement in concept_text
+    assert "## 요구사항" in concept_text
+
+    status = run_awf(repo_root, "wf", "status", "--json")
+    _assert_success(status)
+    status_payload = json.loads(status.stdout)
+    assert status_payload["id"] == state["id"]
+    assert status_payload["changeClass"] == "high_risk"
+
+
 def test_wf_next_runtime_smoke_uses_agent_cards_and_updates_status(
     tmp_path: Path,
 ) -> None:
