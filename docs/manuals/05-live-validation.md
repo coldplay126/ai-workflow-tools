@@ -197,5 +197,7 @@ python3 cli/tests/run_pi_field_smoke.py --npm-exec --json
 ```
 
 이 검증은 fake binary test가 아니라 실제 Pi print-mode provider 호출을
-수행합니다. `No API key found`가 나오면 Pi CLI는 실행됐지만 provider 인증이
-없는 상태입니다. 자세한 판정 기준은 [Pi Field Validation](./pi-field-validation.md)을 참고합니다.
+수행합니다. 실패 시 `reason`과 `diagnosis.next_action`을 확인합니다.
+`missing_provider_auth`는 provider 인증 미구성, `provider_quota_exhausted`
+와 `billing_context: "anthropic_extra_usage"`는 Claude Extra Usage 한도
+부족을 뜻합니다. 자세한 판정 기준은 [Pi Field Validation](./pi-field-validation.md)을 참고합니다.
