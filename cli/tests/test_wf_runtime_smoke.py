@@ -361,3 +361,86 @@ def test_wf_next_auto_apply_failure_applies_gate_once(tmp_path: Path) -> None:
     assert state["loop"]["pendingDecision"]["phase"] == "review"
     assert state["loop"]["pendingDecision"]["decision"] == "escalate_user"
     assert [entry["action"] for entry in state["history"]].count("deciding") == 1
+
+
+def test_wf_next_verify_scope_violation_replans_to_approve(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    prepare_workflow_repo(repo_root)
+
+    initialized = initialize_workflow_fixture(
+        repo_root,
+        "Fixture runtime smoke concept covering verify scope violation routing",
+    )
+    _assert_success(initialized)
+    mark_workflow_prerequisites_passed(repo_root)
+
+    failing_verify = repo_root / "failing-verify.json"
+    failing_verify.write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "phase": "verify",
+                "provider": "fixture",
+                "result": {
+                    "conclusion": "FAIL - scope violation",
+                    "scope": {
+                        "changed_files": 2,
+                        "planned_files": 1,
+                        "violations": 1,
+                        "violation_files": ["src/unplanned.py"],
+                    },
+                    "compliance": {
+                        "total_requirements": 1,
+                        "pass": 1,
+                        "warn": 0,
+                        "fail": 0,
+                        "percentage": 100,
+                        "failed_requirements": [],
+                    },
+                    "quality": {
+                        "critical": 0,
+                        "high": 0,
+                        "medium": 0,
+                        "low": 0,
+                        "issues": [],
+                    },
+                    "evidence": [],
+                    "risks": [],
+                    "action_items": [],
+                },
+                "escape": None,
+                "meta": {"format_version": 1},
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    verified = run_awf(
+        repo_root,
+        "wf",
+        "next",
+        "--phase",
+        "verify",
+        "--provider",
+        "fixture",
+        "--mode",
+        "solo",
+        "--auto-apply",
+        "--yolo",
+        extra_env={"AWF_FIXTURE_RESULT_FILE": str(failing_verify)},
+    )
+
+    assert verified.returncode == 3
+    assert "applied_gate: FAIL" in verified.stdout
+    state = _workflow_state(repo_root)
+    assert state["currentPhase"] == "approve"
+    assert state["phases"]["approve"]["status"] == "pending"
+    assert state["phases"]["impl"]["status"] == "pending"
+    assert state["phases"]["verify"]["status"] == "pending"
+    assert state["gates"]["G3"]["passed"] is None
+    assert state["gates"]["G4"]["passed"] is None
+    assert state["gates"]["G5"]["passed"] is None
+    assert state["loop"]["replanCount"] == 1
+    assert state["history"][-1]["action"] == "replanned"

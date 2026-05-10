@@ -412,6 +412,52 @@ def test_agent_card_on_fail_prompt_user_enters_deciding_state(tmp_path: Path):
     assert deciding["history"][-1]["action"] == "deciding"
 
 
+def test_agent_card_on_fail_failure_type_routes_named_branch(tmp_path: Path):
+    """Agent card on_fail.<failure_type> should drive failure routing."""
+    state = _make_state("standard", current_phase="verify")
+    state["phases"]["approve"]["status"] = "completed"
+    state["phases"]["impl"]["status"] = "completed"
+    state["phases"]["verify"]["status"] = "in_progress"
+    state["gates"]["G3"]["passed"] = True
+    state["gates"]["G4"]["passed"] = True
+    _write_workflow_state(tmp_path, state)
+    cards_dir = tmp_path / ".workflow" / "agent-cards"
+    cards_dir.mkdir(parents=True, exist_ok=True)
+    (cards_dir / "verify.json").write_text(
+        json.dumps(
+            {
+                "name": "phase-verify",
+                "retry": {"max": 2},
+                "gate": {
+                    "id": "G5",
+                    "on_fail": {"scope_violation": {"next_phase": "approve"}},
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    replanned = apply_gate_result(
+        str(tmp_path),
+        "verify",
+        False,
+        failure_context={"failure_type": "scope_violation"},
+    )
+
+    assert replanned["currentPhase"] == "approve"
+    assert replanned["phases"]["approve"]["status"] == "pending"
+    assert replanned["phases"]["impl"]["status"] == "pending"
+    assert replanned["phases"]["verify"]["status"] == "pending"
+    assert replanned["gates"]["G3"]["passed"] is None
+    assert replanned["gates"]["G4"]["passed"] is None
+    assert replanned["gates"]["G5"]["passed"] is None
+    assert replanned["loop"]["replanCount"] == 1
+    assert replanned["history"][-1]["action"] == "replanned"
+
+
 # ===========================================================================
 # WF-TEST-006: risk-based 투자 차등
 # ===========================================================================
