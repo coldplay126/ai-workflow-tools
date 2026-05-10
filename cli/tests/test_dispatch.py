@@ -353,6 +353,8 @@ def test_select_dispatch_cmux_preference_falls_back_when_unavailable(capsys, tmp
     assert isinstance(selected, InlineDispatch)
     err = capsys.readouterr().err
     assert "cmux" in err and "inline" in err
+    assert "awf doctor --repo-root" in err
+    assert "cmux-agent" in err
 
 
 def test_select_dispatch_pi_preference_uses_pi_when_available(tmp_path):
@@ -383,6 +385,8 @@ def test_select_dispatch_pi_preference_falls_back_when_unavailable(capsys, tmp_p
     assert isinstance(selected, InlineDispatch)
     err = capsys.readouterr().err
     assert "pi" in err and "inline" in err
+    assert "awf doctor --repo-root" in err
+    assert "run_pi_field_smoke.py" in err
 
 
 def test_select_dispatch_auto_picks_inline_when_cmux_unavailable(tmp_path):

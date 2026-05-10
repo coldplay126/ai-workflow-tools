@@ -54,6 +54,16 @@ that can already normalize Pi output into awf's existing result shapes:
 - `dispatch.surface_preference = "pi"` selects a Pi-backed dispatch surface
   only when the Pi command is installed. `auto` still chooses only the existing
   inline/cmux surfaces.
+- If `surface_preference=pi` or `surface_preference=cmux` is requested but the
+  selected surface is unavailable, awf keeps the existing inline fallback and
+  prints a runtime warning that points to `awf doctor --repo-root . --json`.
+  Pi fallback warnings also point to `cli/tests/run_pi_field_smoke.py` for
+  install/auth/quota diagnostics.
+- `awf ready --gate workflow-run` should not block only because an optional
+  dispatch surface is unavailable. Surface mismatch is a caution at this stage:
+  `doctor`/`ready` expose it before execution, and runtime fallback warnings
+  expose it during execution. A future `dispatch.required = true` style option
+  would be the right boundary for promoting this to a gate block.
 
 ## Consequences
 
