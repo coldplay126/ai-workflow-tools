@@ -43,6 +43,14 @@ def run_doctor(args: argparse.Namespace) -> int:
         )
         pi_note = "ready" if dispatch.get("pi_backend_ready") else "binary not on PATH"
         print(f"dispatch_surfaces: {surfaces} (cmux: {cmux_note}; pi: {pi_note})")
+        preference = dispatch.get("surface_preference", {}) or {}
+        preference_ready = dispatch.get("surface_preference_ready", {}) or {}
+        print(
+            "dispatch_preference: "
+            f"{preference.get('surface_preference')} "
+            f"({preference.get('source')}; "
+            f"{preference_ready.get('status')}: {preference_ready.get('detail')})"
+        )
     runners = payload.get("runners", []) or []
     if runners:
         print("runners:")

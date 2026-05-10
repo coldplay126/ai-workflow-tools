@@ -39,6 +39,9 @@ that can already normalize Pi output into awf's existing result shapes:
 - `awf doctor` reports whether the `pi` command is available and exposes
   `pi_readiness` with command path, version, auth-env presence, opt-in dispatch
   surface, and the Anthropic Extra Usage billing warning.
+- `awf doctor` also reports `.workflow/provider-config.json` dispatch
+  preference readiness, so `surface_preference=pi` is visible before a provider
+  run falls back to inline.
 - `awf ready --json` includes the same Pi runner readiness payload under
   `doctor.runners` and the richer payload under `doctor.pi_readiness`.
 - `AWF_PI_COMMAND` can point detection at a non-default executable name.

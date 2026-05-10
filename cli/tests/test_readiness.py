@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -21,6 +22,15 @@ def _repo_root(path: Path) -> Path:
         encoding="utf-8",
     )
     return path
+
+
+def _write_provider_config(repo: Path, payload: dict) -> None:
+    workflow_dir = repo / ".workflow"
+    workflow_dir.mkdir()
+    (workflow_dir / "provider-config.json").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
 
 
 def test_doctor_report_detects_pi_runner_without_requiring_backend(
@@ -55,6 +65,9 @@ def test_doctor_report_detects_pi_runner_without_requiring_backend(
     assert report["pi_readiness"]["auth_env_any"] is False
     assert report["pi_readiness"]["dispatch_surface"] == "opt_in_only"
     assert report["pi_readiness"]["billing_warning"]["billing_context"] == "anthropic_extra_usage"
+    assert report["dispatch"]["surface_preference"]["surface_preference"] == "auto"
+    assert report["dispatch"]["surface_preference"]["source"] == "default"
+    assert report["dispatch"]["surface_preference_ready"]["status"] == "ok"
     assert "pi" in report["dispatch"]["available_surfaces"]
 
 
@@ -82,6 +95,67 @@ def test_doctor_report_honors_awf_pi_command_override(
     assert report["pi_readiness"]["command_source"] == "AWF_PI_COMMAND"
     assert report["pi_readiness"]["path"] == str(custom_pi)
     assert report["dispatch"]["pi_backend_ready"] is True
+
+
+def test_doctor_report_marks_configured_pi_dispatch_preference_ready(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo = _repo_root(tmp_path / "repo")
+    _write_provider_config(repo, {"dispatch": {"surface_preference": "pi"}})
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    pi = bin_dir / "pi"
+    pi.write_text("#!/bin/sh\necho pi\n", encoding="utf-8")
+    pi.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    config = load_awf_config(str(repo))
+    report = collect_doctor_report(config, str(repo))
+
+    preference = report["dispatch"]["surface_preference"]
+    assert preference["provider_config_exists"] is True
+    assert preference["surface_preference"] == "pi"
+    assert preference["source"] == "provider_config"
+    assert report["dispatch"]["surface_preference_ready"]["status"] == "ok"
+
+
+def test_doctor_report_marks_configured_pi_dispatch_preference_caution(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo = _repo_root(tmp_path / "repo")
+    _write_provider_config(repo, {"dispatch": {"surface_preference": "pi"}})
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
+
+    config = load_awf_config(str(repo))
+    report = collect_doctor_report(config, str(repo))
+
+    preference = report["dispatch"]["surface_preference"]
+    assert preference["surface_preference"] == "pi"
+    assert report["dispatch"]["surface_preference_ready"]["status"] == "caution"
+    assert (
+        "falls back to inline"
+        in report["dispatch"]["surface_preference_ready"]["detail"]
+    )
+
+
+def test_doctor_report_marks_invalid_dispatch_preference(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo = _repo_root(tmp_path / "repo")
+    _write_provider_config(repo, {"dispatch": {"surface_preference": "sideways"}})
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
+
+    config = load_awf_config(str(repo))
+    report = collect_doctor_report(config, str(repo))
+
+    preference = report["dispatch"]["surface_preference"]
+    assert preference["surface_preference"] == "auto"
+    assert preference["raw_surface_preference"] == "sideways"
+    assert preference["status"] == "invalid"
+    assert report["dispatch"]["surface_preference_ready"]["status"] == "ok"
 
 
 def test_doctor_report_marks_missing_pi_readiness(

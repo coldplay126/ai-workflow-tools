@@ -45,6 +45,9 @@ uv run --project cli --no-editable awf doctor --repo-root . --json --ci
 - `pi_readiness`: Pi command/path/version, provider auth env 존재 여부,
   opt-in dispatch surface, Anthropic Extra Usage 과금 주의를 provider 호출
   없이 확인하는 참고 진단
+- `dispatch.surface_preference`: `.workflow/provider-config.json`이 요청한
+  dispatch surface와 현재 ready 여부. `pi` 또는 `cmux` 요청이 준비되지
+  않았으면 실제 실행은 inline fallback 경고를 낸다.
 
 ## 2. 검증 A: Claude Code `/analysis`
 

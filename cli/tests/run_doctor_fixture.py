@@ -92,6 +92,8 @@ def main() -> int:
         print(f"doctor_default_provider={payload.get('default_provider')}")
         print(f"doctor_mcp_server_count={payload.get('mcp', {}).get('server_count')}")
         providers = {item["provider"]: item for item in payload.get("providers", [])}
+        dispatch = payload.get("dispatch", {})
+        preference = dispatch.get("surface_preference", {})
         if payload.get("default_provider") != "fixture":
             return 1
         if payload.get("mcp", {}).get("server_count") != 1:
@@ -107,6 +109,12 @@ def main() -> int:
         if providers.get("openai", {}).get("configured", {}).get("status") != "ok":
             return 1
         if providers.get("fixture", {}).get("installed", {}).get("status") != "ok":
+            return 1
+        if "pi_readiness" not in payload:
+            return 1
+        if preference.get("surface_preference") != "auto":
+            return 1
+        if dispatch.get("surface_preference_ready", {}).get("status") != "ok":
             return 1
         return 0
 
