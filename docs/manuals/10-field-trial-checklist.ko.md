@@ -90,7 +90,9 @@ awf ready --repo-root .
 
 ## 4. 트라이얼 결과 템플릿
 
-트라이얼이 끝나면 아래 형식으로 판단을 남깁니다.
+트라이얼이 끝나면 아래 형식으로 판단을 남깁니다. GitHub issue로 남길 때는
+[ai-workflow-tools field trial issue form](../../.github/ISSUE_TEMPLATE/awf-field-trial.yml)을
+사용할 수 있습니다.
 
 ```markdown
 ## ai-workflow-tools field trial

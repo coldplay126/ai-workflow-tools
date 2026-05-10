@@ -91,7 +91,8 @@ Decision criteria:
 
 ## 4. Trial Result Template
 
-Record the result in this format.
+Record the result in this format. When filing the result as a GitHub issue, use
+the [ai-workflow-tools field trial issue form](../../.github/ISSUE_TEMPLATE/awf-field-trial.yml).
 
 ```markdown
 ## ai-workflow-tools field trial

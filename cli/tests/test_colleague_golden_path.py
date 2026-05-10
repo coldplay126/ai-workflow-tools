@@ -12,6 +12,7 @@ KO_ONBOARDING = ROOT / "docs" / "manuals" / "09-colleague-onboarding.ko.md"
 EN_ONBOARDING = ROOT / "docs" / "manuals" / "09-colleague-onboarding.en.md"
 KO_FIELD_TRIAL = ROOT / "docs" / "manuals" / "10-field-trial-checklist.ko.md"
 EN_FIELD_TRIAL = ROOT / "docs" / "manuals" / "10-field-trial-checklist.en.md"
+FIELD_TRIAL_ISSUE = ROOT / ".github" / "ISSUE_TEMPLATE" / "awf-field-trial.yml"
 
 
 def _run_awf(
@@ -185,6 +186,7 @@ def test_colleague_onboarding_docs_include_scenario_examples() -> None:
 def test_field_trial_checklist_keeps_real_repo_decision_criteria() -> None:
     ko = KO_FIELD_TRIAL.read_text(encoding="utf-8")
     en = EN_FIELD_TRIAL.read_text(encoding="utf-8")
+    issue_form = FIELD_TRIAL_ISSUE.read_text(encoding="utf-8")
 
     for text in (ko, en):
         assert "awf ready --repo-root ." in text
@@ -205,3 +207,18 @@ def test_field_trial_checklist_keeps_real_repo_decision_criteria() -> None:
     assert "Field Trial Checklist for Real Repositories" in en
     assert "Decision criteria" in en
     assert "two or more checks" in en
+
+    for needle in (
+        "awf ready --repo-root .",
+        "awf scan . --no-ai",
+        "awf analyze <service> <unit> --repo-root . --dry-run --output-format json",
+        "awf ready --repo-root . --gate workflow-run --json",
+        "awf wf next --repo-root . --dry-run --output-format json",
+        "keep using",
+        "use only for review-verify",
+        "do not use here",
+    ):
+        assert needle in issue_form
+
+    assert "awf-field-trial.yml" in ko
+    assert "awf-field-trial.yml" in en
