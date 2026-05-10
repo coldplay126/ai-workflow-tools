@@ -31,7 +31,7 @@ runtime_contract: ".workflow/agent-cards/impl.json"
 3. **Scope hash 검증 (닫힌계 핵심)**:
    - `.workflow/artifacts/`의 spec.md + plan.md + tasks.md 해시 계산
    - `gates.G3.scope_hash`와 비교
-   - **불일치 시**: "승인 후 명세가 변경되었습니다. `/wf.approve`를 다시 실행하세요." 중단.
+   - **불일치 시**: "승인 후 명세가 변경되었습니다. `/phase-approve`를 다시 실행하세요." 중단.
    - `--force` 플래그 시: 진행하되 history에 `"bypass": true` 기록.
 4. `phases.impl.retries`가 5 이상이면 중단.
 5. TTL 경고.

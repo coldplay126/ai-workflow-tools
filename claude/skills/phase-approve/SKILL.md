@@ -41,6 +41,6 @@ $ARGUMENTS
 > **자동 모드**: `wf-orchestrator`가 Phase 3에 도달하면 자동으로 승인 요약을 표시하고 사용자 입력을 대기합니다.
 
 ### 다음 단계
-- 승인 시: `/wf.impl`
-- 수정요청 시: `/wf.plan`으로 회귀
-- 거부 시: `/wf.reset`
+- 승인 시: `/phase-impl`
+- 수정요청 시: `/phase-plan`으로 회귀
+- 거부 시: `/wf-reset`

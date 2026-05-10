@@ -1,7 +1,7 @@
 ---
 name: analysis
 version: 2.0.0
-description: "소스코드 분석 파이프라인. .ai-context 문서를 생성하고 resume/incremental/deep 분석을 지원."
+description: "소스코드 분석 파이프라인. .ai-context 문서를 생성하고 resume/incremental/conditional Stage 3 분석을 지원."
 type: analysis
 
 # LLM 중립 메타데이터
@@ -21,11 +21,11 @@ cli:
   args:
     service: { required: true, description: "서비스명 (config에 없으면 auto-discovery)" }
     unit: { required: true, description: "분석 단위명 (도메인, 모듈, 컴포넌트 등)" }
-    deep: { flag: true, description: "심층 분석 (크로스서비스 + Stage 3)" }
-    mode: { choices: ["solo", "precise", "cross", "critical"], description: "멀티에이전트 모드" }
+    mode: { choices: ["solo", "quick", "precise", "cross", "critical"], description: "멀티에이전트 모드" }
     all: { flag: true, description: "서비스 내 전체 단위 순차 분석" }
     check: { flag: true, description: "소스 변경 감지 (drift detection). 분석 실행 없이 stale 단위 탐지" }
     catalog: { flag: true, description: "서비스 전체 분석 현황 (config + .ai-context join)" }
+    cycles: { flag: true, description: "저장된 import graph 기준 순환 의존성 리포트" }
 
 # 리소스 (manifest.json 기반 spec-as-truth)
 resources:
@@ -45,7 +45,7 @@ resources:
 # /analysis — 소스코드 분석 파이프라인
 
 4계층 파이프라인으로 소스코드를 분석하여 `.ai-context/` 문서를 자동 생성합니다.
-기본 모드는 빠른 분석, `--deep` 모드는 크로스서비스 분석과 심층 검증을 포함합니다.
+Stage 3은 `related_domains`, `stage3_force`, `stage_routing`을 바탕으로 조건부 실행됩니다.
 모든 프로젝트 구조(TypeScript, PHP, Python, Go, Terraform, K8s 등)를 지원합니다.
 
 **상세 파이프라인 지침은 [reference.md](reference.md)를 참조하세요.**
@@ -54,21 +54,23 @@ resources:
 
 ```
 # Claude Code에서
-/analysis {service} {unit} [--deep]
+/analysis {service} {unit}
 
 # awf-cli에서
-awf analyze {service} {unit} [--deep] [--mode cross] [--all]
+awf analyze {service} {unit} [--mode cross] [--all]
 awf analyze {service} --check        # drift detection
 awf analyze {service} --catalog      # 전체 현황
+awf analyze {service} --cycles       # import cycle report
 ```
 
 - **service**: 서비스명 (config에 없으면 auto-discovery로 자동 탐색)
 - **unit**: 분석 단위명 (프로젝트 구조에 따라 도메인, 모듈, 컴포넌트 등)
-- **--deep**: 크로스서비스 분석 + Stage 3 포함
+- **Stage 3**: CLI flag가 아니라 `related_domains`, `stage3_force`, `stage_routing`으로 결정
 - **--mode**: 멀티에이전트 교차 검증 (cross = codex + sonnet 병렬)
 - **--all**: 서비스 내 전체 단위 순차 분석
 - **--check**: 소스 파일 해시 비교로 stale 단위 탐지 (분석 실행 없음)
 - **--catalog**: 전체 분석 현황 출력 (config의 단위 정의 + .ai-context 상태 join)
+- **--cycles**: 저장된 import graph 기준 순환 의존성 리포트
 
 ## Deterministic Preflight
 
@@ -90,7 +92,7 @@ awf ready --gate analysis --repo-root . --json
 |-------|------|----------|
 | Stage 1 | 파일별 XML 번들 분석 (import context 포함) | 저비용 (codex) |
 | Stage 2 | 단위 합성 (.ai-context 4개 파일 생성) | 중간 (sonnet) |
-| Stage 3 | 프로젝트 정제 (cross-service, deep만) | 고비용 (opus) |
+| Stage 3 | 프로젝트 정제 (조건부 cross-service) | 고비용 (opus) |
 
 Stage별 provider는 `analysis-pipeline.json`의 `stage_routing.{scale}`에서 결정됩니다.
 

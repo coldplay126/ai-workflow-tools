@@ -20,7 +20,7 @@ analysis-docs/{service}/{domain}/.ai-context/
 └── .tmp/                      ← 중간 산출물 (완료 시 삭제)
     ├── stage1-analysis.md     ← Stage 1 결과
     ├── stage2-draft.md        ← Stage 2 초안
-    ├── stage3-final.md        ← Stage 3 결과 (--deep만)
+    ├── stage3-final.md        ← Stage 3 결과 (조건부 실행 시)
     └── hashes.json            ← 증분 분석용 SHA-256 (삭제 안 됨)
 ```
 
@@ -48,7 +48,7 @@ analysis-docs/{service}/{domain}/.ai-context/
 
 **이 섹션은 모든 실행에서 가장 먼저 수행합니다.**
 
-1. `$ARGUMENTS`에서 service, domain, `--deep` 플래그를 파싱합니다
+1. `$ARGUMENTS`에서 service, domain, mode 관련 옵션을 파싱합니다
 2. `{AWF_DOCS_ROOT}/{service}/{domain}/.ai-context/.analysis-state.json` 존재 여부 확인
 3. **존재하고** `layers.output.status != "completed"`이면:
    - state 파일에서 `currentLayer`, `currentStage`, `mode` 확인
@@ -85,7 +85,7 @@ analysis-docs/{service}/{domain}/.ai-context/
 - `exclude_patterns`: 도메인별 추가 제외 패턴 (기본 패턴에 병합)
 - `include_tests`: `true`이면 `*.spec.ts`, `*.test.ts`도 분석 대상에 포함
 - `scale_override`: `"small"` | `"standard"` | `"large"` — 자동 규모 판정을 무시
-- `stage3_force`: `true`이면 규모와 `related_domains` 수에 무관하게 Stage 3 실행 (`--deep`에서만 유효)
+- `stage3_force`: `true`이면 internal deep context를 켜고 규모와 `related_domains` 수에 무관하게 Stage 3 실행
 
 설정이 없는 분석 단위는 heuristic(`src/domain/`, `src/domains/`, `src/`, `app/`) 탐색 후, 실패 시 AI 기반 구조 분석으로 자동 발견.
 
@@ -137,7 +137,7 @@ analysis-docs/{service}/{domain}/.ai-context/
 </review>
 ```
 
-**프로젝트 번들** (`--deep` 모드에서 standard/large 규모만): Stage 3에서 사용
+**프로젝트 번들** (Stage 3 실행 시): Stage 3에서 사용
 ```xml
 <review scope="project" name="{service}">
   <structure><!-- 전체 프로젝트 트리 (요약) --></structure>
@@ -164,18 +164,16 @@ Layer 3 진입 전, 다음 게이트를 순서대로 실행:
 
 2. **모드별 라우팅**:
 
-   **기본 모드** (`mode = "standard"`):
+   **standard context** (`mode = "standard"`):
    - Stage 1: Codex
    - Stage 2: Sonnet (규모 무관)
    - Stage 3: 항상 생략
 
-   **심층 모드** (`mode = "deep"`):
-   - small:
-     - `related_domains.length < 3` → Stage 1: Codex, Stage 2: Sonnet, Stage 3: 생략
-     - `related_domains.length >= 3` → Stage 1: Codex, Stage 2: Sonnet, Stage 3: Opus
-   - standard → Stage 1: Codex, Stage 2: Sonnet, Stage 3: Opus
-   - large → Stage 1: Codex 배치, Stage 2: Opus, Stage 3: Opus
-   - `stage3_force: true` → 규모 무관하게 Stage 3 실행
+   **internal deep context** (`related_domains` 또는 `stage3_force`가 있는 경우):
+   - `stage3_force: true` → scale routing이 `skip`이어도 Stage 3 실행
+   - `related_domains.length >= 3` → scale routing이 `skip`이어도 Stage 3 실행
+   - 그 외에는 `analysis-pipeline.json`의 `stage_routing.{scale}.stage3`이 `skip`이 아닐 때만 Stage 3 실행
+   - Stage 3 실행 provider는 기본 Opus
 
 3. **증분 해시 체크**: `.ai-context/.tmp/hashes.json` 존재 시, 각 파일의 SHA-256 비교
    - 변경된 파일만 Stage 1 재분석 대상으로 마킹
@@ -247,8 +245,8 @@ Layer 3 진입 전, 다음 게이트를 순서대로 실행:
 #### Stage 2: 도메인 분석 — Sonnet/Opus
 
 **프로바이더**:
-- 기본 모드 → Sonnet (규모 무관)
-- `--deep` 모드 → `analysis-pipeline.json`의 `stage_routing.{scale}.stage2`에 따름
+- standard context → Sonnet (규모 무관)
+- internal deep context → `analysis-pipeline.json`의 `stage_routing.{scale}.stage2`에 따름
 
 1개 에이전트를 실행합니다 (Agent tool, model: sonnet 또는 opus):
 
@@ -306,9 +304,9 @@ Layer 3 진입 전, 다음 게이트를 순서대로 실행:
 
 **상태 전이**: `analyze.stage2.status = "completed"`, `summaries.stage2` 기록
 
-#### Stage 3: 크로스서비스 분석 — Opus (`--deep` 모드 전용)
+#### Stage 3: 크로스서비스 분석 — Opus (조건부 실행)
 
-**실행 조건**: `mode = "deep"` AND (`stage_routing.{scale}.stage3 != "skip"` 또는 `related_domains.length >= 3` 또는 `stage3_force: true`)
+**실행 조건**: internal deep context AND retry block 없음 AND (`stage3_force: true` 또는 `related_domains.length >= 3` 또는 `stage_routing.{scale}.stage3 != "skip"`)
 
 > 기본 모드에서는 항상 생략됩니다.
 
@@ -339,7 +337,7 @@ Layer 3 진입 전, 다음 게이트를 순서대로 실행:
    - API 수, 테이블 수, 비즈니스 규칙 수
    - 사용된 모델 요약
 
-   **`--deep` 모드**: 전체 리포트
+   **Stage 3 실행 시**: 전체 리포트
    - 요약: API 수, 테이블 수, 비즈니스 규칙 수
    - 기존 문서 대비 변경점
    - 크로스서비스 의존성
@@ -358,7 +356,7 @@ Layer 3 진입 전, 다음 게이트를 순서대로 실행:
    - 하나라도 불일치 → FAIL, 불일치 항목 목록과 함께 Stage 2 1회 재실행 (재프롬프트에 불일치 목록 포함)
    - 모두 일치 → PASS
 
-   **`--deep` 모드** — lightweight + full 순차 실행:
+   **Stage 3 실행 시** — lightweight + full 순차 실행:
    - 먼저 lightweight 검증 실행 (위와 동일)
    - lightweight PASS 후 → Codex(read-only)에게 최종 4개 파일과 기존 딥다이브를 비교 요청
    - PASS → 완료, FAIL → 피드백과 함께 Stage 2 1회 재실행

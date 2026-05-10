@@ -2,7 +2,7 @@
 
 ## 목적
 
-Claude Code 중심으로 작성된 멀티에이전트 프로토콜과 `/wf` 파이프라인을 Codex에서도 실행할 수 있도록 공통 코어와 도구별 어댑터를 분리하는 가이드입니다.
+Claude Code 중심으로 작성된 멀티에이전트 프로토콜과 `wf-*` pipeline을 Codex에서도 실행할 수 있도록 공통 코어와 도구별 어댑터를 분리하는 가이드입니다.
 
 핵심 원칙은 다음과 같습니다.
 
@@ -28,8 +28,8 @@ Claude Code 중심으로 작성된 멀티에이전트 프로토콜과 `/wf` 파�
 
 ### Claude 어댑터
 
-- 입력 UX: slash command (`/wf`, `/wf.review`, `/wf.status`)
-- 실행 단위: `claude/commands/*.md`, `claude/skills/*`
+- 입력 UX: skill entrypoint (`/wf-orchestrator`, `/phase-review`, `/wf-status`)
+- 실행 단위: `claude/skills/*`
 - secondary provider 호출: Codex MCP, Claude CLI
 
 ### Codex 어댑터
@@ -63,7 +63,7 @@ Codex에는 slash command 개념이 없으므로, 권장 방식은 아래 둘 �
 1. shell wrapper: `./codex/run-wf.sh review`
 2. prompt prefix: `"WF protocol: cross. Respect .workflow artifacts."`
 
-## `/wf` 이식 전략
+## workflow 이식 전략
 
 ### 최소 구현
 

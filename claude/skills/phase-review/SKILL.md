@@ -29,7 +29,7 @@ runtime_contract: ".workflow/agent-cards/review.json"
 1. `.workflow/state.json` 읽기.
 2. `.workflow/manifest.json` 읽기.
 3. **G1 통과 확인**: `gates.G1.passed` true. 아니면: "기획 단계(G1)가 완료되지 않았습니다." 중단.
-4. **Artifact hash 검증**: G1의 `artifact_hashes`와 현재 파일 해시 비교. 불일치 시: "기획 산출물이 G1 이후 변경되었습니다. `/wf.plan`을 다시 실행하거나 `--force`로 진행하세요."
+4. **Artifact hash 검증**: G1의 `artifact_hashes`와 현재 파일 해시 비교. 불일치 시: "기획 산출물이 G1 이후 변경되었습니다. `/phase-plan`을 다시 실행하거나 `--force`로 진행하세요."
 5. `phases.review.retries`가 2 이상이면 중단.
 6. TTL 7일 경과 경고.
 

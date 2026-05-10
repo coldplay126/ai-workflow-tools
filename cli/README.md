@@ -1,11 +1,12 @@
 # awf-cli
 
-`awf-cli`는 `ai-workflow-tools`의 도구 중립 코어 계약을 Python 진입점으로 노출하는 실험적 CLI입니다. 현재 운영 우선 대상은 `claude-code`, `claude-sdk`, `codex`입니다.
+`awf-cli`는 `ai-workflow-tools`의 도구 중립 코어 계약을 Python 진입점으로 노출하는 실험적 CLI입니다. 현재 운영 우선 대상은 `claude-code`, `codex`, `fixture`이며 `claude-sdk`와 `openai`는 optional provider입니다.
 
-현재 단계 요약:
-- gateway migration: 기능 완성
-- `wf` closed-loop: CL-1 ~ CL-4 완료
-- 다음 우선순위: provider-native visibility 또는 구조/커밋 정리
+현재 상태 요약:
+- `ready`/`doctor`: repo-level deterministic preflight, runtime diagnostics, dispatch surface/Pi readiness 요약을 제공
+- `analyze`: document-mode `.ai-context` 생성, resume/incremental, transitive invalidation, Stage 2 fan-out, Stage 3 conditional routing 지원
+- `wf`: gated init/status/next/apply-result/reset, manual decide, ready gates, scope expansion/check, deterministic gate helpers 지원
+- `wiki`/`cmux`: operations telemetry/wiki compile, cmux observability, Pi opt-in field-smoke evidence 소비 지원
 
 최근 문서:
 - [Gateway Migration Checklist](../docs/manuals/06-gateway-migration-checklist.md)
@@ -17,13 +18,19 @@
 - `awf chat [--message ...] [--session-id ...] [--latest]`: Phase 5 chat session mode. SQLite에 세션/메시지를 저장하고 provider를 단일 턴 또는 최소 REPL로 호출하며, message-count threshold를 넘으면 turn 전 auto-compaction을 수행한다. compaction은 가능하면 provider-assisted summary를 사용하고, 실패하면 heuristic summary로 fallback한다. 각 turn에는 estimated input/output token과 session 누적 estimated cost를 함께 남긴다
 - `awf chat --list-sessions | --show-session <id> | --show-latest | --compact-session <id> | --compact-latest`: session 조회/재개/수동 요약 압축 경로. session별 estimated token/cost usage도 함께 확인할 수 있고, compaction 결과에는 `summary_mode`가 포함된다
 - `awf "<자연어 요청>"`: Phase 5 자연어 라우팅의 현재 버전. 안전한 조회 의도(`wf status`, `config show`, `skills list`, `mcp list`, session list/show)는 직접 디스패치하고, 명시적 analyze/review/verify 의도는 기본적으로 `--dry-run`으로 보낸다. `실행`/`run`이 포함되면 실제 `analyze`/`wf next` 실행으로 라우팅한다. 서비스명이 생략된 analyze 요청은 알려진 alias와 `analysis-docs/_templates/analysis-config.json`의 domain/service catalog를 기준으로 기본 service를 추론할 수 있고, 일부 service/domain/analyze keyword 오타도 보수적으로 보정한다. 그 외는 기본적으로 `chat --message`로 보낸다
-- `awf analyze <service> <domain> [--mode precise|cross] [--non-interactive] [--no-ready-gate]`: Claude CLI subprocess 위임. 이전 분석이 있고 소스가 변경되었으면 변경 파일만 Stage 1 재분석 (incremental). Provider-backed 실행은 기본적으로 `awf ready --gate analysis`를 먼저 통과해야 한다
+- `awf analyze <service> <domain> [--mode solo|quick|precise|cross|critical] [--non-interactive] [--no-ready-gate]`: provider 위임 분석. 이전 분석이 있고 소스가 변경되었으면 변경 파일만 Stage 1 재분석 (incremental). Provider-backed 실행은 기본적으로 `awf ready --gate analysis`를 먼저 통과해야 한다
 - `awf analyze <service> --check`: drift detection. 소스 파일 해시와 `.tmp/hashes.json` 비교로 stale 단위 탐지
 - `awf analyze <service> --catalog`: 서비스 전체 분석 현황. config의 단위 정의(분모) + .ai-context(분자) join
+- `awf analyze <service> --cycles`: 저장된 import graph 기준 순환 의존성 리포트
 - `awf wf init <concept> [--no-ready-gate]`: `.workflow` 초기화 + `.work_history/` 세션 자동 생성. 기본적으로 `awf ready --gate workflow-init`를 먼저 통과해야 한다
 - `awf wf status`: `.workflow/state.json` 요약 출력 + 최근 work_history 세션 표시
-- `awf wf next [--phase <name>] [--mode critical] [--auto-apply] [--non-interactive] [--no-ready-gate]`: 다음 phase 해석, delegated prompt 생성, `.workflow/tmp/`에 prompt/result 저장, fallback chain 시도, phase를 `in_progress`로 표시. Provider-backed 실행은 기본적으로 `awf ready --gate workflow-run`를 먼저 통과해야 한다
+- `awf wf next [--phase <name>] [--mode solo|quick|precise|cross|critical] [--auto-apply] [--non-interactive] [--no-ready-gate]`: 다음 phase 해석, delegated prompt 생성, `.workflow/tmp/`에 prompt/result 저장, fallback chain 시도, phase를 `in_progress`로 표시. Provider-backed 실행은 기본적으로 `awf ready --gate workflow-run`를 먼저 통과해야 한다
+- `awf wf decide <phase> --decision ...`: deciding 상태의 closed-loop workflow phase에 수동 결정을 반영
 - `awf wf apply-result <phase> <result-file>`: review/verify JSON 결과를 artifact markdown으로 반영하고 gate/state를 갱신
+- `awf wf gate <phase>`: plan/review/verify deterministic gate 평가
+- `awf wf detect-class <concept>`: concept text 기반 change class 판정
+- `awf wf expand-scope`: 저장된 import graph의 reverse dependents/imports로 allowed-files 확장
+- `awf wf scope-check`: `git diff`와 allowed-files를 비교하는 deterministic G5 scope check
 - `awf wf reset`: workflow state를 다시 `plan` phase로 초기화
 - `awf config show`: 3-level merge 결과와 resolved path 확인
 - `awf skills list`: supported search paths에서 `SKILL.md`를 탐색해 skill 목록 출력
@@ -63,51 +70,57 @@
 빠른 실행:
 
 ```bash
-uv run --project cli --no-editable awf config show --repo-root .
-uv run --project cli --no-editable awf ready --repo-root .
-uv run --project cli --no-editable awf ready --repo-root . --json
-uv run --project cli --no-editable awf ready --repo-root . --gate analysis --json
-uv run --project cli --no-editable awf chat --repo-root . --provider fixture --message "hello" --json --yolo
-uv run --project cli --no-editable awf chat --repo-root . --latest --message "continue" --json --yolo
-uv run --project cli --no-editable awf chat --repo-root . --show-latest --json
-uv run --project cli --no-editable awf chat --repo-root . --compact-latest --json
-uv run --project cli --no-editable awf "workflow status 보여줘"
-uv run --project cli --no-editable awf "간단히 도와줘"
-uv run --project cli --no-editable awf "세션 목록 보여줘"
-uv run --project cli --no-editable awf "최근 세션 보여줘"
-uv run --project cli --no-editable awf "provider 상태 확인해줘"
-uv run --project cli --no-editable awf "provider 상태 probe 확인해줘"
-uv run --project cli --no-editable awf "sample-api quest-challenge 분석해줘"
-uv run --project cli --no-editable awf "quest challenge 분석해줘"
-uv run --project cli --no-editable awf "sample-api quest-challenge 분석 실행"
-uv run --project cli --no-editable awf "review 해줘"
-uv run --project cli --no-editable awf "review 실행"
-uv run --project cli --no-editable awf wf init "README 개편" --repo-root .
-uv run --project cli --no-editable awf wf status --repo-root .
-uv run --project cli --no-editable awf wf next --repo-root . --phase review --dry-run
-uv run --project cli --no-editable awf wf next --repo-root . --phase review --provider codex --auto-apply
-uv run --project cli --no-editable awf wf apply-result review .workflow/tmp/result-review-claude_sonnet.json --repo-root .
-uv run --project cli --no-editable awf wf reset --repo-root .
-uv run --project cli --no-editable awf analyze sample-api quest-challenge --repo-root . --dry-run
-uv run --project cli --no-editable awf analyze sample-api --check --repo-root .
-uv run --project cli --no-editable awf analyze sample-api --catalog --repo-root .
-uv run --project cli --no-editable awf skills list --repo-root .
-uv run --project cli --no-editable awf mcp list --repo-root .
-uv run --project cli --no-editable awf mcp check analysis-docs --repo-root .
-uv run --project cli --no-editable awf mcp invoke fixture-mcp echo --input '{"text":"hello"}' --repo-root .
-uv run --project cli --no-editable awf mcp read fixture-mcp fixture://resource --repo-root .
-uv run --project cli --no-editable awf doctor --repo-root .
-uv run --project cli --no-editable awf doctor --repo-root . --probe
-uv run --project cli --no-editable awf doctor --repo-root . --ci
-uv run --project cli --no-editable awf doctor --repo-root . --json --ci
-uv run --project cli --no-editable awf cmux tail --repo-root .
-uv run --project cli --no-editable awf cmux tail --repo-root . -f --run-id <run-id>
-uv run --project cli --no-editable awf cmux tail --repo-root . --event run.status_changed --limit 20 --json
-uv run --project cli --no-editable awf cmux runs --repo-root .
-uv run --project cli --no-editable awf cmux failures --repo-root . --limit 20
-uv run --project cli --no-editable awf cmux failures --repo-root . --json
-AWF_CMUX_LOG=/path/to/events.jsonl uv run --project cli --no-editable awf cmux tail
-NO_COLOR=1 uv run --project cli --no-editable awf cmux tail --repo-root . | cat
+uv run --project cli awf config show --repo-root .
+uv run --project cli awf ready --repo-root .
+uv run --project cli awf ready --repo-root . --json
+uv run --project cli awf ready --repo-root . --gate analysis --json
+uv run --project cli awf chat --repo-root . --provider fixture --message "hello" --json --yolo
+uv run --project cli awf chat --repo-root . --latest --message "continue" --json --yolo
+uv run --project cli awf chat --repo-root . --show-latest --json
+uv run --project cli awf chat --repo-root . --compact-latest --json
+uv run --project cli awf "workflow status 보여줘"
+uv run --project cli awf "간단히 도와줘"
+uv run --project cli awf "세션 목록 보여줘"
+uv run --project cli awf "최근 세션 보여줘"
+uv run --project cli awf "provider 상태 확인해줘"
+uv run --project cli awf "provider 상태 probe 확인해줘"
+uv run --project cli awf "sample-api quest-challenge 분석해줘"
+uv run --project cli awf "quest challenge 분석해줘"
+uv run --project cli awf "sample-api quest-challenge 분석 실행"
+uv run --project cli awf "review 해줘"
+uv run --project cli awf "review 실행"
+uv run --project cli awf wf init "README 개편" --repo-root .
+uv run --project cli awf wf status --repo-root .
+uv run --project cli awf wf next --repo-root . --phase review --dry-run
+uv run --project cli awf wf next --repo-root . --phase review --provider codex --auto-apply
+uv run --project cli awf wf apply-result review .workflow/tmp/result-review-claude_sonnet.json --repo-root .
+uv run --project cli awf wf reset --repo-root .
+uv run --project cli awf analyze sample-api quest-challenge --repo-root . --dry-run
+uv run --project cli awf analyze sample-api --check --repo-root .
+uv run --project cli awf analyze sample-api --catalog --repo-root .
+uv run --project cli awf skills list --repo-root .
+uv run --project cli awf mcp list --repo-root .
+uv run --project cli awf mcp check analysis-docs --repo-root .
+uv run --project cli awf mcp invoke fixture-mcp echo --input '{"text":"hello"}' --repo-root .
+uv run --project cli awf mcp read fixture-mcp fixture://resource --repo-root .
+uv run --project cli awf doctor --repo-root .
+uv run --project cli awf doctor --repo-root . --probe
+uv run --project cli awf doctor --repo-root . --ci
+uv run --project cli awf doctor --repo-root . --json --ci
+uv run --project cli awf cmux tail --repo-root .
+uv run --project cli awf cmux tail --repo-root . -f --run-id <run-id>
+uv run --project cli awf cmux tail --repo-root . --event run.status_changed --limit 20 --json
+uv run --project cli awf cmux runs --repo-root .
+uv run --project cli awf cmux failures --repo-root . --limit 20
+uv run --project cli awf cmux failures --repo-root . --json
+AWF_CMUX_LOG=/path/to/events.jsonl uv run --project cli awf cmux tail
+NO_COLOR=1 uv run --project cli awf cmux tail --repo-root . | cat
+```
+
+패키지 wheel 자체를 검증할 때만 editable checkout 대신 재설치된 wheel을 사용합니다:
+
+```bash
+uv run --project cli --no-editable --reinstall-package awf-cli awf --help
 ```
 
 ## awf cmux (observability)
@@ -134,14 +147,15 @@ Path 해석 우선순위:
 권장 운영 패턴:
 - 작성/오케스트레이션: `claude-code`
 - `awf analyze`: small domain + standard mode 자동화 경로
-- 큰 분석/deep mode: Claude Code `/analysis` 또는 `awf analyze --dry-run` 조합
+- 큰 분석/Stage 3-heavy case: Claude Code `/analysis` 또는 `awf analyze --dry-run` 조합
 - 분석 단독 실행 실험: `claude-sdk`
 - review/verify 교차검증: `codex`
 
 Phase 4 mode UX의 현재 매핑:
 - `awf analyze --mode precise`: 동일 실행 경로를 유지하되, 더 보수적이고 근거 중심의 분석을 요청
-- `awf analyze --mode cross`: `--deep`를 암시하고, 가능한 경우 secondary provider를 한 번 더 실행해 Stage 2 필수 산출물 세트를 보수적으로 교차 검증
-- `awf analyze --deep`: large + bundle threshold 조건을 만족하면 Stage 2 fan-out scaffold(synthesizer + 4 writer prompt)를 `.tmp/`에 준비하고 state에 기록
+- `awf analyze --mode cross`: 가능한 경우 secondary provider를 한 번 더 실행해 Stage 2 필수 산출물 세트를 보수적으로 교차 검증
+- Stage 3은 CLI flag가 아니라 내부 라우팅 결과다. `related_domains`나 `stage3_force`가 있으면 internal deep context를 켜고, `should_run_stage3`가 retry block, `stage3_force`, `related_domains >= 3`, `stage_routing.{scale}.stage3` 순으로 실행 여부를 결정한다
+- Stage 2 fan-out은 `[analysis.layer3] fanout_enabled=false` 또는 writer 목록이 비어 있을 때만 꺼지며, 켜져 있으면 synthesizer + writer prompt를 `.tmp/`에 준비하고 state에 기록한다
 - fan-out이 실제로 선택되면 현재는 synthesizer 1회 → writer 4개 병렬 실행 → post-writer consistency pass 순으로 진행하고, 실패 시 single-agent Stage 2로 fallback
 - `awf wf next --mode critical`: `codex` 우선, `claude:sonnet` fallback을 우선순위로 올리고 더 엄격한 gate 관점을 prompt에 추가
 - synthesis는 현재 deterministic selection 규칙을 포함한다:
@@ -186,16 +200,16 @@ provider stdout/stderr는 `.workflow/tmp/result-<phase>-<provider>.txt`에 저�
 `awf analyze`는 실행 시 다음을 남깁니다.
 - `.ai-context/.analysis-state.json`
 - `.ai-context/.tmp/domain-bundle.xml`
-- `.ai-context/.tmp/project-bundle.xml` (`--deep`인 경우)
+- `.ai-context/.tmp/project-bundle.xml` (Stage 3 실행 시)
 - `.ai-context/.tmp/stage1-analysis.md`
 - `.ai-context/.tmp/prompt-stage2-<provider>.txt`
 - `.ai-context/.tmp/result-stage2-<provider>.txt`
 - `.ai-context/.tmp/stage2-draft.md`
-- `.ai-context/.tmp/stage3-final.md` (`--deep`인 경우)
+- `.ai-context/.tmp/stage3-final.md` (Stage 3 실행 시)
 
 Stage 2 결과가 `===FILE: ...===` 형식을 따르면 필수 산출물 4종을 실제 `.ai-context/` 파일로 분리 저장합니다.
 `stage1/stage2/stage3` 상태와 bundle `configHash`도 `.analysis-state.json`에 기록됩니다.
-`--deep`에서 Stage 3은 provider에 따라 두 경로로 동작합니다.
+Stage 3은 provider에 따라 두 경로로 동작합니다.
 - `claude-code`, `claude-sdk`: Stage 3 cross-service validation을 한 번 더 실행하고 `stage3.status = completed`
 - 그 외 provider: scaffold 메모만 남기고 `stage3.status = scaffold`
 필수 산출물 4종이 모두 생성되면 `layers.output.status = completed`로 마감하고, 아니면 failed로 남겨 resume 가능한 흔적을 유지합니다.
@@ -216,7 +230,7 @@ flags = ["--print", "--permission-mode", "default"]
 
 [provider.claude-sdk]
 api_key_env = "ANTHROPIC_API_KEY"
-model = "claude-sonnet-4-5"
+model = "claude-sonnet-4-6"
 max_tokens = 8192
 
 [provider.openai]
@@ -280,8 +294,8 @@ chat compaction은 현재 다음 순서로 동작한다:
 실운영 검증 순서:
 
 ```bash
-uv run --project cli --no-editable awf analyze sample-api health --repo-root . --provider claude-code --yolo
-uv run --project cli --no-editable awf wf next --repo-root . --phase review --provider codex --auto-apply
+uv run --project cli awf analyze sample-api health --repo-root . --provider claude-code --yolo
+uv run --project cli awf wf next --repo-root . --phase review --provider codex --auto-apply
 ```
 
 첫 번째 명령은 small domain 기준의 `claude-code` analyze 확인용입니다. 두 번째 명령은 Codex CLI 인증과 실행 가능 상태가 필요합니다.
