@@ -37,6 +37,8 @@ Claude Code 중심으로 작성된 멀티에이전트 프로토콜과 `wf-*` pip
 - 입력 UX: shell command 또는 prompt convention
 - 실행 단위: `codex/run-wf.sh`, `codex/templates/*`, `codex/AGENTS.md`
 - secondary provider 호출: Claude CLI 또는 Codex 자체 sub-agent
+- preflight: Claude skill과 동일하게 `awf ready --gate workflow-run` 후
+  `awf wf next --dry-run --output-format json`으로 phase/provider/prompt를 검증
 
 권장 구조:
 
@@ -69,12 +71,14 @@ Codex에는 slash command 개념이 없으므로, 권장 방식은 아래 둘 �
 
 Codex runner가 다음만 수행해도 실사용 가능합니다.
 
-1. `.workflow/state.json` 읽기
-2. 현재 phase 확인
-3. `agent-cards/{phase}.json` 읽기
-4. `provider-config.json`에 따라 inline/delegated/dual 결정
-5. 결과 JSON 파싱 후 gate 평가
-6. 상태/아티팩트 기록
+1. `awf ready --gate workflow-run --json` 실행
+2. `awf wf next --dry-run --output-format json`으로 현재 phase/provider/prompt 검증
+3. `.workflow/state.json` 읽기
+4. 현재 phase 확인
+5. `agent-cards/{phase}.json` 읽기
+6. `provider-config.json`에 따라 inline/delegated/dual 결정
+7. 결과 JSON 파싱 후 gate 평가
+8. 상태/아티팩트 기록
 
 ### 권장 phase 매핑
 
@@ -176,3 +180,6 @@ Codex runner
 2. Claude/Codex는 각자 얇은 실행 어댑터만 유지
 3. 모든 provider 전환은 `provider-config.json`으로 제어
 4. delegated 응답은 항상 동일 JSON schema를 강제
+5. provider 실행 전에는 항상
+   `claude/skills/wf-orchestrator/reference/deterministic-preflight.md`의
+   deterministic preflight contract를 통과
