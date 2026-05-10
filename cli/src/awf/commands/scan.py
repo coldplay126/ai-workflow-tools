@@ -18,7 +18,8 @@ def run_scan(args: argparse.Namespace) -> int:
     github_root = args.github_root or str(Path.home() / "Documents" / "GitHub")
     github_root_path = Path(github_root).resolve()
 
-    if not github_root_path.is_dir():
+    needs_github_root = bool(getattr(args, "all", False) or getattr(args, "merge", False))
+    if needs_github_root and not github_root_path.is_dir():
         print(f"error: github root not found: {github_root_path}", file=sys.stderr)
         return 2
 

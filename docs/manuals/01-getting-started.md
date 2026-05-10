@@ -8,6 +8,8 @@
 - "자동화가 실제로 어떤 파일을 읽고 쓰는지"를 감으로 익힌다.
 
 관련 문서:
+- [동료 개발자 온보딩 가이드](./09-colleague-onboarding.ko.md)
+- [Colleague Onboarding Guide](./09-colleague-onboarding.en.md)
 - [첫 ai-workflow-tools 작업 흐름](./08-first-workflow.ko.md)
 - [First Workflow](./08-first-workflow.en.md)
 - [WF 빠른 시작](./wf-quickstart.md)
@@ -148,6 +150,8 @@ Analysis 관련:
 다음 문서로 이어서 보세요.
 
 - [두 세션 운영 실습](./02-two-session-workflow.md)
+- [동료 개발자 온보딩 가이드](./09-colleague-onboarding.ko.md)
+- [Colleague Onboarding Guide](./09-colleague-onboarding.en.md)
 - [첫 ai-workflow-tools 작업 흐름](./08-first-workflow.ko.md)
 - [First Workflow](./08-first-workflow.en.md)
 - [커맨드 없이 재현하기](./03-manual-prompt-reproduction.md)
