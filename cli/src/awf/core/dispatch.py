@@ -670,6 +670,28 @@ def pi_dispatch_available(config: PiRunnerConfig | None = None) -> bool:
     return shutil.which(cfg.command) is not None
 
 
+def _dispatch_readiness_hint(cwd: str | os.PathLike[str]) -> str:
+    return f"hint: run `awf doctor --repo-root {cwd} --json` to inspect dispatch readiness"
+
+
+def _print_dispatch_fallback_warning(
+    *,
+    surface: str,
+    detail: str,
+    cwd: str | os.PathLike[str],
+    extra_hints: tuple[str, ...] = (),
+) -> None:
+    lines = [
+        (
+            f"warning: dispatch surface_preference={surface} requested but "
+            f"{detail}; falling back to inline"
+        ),
+        _dispatch_readiness_hint(cwd),
+        *extra_hints,
+    ]
+    print("\n".join(lines), file=sys.stderr)
+
+
 def select_dispatch(
     *,
     worker_count: int,
@@ -695,19 +717,31 @@ def select_dispatch(
     if preference == SURFACE_CMUX:
         if cmux_dispatch_available(cwd):
             return CmuxDispatch(options)
-        print(
-            "warning: dispatch surface_preference=cmux requested but cmux "
-            "backend is unavailable; falling back to inline",
-            file=sys.stderr,
+        _print_dispatch_fallback_warning(
+            surface=SURFACE_CMUX,
+            detail="cmux backend is unavailable",
+            cwd=cwd,
+            extra_hints=(
+                (
+                    "hint: ensure `cmux-agent` is on PATH and this repo has "
+                    "an active cmux run"
+                ),
+            ),
         )
         return InlineDispatch()
     if preference == SURFACE_PI:
         if pi_dispatch_available((pi_options or PiDispatchOptions()).config):
             return PiDispatch(pi_options)
-        print(
-            "warning: dispatch surface_preference=pi requested but pi "
-            "backend is unavailable; falling back to inline",
-            file=sys.stderr,
+        _print_dispatch_fallback_warning(
+            surface=SURFACE_PI,
+            detail="pi backend is unavailable",
+            cwd=cwd,
+            extra_hints=(
+                (
+                    "hint: run `python3 cli/tests/run_pi_field_smoke.py --json` "
+                    "for Pi install/auth/quota diagnostics"
+                ),
+            ),
         )
         return InlineDispatch()
 
