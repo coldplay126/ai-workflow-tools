@@ -11,6 +11,7 @@ from typing import Any
 
 from awf.core.config import AwfConfig, resolve_runtime_paths
 from awf.core.mcp import discover_mcp_servers
+from awf.core.pi_field_smoke import read_pi_field_smoke_summary
 
 
 PI_AUTH_ENV_NAMES = (
@@ -229,7 +230,7 @@ def _pi_field_smoke_command(*, command_source: str, installed_status: str) -> st
     return f"{base} --json"
 
 
-def collect_pi_readiness() -> dict[str, Any]:
+def collect_pi_readiness(repo_root: str | None = None) -> dict[str, Any]:
     command, command_source = _pi_command()
     installed = check_command_installed(command)
     version = _check_pi_version(command)
@@ -268,6 +269,11 @@ def collect_pi_readiness() -> dict[str, Any]:
         "field_smoke_command": _pi_field_smoke_command(
             command_source=command_source,
             installed_status=str(installed["status"]),
+        ),
+        "last_field_smoke": (
+            read_pi_field_smoke_summary(repo_root)
+            if repo_root is not None
+            else {"status": "unknown", "detail": "repo root was not provided"}
         ),
     }
 
@@ -317,7 +323,7 @@ def collect_doctor_report(config: AwfConfig, repo_root: str | None, *, probe: bo
         for item in providers:
             item["probe"] = check_provider_probe(str(item["provider"]), config)
     mcp_servers = discover_mcp_servers(config)
-    pi_readiness = collect_pi_readiness()
+    pi_readiness = collect_pi_readiness(resolved_repo_root)
     return {
         "default_provider": config.provider_name(),
         "provider_fallback": config.raw.get("provider", {}).get("fallback", []),

@@ -23,6 +23,10 @@ CLI_SRC = ROOT / "cli" / "src"
 sys.path.insert(0, str(CLI_SRC))
 
 from awf.core.dispatch import PiDispatch, PiDispatchOptions, WorkerSpec  # noqa: E402
+from awf.core.pi_field_smoke import (  # noqa: E402
+    pi_field_smoke_latest_path,
+    write_pi_field_smoke_result,
+)
 from awf.runners.pi import PiRunnerConfig  # noqa: E402
 
 
@@ -352,9 +356,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--timeout-sec", type=int, default=60)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--write-result",
+        action="store_true",
+        help="Persist the latest result under .awf-operations/pi-field-smoke/.",
+    )
+    parser.add_argument(
+        "--repo-root",
+        default=".",
+        help="Repo root used with --write-result. Defaults to the current directory.",
+    )
     args = parser.parse_args(argv)
 
     rc, payload = _build_payload(args)
+    if args.write_result:
+        result_path = pi_field_smoke_latest_path(args.repo_root)
+        payload["result_path"] = str(result_path)
+        write_pi_field_smoke_result(args.repo_root, payload)
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:

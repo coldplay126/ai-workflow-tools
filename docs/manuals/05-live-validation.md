@@ -193,17 +193,20 @@ Pi는 기본 dispatch surface가 아닙니다. `surface_preference=pi`는 실제
 설치와 provider 인증이 있는 머신에서만 검증합니다.
 
 ```bash
-python3 cli/tests/run_pi_field_smoke.py --json
+python3 cli/tests/run_pi_field_smoke.py --json --write-result
 ```
 
 전역 설치 없이 npm으로 임시 실행하려면:
 
 ```bash
-python3 cli/tests/run_pi_field_smoke.py --npm-exec --json
+python3 cli/tests/run_pi_field_smoke.py --npm-exec --json --write-result
 ```
 
 이 검증은 fake binary test가 아니라 실제 Pi print-mode provider 호출을
 수행합니다. 실패 시 `reason`과 `diagnosis.next_action`을 확인합니다.
 `missing_provider_auth`는 provider 인증 미구성, `provider_quota_exhausted`
 와 `billing_context: "anthropic_extra_usage"`는 Claude Extra Usage 한도
-부족을 뜻합니다. 자세한 판정 기준은 [Pi Field Validation](./pi-field-validation.md)을 참고합니다.
+부족을 뜻합니다. `--write-result`는 최신 결과를
+`.awf-operations/pi-field-smoke/latest.json`에 저장하고, `awf doctor` /
+`awf ready`가 이를 요약합니다. 자세한 판정 기준은
+[Pi Field Validation](./pi-field-validation.md)을 참고합니다.

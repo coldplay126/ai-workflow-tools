@@ -91,6 +91,14 @@ def run_ready(args: argparse.Namespace) -> int:
             f"(version={version.get('status')}, "
             f"surface={pi_readiness.get('dispatch_surface')})"
         )
+        last_smoke = pi_readiness.get("last_field_smoke", {}) or {}
+        if last_smoke.get("status") == "found":
+            print(
+                "    last_field_smoke: "
+                f"ok={last_smoke.get('ok')} "
+                f"reason={last_smoke.get('reason')} "
+                f"at={last_smoke.get('recorded_at')}"
+            )
     dispatch = payload.get("doctor", {}).get("dispatch", {}) or {}
     preference = dispatch.get("surface_preference", {}) or {}
     preference_ready = dispatch.get("surface_preference_ready", {}) or {}

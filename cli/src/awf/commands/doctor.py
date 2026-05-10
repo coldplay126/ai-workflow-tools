@@ -82,6 +82,19 @@ def run_doctor(args: argparse.Namespace) -> int:
         billing = pi_readiness.get("billing_warning", {}) or {}
         print(f"  billing: {billing.get('status')} ({billing.get('detail')})")
         print(f"  field_smoke: {pi_readiness.get('field_smoke_command')}")
+        last_smoke = pi_readiness.get("last_field_smoke", {}) or {}
+        if last_smoke.get("status") == "found":
+            print(
+                "  last_field_smoke: "
+                f"ok={last_smoke.get('ok')} "
+                f"reason={last_smoke.get('reason')} "
+                f"at={last_smoke.get('recorded_at')}"
+            )
+        elif last_smoke.get("status") == "invalid":
+            print(
+                "  last_field_smoke: "
+                f"invalid ({last_smoke.get('detail')})"
+            )
     print("")
     print("providers:")
     for provider in payload["providers"]:

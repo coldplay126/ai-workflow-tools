@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 from awf.core.config import load_awf_config
+from awf.core.pi_field_smoke import write_pi_field_smoke_result
 from awf.core.readiness import PI_AUTH_ENV_NAMES, collect_doctor_report
 
 
@@ -69,6 +70,7 @@ def test_doctor_report_detects_pi_runner_without_requiring_backend(
         report["pi_readiness"]["field_smoke_command"]
         == "python3 cli/tests/run_pi_field_smoke.py --json"
     )
+    assert report["pi_readiness"]["last_field_smoke"]["status"] == "missing"
     assert report["dispatch"]["surface_preference"]["surface_preference"] == "auto"
     assert report["dispatch"]["surface_preference"]["source"] == "default"
     assert report["dispatch"]["surface_preference_ready"]["status"] == "ok"
@@ -201,3 +203,38 @@ def test_doctor_report_marks_missing_pi_readiness(
         == "python3 cli/tests/run_pi_field_smoke.py --npm-exec --json"
     )
     assert report["dispatch"]["pi_backend_ready"] is False
+
+
+def test_doctor_report_includes_latest_pi_field_smoke_summary(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo = _repo_root(tmp_path / "repo")
+    write_pi_field_smoke_result(
+        repo,
+        {
+            "schema": "awf_pi_field_smoke_v1",
+            "ok": False,
+            "reason": "provider_quota_exhausted",
+            "pi_command_source": "PATH",
+            "pi_command": "/bin/pi",
+            "billing_context": "anthropic_extra_usage",
+            "diagnosis": {
+                "kind": "provider_quota_exhausted",
+                "next_action": "Enable Extra Usage.",
+            },
+        },
+        recorded_at="2026-05-10T00:00:00+00:00",
+    )
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
+
+    config = load_awf_config(str(repo))
+    report = collect_doctor_report(config, str(repo))
+
+    last_smoke = report["pi_readiness"]["last_field_smoke"]
+    assert last_smoke["status"] == "found"
+    assert last_smoke["recorded_at"] == "2026-05-10T00:00:00+00:00"
+    assert last_smoke["ok"] is False
+    assert last_smoke["reason"] == "provider_quota_exhausted"
+    assert last_smoke["billing_context"] == "anthropic_extra_usage"
+    assert last_smoke["next_action"] == "Enable Extra Usage."
