@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import re
+import shlex
 import subprocess
 import textwrap
 import urllib.parse
@@ -13,10 +16,15 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     import tomli as tomllib  # type: ignore[no-redef]
 
+from awf.cli import KNOWN_COMMANDS, build_parser
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MACHINE_SPECIFIC_EXAMPLE_ROOT = "/Users/" + "example"
 MARKDOWN_LINK_RE = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
+BASH_FENCE_RE = re.compile(
+    r"^[ \t]*```bash\s*\n(.*?)\n[ \t]*```", re.DOTALL | re.MULTILINE
+)
 JSON_FENCE_RE = re.compile(
     r"^[ \t]*```json\s*\n(.*?)\n[ \t]*```", re.DOTALL | re.MULTILINE
 )
@@ -67,6 +75,52 @@ def _strip_json_line_comments(block: str) -> str:
     return "\n".join(
         line for line in block.splitlines() if not line.lstrip().startswith("//")
     )
+
+
+def _bash_logical_lines(block: str, start_line: int) -> list[tuple[int, str]]:
+    logical_lines: list[tuple[int, str]] = []
+    buffer = ""
+    buffer_line = start_line
+    for index, raw_line in enumerate(block.splitlines(), start_line):
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+
+        if not buffer:
+            buffer_line = index
+        if stripped.endswith("\\"):
+            buffer += stripped[:-1].rstrip() + " "
+            continue
+
+        buffer += stripped
+        logical_lines.append((buffer_line, buffer))
+        buffer = ""
+
+    if buffer:
+        logical_lines.append((buffer_line, buffer.rstrip()))
+    return logical_lines
+
+
+def _awf_argv_from_bash_line(line: str) -> list[str] | None:
+    sanitized = re.sub(r"<([A-Za-z0-9_.-]+)>", r"\1", line)
+    try:
+        tokens = shlex.split(sanitized, comments=True)
+    except ValueError:
+        return None
+    if "awf" not in tokens:
+        return None
+
+    awf_index = tokens.index("awf")
+    argv: list[str] = []
+    for token in tokens[awf_index + 1 :]:
+        if token in {"|", "||", "&&", ";"}:
+            break
+        argv.append(token)
+    return argv
+
+
+def _is_natural_language_awf_argv(argv: list[str]) -> bool:
+    return bool(argv) and argv[0] not in KNOWN_COMMANDS and not argv[0].startswith("-")
 
 
 def test_docs_do_not_use_machine_specific_example_paths() -> None:
@@ -123,6 +177,37 @@ def test_markdown_json_fences_are_parseable_when_not_placeholders() -> None:
                 json.loads(block, object_pairs_hook=_reject_duplicate_json_keys)
             except (json.JSONDecodeError, ValueError) as exc:
                 invalid.append(f"{path.relative_to(REPO_ROOT)}:{line} {exc}")
+
+    assert invalid == []
+
+
+def test_markdown_awf_bash_examples_parse() -> None:
+    parser = build_parser()
+    invalid: list[str] = []
+    for path in _markdown_files():
+        text = path.read_text(encoding="utf-8")
+        for match in BASH_FENCE_RE.finditer(text):
+            start_line = _line_number(text, match.start()) + 1
+            for line, command in _bash_logical_lines(match.group(1), start_line):
+                argv = _awf_argv_from_bash_line(command)
+                if argv is None or _is_natural_language_awf_argv(argv):
+                    continue
+
+                stderr = io.StringIO()
+                stdout = io.StringIO()
+                try:
+                    with (
+                        contextlib.redirect_stdout(stdout),
+                        contextlib.redirect_stderr(stderr),
+                    ):
+                        parser.parse_args(argv)
+                except SystemExit as exc:
+                    if exc.code == 0:
+                        continue
+                    invalid.append(
+                        f"{path.relative_to(REPO_ROOT)}:{line} "
+                        f"awf {' '.join(argv)} (exit={exc.code})"
+                    )
 
     assert invalid == []
 

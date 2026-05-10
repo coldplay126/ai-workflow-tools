@@ -125,12 +125,12 @@ uv tool install awf-cli          # 추천
 pip install awf-cli              # 대안
 
 # 명령 구조
-awf                              # interactive REPL
-awf analyze <service> <domain>   # 분석 실행
+awf --help                       # CLI help
+awf analyze sample-api health    # 분석 실행
 awf wf init '기능 설명'           # 워크플로우 시작
 awf wf next                      # 다음 phase
 awf wf status                    # 현재 상태
-awf config set provider claude   # 설정 변경
+awf config show                  # 설정 확인
 awf mcp list                     # MCP 서버 목록
 ```
 
@@ -526,8 +526,8 @@ escalation 조건 예시:
 기존 `#precise`/`#cross`/`#critical` 모드를 CLI에서 직접 지원:
 
 ```bash
-awf analyze quest-challenge --mode precise     # Codex + Claude 검증
-awf analyze quest-challenge --mode cross        # Codex + Sonnet 병렬
+awf analyze sample-api quest-challenge --mode precise  # Codex + Claude 검증
+awf analyze sample-api quest-challenge --mode cross    # Codex + Sonnet 병렬
 awf wf next --mode critical                    # Codex → Sonnet → Primary 체인
 ```
 
@@ -564,13 +564,13 @@ awf 가 내보내는 운영 이벤트(transitive invalidation 요약, scope-chec
 
 CLI:
 ```bash
-awf wiki init --profile self_improvement|consumer  # starter dirs + .profile marker
-awf wiki decision "<title>" [--from-pr N]         # ADR-style page under wiki/decisions/
+awf wiki init --profile self_improvement          # starter dirs + .profile marker
+awf wiki decision "Adopt operations wiki" --from-pr 37  # ADR-style page under wiki/decisions/
 awf wiki log                                       # 시간순 history
 awf wiki events --type stage1_invalidation         # 원본 JSONL 스트림 필터
 awf wiki lint                                      # orphan/stale/missing-provenance 검출
 awf wiki regenerate-index                          # wiki/ 변경 후 index.md 갱신
-awf wiki compile [--since N] [--topic ...] [--dry-run]  # events → operations/<topic>.md 합성
+awf wiki compile --since 30 --topic scope-check --dry-run  # events → operations/<topic>.md 합성
 ```
 
 **Profile 두 가지** — 같은 storage 위에서 starter set 과 decision 템플릿 variant 만 다름:
