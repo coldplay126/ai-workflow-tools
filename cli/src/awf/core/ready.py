@@ -296,6 +296,87 @@ def _automation_level(capabilities: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _pi_smoke_command(pi_readiness: dict[str, Any]) -> str:
+    command = str(
+        pi_readiness.get("field_smoke_command")
+        or "python3 cli/tests/run_pi_field_smoke.py --json"
+    )
+    if "--write-result" not in command:
+        command = f"{command} --write-result"
+    return command
+
+
+def _pi_field_smoke_recommendation(
+    report: dict[str, Any],
+) -> dict[str, str] | None:
+    pi_readiness = report.get("doctor", {}).get("pi_readiness", {}) or {}
+    dispatch = report.get("doctor", {}).get("dispatch", {}) or {}
+    preference = dispatch.get("surface_preference", {}) or {}
+    surface_preference = str(preference.get("surface_preference") or "auto")
+    last_smoke = pi_readiness.get("last_field_smoke", {}) or {}
+    if last_smoke.get("status") == "missing":
+        if surface_preference != "pi":
+            return None
+        return {
+            "command": _pi_smoke_command(pi_readiness),
+            "why": (
+                "capture Pi field evidence before opting into "
+                "dispatch.surface_preference=pi"
+            ),
+        }
+    if last_smoke.get("status") == "invalid":
+        return {
+            "command": _pi_smoke_command(pi_readiness),
+            "why": "refresh the invalid Pi field smoke evidence artifact",
+        }
+    if last_smoke.get("status") != "found":
+        return None
+
+    smoke_command = _pi_smoke_command(pi_readiness)
+    reason = str(last_smoke.get("reason") or "")
+    if last_smoke.get("stale"):
+        return {
+            "command": smoke_command,
+            "why": (
+                "last Pi field smoke is stale; refresh before relying on "
+                "Pi dispatch"
+            ),
+        }
+
+    reason_guidance = {
+        "pi_not_found": (
+            "Pi was not found in the latest field smoke; install Pi or retry "
+            "with npm before opting into Pi dispatch"
+        ),
+        "missing_provider_auth": (
+            "latest Pi field smoke lacks provider auth; log in through Pi or "
+            "set a provider API key before using Pi dispatch"
+        ),
+        "provider_quota_exhausted": (
+            "latest Pi field smoke hit Claude Extra Usage limits; keep Pi "
+            "dispatch opt-in disabled until quota or credentials are fixed"
+        ),
+        "provider_auth_failed": (
+            "latest Pi field smoke failed provider auth; refresh the Pi login "
+            "or provider API key before using Pi dispatch"
+        ),
+        "provider_rate_limited": (
+            "latest Pi field smoke was rate-limited; rerun after the provider "
+            "limit resets before using Pi dispatch"
+        ),
+        "provider_contract_parse_error": (
+            "latest Pi field smoke did not satisfy the JSON contract; keep "
+            "Pi dispatch opt-in disabled until the contract is stable"
+        ),
+    }
+    if reason in reason_guidance:
+        return {
+            "command": smoke_command,
+            "why": reason_guidance[reason],
+        }
+    return None
+
+
 def _recommended_next(report: dict[str, Any]) -> list[dict[str, str]]:
     recommendations: list[dict[str, str]] = []
     paths = report["paths"]
@@ -314,6 +395,9 @@ def _recommended_next(report: dict[str, Any]) -> list[dict[str, str]]:
             "command": "awf doctor --repo-root . --probe",
             "why": report["provider"]["reason"],
         })
+    pi_recommendation = _pi_field_smoke_recommendation(report)
+    if pi_recommendation:
+        recommendations.append(pi_recommendation)
     if report["scan"]["status"] == "ready":
         recommendations.append({
             "command": f"awf analyze {service} {sample_unit} --repo-root . --dry-run",

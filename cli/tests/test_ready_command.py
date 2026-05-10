@@ -121,6 +121,66 @@ def test_collect_ready_report_recommends_subproject_scan(tmp_path: Path, monkeyp
     )
 
 
+def test_collect_ready_report_recommends_pi_quota_followup(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo, skills = _prepare_repo(tmp_path)
+    monkeypatch.setenv("AWF_SKILLS_DIR", str(skills))
+    write_pi_field_smoke_result(
+        repo,
+        {
+            "schema": "awf_pi_field_smoke_v1",
+            "ok": False,
+            "reason": "provider_quota_exhausted",
+            "billing_context": "anthropic_extra_usage",
+            "diagnosis": {
+                "kind": "provider_quota_exhausted",
+                "next_action": "Enable Extra Usage.",
+            },
+        },
+    )
+
+    report = collect_ready_report(str(repo))
+
+    pi_next = [
+        item for item in report["recommended_next"]
+        if "run_pi_field_smoke.py" in item["command"]
+    ]
+    assert pi_next
+    assert "--write-result" in pi_next[0]["command"]
+    assert "Extra Usage" in pi_next[0]["why"]
+    assert "opt-in disabled" in pi_next[0]["why"]
+
+
+def test_collect_ready_report_recommends_refreshing_stale_pi_smoke(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo, skills = _prepare_repo(tmp_path)
+    monkeypatch.setenv("AWF_SKILLS_DIR", str(skills))
+    write_pi_field_smoke_result(
+        repo,
+        {
+            "schema": "awf_pi_field_smoke_v1",
+            "ok": True,
+            "reason": "dispatch_ok",
+            "diagnosis": {"kind": "dispatch_ok"},
+        },
+        recorded_at="2000-01-01T00:00:00+00:00",
+    )
+
+    report = collect_ready_report(str(repo))
+
+    pi_next = [
+        item for item in report["recommended_next"]
+        if "run_pi_field_smoke.py" in item["command"]
+    ]
+    assert pi_next
+    assert "--write-result" in pi_next[0]["command"]
+    assert "stale" in pi_next[0]["why"]
+
+
 def test_run_ready_json_and_human_output(tmp_path: Path, monkeypatch, capsys) -> None:
     repo, skills = _prepare_repo(tmp_path)
     monkeypatch.setenv("AWF_SKILLS_DIR", str(skills))
