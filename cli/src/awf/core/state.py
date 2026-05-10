@@ -576,6 +576,35 @@ def _agent_card_retry_max(agent_card: dict, default: int = 3) -> int:
     return default
 
 
+def _agent_card_on_fail_next_phase(
+    on_fail: dict,
+    failure_context: Optional[dict],
+) -> str | None:
+    if not isinstance(on_fail, dict):
+        return None
+
+    ctx = failure_context or {}
+    action = None
+    if ctx.get("has_critical") and "critical_found" in on_fail:
+        action = on_fail["critical_found"]
+    elif "default" in on_fail:
+        action = on_fail["default"]
+
+    if isinstance(action, dict):
+        next_phase = action.get("next_phase") or action.get("target_phase")
+        if isinstance(next_phase, str) and next_phase in PHASE_ORDER:
+            return next_phase
+        return None
+
+    if action == "replan":
+        target_phase = on_fail.get("target_phase")
+        if isinstance(target_phase, str) and target_phase in PHASE_ORDER:
+            return target_phase
+        return None
+
+    return None
+
+
 def apply_gate_result(
     explicit_root: Optional[str],
     phase: str,
@@ -665,22 +694,12 @@ def apply_gate_result(
             return state
 
         # --- on_fail routing from agent card ---
-        on_fail_action = None
         on_fail_target = None
         if agent_card:
             on_fail = agent_card.get("gate", {}).get("on_fail", {})
-            if isinstance(on_fail, dict):
-                # Check failure_context for specific routing
-                ctx = failure_context or {}
-                has_critical = ctx.get("has_critical", False)
-                if has_critical and "critical_found" in on_fail:
-                    on_fail_target = on_fail["critical_found"]
-                    on_fail_action = "replan"
-                elif "default" in on_fail:
-                    on_fail_action = on_fail["default"]  # e.g., "prompt_user", "replan"
-                    on_fail_target = on_fail.get("target_phase")
+            on_fail_target = _agent_card_on_fail_next_phase(on_fail, failure_context)
 
-        if on_fail_action == "replan" and on_fail_target and on_fail_target in PHASE_ORDER:
+        if on_fail_target:
             phase_state["status"] = "failed"
             # Delegate to replan_workflow for proper state cleanup
             _save_workflow_state(explicit_root, state)
