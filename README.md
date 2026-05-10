@@ -83,6 +83,11 @@ uv run --project cli --no-editable --reinstall-package awf-cli awf --help
 `awf ready`는 프로젝트에서 가장 먼저 실행하는 read-only 점검입니다. 설정,
 provider, skill, scan, workflow, operations wiki 상태를 한 번에 모아 현재
 안전한 자동화 레벨과 다음 명령을 알려줍니다.
+`awf scan --no-ai`는 deterministic 탐색을 우선합니다. Python 프로젝트는
+`pyproject.toml`/`setup.py`뿐 아니라 `requirements.txt`, `setup.cfg`,
+`Pipfile`, `poetry.lock`만 있어도 인식하며, `src/*` 구조가 없어도
+`collectors/`, `analyzers/`, `importers/` 같은 root-level 소스 디렉토리를
+분석 단위로 잡을 수 있습니다.
 
 ### 첫 workflow 순서
 
@@ -90,13 +95,18 @@ provider, skill, scan, workflow, operations wiki 상태를 한 번에 모아 현
 
 ```bash
 awf ready --repo-root .
-awf scan cli --no-ai
-awf analyze ai-workflow-tools <unit> --repo-root . --dry-run
+awf scan <repo-or-subproject> --no-ai
+awf analyze <service> <unit> --repo-root . --dry-run --output-format json
 awf wf init "small scoped improvement" --repo-root .
 awf ready --repo-root . --gate workflow-run
+awf wf next --repo-root . --dry-run --output-format json
 awf wf next --repo-root .
 awf ready --repo-root .
 ```
+
+`--output-format json`을 붙인 dry-run은 자동화에서 소비할 수 있는 구조화된
+prompt preview를 출력합니다. `.workflow/`가 프로젝트 `.gitignore`에 있으면
+`awf ready`가 local-only workflow state 경고를 표시합니다.
 
 Pi는 기본 dispatch surface가 아니라 opt-in runner입니다. Pi를 쓰려면 먼저
 field-smoke evidence를 남기고 `ready`가 그 결과를 읽게 합니다.
@@ -225,6 +235,11 @@ The Python package is `awf-cli`, and the console entrypoint is `awf`.
 provider, skill, scan, workflow, and operations-wiki readiness into one report,
 then prints the next safe commands instead of assuming the repo is ready for
 provider-backed automation.
+`awf scan --no-ai` starts with deterministic discovery. Python projects are
+recognized from `requirements.txt`, `setup.cfg`, `Pipfile`, or `poetry.lock` in
+addition to `pyproject.toml` and `setup.py`; script-style repos without `src/`
+can still expose root-level units such as `collectors/`, `analyzers/`, and
+`importers/`.
 
 ### First workflow sequence
 
@@ -232,13 +247,18 @@ Start new repositories with a small, gated loop:
 
 ```bash
 awf ready --repo-root .
-awf scan cli --no-ai
-awf analyze ai-workflow-tools <unit> --repo-root . --dry-run
+awf scan <repo-or-subproject> --no-ai
+awf analyze <service> <unit> --repo-root . --dry-run --output-format json
 awf wf init "small scoped improvement" --repo-root .
 awf ready --repo-root . --gate workflow-run
+awf wf next --repo-root . --dry-run --output-format json
 awf wf next --repo-root .
 awf ready --repo-root .
 ```
+
+Dry-runs with `--output-format json` emit structured prompt previews for
+automation. If `.workflow/` is ignored by the target repo's `.gitignore`,
+`awf ready` reports that workflow state is local-only.
 
 Pi remains opt-in. When using Pi dispatch, first persist field-smoke evidence
 and let `ready` incorporate the result:

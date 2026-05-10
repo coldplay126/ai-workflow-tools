@@ -14,6 +14,11 @@ AI 기반 코드 분석 파이프라인의 핵심 설계 원리.
 
 - 분석 대상 파일 탐색 및 목록 생성
 - 분석 단위(unit) 식별 — 기능 모듈, 패키지, 컴포넌트 등
+- deterministic marker 탐지 — Python은 `pyproject.toml`/`setup.py`뿐 아니라
+  `requirements.txt`, `setup.cfg`, `Pipfile`, `poetry.lock`도 프로젝트 marker로
+  사용
+- `src/` 구조가 없는 script repo에서는 root-level source directory를 unit으로
+  사용할 수 있음
 - 규모(scale) 판정: 파일 수 기준으로 small / standard / large 분류
 - 분석 목적(mode) 결정: 문서화, 리뷰, 조사 등
 
@@ -133,3 +138,5 @@ mode별 구체적인 required output files 목록은 reference 문서를 참조�
 
 분석 단위는 파이프라인이 한 번에 분석하는 코드의 논리적 묶음이다.
 "기능적으로 응집된 파일 그룹"이면 충분하며, 특정 아키텍처 패턴을 전제하지 않는다.
+따라서 DDD `domain` 디렉토리뿐 아니라 package, component, worker, collector,
+importer, analyzer 같은 운영 단위도 동일하게 분석할 수 있다.

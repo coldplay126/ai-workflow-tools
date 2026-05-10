@@ -56,6 +56,13 @@ LLM 대화 이력이나 메모리에 상태를 보관하지 않는다.
 | 감사 추적 | 제한적 |
 | 병렬 실행 | 불가능 (세션 격리) |
 
+### Local-only 상태
+
+상태 외부화가 항상 git commit을 뜻하지는 않는다. `.workflow/`가 프로젝트
+`.gitignore`에 있으면 workflow state는 해당 repo의 local-only 운영 상태다.
+이 경우 readiness layer는 경고를 표시하고, 사용자는 실제 commit 대상과 로컬
+workflow state를 분리해서 판단한다.
+
 ### 상태 전이 원자성
 
 상태 파일 쓰기는 원자적 rename 패턴을 사용한다.

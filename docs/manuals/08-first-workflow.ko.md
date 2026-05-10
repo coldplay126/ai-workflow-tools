@@ -11,10 +11,10 @@ workflow 실행까지 단계적으로 올리는 것입니다.
 
 1. `awf ready`로 현재 안전 레벨과 다음 추천 명령을 확인합니다.
 2. `awf scan`으로 분석 단위를 확정합니다.
-3. `awf analyze --dry-run`으로 provider 호출 전 prompt와 산출물 경로를 확인합니다.
+3. `awf analyze --dry-run --output-format json`으로 provider 호출 전 prompt와 산출물 경로를 확인합니다.
 4. `awf wf init`으로 작은 작업의 `.workflow` 상태를 만듭니다.
 5. `awf ready --gate workflow-run`으로 실행 gate를 통과합니다.
-6. `awf wf next`로 다음 phase를 실행합니다.
+6. `awf wf next --dry-run --output-format json`으로 다음 phase prompt를 먼저 확인한 뒤 `awf wf next`로 실행합니다.
 7. `.awf-operations` evidence를 남긴 뒤 다시 `awf ready`로 다음 행동을 확인합니다.
 
 ## 시퀀스 다이어그램
@@ -37,8 +37,8 @@ sequenceDiagram
     CLI->>Scan: detect deterministic analysis units
     Scan-->>User: service/unit candidates
 
-    User->>CLI: awf analyze <service> <unit> --repo-root . --dry-run
-    CLI-->>User: prompt and artifact preview
+    User->>CLI: awf analyze <service> <unit> --repo-root . --dry-run --output-format json
+    CLI-->>User: structured prompt and artifact preview
 
     User->>CLI: awf wf init "small scoped improvement" --repo-root .
     CLI->>Workflow: create state and phase artifacts
@@ -46,6 +46,9 @@ sequenceDiagram
     User->>CLI: awf ready --repo-root . --gate workflow-run
     CLI->>Ready: evaluate deterministic execution gate
     Ready-->>User: allow, dry_run_only, or block
+
+    User->>CLI: awf wf next --repo-root . --dry-run --output-format json
+    CLI-->>User: structured phase prompt preview
 
     User->>CLI: awf wf next --repo-root .
     CLI->>Provider: run the next gated phase
@@ -67,23 +70,28 @@ awf ready --repo-root .
 ```
 
 workspace root라서 subproject가 보이면, `ready`가 추천한 subproject를 먼저
-스캔합니다.
+스캔합니다. Python script repo는 `pyproject.toml`이나 `setup.py`가 없어도
+`requirements.txt`, `setup.cfg`, `Pipfile`, `poetry.lock`만으로 Python
+프로젝트로 인식됩니다. `src/` 구조가 없어도 `collectors/`, `analyzers/`,
+`importers/` 같은 root-level 소스 디렉토리를 분석 단위로 잡을 수 있습니다.
 
 ```bash
-awf scan cli --no-ai
+awf scan <repo-or-subproject> --no-ai
 ```
 
 분석 단위가 확인되면 provider 호출 없이 dry-run을 실행합니다.
 
 ```bash
-awf analyze ai-workflow-tools <unit> --repo-root . --dry-run
+awf analyze <service> <unit> --repo-root . --dry-run --output-format json
 ```
 
-작은 작업을 workflow로 시작합니다.
+작은 작업을 workflow로 시작한 뒤, 실제 provider 실행 전에 다음 phase prompt를
+구조화 출력으로 확인합니다.
 
 ```bash
 awf wf init "small scoped improvement" --repo-root .
 awf ready --repo-root . --gate workflow-run
+awf wf next --repo-root . --dry-run --output-format json
 awf wf next --repo-root .
 ```
 
@@ -108,5 +116,8 @@ smoke freshness를 먼저 해결합니다.
 - `ready`가 `block`이면 workflow 실행보다 추천 명령을 먼저 수행합니다.
 - `dry-run`이 이해되지 않으면 provider 실행으로 넘어가지 않습니다.
 - `.workflow`는 feature workflow의 canonical state입니다.
+- `.workflow/`가 `.gitignore`에 있으면 `ready`가 local-only 상태 경고를
+  표시합니다. 이 경우 workflow state는 로컬 운영 상태로 보고, commit 대상은
+  의도적으로 고릅니다.
 - `.awf-operations`는 운영 evidence와 후속 판단의 입력입니다.
 - Pi evidence는 optional이지만, Pi dispatch를 쓰려면 최신 field smoke가 있어야 합니다.

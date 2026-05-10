@@ -38,6 +38,32 @@ Status: v3 로드맵 Phase 4에서 구현 예정. Writer 구성: 보안 + 품질
 
 Status: 미정.
 
+## 0.1 Unit Discovery
+
+`awf ready`와 `awf scan --no-ai`는 provider 호출 없이 deterministic scanner를
+사용한다.
+
+### Python project markers
+
+| Marker | 의미 |
+|--------|------|
+| `pyproject.toml` | 표준 Python project metadata |
+| `setup.py` / `setup.cfg` | setuptools 기반 project |
+| `requirements.txt` | script-style Python repo 또는 legacy dependency manifest |
+| `Pipfile` | Pipenv project |
+| `poetry.lock` | Poetry-managed dependency lock |
+
+### Unit directory patterns
+
+| 구조 | unit pattern | 예시 |
+|------|--------------|------|
+| conventional source tree | `src/{unit}`, `src/domains/{unit}`, `src/modules/{unit}` 등 | `src/orders`, `src/features/payment` |
+| root-level script repo | `{unit}` | `collectors`, `analyzers`, `importers`, `exporters`, `monitors`, `matchers` |
+
+`--dry-run --output-format json`은 이 deterministic discovery 결과를 기반으로
+prompt와 경로를 구조화 출력한다. 설정이 비어 있어도 dry-run 단계에서는 AI
+unit discovery를 호출하지 않는다.
+
 ---
 
 ## 1. 규모 분류 임계값
