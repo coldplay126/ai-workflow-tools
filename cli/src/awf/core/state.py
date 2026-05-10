@@ -564,6 +564,18 @@ def _default_next_phase(phase: str) -> Optional[str]:
     return None
 
 
+def _agent_card_retry_max(agent_card: dict, default: int = 3) -> int:
+    retry = agent_card.get("retry")
+    if isinstance(retry, dict) and isinstance(retry.get("max"), int):
+        return retry["max"]
+
+    legacy_retry = (agent_card.get("gate") or {}).get("retry")
+    if isinstance(legacy_retry, dict) and isinstance(legacy_retry.get("max"), int):
+        return legacy_retry["max"]
+
+    return default
+
+
 def apply_gate_result(
     explicit_root: Optional[str],
     phase: str,
@@ -634,7 +646,7 @@ def apply_gate_result(
 
         max_retries = 3  # default
         if agent_card:
-            max_retries = agent_card.get("gate", {}).get("retry", {}).get("max", 3)
+            max_retries = _agent_card_retry_max(agent_card, default=max_retries)
 
         if retries > max_retries:
             # Retry budget exhausted — abort workflow

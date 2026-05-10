@@ -7,6 +7,7 @@ Reference: docs/tests/workflow-and-multi-agent.md
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from awf.core.state import (
     PHASE_GATE,
     PHASE_ORDER,
     _apply_policy_skips,
+    apply_gate_result,
     detect_change_class,
     get_risk_investment,
     resolve_next_phase,
@@ -51,6 +53,15 @@ def _make_agent_card(name: str, hil: bool = False, required_gates: dict | None =
     if required_gates:
         card["input"] = {"required_state": {"gates": required_gates}}
     return card
+
+
+def _write_workflow_state(repo_root: Path, state: dict) -> None:
+    wf_dir = repo_root / ".workflow"
+    wf_dir.mkdir(parents=True, exist_ok=True)
+    (wf_dir / "state.json").write_text(
+        json.dumps(state, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 # ===========================================================================
@@ -273,6 +284,43 @@ def test_003_precondition_fails_without_gate():
         assert False, "should have raised ValueError"
     except ValueError as e:
         assert "G3" in str(e)
+
+
+def test_agent_card_top_level_retry_max_controls_failure_abort(tmp_path: Path):
+    """Agent card retry.max should be the runtime retry budget."""
+    state = _make_state("standard", current_phase="review")
+    _write_workflow_state(tmp_path, state)
+    cards_dir = tmp_path / ".workflow" / "agent-cards"
+    cards_dir.mkdir(parents=True, exist_ok=True)
+    (cards_dir / "review.json").write_text(
+        json.dumps(
+            {
+                "name": "phase-review",
+                "retry": {"max": 2},
+                "gate": {"id": "G2", "on_fail": {}},
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    first = apply_gate_result(str(tmp_path), "review", False)
+    assert first["phases"]["review"]["status"] == "failed"
+    assert first["phases"]["review"]["retries"] == 1
+    assert first["currentPhase"] == "review"
+
+    second = apply_gate_result(str(tmp_path), "review", False)
+    assert second["phases"]["review"]["status"] == "failed"
+    assert second["phases"]["review"]["retries"] == 2
+    assert second["currentPhase"] == "review"
+
+    third = apply_gate_result(str(tmp_path), "review", False)
+    assert third["phases"]["review"]["status"] == "aborted"
+    assert third["phases"]["review"]["retries"] == 3
+    assert third["currentPhase"] == "aborted"
+    assert "max=2" in third["history"][-1]["details"]
 
 
 # ===========================================================================
