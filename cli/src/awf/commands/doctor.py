@@ -42,6 +42,17 @@ def run_doctor(args: argparse.Namespace) -> int:
             )
         )
         print(f"dispatch_surfaces: {surfaces} (cmux: {cmux_note})")
+    runners = payload.get("runners", []) or []
+    if runners:
+        print("runners:")
+        for runner in runners:
+            installed = runner.get("installed", {}) or {}
+            backend = runner.get("backend", {}) or {}
+            print(
+                f"  - {runner.get('runner')}: "
+                f"{installed.get('status')} ({installed.get('detail')}); "
+                f"backend: {backend.get('status')} ({backend.get('detail')})"
+            )
     print("")
     print("providers:")
     for provider in payload["providers"]:

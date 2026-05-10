@@ -76,6 +76,13 @@ def run_ready(args: argparse.Namespace) -> int:
         f"  operations: {_fmt_status(payload['operations']['status'])} "
         f"(profile={payload['operations']['profile_exists']})"
     )
+    runners = payload.get("doctor", {}).get("runners", []) or []
+    if runners:
+        summary = ", ".join(
+            f"{item.get('runner')}={item.get('installed', {}).get('status')}"
+            for item in runners
+        )
+        print(f"  runners: {summary}")
     print("")
     print("capabilities:")
     for cap in payload["capabilities"]:
