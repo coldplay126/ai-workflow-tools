@@ -119,7 +119,7 @@ awf ready --repo-root .
 
 자세한 첫 작업 흐름:
 
-- [동료 개발자 온보딩 가이드](docs/manuals/09-colleague-onboarding.ko.md)
+- [처음 쓰는 개발자를 위한 온보딩 가이드](docs/manuals/09-colleague-onboarding.ko.md)
 - [첫 ai-workflow-tools 작업 흐름](docs/manuals/08-first-workflow.ko.md)
 - [First Workflow](docs/manuals/08-first-workflow.en.md)
 - [Workflow Pipeline](docs/architecture/02-wf-pipeline.md)
@@ -272,7 +272,7 @@ awf ready --repo-root .
 
 Full guides:
 
-- [Colleague Onboarding Guide](docs/manuals/09-colleague-onboarding.en.md)
+- [Onboarding Guide for First-Time Developers](docs/manuals/09-colleague-onboarding.en.md)
 - [First Workflow](docs/manuals/08-first-workflow.en.md)
 - [첫 ai-workflow-tools 작업 흐름](docs/manuals/08-first-workflow.ko.md)
 - [Workflow Pipeline](docs/architecture/02-wf-pipeline.md)
