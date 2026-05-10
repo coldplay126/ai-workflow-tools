@@ -33,12 +33,15 @@ cmux-agent = multi-surface runtime
 Pi = per-worker terminal harness
 ```
 
-The first implementation step is detection only:
+The first implementation step is detection plus a print-mode adapter skeleton:
 
 - `awf doctor` reports whether the `pi` command is available.
 - `awf ready --json` includes the same Pi runner readiness payload under
   `doctor.runners`.
 - `AWF_PI_COMMAND` can point detection at a non-default executable name.
+- `awf.runners.pi.run_pi_print()` wraps `pi --no-session -p <prompt>` and
+  normalizes return code, stdout, stderr, timeout, and elapsed time into the
+  existing awf result shape.
 - Pi is not added to `available_surfaces` until an awf execution adapter exists.
 
 ## Consequences
@@ -56,11 +59,12 @@ Negative:
 - Pi session state and awf workflow state will both exist once execution is
   added; awf must record Pi session IDs as provenance, not as canonical state.
 - Pi permissions or extensions cannot replace `awf ready --gate`.
-- Until an adapter lands, detection only proves that Pi is available on PATH.
+- The adapter skeleton is intentionally not wired into workflow execution yet;
+  detection still only proves that Pi is available on PATH.
 
 ## Follow-up
 
-1. Add a fake-binary fixture for Pi runner detection.
-2. Add an adapter skeleton around Pi print/JSON or RPC mode.
-3. Record Pi session/export IDs in `.awf-operations` events as provenance.
+1. Decide whether workflow execution should use Pi print/JSON mode or RPC mode.
+2. Add a real `awf` dispatch/backend selector for Pi after the result contract is stable.
+3. Record Pi session/export IDs in `.awf-operations` events as provenance when sessions are enabled.
 4. Keep live Pi execution smoke tests outside the default CI suite.
