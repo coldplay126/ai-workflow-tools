@@ -283,6 +283,11 @@ def _failure_context_for_result(phase: str, data: dict[str, Any]) -> dict[str, A
         scope = data.get("scope", {})
         if isinstance(scope, dict) and _int_value(scope.get("violations")) > 0:
             context["failure_type"] = "scope_violation"
+            return context
+
+        compliance = data.get("compliance", {})
+        if isinstance(compliance, dict) and _int_value(compliance.get("fail")) > 0:
+            context["failure_type"] = "impl_bug"
 
     return context
 
