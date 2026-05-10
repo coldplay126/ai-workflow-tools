@@ -65,6 +65,10 @@ def test_doctor_report_detects_pi_runner_without_requiring_backend(
     assert report["pi_readiness"]["auth_env_any"] is False
     assert report["pi_readiness"]["dispatch_surface"] == "opt_in_only"
     assert report["pi_readiness"]["billing_warning"]["billing_context"] == "anthropic_extra_usage"
+    assert (
+        report["pi_readiness"]["field_smoke_command"]
+        == "python3 cli/tests/run_pi_field_smoke.py --json"
+    )
     assert report["dispatch"]["surface_preference"]["surface_preference"] == "auto"
     assert report["dispatch"]["surface_preference"]["source"] == "default"
     assert report["dispatch"]["surface_preference_ready"]["status"] == "ok"
@@ -192,4 +196,8 @@ def test_doctor_report_marks_missing_pi_readiness(
     assert report["pi_readiness"]["status"] == "missing"
     assert report["pi_readiness"]["installed"]["status"] == "fail"
     assert report["pi_readiness"]["version"]["status"] == "skip"
+    assert (
+        report["pi_readiness"]["field_smoke_command"]
+        == "python3 cli/tests/run_pi_field_smoke.py --npm-exec --json"
+    )
     assert report["dispatch"]["pi_backend_ready"] is False

@@ -222,6 +222,13 @@ def _check_pi_version(command: str, timeout_sec: int = 5) -> dict[str, Any]:
     )
 
 
+def _pi_field_smoke_command(*, command_source: str, installed_status: str) -> str:
+    base = "python3 cli/tests/run_pi_field_smoke.py"
+    if command_source == "default" and installed_status != "ok":
+        return f"{base} --npm-exec --json"
+    return f"{base} --json"
+
+
 def collect_pi_readiness() -> dict[str, Any]:
     command, command_source = _pi_command()
     installed = check_command_installed(command)
@@ -258,7 +265,10 @@ def collect_pi_readiness() -> dict[str, Any]:
             ),
             billing_context="anthropic_extra_usage",
         ),
-        "field_smoke_command": "python3 cli/tests/run_pi_field_smoke.py --json",
+        "field_smoke_command": _pi_field_smoke_command(
+            command_source=command_source,
+            installed_status=str(installed["status"]),
+        ),
     }
 
 
