@@ -22,6 +22,36 @@ ai-workflow-tools/
 └── setup.sh        # Claude Code skill/agent symlink installer
 ```
 
+### 기능 지도
+
+`ai-workflow-tools`는 하나의 기능만 제공하는 CLI가 아니라, AI 작업을
+준비, 분석, 실행, 검증, 운영 기록까지 이어 주는 도구 묶음입니다.
+
+| 영역 | 역할 | 주요 상태/산출물 | 문서 |
+|------|------|------------------|------|
+| `awf ready` / `awf doctor` | repo가 어느 수준까지 자동화 가능한지 read-only로 점검하고 다음 명령을 추천 | provider readiness, skill discovery, scan/workflow/wiki 상태, gate decision | [첫 작업 흐름](docs/manuals/08-first-workflow.ko.md) |
+| `awf analyze` | 코드 단위를 분석해 도메인 문서를 생성하거나 갱신 | `.ai-context/.analysis-state.json`, `.ai-context/.tmp/*`, transitive invalidation cache | [Analysis Pipeline](docs/reference/analysis-pipeline.md) |
+| `.ai-context/` | 분석 결과를 Claude Code, Codex, CLI가 함께 읽을 수 있는 tool-agnostic 계약으로 보관 | `api-spec.json`, `data-model.md`, `domain-overview.md`, `external-integration.md`, `ANALYSIS_REPORT.md` | [.ai-context 사양](docs/specs/ai-context-specification.md) |
+| `awf wf` | 기능 작업을 7-phase gated workflow로 진행 | `.workflow/state.json`, `.workflow/artifacts/*`, `.workflow/tmp/*` | [Workflow Pipeline](docs/architecture/02-wf-pipeline.md) |
+| 멀티에이전트 | review/verify, cross/critical 모드에서 독립 평가와 synthesis를 수행 | subagent 결과 envelope, judge verdict, fallback chain | [Multi-Agent Reference](docs/reference/multi-agent.md) |
+| `cmux-agent` / Pi | worker terminal surface와 dispatch runtime을 제공. Pi는 opt-in field-smoke 기반 runner | `.agent/events.jsonl`, Pi smoke result, dispatch surface preference | [cmux Quickstart](docs/manuals/cmux-agent-quickstart.md), [Pi 검증](docs/manuals/pi-field-validation.md) |
+| `awf wiki` | 작업 중 생긴 운영 evidence와 결정 기록을 프로젝트 로컬 wiki로 누적 | `.awf-operations/events/*.jsonl`, `wiki/decisions/*`, compiled operations pages | [CLI Architecture](docs/architecture/awf-cli-architecture.md) |
+| Claude/Codex 통합 | Claude skills, Codex runner 규칙, snippets를 통해 같은 계약을 다른 agent 환경에서 사용 | `claude/skills/*`, `codex/*`, `snippets/*` | [Claude Code Setup](#claude-code-setup) |
+
+### 작동 방식 요약
+
+일반적인 흐름은 `ready`로 안전 레벨을 확인하고, `scan`/`analyze`로
+`.ai-context` 분석 컨텍스트를 만든 뒤, 실제 변경은 `awf wf`의
+`plan → review → approve → impl → verify → test → done` 게이트를 통과시키는
+방식입니다. 멀티에이전트는 이 흐름의 별도 제품이 아니라, 분석 fan-out,
+workflow review/verify, critical mode 같은 고위험 구간에서 실행 품질을
+높이는 평가/합성 레이어입니다.
+
+상태의 진실 공급원은 실행 surface가 아니라 repo-local artifact입니다.
+`.workflow`는 기능 작업 상태, `.ai-context`는 분석 결과, `.awf-operations`는
+운영 evidence를 보관합니다. inline, cmux, Pi는 실행 표면이고, canonical
+state는 awf가 관리합니다.
+
 ### CLI
 
 ```bash
@@ -63,6 +93,10 @@ awf ready --repo-root .
 
 - [첫 ai-workflow-tools 작업 흐름](docs/manuals/08-first-workflow.ko.md)
 - [First Workflow](docs/manuals/08-first-workflow.en.md)
+- [Workflow Pipeline](docs/architecture/02-wf-pipeline.md)
+- [Analysis Pipeline](docs/reference/analysis-pipeline.md)
+- [.ai-context 사양](docs/specs/ai-context-specification.md)
+- [Multi-Agent Reference](docs/reference/multi-agent.md)
 
 ### 운영 wiki
 
@@ -83,10 +117,11 @@ uv run --project cmux-agent --group dev python -m pytest cmux-agent/tests -q
 ### 핵심 개념
 
 - `.workflow/`는 gated feature 작업의 phase state와 artifact를 보관합니다.
-- `.ai-context/`는 분석 결과를 보관합니다.
+- `.ai-context/`는 분석 결과와 resume/incremental 상태를 보관합니다.
 - `.awf-operations/`는 운영 evidence와 후속 판단 입력을 보관합니다.
 - provider adapter는 Claude, Codex, OpenAI, subprocess, fixture 실행을 정규화합니다.
 - runner backend는 workflow state와 분리됩니다. inline/cmux/Pi는 실행 surface이고, awf state가 canonical source입니다.
+- 멀티에이전트는 별도 상태 저장소가 아니라 review/verify/analyze 구간에서 신뢰도를 높이는 실행 전략입니다.
 
 ## English
 
@@ -107,6 +142,36 @@ ai-workflow-tools/
 ├── templates/      # cmux protocol templates
 └── setup.sh        # Claude Code skill/agent symlink installer
 ```
+
+## Project Map
+
+`ai-workflow-tools` is a toolkit rather than a single-purpose CLI. It connects
+readiness checks, source analysis, gated implementation workflows,
+multi-agent review, dispatch surfaces, and local operating evidence.
+
+| Area | Purpose | Main state or output | Docs |
+|------|---------|----------------------|------|
+| `awf ready` / `awf doctor` | Read-only project readiness and next-command recommendation | provider readiness, skill discovery, scan/workflow/wiki state, gate decisions | [First Workflow](docs/manuals/08-first-workflow.en.md) |
+| `awf analyze` | Analyze a code unit and generate or refresh domain documentation | `.ai-context/.analysis-state.json`, `.ai-context/.tmp/*`, transitive invalidation cache | [Analysis Pipeline](docs/reference/analysis-pipeline.md) |
+| `.ai-context/` | Tool-agnostic analysis contract shared by Claude Code, Codex, and the CLI | `api-spec.json`, `data-model.md`, `domain-overview.md`, `external-integration.md`, `ANALYSIS_REPORT.md` | [.ai-context spec](docs/specs/ai-context-specification.md) |
+| `awf wf` | Run feature work through a 7-phase gated workflow | `.workflow/state.json`, `.workflow/artifacts/*`, `.workflow/tmp/*` | [Workflow Pipeline](docs/architecture/02-wf-pipeline.md) |
+| Multi-agent | Run independent evaluation and synthesis for review/verify and cross/critical modes | subagent result envelopes, judge verdicts, fallback chains | [Multi-Agent Reference](docs/reference/multi-agent.md) |
+| `cmux-agent` / Pi | Provide worker terminal surfaces and dispatch runtimes. Pi is an opt-in runner gated by field-smoke evidence | `.agent/events.jsonl`, Pi smoke result, dispatch surface preference | [cmux Quickstart](docs/manuals/cmux-agent-quickstart.md), [Pi validation](docs/manuals/pi-field-validation.md) |
+| `awf wiki` | Capture operating evidence and decisions in a local project wiki | `.awf-operations/events/*.jsonl`, `wiki/decisions/*`, compiled operations pages | [CLI Architecture](docs/architecture/awf-cli-architecture.md) |
+| Claude/Codex integration | Reuse the same contracts from Claude skills, Codex runner rules, and snippets | `claude/skills/*`, `codex/*`, `snippets/*` | [Claude Code Setup](#claude-code-setup) |
+
+## How It Fits Together
+
+The normal path is to run `ready`, inspect or scan the repo, create analysis
+context with `awf analyze`, then move actual changes through the `awf wf`
+`plan → review → approve → impl → verify → test → done` gates. Multi-agent
+execution is not a separate product in this repo; it is the evaluation and
+synthesis layer used in higher-risk parts of analysis and workflow execution.
+
+The source of truth is repo-local state, not the terminal surface. `.workflow`
+stores feature workflow state, `.ai-context` stores analysis output, and
+`.awf-operations` stores operating evidence. Inline dispatch, cmux, and Pi are
+execution surfaces; awf owns the canonical state and provenance.
 
 ## CLI
 
@@ -152,6 +217,10 @@ Full guides:
 
 - [First Workflow](docs/manuals/08-first-workflow.en.md)
 - [첫 ai-workflow-tools 작업 흐름](docs/manuals/08-first-workflow.ko.md)
+- [Workflow Pipeline](docs/architecture/02-wf-pipeline.md)
+- [Analysis Pipeline](docs/reference/analysis-pipeline.md)
+- [.ai-context spec](docs/specs/ai-context-specification.md)
+- [Multi-Agent Reference](docs/reference/multi-agent.md)
 
 #### 첫 workflow 순서 (한국어 요약)
 
@@ -249,9 +318,11 @@ Optional snippets:
 ## Core Ideas
 
 - `.workflow/` holds phase state and artifacts for gated feature work.
-- `.ai-context/` holds generated analysis output.
+- `.ai-context/` holds generated analysis output plus resume and incremental state.
+- `.awf-operations/` holds operating evidence and follow-up decision inputs.
 - Provider adapters normalize Claude, Codex, OpenAI, subprocess, and fixture execution.
-- Runner backends stay separate from workflow state: inline dispatch and cmux-agent manage execution surfaces, while Pi is detected as a planned terminal harness integration.
+- Runner backends stay separate from workflow state: inline dispatch, cmux-agent, and Pi manage execution surfaces while awf remains the canonical state owner.
+- Multi-agent mode is an execution strategy for review, verify, and analysis confidence, not a separate state store.
 - The same contracts can be driven from Claude skills, Codex runner scripts, or the `awf` CLI.
 
 ## Import Notes
