@@ -753,6 +753,7 @@ Phase 5 첫 범위 권장:
 - `awf ready --gate inspect|analysis|workflow-init|workflow-run|operations --json`은 Claude/Codex entrypoint용 deterministic preflight다. JSON에 `decision: allow|dry_run_only|block`을 포함하고, `allow` 외 decision은 non-zero exit로 provider 호출이나 workflow 진행을 막는다
 - `awf analyze`, `awf wf init`, `awf wf next`, `awf wiki decision`, `awf wiki regenerate-index`, `awf wiki compile`은 내부에서도 해당 ready gate를 기본 실행한다. 조회성 경로(`--dry-run`, `--check`, `--catalog`, `status`, `log`, `events`, `lint`)는 gate로 막지 않으며, 명시적 escape hatch는 `--no-ready-gate`다
 - `awf doctor`는 provider readiness를 installed/configured 수준으로 점검하고, `--probe`로 subprocess provider 접근성, `--ci`로 default provider readiness에 대한 CI/CD exit code 게이트를 제공한다
+- `awf doctor --json`은 `pi_readiness`로 Pi command/path/version, auth env 존재 여부, opt-in surface, Anthropic Extra Usage 과금 주의를 provider 호출 없이 노출한다
 - provider 실행 실패 시에는 `hint: run awf doctor`를 통해 readiness 진단 경로를 안내한다
 - top-level 자연어 라우팅은 안전한 조회 의도(`wf status`/`config show`/`skills list`/`mcp list`/session list-show)를 직접 보낸다
 - 명시적인 `service + domain + 분석` 의도와 `review`/`verify` 의도는 기본적으로 `analyze --dry-run`, `wf next --phase ... --dry-run`으로 보낸다

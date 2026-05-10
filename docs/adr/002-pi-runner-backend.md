@@ -36,9 +36,11 @@ Pi = per-worker terminal harness
 The first implementation step is detection plus a print-mode adapter skeleton
 that can already normalize Pi output into awf's existing result shapes:
 
-- `awf doctor` reports whether the `pi` command is available.
+- `awf doctor` reports whether the `pi` command is available and exposes
+  `pi_readiness` with command path, version, auth-env presence, opt-in dispatch
+  surface, and the Anthropic Extra Usage billing warning.
 - `awf ready --json` includes the same Pi runner readiness payload under
-  `doctor.runners`.
+  `doctor.runners` and the richer payload under `doctor.pi_readiness`.
 - `AWF_PI_COMMAND` can point detection at a non-default executable name.
 - `awf.runners.pi.run_pi_print()` wraps `pi --no-session -p <prompt>` and
   normalizes return code, stdout, stderr, timeout, and elapsed time into the

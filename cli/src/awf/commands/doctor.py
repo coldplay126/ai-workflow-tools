@@ -54,6 +54,26 @@ def run_doctor(args: argparse.Namespace) -> int:
                 f"{installed.get('status')} ({installed.get('detail')}); "
                 f"backend: {backend.get('status')} ({backend.get('detail')})"
             )
+    pi_readiness = payload.get("pi_readiness", {}) or {}
+    if pi_readiness:
+        version = pi_readiness.get("version", {}) or {}
+        auth_env = pi_readiness.get("auth_env_present", {}) or {}
+        auth_env_names = [name for name, present in auth_env.items() if present]
+        print("pi_readiness:")
+        print(
+            f"  status: {pi_readiness.get('status')} "
+            f"(surface={pi_readiness.get('dispatch_surface')})"
+        )
+        print(
+            f"  command: {pi_readiness.get('command')} "
+            f"({pi_readiness.get('command_source')}, "
+            f"path={pi_readiness.get('path') or 'missing'})"
+        )
+        print(f"  version: {version.get('status')} ({version.get('detail')})")
+        print(f"  auth_env: {', '.join(auth_env_names) if auth_env_names else 'none'}")
+        billing = pi_readiness.get("billing_warning", {}) or {}
+        print(f"  billing: {billing.get('status')} ({billing.get('detail')})")
+        print(f"  field_smoke: {pi_readiness.get('field_smoke_command')}")
     print("")
     print("providers:")
     for provider in payload["providers"]:
