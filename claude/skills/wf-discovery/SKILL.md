@@ -9,6 +9,7 @@ description: |
   DO NOT TRIGGER when: 이미 프로젝트가 결정된 상태,
                       wf pipeline 진행 중,
                       단순 코드 질문.
+type: workflow-utility
 allowed-tools:
   - Agent
 ---
