@@ -245,10 +245,12 @@ def _detect_current_branch(root: Path) -> str:
 
 
 def _detect_manifest(root: Path) -> dict:
+    from awf.core.scanner import PYTHON_PROJECT_MARKERS
+
     manifest = deepcopy(DEFAULT_MANIFEST)
     if (root / "package.json").exists():
         manifest["language"] = "javascript"
-    elif (root / "pyproject.toml").exists() or (root / "setup.py").exists():
+    elif any((root / marker).exists() for marker in PYTHON_PROJECT_MARKERS):
         manifest["language"] = "python"
         manifest["test_command"] = "pytest"
     elif (root / "go.mod").exists():

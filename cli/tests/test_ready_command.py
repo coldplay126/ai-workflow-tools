@@ -121,6 +121,45 @@ def test_collect_ready_report_recommends_subproject_scan(tmp_path: Path, monkeyp
     )
 
 
+def test_collect_ready_report_accepts_requirements_txt_script_repo(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo, skills = _prepare_repo(tmp_path)
+    monkeypatch.setenv("AWF_SKILLS_DIR", str(skills))
+    (repo / "pyproject.toml").unlink()
+    (repo / "src" / "orders" / "service.py").unlink()
+    (repo / "requirements.txt").write_text("requests\n", encoding="utf-8")
+    collectors = repo / "collectors"
+    collectors.mkdir()
+    (collectors / "places.py").write_text("def collect():\n    return []\n", encoding="utf-8")
+
+    report = collect_ready_report(str(repo))
+
+    assert report["scan"]["status"] == "ready"
+    assert report["scan"]["language"] == "python"
+    assert report["scan"]["unit_count"] == 1
+    assert report["scan"]["sample_units"][0]["name"] == "collectors"
+    assert any(
+        item["command"] == "awf analyze repo collectors --repo-root . --dry-run"
+        for item in report["recommended_next"]
+    )
+
+
+def test_collect_ready_report_warns_when_workflow_is_gitignored(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo, skills = _prepare_repo(tmp_path, workflow_started=True)
+    monkeypatch.setenv("AWF_SKILLS_DIR", str(skills))
+    (repo / ".gitignore").write_text(".workflow/\n", encoding="utf-8")
+
+    report = collect_ready_report(str(repo))
+
+    assert report["workflow"]["gitignored"] is True
+    assert "local-only" in report["workflow"]["warning"]
+
+
 def test_collect_ready_report_recommends_pi_quota_followup(
     tmp_path: Path,
     monkeypatch,

@@ -6,8 +6,12 @@ import json
 import sys
 from pathlib import Path
 
-from awf.core.scanner import scan_repo, scan_result_to_dict
+from awf.core.scanner import NESTED_PROJECT_MARKERS, scan_repo, scan_result_to_dict
 from awf.core.config_merger import merge_scan_results, merge_with_existing
+
+
+def _has_project_marker(path: Path) -> bool:
+    return any((path / marker).exists() for marker in NESTED_PROJECT_MARKERS)
 
 
 def run_scan(args: argparse.Namespace) -> int:
@@ -22,7 +26,7 @@ def run_scan(args: argparse.Namespace) -> int:
     if getattr(args, "all", False):
         repos = sorted([
             d for d in github_root_path.iterdir()
-            if d.is_dir() and not d.name.startswith(".") and (d / "package.json").exists() or (d / "pyproject.toml").exists() or (d / "go.mod").exists() or (d / "Cargo.toml").exists()
+            if d.is_dir() and not d.name.startswith(".") and _has_project_marker(d)
         ])
         if not repos:
             print(f"error: no projects found in {github_root_path}", file=sys.stderr)

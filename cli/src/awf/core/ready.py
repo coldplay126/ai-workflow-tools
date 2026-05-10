@@ -5,11 +5,17 @@ from typing import Any
 
 from awf.core.config import load_awf_config, resolve_runtime_paths
 from awf.core.readiness import collect_doctor_report
-from awf.core.scanner import scan_repo, scan_result_to_dict
+from awf.core.scanner import PYTHON_PROJECT_MARKERS, scan_repo, scan_result_to_dict
 from awf.core.skills import discover_skills
 
 
-_PROJECT_MARKERS = ("pyproject.toml", "package.json", "go.mod", "Cargo.toml", "composer.json")
+_PROJECT_MARKERS = (
+    "package.json",
+    *PYTHON_PROJECT_MARKERS,
+    "go.mod",
+    "Cargo.toml",
+    "composer.json",
+)
 
 
 AUTOMATION_LEVELS = {
@@ -183,14 +189,38 @@ def _config_status(paths: dict[str, str]) -> dict[str, Any]:
     }
 
 
+def _is_gitignored_by_pattern(repo_root: Path, path: str) -> bool:
+    gitignore = repo_root / ".gitignore"
+    if not gitignore.is_file():
+        return False
+    candidates = {path, f"{path}/", f"/{path}", f"/{path}/"}
+    try:
+        lines = gitignore.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith("!"):
+            continue
+        if line in candidates:
+            return True
+    return False
+
+
 def _workflow_status(repo_root: Path) -> dict[str, Any]:
     workflow_dir = repo_root / ".workflow"
     state_path = workflow_dir / "state.json"
+    gitignored = _is_gitignored_by_pattern(repo_root, ".workflow")
+    warning = None
+    if gitignored:
+        warning = ".workflow/ is ignored by .gitignore; workflow state is local-only"
     return {
         "status": "ready" if state_path.is_file() else "not_started",
         "workflow_dir_exists": workflow_dir.is_dir(),
         "state_exists": state_path.is_file(),
         "state_path": str(state_path),
+        "gitignored": gitignored,
+        "warning": warning,
     }
 
 

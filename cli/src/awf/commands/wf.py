@@ -405,6 +405,23 @@ def run_wf_next(args: argparse.Namespace) -> int:
 
     if args.print_prompt or args.dry_run:
         phase_models = provider_config.get("phase_models", {}).get(phase, {})
+        prompt_file = (
+            str(prompt_path)
+            if prompt_path is not None
+            else "(dry-run, not written)"
+        )
+        if dry_run and getattr(args, "output_format", "text") == "json":
+            print(json.dumps({
+                "phase": phase,
+                "provider": provider_name,
+                "phase_models": phase_models,
+                "execution_mode": getattr(args, "mode", None) or "default",
+                "non_interactive": non_interactive,
+                "fallback_chain": fallback_chain,
+                "prompt_file": prompt_file,
+                "prompt": prompt,
+            }, ensure_ascii=False, indent=2))
+            return 0
         print(f"=== awf wf next ===")
         print(f"phase: {phase}")
         print(f"provider: {provider_name}")
@@ -413,11 +430,6 @@ def run_wf_next(args: argparse.Namespace) -> int:
         print(f"execution_mode: {getattr(args, 'mode', None) or 'default'}")
         print(f"non_interactive: {non_interactive}")
         print(f"fallback_chain: {json.dumps(fallback_chain, ensure_ascii=False)}")
-        prompt_file = (
-            str(prompt_path)
-            if prompt_path is not None
-            else "(dry-run, not written)"
-        )
         print(f"prompt_file: {prompt_file}")
         print()
         print(prompt)
