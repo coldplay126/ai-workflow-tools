@@ -14,6 +14,13 @@ def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def _int_value(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _recommendation_text(finding: dict[str, Any]) -> str:
     return str(finding.get("recommendation", "") or finding.get("suggestion", "") or "-")
 
@@ -256,6 +263,30 @@ def render_verify_report(
     return "\n".join(lines), gate_passed
 
 
+def _failure_context_for_result(phase: str, data: dict[str, Any]) -> dict[str, Any]:
+    findings = _as_list(data.get("findings"))
+    context: dict[str, Any] = {
+        "has_critical": any(f.get("severity") == "CRITICAL" for f in findings),
+        "high_count": len([f for f in findings if f.get("severity") == "HIGH"]),
+    }
+
+    explicit_failure_type = (
+        data.get("failure_type")
+        or data.get("failureType")
+        or data.get("reason")
+    )
+    if isinstance(explicit_failure_type, str) and explicit_failure_type.strip():
+        context["failure_type"] = explicit_failure_type.strip()
+        return context
+
+    if phase == "verify":
+        scope = data.get("scope", {})
+        if isinstance(scope, dict) and _int_value(scope.get("violations")) > 0:
+            context["failure_type"] = "scope_violation"
+
+    return context
+
+
 def apply_workflow_result(
     explicit_root: Optional[str],
     phase: str,
@@ -308,11 +339,7 @@ def apply_workflow_result(
         # --- Build failure context for on_fail routing ---
         failure_context = None
         if not gate_passed:
-            findings = _as_list(data.get("findings"))
-            failure_context = {
-                "has_critical": any(f.get("severity") == "CRITICAL" for f in findings),
-                "high_count": len([f for f in findings if f.get("severity") == "HIGH"]),
-            }
+            failure_context = _failure_context_for_result(phase, data)
 
         malformed = any(
             (item.get("condition") == "structured_result_shape" and not item.get("passed", False))

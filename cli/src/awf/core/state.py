@@ -591,6 +591,10 @@ def _agent_card_on_fail_action(
     if isinstance(high_count, int) and high_count > 0 and "high_only" in on_fail:
         return on_fail["high_only"]
 
+    failure_type = ctx.get("failure_type")
+    if isinstance(failure_type, str) and failure_type in on_fail:
+        return on_fail[failure_type]
+
     if "default" in on_fail:
         return on_fail["default"]
 
