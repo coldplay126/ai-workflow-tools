@@ -5,7 +5,14 @@ import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
-from awf.runners.pi import PiRunnerConfig, build_pi_print_command, run_pi_print
+from awf.providers.base import ProviderResult
+from awf.runners.pi import (
+    PiRunnerConfig,
+    build_pi_print_command,
+    pi_result_to_agent_result,
+    run_pi_agent,
+    run_pi_print,
+)
 
 
 def _write_fake_pi(path: Path, body: str) -> Path:
@@ -59,6 +66,48 @@ def test_run_pi_print_invokes_fake_binary_and_returns_provider_result(
     assert env_log.read_text(encoding="utf-8").strip() == "1"
 
 
+def test_run_pi_agent_returns_agent_result_with_parsed_json(
+    tmp_path: Path,
+) -> None:
+    fake_pi = _write_fake_pi(
+        tmp_path / "pi",
+        "#!/bin/sh\nprintf '%s\\n' '{\"conclusion\":\"PASS\",\"findings\":[]}'\n",
+    )
+
+    result = run_pi_agent(
+        "review",
+        role="plan_conformance",
+        cwd=str(tmp_path),
+        require_json=True,
+        config=PiRunnerConfig(command=str(fake_pi)),
+    )
+
+    assert result.provider_name == "pi"
+    assert result.role == "plan_conformance"
+    assert result.returncode == 0
+    assert result.parse_error is False
+    assert result.parsed == {"conclusion": "PASS", "findings": []}
+    assert result.conclusion == "PASS"
+
+
+def test_pi_result_to_agent_result_marks_parse_error_when_json_required() -> None:
+    result = pi_result_to_agent_result(
+        ProviderResult(
+            returncode=0,
+            stdout="not json",
+            stderr="",
+            provider_name="pi",
+            elapsed_sec=0.1,
+        ),
+        role="quality_validation",
+        require_json=True,
+    )
+
+    assert result.role == "quality_validation"
+    assert result.parse_error is True
+    assert result.parsed is None
+
+
 def test_run_pi_print_honors_awf_pi_command_env(
     tmp_path: Path,
     monkeypatch,
@@ -103,6 +152,22 @@ def test_run_pi_print_reports_timeout() -> None:
     assert result.returncode == 124
     assert result.provider_name == "pi"
     assert result.stderr == "runner_timeout: pi timed out after 1s"
+
+
+def test_run_pi_agent_marks_timeout_result() -> None:
+    with patch(
+        "awf.runners.pi.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(["pi"], timeout=1),
+    ):
+        result = run_pi_agent(
+            "hello",
+            role="precision",
+            config=PiRunnerConfig(command="pi", timeout_sec=1),
+        )
+
+    assert result.returncode == 124
+    assert result.timed_out is True
+    assert result.role == "precision"
 
 
 def test_pi_runner_config_from_env_falls_back_on_bad_timeout(monkeypatch) -> None:
