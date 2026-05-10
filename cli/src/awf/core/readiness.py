@@ -446,7 +446,13 @@ def _dispatch_preference_readiness(
         return readiness_item("caution", detail)
     if preference == "pi":
         if pi_backend_ready:
-            return readiness_item("ok", "Pi dispatch preference is ready")
+            return readiness_item(
+                "ok",
+                (
+                    "Pi command is available; run the field smoke before "
+                    "relying on provider auth/quota"
+                ),
+            )
         return readiness_item(
             "caution",
             (
