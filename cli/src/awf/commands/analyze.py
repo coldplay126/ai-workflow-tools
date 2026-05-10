@@ -382,6 +382,7 @@ def run_analyze(args: argparse.Namespace) -> int:
                 repo_root=args.repo_root,
                 docs_root=args.docs_root,
                 github_root=args.github_root,
+                use_ai_discovery=False,
             )
             state = load_analysis_state(context)
         except Exception as exc:
@@ -421,6 +422,7 @@ def run_analyze(args: argparse.Namespace) -> int:
             repo_root=args.repo_root,
             docs_root=args.docs_root,
             github_root=args.github_root,
+            use_ai_discovery=not bool(getattr(args, "dry_run", False)),
         )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -434,6 +436,23 @@ def run_analyze(args: argparse.Namespace) -> int:
     prompt = build_prompt(context, execution_mode=execution_mode, native=(_default_provider == "claude-code"))
 
     if args.print_prompt or args.dry_run:
+        if args.dry_run and output_format == "json" and _original_stdout:
+            sys.stdout = _original_stdout
+            print(json.dumps({
+                "command": "analyze",
+                "service": context.service,
+                "domain": context.domain,
+                "repo_root": str(context.repo_root),
+                "docs_root": str(context.docs_root),
+                "github_root": str(context.github_root),
+                "ai_context_dir": str(context.ai_context_dir),
+                "mode": context.mode,
+                "execution_mode": execution_mode or "default",
+                "domain_directories": context.domain_directories,
+                "all_directories": context.all_directories,
+                "prompt": prompt,
+            }, ensure_ascii=False, indent=2))
+            return 0
         print("=== awf analyze context ===")
         print(f"repo_root: {context.repo_root}")
         print(f"docs_root: {context.docs_root}")
@@ -1388,7 +1407,7 @@ def _run_analyze_all(args: argparse.Namespace) -> int:
         print(f"error: repo not found at {repo_path}", file=sys.stderr)
         return 2
 
-    scan_result = scan_repo(repo_path)
+    scan_result = scan_repo(repo_path, use_ai=not bool(getattr(args, "dry_run", False)))
     if not scan_result.units:
         print(f"error: no domains found in {repo_path}", file=sys.stderr)
         return 1
@@ -1397,7 +1416,7 @@ def _run_analyze_all(args: argparse.Namespace) -> int:
     total = len(scan_result.units)
     print(f"=== awf analyze --all: {args.service} ({total} domains, delay={delay}s) ===", file=sys.stderr)
     print(f"language: {scan_result.language}/{scan_result.framework}", file=sys.stderr)
-    print(f"pattern: {scan_result.domain_pattern}", file=sys.stderr)
+    print(f"pattern: {scan_result.unit_pattern}", file=sys.stderr)
     print(file=sys.stderr)
 
     succeeded = []
@@ -1462,6 +1481,7 @@ def _resolve_service_docs_root(args: argparse.Namespace) -> tuple[Path, Path, st
         repo_root=getattr(args, "repo_root", None),
         docs_root=getattr(args, "docs_root", None),
         github_root=getattr(args, "github_root", None),
+        use_ai_discovery=False,
     )
     return ctx.docs_root, ctx.github_root, args.service
 
@@ -1652,7 +1672,7 @@ def _run_catalog(args: argparse.Namespace) -> int:
         from awf.core.scanner import scan_repo
         repo_path = gh_root / service
         if repo_path.is_dir():
-            scan_result = scan_repo(repo_path)
+            scan_result = scan_repo(repo_path, use_ai=False)
             for d in scan_result.units:
                 domain_definitions[d.name] = {
                     "directories": {service: [d.directory]},

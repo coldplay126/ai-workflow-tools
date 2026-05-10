@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 
 from awf.commands import analyze as analyze_command
 from awf.commands import wf as wf_command
@@ -85,6 +86,54 @@ def test_analyze_status_skips_ready_gate(monkeypatch, capsys) -> None:
     assert called is False
 
 
+def test_analyze_dry_run_uses_deterministic_discovery_only(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    from awf.commands import analyze as analyze_command
+    from awf.core import scanner
+
+    github_root = tmp_path / "github"
+    repo = github_root / "script_repo"
+    target = repo / "manual"
+    target.mkdir(parents=True)
+    (repo / ".git").mkdir()
+    (target / "job.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+
+    def fail_ai_discovery(*_args, **_kwargs):
+        raise AssertionError("dry-run must not invoke AI unit discovery")
+
+    monkeypatch.setattr(scanner, "_ai_discover_units", fail_ai_discovery)
+
+    rc = analyze_command.run_analyze(argparse.Namespace(
+        check=False,
+        catalog=False,
+        cycles=False,
+        all=False,
+        status=False,
+        service="script_repo",
+        domain="manual",
+        repo_root=str(repo),
+        docs_root=str(tmp_path / "analysis-docs"),
+        github_root=str(github_root),
+        provider=None,
+        mode=None,
+        non_interactive=False,
+        dry_run=True,
+        print_prompt=False,
+        output_format="json",
+    ))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["command"] == "analyze"
+    assert payload["service"] == "script_repo"
+    assert payload["domain"] == "manual"
+    assert payload["domain_directories"] == [str(target.resolve())]
+    assert "Analyze the `manual` unit" in payload["prompt"]
+
+
 def test_wf_init_enforces_ready_gate(monkeypatch) -> None:
     monkeypatch.setattr(wf_command, "enforce_ready_gate", lambda *args, **kwargs: 20)
 
@@ -134,6 +183,38 @@ def test_wf_next_dry_run_writes_no_state_or_prompt(monkeypatch, capsys) -> None:
     assert gate_called is False
     assert "prompt_file: (dry-run, not written)" in out
     assert "PROMPT" in out
+
+
+def test_wf_next_dry_run_json_outputs_structured_prompt(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(wf_command, "enforce_ready_gate", lambda *args, **kwargs: 20)
+    monkeypatch.setattr(wf_command, "load_awf_config", lambda _repo_root: object())
+    monkeypatch.setattr(
+        wf_command, "load_workflow_state", lambda _repo_root: {"phases": {}}
+    )
+    monkeypatch.setattr(
+        wf_command, "load_workflow_provider_config", lambda _repo_root: {}
+    )
+    monkeypatch.setattr(wf_command, "resolve_next_phase", lambda _state, _phase: "plan")
+    monkeypatch.setattr(wf_command, "build_workflow_prompt", lambda *_args: "PROMPT")
+
+    rc = wf_command.run_wf_next(argparse.Namespace(
+        repo_root=".",
+        auto_apply=False,
+        dry_run=True,
+        output_format="json",
+        phase=None,
+        provider="fixture",
+        mode=None,
+        print_prompt=False,
+        non_interactive=False,
+    ))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["phase"] == "plan"
+    assert payload["provider"] == "fixture"
+    assert payload["prompt_file"] == "(dry-run, not written)"
+    assert payload["prompt"] == "PROMPT"
 
 
 def test_wiki_decision_enforces_ready_gate(monkeypatch) -> None:

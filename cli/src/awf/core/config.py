@@ -234,6 +234,7 @@ def resolve_analysis_context(
     repo_root: Optional[str] = None,
     docs_root: Optional[str] = None,
     github_root: Optional[str] = None,
+    use_ai_discovery: bool = True,
 ) -> AnalysisContext:
     root = find_repo_root(repo_root)
     awf_config = load_awf_config(str(root))
@@ -260,7 +261,7 @@ def resolve_analysis_context(
         if candidate.is_dir():
             import sys
             from awf.core.scanner import scan_repo
-            scan_result = scan_repo(candidate)
+            scan_result = scan_repo(candidate, use_ai=use_ai_discovery)
             service_map[service] = str(candidate)
             print(f"auto_discovered: {service} ({scan_result.language}/{scan_result.framework}, {len(scan_result.units)} domains)", file=sys.stderr)
             # Inject scanned domains into domain_definitions

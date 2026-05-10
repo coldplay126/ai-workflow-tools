@@ -72,6 +72,8 @@ def run_ready(args: argparse.Namespace) -> int:
         f"  workflow: {_fmt_status(payload['workflow']['status'])} "
         f"(state={payload['workflow']['state_exists']})"
     )
+    if payload["workflow"].get("warning"):
+        print(f"    warning: {payload['workflow']['warning']}")
     print(
         f"  operations: {_fmt_status(payload['operations']['status'])} "
         f"(profile={payload['operations']['profile_exists']})"

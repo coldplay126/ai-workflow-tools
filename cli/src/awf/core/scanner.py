@@ -26,6 +26,44 @@ EXCLUDED_DIRS = {
     "exports", "imports", "payments",
 }
 
+ROOT_UNIT_EXCLUDED_DIRS = EXCLUDED_DIRS | {
+    "agent",
+    "agents",
+    "asset",
+    "assets",
+    "coverage",
+    "data",
+    "doc",
+    "docs",
+    "htmlcov",
+    "log",
+    "logs",
+    "output",
+    "outputs",
+    "public",
+    "resource",
+    "resources",
+    "static",
+    "tmp",
+}
+
+PYTHON_PROJECT_MARKERS = (
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "requirements.txt",
+    "Pipfile",
+    "poetry.lock",
+)
+
+NESTED_PROJECT_MARKERS = (
+    "package.json",
+    *PYTHON_PROJECT_MARKERS,
+    "go.mod",
+    "Cargo.toml",
+    "composer.json",
+)
+
 UNIT_DIR_PATTERNS = [
     "src/domains",
     "src/domain",
@@ -110,7 +148,7 @@ def detect_language(repo_root: Path) -> tuple[str, str]:
             return lang, "nuxtjs"
         return lang, "node"
 
-    if (repo_root / "pyproject.toml").exists() or (repo_root / "setup.py").exists():
+    if any((repo_root / marker).exists() for marker in PYTHON_PROJECT_MARKERS):
         try:
             text = (repo_root / "pyproject.toml").read_text(encoding="utf-8") if (repo_root / "pyproject.toml").exists() else ""
         except Exception:
@@ -185,6 +223,44 @@ def find_unit_directories(repo_root: Path, language: str) -> tuple[str, list[Uni
         if units:
             unit_pattern = f"{pattern}/{{unit}}"
             return unit_pattern, units, excluded
+
+    if language == "unknown":
+        return "", [], []
+
+    root_units: list[UnitInfo] = []
+    root_excluded: list[str] = []
+    try:
+        top_level_dirs = sorted(d for d in repo_root.iterdir() if d.is_dir())
+    except OSError:
+        top_level_dirs = []
+
+    for d in top_level_dirs:
+        name = d.name
+        lowered = name.lower()
+        if name.startswith(".") or name.startswith("__"):
+            root_excluded.append(name)
+            continue
+        if lowered in ROOT_UNIT_EXCLUDED_DIRS:
+            root_excluded.append(name)
+            continue
+        if any((d / marker).exists() for marker in NESTED_PROJECT_MARKERS):
+            root_excluded.append(name)
+            continue
+
+        file_count = _has_source_files(d, language)
+        if file_count == 0:
+            root_excluded.append(name)
+            continue
+
+        root_units.append(UnitInfo(
+            name=name,
+            directory=name,
+            file_count=file_count,
+            normalized=normalize_unit_name(name),
+        ))
+
+    if root_units:
+        return "{unit}", root_units, root_excluded
 
     return "", [], []
 
