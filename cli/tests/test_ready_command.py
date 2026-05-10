@@ -137,12 +137,15 @@ def test_run_ready_json_and_human_output(tmp_path: Path, monkeypatch, capsys) ->
     assert payload["capabilities"][0]["name"] == "inspect"
     assert payload["doctor"]["runners"][0]["runner"] == "pi"
     assert payload["doctor"]["runners"][0]["installed"]["status"] == "ok"
+    assert payload["doctor"]["pi_readiness"]["status"] == "ready"
+    assert payload["doctor"]["pi_readiness"]["dispatch_surface"] == "opt_in_only"
 
     rc = run_ready(argparse.Namespace(repo_root=str(repo), json=False, probe=False))
     assert rc == 0
     out = capsys.readouterr().out
     assert "automation_level: 2 (provider execution)" in out
     assert "runners: pi=ok" in out
+    assert "pi: ready (version=ok, surface=opt_in_only)" in out
     assert "recommended_next:" in out
 
 

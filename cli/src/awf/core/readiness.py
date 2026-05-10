@@ -12,6 +12,14 @@ from awf.core.config import AwfConfig, resolve_runtime_paths
 from awf.core.mcp import discover_mcp_servers
 
 
+PI_AUTH_ENV_NAMES = (
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+)
+
+
 def readiness_item(status: str, detail: str, **extra: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "status": status,
@@ -146,10 +154,121 @@ def check_provider_probe(provider_name: str, config: AwfConfig) -> dict[str, Any
     return readiness_item("skip", f"no probe checker for provider: {provider_name}")
 
 
-def check_runner_readiness(runner_name: str) -> dict[str, Any]:
+def _pi_command() -> tuple[str, str]:
+    env_command = os.environ.get("AWF_PI_COMMAND", "").strip()
+    if env_command:
+        return env_command, "AWF_PI_COMMAND"
+    return "pi", "default"
+
+
+def _auth_env_status() -> dict[str, bool]:
+    return {name: bool(os.environ.get(name, "").strip()) for name in PI_AUTH_ENV_NAMES}
+
+
+def _check_pi_version(command: str, timeout_sec: int = 5) -> dict[str, Any]:
+    resolved = shutil.which(command)
+    if not resolved:
+        return readiness_item(
+            "skip",
+            "Pi version not checked because the command is unavailable",
+            command=command,
+            version=None,
+        )
+    env = os.environ.copy()
+    env.setdefault("PI_SKIP_VERSION_CHECK", "1")
+    env.setdefault("PI_TELEMETRY", "0")
+    try:
+        completed = subprocess.run(
+            [resolved, "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return readiness_item(
+            "fail",
+            f"pi --version timed out after {timeout_sec}s",
+            command=command,
+            path=resolved,
+            version=None,
+        )
+    except Exception as exc:
+        return readiness_item(
+            "fail",
+            f"pi --version failed: {exc}",
+            command=command,
+            path=resolved,
+            version=None,
+        )
+    output = (completed.stdout or completed.stderr or "").strip()
+    if completed.returncode == 0:
+        return readiness_item(
+            "ok",
+            output or "pi --version succeeded",
+            command=command,
+            path=resolved,
+            version=output or None,
+        )
+    return readiness_item(
+        "fail",
+        output or f"pi --version exited with {completed.returncode}",
+        command=command,
+        path=resolved,
+        version=None,
+        returncode=completed.returncode,
+    )
+
+
+def collect_pi_readiness() -> dict[str, Any]:
+    command, command_source = _pi_command()
+    installed = check_command_installed(command)
+    version = _check_pi_version(command)
+    auth_env_present = _auth_env_status()
+    auth_env_any = any(auth_env_present.values())
+    if installed["status"] != "ok":
+        status = "missing"
+    elif version["status"] == "ok":
+        status = "ready"
+    else:
+        status = "caution"
+    auth_detail = (
+        "provider API key env is present; Pi may also use its own stored login"
+        if auth_env_any
+        else "no provider API key env detected; Pi may still use its own stored login"
+    )
+    return {
+        "status": status,
+        "command": command,
+        "command_source": command_source,
+        "path": installed.get("path"),
+        "installed": installed,
+        "version": version,
+        "auth_env_present": auth_env_present,
+        "auth_env_any": auth_env_any,
+        "auth": readiness_item("skip", auth_detail),
+        "dispatch_surface": "opt_in_only",
+        "billing_warning": readiness_item(
+            "caution",
+            (
+                "Anthropic subscription auth in Pi may bill third-party "
+                "harness calls through Claude Extra Usage"
+            ),
+            billing_context="anthropic_extra_usage",
+        ),
+        "field_smoke_command": "python3 cli/tests/run_pi_field_smoke.py --json",
+    }
+
+
+def check_runner_readiness(
+    runner_name: str,
+    *,
+    pi_readiness: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if runner_name == "pi":
-        command = os.environ.get("AWF_PI_COMMAND", "pi").strip() or "pi"
-        installed = check_command_installed(command)
+        pi = pi_readiness or collect_pi_readiness()
+        installed = pi["installed"]
         backend_status = "ok" if installed["status"] == "ok" else "skip"
         backend_detail = (
             "Pi dispatch adapter available; enable with dispatch.surface_preference=pi"
@@ -162,7 +281,10 @@ def check_runner_readiness(runner_name: str) -> dict[str, Any]:
             "installed": installed,
             "configured": readiness_item(
                 "skip",
-                "Pi authentication and session state are managed by Pi; awf only detects the harness",
+                (
+                    "Pi authentication and session state are managed by Pi; "
+                    "awf only detects the harness"
+                ),
             ),
             "backend": readiness_item(backend_status, backend_detail),
         }
@@ -183,6 +305,7 @@ def collect_doctor_report(config: AwfConfig, repo_root: str | None, *, probe: bo
         for item in providers:
             item["probe"] = check_provider_probe(str(item["provider"]), config)
     mcp_servers = discover_mcp_servers(config)
+    pi_readiness = collect_pi_readiness()
     return {
         "default_provider": config.provider_name(),
         "provider_fallback": config.raw.get("provider", {}).get("fallback", []),
@@ -196,7 +319,8 @@ def collect_doctor_report(config: AwfConfig, repo_root: str | None, *, probe: bo
             "servers": [server.name for server in mcp_servers],
         },
         "providers": providers,
-        "runners": [check_runner_readiness("pi")],
+        "runners": [check_runner_readiness("pi", pi_readiness=pi_readiness)],
+        "pi_readiness": pi_readiness,
         "dispatch": _collect_dispatch_status(repo_root),
     }
 

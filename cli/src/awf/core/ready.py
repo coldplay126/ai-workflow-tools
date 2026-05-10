@@ -534,6 +534,7 @@ def collect_ready_report(repo_root: str | None = None, *, probe: bool = False) -
             "default_provider": doctor.get("default_provider"),
             "provider_fallback": doctor.get("provider_fallback", []),
             "runners": doctor.get("runners", []),
+            "pi_readiness": doctor.get("pi_readiness", {}),
             "dispatch": doctor.get("dispatch", {}),
             "mcp": doctor.get("mcp", {}),
         },

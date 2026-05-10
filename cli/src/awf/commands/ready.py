@@ -83,6 +83,14 @@ def run_ready(args: argparse.Namespace) -> int:
             for item in runners
         )
         print(f"  runners: {summary}")
+    pi_readiness = payload.get("doctor", {}).get("pi_readiness", {}) or {}
+    if pi_readiness:
+        version = pi_readiness.get("version", {}) or {}
+        print(
+            f"  pi: {pi_readiness.get('status')} "
+            f"(version={version.get('status')}, "
+            f"surface={pi_readiness.get('dispatch_surface')})"
+        )
     print("")
     print("capabilities:")
     for cap in payload["capabilities"]:

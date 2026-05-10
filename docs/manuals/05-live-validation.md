@@ -42,6 +42,9 @@ uv run --project cli --no-editable awf doctor --repo-root . --json --ci
 - exit code `0`: 현재 default provider가 installed/configured 기준으로 준비됨
 - exit code `1`: default provider readiness 미달
 - `--probe`를 같이 쓰면 subprocess provider는 lightweight probe까지 포함해 판정
+- `pi_readiness`: Pi command/path/version, provider auth env 존재 여부,
+  opt-in dispatch surface, Anthropic Extra Usage 과금 주의를 provider 호출
+  없이 확인하는 참고 진단
 
 ## 2. 검증 A: Claude Code `/analysis`
 
