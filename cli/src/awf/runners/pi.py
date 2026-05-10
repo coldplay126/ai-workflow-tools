@@ -5,6 +5,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 
+from awf.core.agent_runner import AgentResult, _try_parse_json
 from awf.providers.base import ProviderResult
 
 
@@ -86,3 +87,60 @@ def run_pi_print(
         provider_name="pi",
         elapsed_sec=time.monotonic() - started,
     )
+
+
+def pi_result_to_agent_result(
+    result: ProviderResult,
+    *,
+    role: str,
+    require_json: bool = False,
+) -> AgentResult:
+    """Convert a Pi runner result into awf's multi-agent result shape."""
+    stdout = (result.stdout or "").strip()
+    stderr = (result.stderr or "").strip()
+    parsed = None
+    parse_error = False
+
+    if stdout:
+        parsed = _try_parse_json(stdout)
+        if parsed is None and require_json:
+            parse_error = True
+
+    return AgentResult(
+        provider_name=result.provider_name or "pi",
+        role=role,
+        stdout=stdout,
+        stderr=stderr,
+        returncode=result.returncode,
+        elapsed_sec=result.elapsed_sec,
+        timed_out=_is_timeout_result(result.returncode, stderr),
+        parse_error=parse_error,
+        parsed=parsed,
+    )
+
+
+def run_pi_agent(
+    prompt: str,
+    *,
+    role: str,
+    cwd: str | None = None,
+    require_json: bool = False,
+    config: PiRunnerConfig | None = None,
+    timeout_sec: int | None = None,
+) -> AgentResult:
+    """Run Pi print mode for one worker and return an AgentResult."""
+    result = run_pi_print(
+        prompt,
+        cwd=cwd,
+        config=config,
+        timeout_sec=timeout_sec,
+    )
+    return pi_result_to_agent_result(
+        result,
+        role=role,
+        require_json=require_json,
+    )
+
+
+def _is_timeout_result(returncode: int, stderr: str) -> bool:
+    return returncode == 124 and "timeout" in stderr.lower()
