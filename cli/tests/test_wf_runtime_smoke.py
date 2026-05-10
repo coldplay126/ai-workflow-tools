@@ -27,6 +27,41 @@ def _workflow_state(repo_root: Path) -> dict:
     return json.loads(state_path.read_text(encoding="utf-8"))
 
 
+def test_wf_next_runtime_smoke_blocks_phase_when_required_gate_missing(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    prepare_workflow_repo(repo_root)
+
+    initialized = initialize_workflow_fixture(
+        repo_root,
+        "Fixture negative runtime smoke concept covering missing gate preconditions",
+    )
+    _assert_success(initialized)
+
+    blocked = run_awf(
+        repo_root,
+        "wf",
+        "next",
+        "--phase",
+        "review",
+        "--provider",
+        "fixture",
+        "--mode",
+        "solo",
+        "--dry-run",
+    )
+    assert blocked.returncode == 2
+    assert "Precondition failed for phase 'review'" in blocked.stderr
+    assert "gate G1 must pass first" in blocked.stderr
+
+    state = _workflow_state(repo_root)
+    assert state["currentPhase"] == "plan"
+    assert state["phases"]["review"]["status"] == "pending"
+    assert state["gates"]["G1"]["passed"] is None
+    assert state["gates"]["G2"]["passed"] is None
+
+
 def test_wf_next_runtime_smoke_uses_agent_cards_and_updates_status(
     tmp_path: Path,
 ) -> None:
