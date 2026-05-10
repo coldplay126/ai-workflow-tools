@@ -36,7 +36,7 @@ def run_doctor(args: argparse.Namespace) -> int:
             "ready"
             if dispatch.get("cmux_backend_ready")
             else (
-                "binary on PATH but backend not yet wired up"
+                "binary on PATH but no active run"
                 if dispatch.get("cmux_binary_on_path")
                 else "binary not on PATH"
             )
