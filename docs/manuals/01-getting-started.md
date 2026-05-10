@@ -8,6 +8,8 @@
 - "자동화가 실제로 어떤 파일을 읽고 쓰는지"를 감으로 익힌다.
 
 관련 문서:
+- [첫 ai-workflow-tools 작업 흐름](./08-first-workflow.ko.md)
+- [First Workflow](./08-first-workflow.en.md)
 - [WF 빠른 시작](./wf-quickstart.md)
 - [WF 아키텍처](../architecture/02-wf-pipeline.md)
 - [.ai-context 사양](../specs/ai-context-specification.md)
@@ -140,6 +142,8 @@ Analysis 관련:
 다음 문서로 이어서 보세요.
 
 - [두 세션 운영 실습](./02-two-session-workflow.md)
+- [첫 ai-workflow-tools 작업 흐름](./08-first-workflow.ko.md)
+- [First Workflow](./08-first-workflow.en.md)
 - [커맨드 없이 재현하기](./03-manual-prompt-reproduction.md)
 - [내부 원리서](./04-internal-principles.md)
 - [실환경 검증 체크리스트](./05-live-validation.md)

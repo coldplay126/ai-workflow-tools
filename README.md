@@ -35,6 +35,42 @@ provider, skill, scan, workflow, and operations-wiki readiness into one report,
 then prints the next safe commands instead of assuming the repo is ready for
 provider-backed automation.
 
+### First workflow sequence
+
+Start new repositories with a small, gated loop:
+
+```bash
+awf ready --repo-root .
+awf scan cli --no-ai
+awf analyze ai-workflow-tools <unit> --repo-root . --dry-run
+awf wf init "small scoped improvement" --repo-root .
+awf ready --repo-root . --gate workflow-run
+awf wf next --repo-root .
+awf ready --repo-root .
+```
+
+Pi remains opt-in. When using Pi dispatch, first persist field-smoke evidence
+and let `ready` incorporate the result:
+
+```bash
+python3 cli/tests/run_pi_field_smoke.py --json --write-result
+awf doctor --repo-root . --json
+awf ready --repo-root .
+```
+
+Full guides:
+
+- [First Workflow](docs/manuals/08-first-workflow.en.md)
+- [첫 ai-workflow-tools 작업 흐름](docs/manuals/08-first-workflow.ko.md)
+
+#### 첫 workflow 순서 (한국어 요약)
+
+처음에는 `ready → scan → analyze dry-run → wf init → ready gate → wf next →
+ready 재확인` 순서로 진행한다. `ready`가 `block`을 반환하면 workflow 실행보다
+추천 명령을 먼저 수행한다. Pi를 사용할 때는
+`run_pi_field_smoke.py --write-result`로 최신 evidence를 남긴 뒤
+`awf ready`의 `recommended_next`를 확인한다.
+
 ### Stage 1 transitive cache invalidation
 
 `awf analyze` builds an import graph alongside its analysis output and uses it on the next run to re-analyze not just files whose content changed, but also their reverse dependents whose imported source moved. This is why a unit you did not touch can still be re-analyzed — its dependency's exported surface changed.
