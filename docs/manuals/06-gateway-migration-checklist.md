@@ -35,7 +35,7 @@ python3 cli/tests/run_analyze_status_fixture.py
 ## 2. workflow status 확인
 
 ```bash
-uv run --project cli --no-editable awf wf status --repo-root .
+uv run --project cli awf wf status --repo-root .
 ```
 
 확인 포인트:
@@ -53,8 +53,8 @@ uv run --project cli --no-editable awf wf status --repo-root .
 ## 3. analyze status 확인
 
 ```bash
-uv run --project cli --no-editable awf analyze sample-api quest-challenge --repo-root . --status
-uv run --project cli --no-editable awf analyze sample-api quest-challenge --repo-root . --status --json
+uv run --project cli awf analyze sample-api quest-challenge --repo-root . --status
+uv run --project cli awf analyze sample-api quest-challenge --repo-root . --status --json
 ```
 
 확인 포인트:
@@ -67,9 +67,9 @@ uv run --project cli --no-editable awf analyze sample-api quest-challenge --repo
 ## 4. 자연어 라우팅 확인
 
 ```bash
-uv run --project cli --no-editable awf "quest challenge 분석 상태 보여줘"
-uv run --project cli --no-editable awf "review 실행"
-uv run --project cli --no-editable awf "provider 상태 probe 확인해줘"
+uv run --project cli awf "quest challenge 분석 상태 보여줘"
+uv run --project cli awf "review 실행"
+uv run --project cli awf "provider 상태 probe 확인해줘"
 ```
 
 확인 포인트:
@@ -101,7 +101,7 @@ python3 cli/tests/run_fixture_flow.py
 small domain 기준:
 
 ```bash
-uv run --project cli --no-editable awf analyze sample-api health --repo-root . --provider claude-code --yolo
+uv run --project cli awf analyze sample-api health --repo-root . --provider claude-code --yolo
 ```
 
 확인 포인트:

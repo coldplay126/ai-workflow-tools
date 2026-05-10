@@ -212,6 +212,34 @@ def test_markdown_awf_bash_examples_parse() -> None:
     assert invalid == []
 
 
+def test_markdown_awf_bash_examples_do_not_use_stale_no_editable() -> None:
+    stale: list[str] = []
+    for path in _markdown_files():
+        text = path.read_text(encoding="utf-8")
+        for match in BASH_FENCE_RE.finditer(text):
+            start_line = _line_number(text, match.start()) + 1
+            for line, command in _bash_logical_lines(match.group(1), start_line):
+                if (
+                    "uv run --project cli --no-editable" in command
+                    and " awf" in command
+                    and "--reinstall-package awf-cli" not in command
+                ):
+                    stale.append(f"{path.relative_to(REPO_ROOT)}:{line} {command}")
+
+    assert stale == []
+
+
+def test_markdown_awf_analyze_examples_do_not_use_removed_deep_flag() -> None:
+    stale: list[str] = []
+    for path in _markdown_files():
+        text = path.read_text(encoding="utf-8")
+        for line, raw_line in enumerate(text.splitlines(), 1):
+            if "awf analyze" in raw_line and "--deep" in raw_line:
+                stale.append(f"{path.relative_to(REPO_ROOT)}:{line} {raw_line.strip()}")
+
+    assert stale == []
+
+
 def test_markdown_toml_fences_are_parseable_when_not_placeholders() -> None:
     invalid: list[str] = []
     for path in _markdown_files():

@@ -3,7 +3,7 @@
 이 문서는 `ai-workflow-tools`를 처음 사용하는 팀원을 위한 30분 입문 가이드입니다.
 
 목표:
-- `/wf`, `/analysis`, `awf-cli`가 어떤 역할을 하는지 이해한다.
+- `wf-*` skills, `/analysis`, `awf-cli`가 어떤 역할을 하는지 이해한다.
 - 상태 파일과 산출물 위치를 직접 확인한다.
 - "자동화가 실제로 어떤 파일을 읽고 쓰는지"를 감으로 익힌다.
 
@@ -39,33 +39,33 @@ cd ~/Documents/GitHub/ai-workflow-tools
 Claude 중심 설치가 되어 있다면:
 
 ```text
-/wf.status
+/wf-status
 ```
 
 Python CLI를 같이 보고 싶다면:
 
 ```bash
-uv run --project cli --no-editable awf ready --repo-root .
-uv run --project cli --no-editable awf ready --repo-root . --gate workflow-init --json
+uv run --project cli awf ready --repo-root .
+uv run --project cli awf ready --repo-root . --gate workflow-init --json
 ```
 
 `ready`는 설정, provider, skill, scan, workflow, operations wiki 상태를 읽기 전용으로 모아 현재 repo에서 어느 자동화 레벨까지 안전한지 보여줍니다.
 `--gate`는 Claude/Codex가 첫 실행 전에 따를 수 있는 결정론적 preflight이며, `allow`가 아니면 non-zero exit로 진행을 멈춥니다.
 
-## 3. 실습 A: `/wf` 상태 읽기
+## 3. 실습 A: workflow 상태 읽기
 
 먼저 현재 workflow 상태를 봅니다.
 
 Claude:
 
 ```text
-/wf.status
+/wf-status
 ```
 
 CLI:
 
 ```bash
-uv run --project cli --no-editable awf wf status --repo-root .
+uv run --project cli awf wf status --repo-root .
 ```
 
 확인할 것:
@@ -81,12 +81,12 @@ uv run --project cli --no-editable awf wf status --repo-root .
 - `gates`는 어떤 시점에 채워지는가?
 - `history`는 어떤 실행 흔적을 남기는가?
 
-## 4. 실습 B: `/wf next`가 만드는 것 보기
+## 4. 실습 B: `awf wf next`가 만드는 것 보기
 
 실제 provider를 부르지 않고 prompt만 확인합니다.
 
 ```bash
-uv run --project cli --no-editable awf wf next --repo-root . --phase review --provider codex --dry-run
+uv run --project cli awf wf next --repo-root . --phase review --provider codex --dry-run
 ```
 
 실행 후 확인할 파일:
@@ -98,14 +98,14 @@ uv run --project cli --no-editable awf wf next --repo-root . --phase review --pr
 - self-contained prompt를 만들고
 - 그 prompt를 provider에 넘깁니다.
 
-즉 `/wf`는 "마법 명령"이 아니라 "상태 + 계약 + 프롬프트 생성기"입니다.
+즉 `wf-*` skill과 `awf wf`는 "마법 명령"이 아니라 "상태 + 계약 + 프롬프트 생성기"입니다.
 
 ## 5. 실습 C: `/analysis` 드라이런 보기
 
 도메인 분석 prompt가 어떤 입력을 받는지 확인합니다.
 
 ```bash
-uv run --project cli --no-editable awf analyze sample-api quest-challenge --repo-root . --dry-run
+uv run --project cli awf analyze sample-api quest-challenge --repo-root . --dry-run
 ```
 
 확인할 것:
@@ -133,7 +133,7 @@ Analysis 관련:
 
 이 문서를 끝내면 다음 설명이 가능해야 합니다.
 
-- "`/wf`는 `.workflow`를 읽고 phase별 prompt를 만드는 흐름이다."
+- "`wf-*` skill과 `awf wf`는 `.workflow`를 읽고 phase별 prompt를 만드는 흐름이다."
 - "`/analysis`는 `.ai-context`와 `.analysis-state.json`을 남기는 분석 파이프라인이다."
 - "이 자동화는 세션 메모리보다 파일 상태를 더 신뢰한다."
 

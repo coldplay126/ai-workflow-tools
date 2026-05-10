@@ -36,7 +36,7 @@ sequenceDiagram
     CLI->>S2: domain-bundle (enriched) + Stage 1 memo + 기존 docs
     S2-->>CLI: 4개 파일 (api-spec, data-model, overview, integration)
     CLI->>OUT: 파일 저장
-    opt Stage 3 승격 (related_domains 존재 or stage3_force=true)
+    opt Stage 3 실행 (internal deep + routing/force/related>=3 rule)
         CLI->>S3: Stage 2 결과 + project 번들
         S3-->>CLI: 교차 검증 결과
     end
@@ -53,18 +53,20 @@ sequenceDiagram
 | standard | codex | sonnet | opus |
 | large | codex | opus | opus |
 
-## Stage 3 자동 승격 규칙
+## Stage 3 실행 규칙
 
-독립적인 `--deep` CLI 플래그는 제거됨(2026-04-08, 커밋 a1ec135). Stage 3은 다음 조건에서 자동 승격된다:
+독립적인 `--deep` CLI 플래그는 제거됨(2026-04-08, 커밋 a1ec135). Stage 3은 내부 deep context와 `should_run_stage3` 판정으로만 실행된다.
 
-| 승격 조건 | 판정 근거 |
-|----------|----------|
-| `related_domains` 배열이 존재 (≥1) | `analysis-config.json`의 `domain_definitions.{domain}.related_domains` |
-| `stage3_force: true` 설정 | `analysis-config.json` 단위별 오버라이드 |
-| scale이 `standard` 또는 `large` | 위 조건과 AND 결합 |
+| 우선순위 | 조건 | 결과 |
+|----------|------|------|
+| 1 | `stage3.retryCount`가 retry block 기준 이상 | Stage 3 실행 차단 |
+| 2 | `stage3_force: true` | scale routing이 `skip`이어도 Stage 3 실행 |
+| 3 | `related_domains.length >= 3` | scale routing이 `skip`이어도 Stage 3 실행 |
+| 4 | `stage_routing.{scale}.stage3 != "skip"` | Stage 3 실행 |
+| 5 | 그 외 | Stage 3 skip |
 
-`small` scale + `related_domains` 없음 → Stage 3 skip.
-승격 판정은 Layer 2(bundle 완료) 직후 결정론적으로 수행된다.
+`related_domains`가 존재하거나 `stage3_force`가 설정되면 내부 deep context가 켜진다. 단, `related_domains.length`가 1~2개인 경우에는 routing이 `skip`이면 Stage 3도 skip된다.
+실행 판정은 Layer 2(bundle 완료) 직후 결정론적으로 수행된다.
 
 ## Stage 1: 파일별 XML 번들
 
@@ -128,8 +130,8 @@ stateDiagram-v2
     bundle --> failed: 파일 0건
     bundle --> stage1: Stage 1 시작
     stage1 --> stage2: Stage 1 완료
-    stage2 --> output: Stage 2 완료 (related_domains 없음)
-    stage2 --> stage3: Stage 3 승격 (related_domains 존재)
+    stage2 --> output: Stage 2 완료 (Stage 3 skip)
+    stage2 --> stage3: Stage 3 실행 조건 충족
     stage3 --> output: Stage 3 완료
     output --> completed: 4개 파일 생성
     stage2 --> failed: provider 실패

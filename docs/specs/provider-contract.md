@@ -458,11 +458,11 @@ conformance test는 **provider 추상화 성공 기준**이며, [4] awf-cli host
 ### 10.5 Step 4 — Conformance gate
 
 - `cli/tests/conformance/` 모든 테스트가 claude-code와 codex에서 녹색
-- `/wf plan → done`이 `--provider codex` 단일 옵션으로 완주
+- workflow `plan → done`이 `--provider codex` 단일 옵션으로 완주
 
 ### 10.6 Step 5 — Opt-in provider 확장
 
-- OpenAI를 Tier 2 일등 시민으로 추가 (`/wf`에서 `--provider openai` 지원)
+- OpenAI를 Tier 2 일등 시민으로 추가 (`awf wf`에서 `--provider openai` 지원)
 - 향후 Gemini, Mistral 등은 본 contract만 구현하면 host 수정 0
 
 ---

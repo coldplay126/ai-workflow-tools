@@ -34,7 +34,7 @@
 예시:
 
 ```text
-/wf 'README 개편'
+/wf-orchestrator 'README 개편'
 ```
 
 확인할 파일:
@@ -58,8 +58,8 @@
 CLI 예시:
 
 ```bash
-uv run --project cli --no-editable awf wf status --repo-root .
-uv run --project cli --no-editable awf wf next --repo-root . --phase review --provider codex --dry-run
+uv run --project cli awf wf status --repo-root .
+uv run --project cli awf wf next --repo-root . --phase review --provider codex --dry-run
 ```
 
 세션 B가 확인할 것:
@@ -78,7 +78,7 @@ uv run --project cli --no-editable awf wf next --repo-root . --phase review --pr
 또는:
 
 ```bash
-uv run --project cli --no-editable awf analyze sample-api quest-challenge --repo-root . --dry-run
+uv run --project cli awf analyze sample-api quest-challenge --repo-root . --dry-run
 ```
 
 세션 A 산출물:
@@ -97,7 +97,7 @@ uv run --project cli --no-editable awf analyze sample-api quest-challenge --repo
 ## 4. 시나리오 C: Claude / Codex 분업
 
 세션 A:
-- Claude Code에서 `/wf`, `/analysis`
+- Claude Code에서 `/wf-orchestrator`, `/analysis`
 - 필요하면 선택적으로 `awf analyze ... --provider claude-sdk --yolo`
 
 세션 B:
@@ -116,13 +116,13 @@ uv run --project cli --no-editable awf analyze sample-api quest-challenge --repo
 CLI 예시:
 
 ```bash
-uv run --project cli --no-editable awf wf next --repo-root . --phase review --provider codex --auto-apply
+uv run --project cli awf wf next --repo-root . --phase review --provider codex --auto-apply
 ```
 
 선택 실험 경로:
 
 ```bash
-uv run --project cli --no-editable awf analyze sample-api quest-challenge --repo-root . --provider claude-sdk --yolo
+uv run --project cli awf analyze sample-api quest-challenge --repo-root . --provider claude-sdk --yolo
 ```
 
 ## 5. 체크포인트

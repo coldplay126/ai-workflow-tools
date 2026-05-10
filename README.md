@@ -67,11 +67,17 @@ state는 awf가 관리합니다.
 ### CLI
 
 ```bash
-uv run --project cli --no-editable awf --help
-uv run --project cli --no-editable awf ready --repo-root .
-uv run --project cli --no-editable awf doctor --repo-root . --json --ci
-uv run --project cli --no-editable awf wf status --repo-root .
-uv run --project cli --no-editable awf analyze sample-api health --repo-root . --dry-run
+uv run --project cli awf --help
+uv run --project cli awf ready --repo-root .
+uv run --project cli awf doctor --repo-root . --json --ci
+uv run --project cli awf wf status --repo-root .
+uv run --project cli awf analyze sample-api health --repo-root . --dry-run
+```
+
+패키지 wheel 자체를 검증할 때만 editable checkout 대신 재설치된 wheel을 사용합니다:
+
+```bash
+uv run --project cli --no-editable --reinstall-package awf-cli awf --help
 ```
 
 `awf ready`는 프로젝트에서 가장 먼저 실행하는 read-only 점검입니다. 설정,
@@ -200,11 +206,17 @@ execution surfaces; awf owns the canonical state and provenance.
 ## CLI
 
 ```bash
-uv run --project cli --no-editable awf --help
-uv run --project cli --no-editable awf ready --repo-root .
-uv run --project cli --no-editable awf doctor --repo-root . --json --ci
-uv run --project cli --no-editable awf wf status --repo-root .
-uv run --project cli --no-editable awf analyze sample-api health --repo-root . --dry-run
+uv run --project cli awf --help
+uv run --project cli awf ready --repo-root .
+uv run --project cli awf doctor --repo-root . --json --ci
+uv run --project cli awf wf status --repo-root .
+uv run --project cli awf analyze sample-api health --repo-root . --dry-run
+```
+
+Use a freshly reinstalled wheel only when validating package contents:
+
+```bash
+uv run --project cli --no-editable --reinstall-package awf-cli awf --help
 ```
 
 The Python package is `awf-cli`, and the console entrypoint is `awf`.
@@ -322,7 +334,7 @@ uv run --project cmux-agent cmux-agent smoke
 uv run --project cmux-agent cmux-agent status --failures
 uv run --project cmux-agent cmux-agent failures
 uv run --project cmux-agent cmux-agent events --failures
-uv run --project cli --no-editable awf cmux failures --repo-root .
+uv run --project cli awf cmux failures --repo-root .
 ```
 
 ## Claude Code Setup

@@ -9,7 +9,7 @@
 
 현재 운영 가정:
 - **Analysis**: Claude Code `/analysis`가 primary, `awf analyze --dry-run`이 보조 준비 도구
-- **WF pipeline**: Claude Code `/wf`가 primary, `awf wf next --dry-run`이 보조 (Codex review/verify는 `awf wf next --provider codex` 경로 사용 가능)
+- **WF pipeline**: Claude Code `wf-*`/`phase-*` skills가 primary, `awf wf next --dry-run`이 보조 (Codex review/verify는 `awf wf next --provider codex` 경로 사용 가능)
 - `awf analyze --provider claude-code`는 small domain에서 먼저 검증
 - large domain 또는 Stage 3 자동 승격 케이스는 timeout 가능성이 있으므로 `/analysis` 권장
 
@@ -34,8 +34,8 @@ cd ~/Documents/GitHub/ai-workflow-tools
 선택 확인:
 
 ```bash
-uv run --project cli --no-editable awf config show --repo-root .
-uv run --project cli --no-editable awf doctor --repo-root . --json --ci
+uv run --project cli awf config show --repo-root .
+uv run --project cli awf doctor --repo-root . --json --ci
 ```
 
 `awf doctor --json --ci` 판정:
@@ -71,10 +71,10 @@ uv run --project cli --no-editable awf doctor --repo-root . --json --ci
 - `layers.analyze.stage1.status = completed`
 - `layers.analyze.stage2.status = completed`
 - `layers.output.status = completed`
-- Stage 3 자동 승격 케이스 (`related_domains` 존재 또는 `stage3_force: true`):
+- Stage 3 실행 케이스 (`stage3_force: true`, `related_domains >= 3`, 또는 routing이 `skip`이 아닌 internal deep context):
   - Claude Code / Claude 계열 provider에서는 `layers.analyze.stage3.status = completed`
   - fixture 등 비실행 provider에서는 `layers.analyze.stage3.status = scaffold`
-  - 승격 조건을 만족하지 않으면 `stage3.status = skipped`
+  - 실행 조건을 만족하지 않으면 `stage3.status = skipped`
 
 실패 시 우선 확인:
 - `.analysis-state.json`의 `retryCount`
@@ -85,7 +85,7 @@ uv run --project cli --no-editable awf doctor --repo-root . --json --ci
 실행:
 
 ```bash
-uv run --project cli --no-editable awf analyze sample-api health --repo-root . --provider claude-code --yolo
+uv run --project cli awf analyze sample-api health --repo-root . --provider claude-code --yolo
 ```
 
 확인 포인트:
@@ -104,7 +104,7 @@ uv run --project cli --no-editable awf analyze sample-api health --repo-root . -
 실행:
 
 ```bash
-uv run --project cli --no-editable awf wf next --repo-root . --phase review --provider codex --auto-apply
+uv run --project cli awf wf next --repo-root . --phase review --provider codex --auto-apply
 ```
 
 성공 시 확인할 것:
@@ -128,7 +128,7 @@ uv run --project cli --no-editable awf wf next --repo-root . --phase review --pr
 실행:
 
 ```bash
-uv run --project cli --no-editable awf wf next --repo-root . --phase verify --provider codex --auto-apply
+uv run --project cli awf wf next --repo-root . --phase verify --provider codex --auto-apply
 ```
 
 성공 시 확인할 것:
@@ -182,7 +182,7 @@ uv run --project cli --no-editable awf wf next --repo-root . --phase verify --pr
 `ANTHROPIC_API_KEY`를 쓰는 환경이면 아래도 별도 검증할 수 있습니다.
 
 ```bash
-uv run --project cli --no-editable awf analyze sample-api quest-challenge --repo-root . --provider claude-sdk --yolo
+uv run --project cli awf analyze sample-api quest-challenge --repo-root . --provider claude-sdk --yolo
 ```
 
 이 경로는 현재 기본 운영 경로가 아니라 optional 실험 경로입니다.

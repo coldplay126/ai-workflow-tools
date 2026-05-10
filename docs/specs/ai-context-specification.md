@@ -204,7 +204,7 @@ erDiagram
 
 **필수 섹션**: 요약(통계 표), 도메인 특성, 아키텍처 관찰, 기술 부채 요약, 보안 분석, 크로스서비스 의존성, 파일 구성
 
-**deep 모드 추가 섹션**: 기존 문서 대비 변경점, Stage 3 크로스서비스 검증 결과, 기술 부채 우선순위화
+**Stage 3 실행 시 추가 섹션**: 기존 문서 대비 변경점, Stage 3 크로스서비스 검증 결과, 기술 부채 우선순위화
 
 ### 3.2 .analysis-state.json
 
@@ -468,7 +468,7 @@ Secondary evaluator(read-only 권한)로 4개 신규 파일과 기존 딥다이�
 | standard | Codex | Sonnet | Opus |
 | large | Codex (배치) | Opus | Opus |
 
-`stage3_force: true` (analysis-config.json) → scale 무관하게 Stage 3 실행
+`stage3_force: true` (analysis-config.json) → internal deep context를 켜고 scale routing과 무관하게 Stage 3 실행
 
 ---
 
@@ -516,7 +516,7 @@ ${AWF_DOCS_ROOT}/{service}/{domain}/.ai-context/
 **해석 규칙**:
 - 각 디렉토리의 절대 경로 = `service_map[service]` + `directories[service][i]`
 - Stage 1 번들링 시 모든 디렉토리를 순회하여 파일 수집
-- `related_domains`는 Stage 3 크로스서비스 분석 범위를 결정
+- `related_domains`는 Stage 3 크로스서비스 분석 범위를 결정한다. 값이 존재하면 internal deep context가 켜지지만, routing이 `skip`인 scale에서는 `related_domains.length >= 3`일 때만 Stage 3 skip을 override한다.
 
 ---
 
@@ -529,6 +529,6 @@ ${AWF_DOCS_ROOT}/{service}/{domain}/.ai-context/
 | Codex | Stage 1 분석, Full 검증에서 호출됨 | 이 사양의 파일 형식을 출력/검증 |
 | 수동 작성 | 템플릿 복사 후 직접 작성 | 이 사양의 파일 구조를 준수 |
 
-> **Stage 3 승격 규칙**: 독립적인 `--deep` 플래그는 제거됨(2026-04-08, 커밋 a1ec135). Stage 3은 `analysis-config.json`의 `related_domains`가 존재하거나 `stage3_force: true`가 설정된 경우 자동 승격. 8절 라우팅 표 참조.
+> **Stage 3 실행 규칙**: 독립적인 `--deep` 플래그는 제거됨(2026-04-08, 커밋 a1ec135). `related_domains` 또는 `stage3_force`가 있으면 internal deep context가 켜진다. 실제 Stage 3 실행은 retry block 확인 후 `stage3_force`, `related_domains.length >= 3`, `stage_routing.{scale}.stage3 != "skip"` 순으로 결정된다.
 
 **핵심**: 어떤 도구로 생성하든 이 사양을 준수하면 다른 도구가 동일하게 소비할 수 있다.

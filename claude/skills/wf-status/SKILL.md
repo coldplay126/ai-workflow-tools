@@ -20,7 +20,7 @@ cli:
 
 ### 실행 흐름
 
-1. **`.workflow/state.json` 읽기**: 없으면 "활성 워크플로우가 없습니다. `/wf`로 시작하세요." 출력.
+1. **`.workflow/state.json` 읽기**: 없으면 "활성 워크플로우가 없습니다. `/wf-orchestrator`로 시작하세요." 출력.
 
 2. **manifest.json 읽기**: 프로젝트 설정 요약.
 
@@ -86,17 +86,17 @@ cli:
 
 7. **TTL 경고**: `createdAt`이 7일 이상 지났으면:
    ```
-   ⚠ 이 워크플로우는 N일 경과되었습니다. /wf.reset으로 정리하거나 계속 진행하세요.
+   ⚠ 이 워크플로우는 N일 경과되었습니다. /wf-reset으로 정리하거나 계속 진행하세요.
    ```
 
 8. **다음 액션 안내**:
    현재 단계에 따른 다음 명령어를 안내합니다:
    ```
-   다음 단계: /wf.approve
+   다음 단계: /phase-approve
    ```
    게이트 실패로 회귀 중이면:
    ```
-   회귀 중: G2 CRITICAL → /wf.plan으로 돌아가세요 (review-feedback.md 참조)
+   회귀 중: G2 CRITICAL → /phase-plan으로 돌아가세요 (review-feedback.md 참조)
    ```
 
 9. **산출물 목록**:

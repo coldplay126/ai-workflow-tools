@@ -57,4 +57,4 @@ Phase 7 완료 시 `.work_history/` 세션 디렉토리에 `summary.md`가 자�
 ### 다음 단계
 - 확인 + PR 생성: 워크플로우 완료
 - 확인만: PR 수동 생성
-- 보류: 나중에 `/wf.done` 재실행
+- 보류: 나중에 `/phase-done` 재실행

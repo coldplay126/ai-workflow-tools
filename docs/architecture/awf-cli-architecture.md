@@ -1,7 +1,7 @@
 # awf-cli 아키텍처 설계 — 3분할 차용 전략
 
 > **문서 상태**: 이 문서는 2026-04-06 기준 **초기 설계 의사결정**을 기록한 design document입니다. 현재 구현은 [cli/README.md](../../cli/README.md)를 기준으로 삼아야 합니다. 2026-04-08 이후 아래 항목이 변경되었습니다:
-> - `--deep` CLI 플래그 제거 (커밋 a1ec135). Stage 3은 `related_domains`/`stage3_force` 기반 자동 승격으로 전환
+> - `--deep` CLI 플래그 제거 (커밋 a1ec135). Stage 3은 internal deep context에서 `stage3_force`, `related_domains >= 3`, `stage_routing` 순으로 결정
 > - Stage 2 실제 fan-out 구현 (synthesizer + 4 writer)
 > - gateway migration 완료 (2026-03-31)
 >
@@ -9,7 +9,7 @@
 
 ## Context
 
-ai-workflow-tools의 `/wf`, `/analysis`, `.workflow` 계약을 독립 CLI로 제품화한다.
+ai-workflow-tools의 `wf-*` skills, `/analysis`, `.workflow` 계약을 독립 CLI로 제품화한다.
 opencode/crush를 **채택**하지 않고, 각 프로젝트의 강한 패턴만 **차용**하여 AWF 전용 코어를 구축한다.
 
 **결정**: awf-cli 직접 구축 (Python + uv)
@@ -86,7 +86,7 @@ class AgentInfo:
 | Agent | Mode | 역할 | 모델 결정 |
 |-------|------|------|----------|
 | `chat` | session | 자연어 REPL, 장기 대화 | config default |
-| `wf-router` | router | `/wf` 명령을 phase/provider로 디스패치 | phase/state/provider 해석 중심의 제한적 추론 |
+| `wf-router` | router | workflow skill/`awf wf` 요청을 phase/provider로 디스패치 | phase/state/provider 해석 중심의 제한적 추론 |
 | `analysis-synthesizer` | worker | Stage 2 도메인 합성, Stage 3 크로스서비스 | phase_models에 의해 결정 |
 | `analysis-writer-*` | worker | .ai-context 파일 개별 생성 (fan-out 시) | sonnet |
 | `review-evaluator` | worker | review phase evaluator slot | dual_strategy + provider-config에 의해 결정 |
@@ -394,7 +394,7 @@ models = ["deepseek-chat", "deepseek-coder"]
     └── impl-log.md
 ```
 
-**핵심**: Claude Code `/wf`와 awf-cli `awf wf`가 같은 state.json을 공유. 사용자가 두 도구를 혼용 가능.
+**핵심**: Claude Code `wf-*`/`phase-*` skills와 awf-cli `awf wf`가 같은 state.json을 공유. 사용자가 두 도구를 혼용 가능.
 
 ### 3.2 agent-cards 기반 Gate 시스템
 
@@ -445,10 +445,10 @@ Stage별 provider는 `analysis-pipeline.json`의 `stage_routing.{scale}`에서 �
 
 모드별 라우팅:
 
-| | standard | deep |
+| | standard | internal deep |
 |---|---|---|
 | Stage 2 provider | sonnet | scale별 (sonnet/opus) |
-| Stage 2 실행 방식 | 단일 agent (4파일 통합) | 조건부 fan-out (아래 참조) |
+| Stage 2 실행 방식 | fan-out 기본값 (아래 참조) | fan-out 기본값 (아래 참조) |
 | Stage 3 | skip | scale별 (skip/execute) |
 | Stage 3 provider | - | opus (기본), sonnet (opt-in, 아래 참조) |
 | Evaluator | lightweight | full |
@@ -457,15 +457,10 @@ Stage별 provider는 `analysis-pipeline.json`의 `stage_routing.{scale}`에서 �
 
 기본: 단일 agent가 4개 파일(api-spec.json, data-model.md, domain-overview.md, external-integration.md)을 한 번에 생성한다. 이 방식은 파일 간 일관성(엔드포인트 ↔ 엔티티 ↔ 흐름 ↔ 의존성)을 자연스럽게 보장한다.
 
-**조건부 fan-out**: 다음 조건을 **모두** 충족할 때, synthesizer + 4 writer 구조로 분리한다:
+**fan-out 기본값**: 현재 구현은 synthesizer + 4 writer 구조를 기본 활성화한다. 다음 설정이 있을 때만 비활성화된다:
 
-```
-scale == "large"
-AND (bundle_tokens > STAGE2_TOKEN_THRESHOLD OR bundle_lines > STAGE2_LINE_THRESHOLD)
-```
-
-- `scale`만으로는 부족하다 — 같은 large라도 작은 DTO 50개(번들 작음)와 거대한 서비스 15개(번들 큼)는 실제 문맥 밀도가 다르다
-- threshold 값은 구현 시 실측으로 결정 (config에서 오버라이드 가능)
+- `[analysis.layer3] fanout_enabled = false`
+- `[analysis.layer3] writers = []`
 
 fan-out 시 실행 구조:
 ```
@@ -485,7 +480,7 @@ analysis-synthesizer (sonnet/opus)
 
 #### Stage 3 모델 선택
 
-**기본: Opus** (현행 유지). Stage 3은 deep 모드에서만 실행되고 빈도가 낮으므로, 안전성을 우선한다.
+**기본: Opus** (현행 유지). Stage 3은 조건부로만 실행되고 빈도가 낮으므로, 안전성을 우선한다.
 
 **Sonnet 다운그레이드: config flag로 opt-in** (`stage3_model_override: "sonnet"`).
 
@@ -657,10 +652,10 @@ ai-workflow-tools/
 - [x] ClaudeSdkAdapter (anthropic Python SDK)
 - [x] Tool 시스템: file read/write/glob/grep Python 네이티브
 - [x] Stateless step invoker (artifact 읽기 → provider 호출 → artifact 쓰기)
-- [x] `--deep` 모드: Stage 1→2→3 오케스트레이션 (Stage 2는 단일 agent 기본)
+- [x] Stage 3 조건부 오케스트레이션: Stage 1→2→3 상태 전이와 routing/force/related-domain gate
 - [x] Evaluator gate + State persistence (.analysis-state.json)
 
-**검증**: Claude Code 없이 `awf analyze --deep` 단독 실행
+**검증**: Claude Code 없이 `awf analyze <service> <domain>` 단독 실행, Stage 3 fixture matrix로 조건부 실행 확인
 
 ### Phase 3: WF + Permissions (2주)
 - [x] `awf wf init/next/status/reset`
@@ -693,13 +688,13 @@ ai-workflow-tools/
 - `[ ]` 미착수
 
 현재 구현 메모:
-- Phase 2는 `claude-sdk`, tool system, `.analysis-state.json`, Stage 1/2/3 상태 전이, bundle 저장/configHash invalidation, resume/retry, deep mode live Stage 3까지 반영되어 완료 상태로 본다
+- Phase 2는 `claude-sdk`, tool system, `.analysis-state.json`, Stage 1/2/3 상태 전이, bundle 저장/configHash invalidation, resume/retry, conditional live Stage 3까지 반영되어 완료 상태로 본다
 - Phase 3의 workflow는 `init`, `reset`, `status`, `next`, `apply-result`, gate/state 갱신, permissions, fallback chain까지 반영됐고 SQLite만 미구현이다
 - Phase 4 전반부는 `codex` 운영 경로, `openai` skeleton, provider timeout/progress UX, `analyze --mode precise|cross`, `wf next --mode critical`, `--non-interactive`, `skills list`, `mcp list`, `mcp check`, `mcp invoke`, `mcp read` 최소 경로까지 반영되어 완료로 본다
 - Phase 4 전반부 마감 기준은 "mode UX + non-interactive + skills discovery + MCP check/invoke/read + MCP provider integration"까지 확보된 상태다
 - Phase 4는 현재 전반부 완료를 넘어 후반부 핵심도 상당수 반영된 상태이며, practical하게는 "대부분 완료"로 본다
 - 따라서 현재 문서 기준으로는 "Phase 4 closeout, Phase 5 checkpoint active" 상태로 보는 것이 가장 정확하다
-- Phase 4 후반부에서는 deep/large 조건의 Stage 2 fan-out이 scaffold-only가 아니라 실제 실행 경로까지 들어갔다
+- Phase 4 후반부에서는 Stage 2 fan-out이 scaffold-only가 아니라 실제 실행 경로까지 들어갔다
 - 구조 정리로 `core/analysis_prompt.py`와 `core/judge.py`가 추가되어 prompt 조립과 judge 규칙이 `analyze.py`/`wf.py`에서 분리됐다
 - 추가 구조 정리로 `core/analysis_fanout.py`가 분리되어 fan-out decision/execution/consistency/fallback이 `analyze.py`에서 분리됐다
 - `mcp check`는 stdio transport에 한해 실제 MCP `initialize` handshake와 optional `tools/list`/`resources/list`까지 수행한다

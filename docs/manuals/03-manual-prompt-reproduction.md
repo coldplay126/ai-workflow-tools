@@ -1,6 +1,6 @@
 # AWF AI Workflow 커맨드 없이 재현하기
 
-이 문서는 `/wf`, `/analysis` 같은 커맨드 없이도 같은 흐름을 프롬프트로 재현하는 방법을 설명합니다.
+이 문서는 `wf-*` skills, `/analysis` 같은 진입점 없이도 같은 흐름을 프롬프트로 재현하는 방법을 설명합니다.
 
 목표:
 - slash command/skill이 실제로 무엇을 하는지 이해한다.
@@ -18,7 +18,7 @@
 
 즉 수동 재현은 "같은 입력과 출력 계약"만 지키면 됩니다.
 
-## 2. `/wf` 계획 단계 재현
+## 2. workflow 계획 단계 재현
 
 읽을 파일:
 - `.workflow/concept.md`
@@ -144,5 +144,5 @@ gate 판단은 `review.json`의 `gate.pass_conditions`를 따르세요.
 
 ## 7. 이 문서를 끝내면 가능한 설명
 
-- "`/wf review`는 사실 spec/plan/tasks와 review agent-card를 모아 검토 prompt를 만드는 일이다."
+- "`/phase-review`는 사실 spec/plan/tasks와 review agent-card를 모아 검토 prompt를 만드는 일이다."
 - "`/analysis`는 입력 문서와 소스 디렉토리 맵을 읽고 `.ai-context` 계약에 맞춰 출력하는 파이프라인이다."

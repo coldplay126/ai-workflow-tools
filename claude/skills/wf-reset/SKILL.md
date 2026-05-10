@@ -29,7 +29,7 @@ $ARGUMENTS
 
 1. **`.workflow/state.json` 읽기**: 없으면 "활성 워크플로우가 없습니다." 출력 후 종료.
 
-2. **현재 상태 표시**: `/wf.status`와 동일한 요약을 먼저 보여줍니다.
+2. **현재 상태 표시**: `/wf-status`와 동일한 요약을 먼저 보여줍니다.
 
 3. **사용자에게 선택지 제시**:
 
@@ -44,13 +44,13 @@ $ARGUMENTS
 
 4. **옵션 1: 완전 삭제**:
    - `.workflow/` 디렉토리 전체 삭제
-   - "워크플로우가 삭제되었습니다. `/wf`로 새 워크플로우를 시작하세요."
+   - "워크플로우가 삭제되었습니다. `/wf-orchestrator`로 새 워크플로우를 시작하세요."
 
 5. **옵션 2: 아카이브**:
    - `.workflow-archive/` 디렉토리 생성 (없으면)
    - `.workflow/`를 `.workflow-archive/<id>/`로 이동
    - `.workflow-archive/`도 `.gitignore`에 추가
-   - "워크플로우가 아카이브되었습니다. `/wf`로 새 워크플로우를 시작하세요."
+   - "워크플로우가 아카이브되었습니다. `/wf-orchestrator`로 새 워크플로우를 시작하세요."
 
 6. **옵션 3: 특정 단계로 되돌리기**:
    ```
@@ -72,12 +72,12 @@ $ARGUMENTS
    - 해당 단계의 artifacts 파일은 **삭제하지 않음** (덮어쓰기로 갱신)
 
 7. **`$ARGUMENTS` 직접 처리**:
-   - `/wf.reset delete` → 확인 없이 옵션 1 실행
-   - `/wf.reset archive` → 확인 없이 옵션 2 실행
-   - `/wf.reset plan` → 확인 없이 Phase 1로 되돌리기
-   - `/wf.reset review` → Phase 2로 되돌리기
-   - `/wf.reset approve` → Phase 3으로 되돌리기
-   - `/wf.reset impl` → Phase 4로 되돌리기
+   - `/wf-reset delete` → 확인 없이 옵션 1 실행
+   - `/wf-reset archive` → 확인 없이 옵션 2 실행
+   - `/wf-reset plan` → 확인 없이 Phase 1로 되돌리기
+   - `/wf-reset review` → Phase 2로 되돌리기
+   - `/wf-reset approve` → Phase 3으로 되돌리기
+   - `/wf-reset impl` → Phase 4로 되돌리기
    - 인자 없으면 대화형 선택
 
 ### 주의사항
