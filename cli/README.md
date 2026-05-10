@@ -25,7 +25,7 @@
 - `awf wf init <concept> [--no-ready-gate]`: `.workflow` 초기화 + `.work_history/` 세션 자동 생성. 기본적으로 `awf ready --gate workflow-init`를 먼저 통과해야 한다
 - `awf wf status`: `.workflow/state.json` 요약 출력 + 최근 work_history 세션 표시
 - `awf wf next [--phase <name>] [--mode solo|quick|precise|cross|critical] [--auto-apply] [--non-interactive] [--no-ready-gate]`: 다음 phase 해석, delegated prompt 생성, `.workflow/tmp/`에 prompt/result 저장, fallback chain 시도, phase를 `in_progress`로 표시. Provider-backed 실행은 기본적으로 `awf ready --gate workflow-run`를 먼저 통과해야 한다
-- `awf wf decide <phase> --decision ...`: deciding 상태의 closed-loop workflow phase에 수동 결정을 반영
+- `awf wf decide <continue|replan|abort> [--phase <name>] [--target <phase>]`: deciding 상태의 closed-loop workflow phase에 수동 결정을 반영
 - `awf wf apply-result <phase> <result-file>`: review/verify JSON 결과를 artifact markdown으로 반영하고 gate/state를 갱신
 - `awf wf gate <phase>`: plan/review/verify deterministic gate 평가
 - `awf wf detect-class <concept>`: concept text 기반 change class 판정
@@ -43,6 +43,8 @@
 - `awf mcp read <name> <uri>`: MCP resource 읽기. 현재는 `stdio`, `http` transport 지원
 - `awf doctor [--probe] [--ci]`: provider readiness MVP. 기본은 installed/configured 상태와 default provider, session DB, MCP server count, dispatch surface preference, Pi opt-in runner readiness를 보여주고, `--probe`는 가능한 provider에 대해 lightweight subprocess probe를 추가한다. `--ci`는 default provider readiness가 충분하지 않으면 non-zero exit를 반환한다
 - `awf ready [--probe] [--gate inspect|analysis|workflow-init|workflow-run|operations]`: repo별 자동화 준비 상태를 read-only로 요약한다. `doctor`/heuristic `scan`/skill discovery/workflow/operations 상태를 한 보고서로 모아 automation level(L0 inspect → L3 workflow)과 다음 추천 명령을 출력한다. `--gate`는 `decision: allow|dry_run_only|block`을 JSON에 포함하고 `allow` 외에는 non-zero exit로 Claude/Codex entrypoint와 내부 실행 명령을 중단시킨다
+- `awf init [--repo-root <path>] [--force]`: 대상 프로젝트에 `.awf.toml`을 초기화
+- `awf scan [repo_path] [--all] [--merge] [--dry-run] [--no-ai]`: 프로젝트 구조를 휴리스틱/AI fallback으로 탐색해 analysis config 후보를 생성
 - `awf cmux tail [path] [-f] [--run-id ...] [--event ...] [--limit N] [--json]`: cmux-agent `.agent/events.jsonl`을 구조화된 4컬럼(`ts / run_id-prefix / event / summary`)으로 출력한다. `-f/--follow`는 폴링 기반 tail이며 `Ctrl-C`로 정상 종료한다. cmux-agent 패키지를 import하지 않는 read-only consumer다
 - `awf cmux runs [path] [--json] [--limit N]`: 로그를 1회 스캔해 run_id별 `STARTED / STATUS / EVENTS / DURATION`을 요약한다. 마지막 `run.status_changed.new`가 `completed/failed/aborted`면 해당 값, 아니면 `running`으로 표시한다
 - `awf cmux failures [path] [--run-id ...] [--limit N] [--json]`: `artifact.validation_failed`와 `message.failed`를 한 번에 필터링해 timestamp, run_id, target, reason을 보여준다. JSON 모드는 structured array를 출력한다
