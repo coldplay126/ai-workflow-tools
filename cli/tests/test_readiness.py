@@ -136,6 +136,8 @@ def test_doctor_report_marks_configured_pi_dispatch_preference_ready(
     assert preference["surface_preference"] == "pi"
     assert preference["source"] == "provider_config"
     assert report["dispatch"]["surface_preference_ready"]["status"] == "ok"
+    assert "field smoke" in report["dispatch"]["surface_preference_ready"]["detail"]
+    assert "auth/quota" in report["dispatch"]["surface_preference_ready"]["detail"]
 
 
 def test_doctor_report_marks_configured_pi_dispatch_preference_caution(
