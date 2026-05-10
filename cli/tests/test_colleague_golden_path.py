@@ -10,6 +10,8 @@ from fixture_support import ROOT, REVIEW_RESULT, awf_env
 
 KO_ONBOARDING = ROOT / "docs" / "manuals" / "09-colleague-onboarding.ko.md"
 EN_ONBOARDING = ROOT / "docs" / "manuals" / "09-colleague-onboarding.en.md"
+KO_FIELD_TRIAL = ROOT / "docs" / "manuals" / "10-field-trial-checklist.ko.md"
+EN_FIELD_TRIAL = ROOT / "docs" / "manuals" / "10-field-trial-checklist.en.md"
 
 
 def _run_awf(
@@ -178,3 +180,28 @@ def test_colleague_onboarding_docs_include_scenario_examples() -> None:
     assert "Onboarding Guide for First-Time Developers" in en
     assert "Use It When" in en
     assert "FAQ" in en
+
+
+def test_field_trial_checklist_keeps_real_repo_decision_criteria() -> None:
+    ko = KO_FIELD_TRIAL.read_text(encoding="utf-8")
+    en = EN_FIELD_TRIAL.read_text(encoding="utf-8")
+
+    for text in (ko, en):
+        assert "awf ready --repo-root ." in text
+        assert "awf scan . --no-ai" in text
+        assert (
+            "awf analyze <service> <unit> --repo-root . "
+            "--dry-run --output-format json"
+        ) in text
+        assert "awf ready --repo-root . --gate workflow-run --json" in text
+        assert "awf wf next --repo-root . --dry-run --output-format json" in text
+        assert "python3 cli/tests/run_pi_field_smoke.py --json --write-result" in text
+        assert "repo / branch" in text
+        assert "provider calls" in text
+
+    assert "실제 레포 필드 트라이얼 체크리스트" in ko
+    assert "판정 기준" in ko
+    assert "두 개 이상 멈출 신호" in ko
+    assert "Field Trial Checklist for Real Repositories" in en
+    assert "Decision criteria" in en
+    assert "two or more checks" in en

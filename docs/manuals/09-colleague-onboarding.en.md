@@ -185,6 +185,8 @@ Codex does not replicate Claude's skill UX. Use the `awf` CLI and Codex adapter.
 
 ## Next Docs
 
+- [Field Trial Checklist for Real Repositories](./10-field-trial-checklist.en.md)
+- [실제 레포 필드 트라이얼 체크리스트](./10-field-trial-checklist.ko.md)
 - [First Workflow](./08-first-workflow.en.md)
 - [첫 ai-workflow-tools 작업 흐름](./08-first-workflow.ko.md)
 - [AWF AI Workflow 입문 가이드](./01-getting-started.md)
