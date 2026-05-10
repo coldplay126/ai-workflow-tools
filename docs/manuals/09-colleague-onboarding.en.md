@@ -53,6 +53,90 @@ Check:
 
 If the dry-run output is unclear, do not move to provider-backed execution.
 
+## Scenario Examples
+
+### Example A: Unfamiliar Python Script Repository
+
+Situation: the repository has root-level source directories such as
+`collectors/`, `analyzers/`, or `importers/`.
+
+```bash
+awf ready --repo-root .
+awf scan . --no-ai
+awf analyze collectors naver --repo-root . --dry-run --output-format json
+```
+
+Decision:
+
+- If `scan` identifies real source directories as units, the target is likely
+  usable.
+- If `domain_directories` points to the intended folder, provider execution may
+  be reasonable.
+- If the unit name is wrong, choose another unit from the scan output before
+  calling a provider.
+
+### Example B: Start a Small Feature Workflow
+
+Situation: the task is narrow, such as "record the retry reason in payment
+failure logs."
+
+```bash
+awf wf init "record retry reason in payment failure logs" --repo-root .
+awf ready --repo-root . --gate workflow-run --json
+awf wf next --repo-root . --dry-run --output-format json
+```
+
+Decision:
+
+- If the phase is `plan`, the tool is preparing planning artifacts, not
+  implementation.
+- If the prompt is too broad, narrow the concept and restart.
+- `.workflow/state.json` is the canonical state for this task.
+
+### Example C: Use Codex for Review or Verify Only
+
+Situation: Claude Code is the main host, but you want a Codex review/verify
+perspective.
+
+```bash
+../ai-workflow-tools/codex/run-wf.sh preflight review codex
+../ai-workflow-tools/codex/run-wf.sh prompt review codex
+```
+
+Decision:
+
+- If `preflight` fails, follow `ready` recommendations before running Codex.
+- The generated prompt should make the review goal and artifacts clear.
+- This path should work without cmux-agent or Pi.
+
+### Example D: A Task That Should Not Use AWF
+
+Situation: fix one README typo or reorder imports.
+
+Recommended path:
+
+```bash
+git diff
+pytest <relevant tests>
+```
+
+Decision:
+
+- If creating `.workflow` costs more than the edit, do not use it.
+- Keep simple edits in the normal development flow. If the pattern repeats,
+  consider only a wiki decision or docs update later.
+
+## Example Conversation
+
+Question: "Does this mean the AI implements the feature by itself?"
+
+Answer:
+
+> Not exactly. It keeps AI work from jumping straight into execution. First it
+> checks repo readiness and analysis units, then previews dry-run prompts, then
+> runs gated phases. It is too much for tiny edits, but useful for unfamiliar
+> repo analysis and feature work that needs review or verification.
+
 ## Claude Code
 
 Install the skills with:

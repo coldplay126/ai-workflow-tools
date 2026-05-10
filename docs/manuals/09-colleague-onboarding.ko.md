@@ -53,6 +53,88 @@ awf wf next --repo-root . --dry-run --output-format json
 
 이 단계가 이해되지 않으면 provider-backed 실행으로 넘어가지 않습니다.
 
+## 상황별 예시
+
+### 예시 A: 처음 보는 Python script repo
+
+상황: `collectors/`, `analyzers/`, `importers/` 같은 root-level 디렉토리가
+있는 repo를 처음 맡았습니다.
+
+```bash
+awf ready --repo-root .
+awf scan . --no-ai
+awf analyze collectors naver --repo-root . --dry-run --output-format json
+```
+
+판단:
+
+- `scan`이 실제 소스 디렉토리를 unit으로 잡으면 분석 후보가 맞습니다.
+- dry-run의 `domain_directories`가 의도한 폴더를 가리키면 provider 실행을
+  고려합니다.
+- unit 이름이 맞지 않으면 provider를 부르기 전에 `scan` 결과에서 다른 unit을
+  고릅니다.
+
+### 예시 B: 작은 기능 작업을 workflow로 시작
+
+상황: "결제 실패 로그에 retry reason을 남긴다"처럼 범위가 작은 기능을
+시작합니다.
+
+```bash
+awf wf init "record retry reason in payment failure logs" --repo-root .
+awf ready --repo-root . --gate workflow-run --json
+awf wf next --repo-root . --dry-run --output-format json
+```
+
+판단:
+
+- `phase`가 `plan`이면 아직 구현이 아니라 기획 산출물을 만드는 단계입니다.
+- prompt가 너무 넓으면 concept를 더 좁혀 다시 시작합니다.
+- `.workflow/state.json`은 이 작업의 canonical state입니다.
+
+### 예시 C: 구현 전 review/verify만 Codex로 확인
+
+상황: Claude Code로 작업하되, review나 verify는 Codex 시각으로 한 번 더
+보고 싶습니다.
+
+```bash
+../ai-workflow-tools/codex/run-wf.sh preflight review codex
+../ai-workflow-tools/codex/run-wf.sh prompt review codex
+```
+
+판단:
+
+- `preflight`가 실패하면 Codex 실행보다 `ready`의 추천 명령을 먼저 따릅니다.
+- `prompt` 파일을 읽어도 review 목적과 artifact가 분명해야 합니다.
+- cmux-agent나 Pi가 없어도 이 흐름은 동작해야 합니다.
+
+### 예시 D: 쓰지 않는 편이 나은 작업
+
+상황: README 오타 하나를 고치거나 import 정렬만 바꿉니다.
+
+권장:
+
+```bash
+git diff
+pytest <관련 테스트>
+```
+
+판단:
+
+- `.workflow`를 만드는 비용이 수정 자체보다 크면 쓰지 않습니다.
+- 단순 수정은 일반 개발 흐름으로 끝내고, 나중에 반복되는 패턴이 보이면
+  `awf wiki decision`이나 문서화만 고려합니다.
+
+## 동료에게 말하는 예시
+
+질문: "이거 쓰면 AI가 알아서 구현해주는 거야?"
+
+답변:
+
+> 그보다는 AI 작업을 바로 실행하지 않고, 먼저 repo 상태와 분석 단위를
+> 확인한 뒤 dry-run prompt를 보고 단계별로 진행하게 해주는 도구야. 작은
+> 수정에는 과하지만, 낯선 repo 분석이나 review/verify가 필요한 기능 작업에
+> 좋다.
+
 ## Claude Code에서 쓰기
 
 Claude Code에서는 `setup.sh`로 skill을 설치한 뒤 skill 진입점을 사용합니다.
