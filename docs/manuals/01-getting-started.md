@@ -10,6 +10,8 @@
 관련 문서:
 - [처음 쓰는 개발자를 위한 온보딩 가이드](./09-colleague-onboarding.ko.md)
 - [Onboarding Guide for First-Time Developers](./09-colleague-onboarding.en.md)
+- [실제 레포 필드 트라이얼 체크리스트](./10-field-trial-checklist.ko.md)
+- [Field Trial Checklist for Real Repositories](./10-field-trial-checklist.en.md)
 - [첫 ai-workflow-tools 작업 흐름](./08-first-workflow.ko.md)
 - [First Workflow](./08-first-workflow.en.md)
 - [WF 빠른 시작](./wf-quickstart.md)
@@ -152,6 +154,8 @@ Analysis 관련:
 - [두 세션 운영 실습](./02-two-session-workflow.md)
 - [처음 쓰는 개발자를 위한 온보딩 가이드](./09-colleague-onboarding.ko.md)
 - [Onboarding Guide for First-Time Developers](./09-colleague-onboarding.en.md)
+- [실제 레포 필드 트라이얼 체크리스트](./10-field-trial-checklist.ko.md)
+- [Field Trial Checklist for Real Repositories](./10-field-trial-checklist.en.md)
 - [첫 ai-workflow-tools 작업 흐름](./08-first-workflow.ko.md)
 - [First Workflow](./08-first-workflow.en.md)
 - [커맨드 없이 재현하기](./03-manual-prompt-reproduction.md)
