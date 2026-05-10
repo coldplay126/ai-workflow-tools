@@ -323,6 +323,48 @@ def test_agent_card_top_level_retry_max_controls_failure_abort(tmp_path: Path):
     assert "max=2" in third["history"][-1]["details"]
 
 
+def test_agent_card_on_fail_next_phase_replans_critical_failure(tmp_path: Path):
+    """Agent card on_fail.*.next_phase should drive failure routing."""
+    state = _make_state("standard", current_phase="review")
+    state["phases"]["plan"]["status"] = "completed"
+    state["phases"]["review"]["status"] = "in_progress"
+    state["gates"]["G1"]["passed"] = True
+    _write_workflow_state(tmp_path, state)
+    cards_dir = tmp_path / ".workflow" / "agent-cards"
+    cards_dir.mkdir(parents=True, exist_ok=True)
+    (cards_dir / "review.json").write_text(
+        json.dumps(
+            {
+                "name": "phase-review",
+                "retry": {"max": 2},
+                "gate": {
+                    "id": "G2",
+                    "on_fail": {"critical_found": {"next_phase": "plan"}},
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    replanned = apply_gate_result(
+        str(tmp_path),
+        "review",
+        False,
+        failure_context={"has_critical": True},
+    )
+
+    assert replanned["currentPhase"] == "plan"
+    assert replanned["phases"]["plan"]["status"] == "pending"
+    assert replanned["phases"]["review"]["status"] == "pending"
+    assert replanned["gates"]["G1"]["passed"] is None
+    assert replanned["gates"]["G2"]["passed"] is None
+    assert replanned["loop"]["replanCount"] == 1
+    assert replanned["history"][-1]["action"] == "replanned"
+
+
 # ===========================================================================
 # WF-TEST-006: risk-based 투자 차등
 # ===========================================================================
