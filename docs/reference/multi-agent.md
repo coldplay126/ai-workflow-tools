@@ -13,7 +13,7 @@
 | `awf` | workflow/gate/control plane. `.workflow`, `.ai-context`, `.awf-operations`의 canonical state를 소유 | 구현됨 |
 | `inline` | 같은 프로세스에서 provider 호출을 병렬/순차 실행 | 구현됨 |
 | `cmux-agent` | 여러 터미널 surface와 worker lifecycle 관리 | 구현됨 |
-| `Pi` | per-worker terminal harness 후보. session tree/context engineering은 Pi가 소유하고, awf는 gate/state/provenance만 소유 | 감지만 구현, backend adapter는 계획 |
+| `Pi` | per-worker terminal harness 후보. session tree/context engineering은 Pi가 소유하고, awf는 gate/state/provenance만 소유 | 감지 + print-mode adapter skeleton 구현, dispatch backend 연결은 계획 |
 
 ### 패턴 비교
 
