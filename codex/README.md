@@ -25,6 +25,7 @@
 cd ~/Documents/GitHub/<repo>
 ../ai-workflow-tools/codex/run-wf.sh status
 ../ai-workflow-tools/codex/run-wf.sh dispatch
+../ai-workflow-tools/codex/run-wf.sh preflight review codex
 ../ai-workflow-tools/codex/run-wf.sh phase review
 ../ai-workflow-tools/codex/run-wf.sh prompt review claude:sonnet
 ../ai-workflow-tools/codex/run-wf.sh run-secondary review claude:sonnet
@@ -54,12 +55,19 @@ Codex runner는 `provider-config.json`의 `fallback_chain`을 보고 다음 prov
 현재 `run-wf.sh`는 다음까지 지원합니다.
 
 - `awf ready --gate workflow-run` preflight
+- `awf wf next --dry-run --output-format json` 기반 phase/provider/prompt 검증
 - `.workflow` 상태 읽기
 - phase별 secondary provider 해석
 - delegated self-contained prompt 생성
 - Claude CLI provider 실행 결과 저장
 
+`preflight`, `dispatch`, `phase`, `prompt`, `run-secondary`, `apply-secondary`
+명령은 Claude skill과 같은 deterministic preflight contract를 공유합니다.
+공통 계약은
+[`claude/skills/wf-orchestrator/reference/deterministic-preflight.md`](../claude/skills/wf-orchestrator/reference/deterministic-preflight.md)
+를 기준으로 합니다.
+
 아직 지원하지 않는 것:
 
-- `verification-report.md` 같은 artifact 자동 반영
+- provider 실행 직후 자동 artifact 반영 orchestration (`apply-secondary`는 review/verify 수동 반영 지원)
 - dual merge / format retry 자동화

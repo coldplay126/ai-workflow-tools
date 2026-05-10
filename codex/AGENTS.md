@@ -5,16 +5,20 @@ WF 파이프라인에서 Codex가 Slave로 호출될 때의 규칙입니다.
 ## Host Preflight
 
 Codex가 slave가 아니라 사용자 repo의 host로 `ai-workflow-tools`를 직접 실행할 때는 작업 전 repo root에서 matching gate를 먼저 실행합니다.
+Workflow 실행 경로는 Claude skill과 같은 deterministic preflight contract를 사용합니다:
+`claude/skills/wf-orchestrator/reference/deterministic-preflight.md`.
 
 ```bash
 awf ready --gate inspect --repo-root . --json
 awf ready --gate analysis --repo-root . --json
 awf ready --gate workflow-init --repo-root . --json
 awf ready --gate workflow-run --repo-root . --json
+awf wf next --repo-root . --dry-run --output-format json
 awf ready --gate operations --repo-root . --json
 ```
 
 exit code `0`만 전체 실행을 허용합니다. exit code `10`은 dry-run/status만 허용하고, exit code `20`은 중단 후 `gate.recommended_next`를 따릅니다.
+provider 호출, `run-secondary`, `apply-secondary`는 dry-run JSON이 phase/provider/prompt를 명확히 보여주고 gate가 allow일 때만 수행합니다.
 
 ## 실행 환경
 - sandbox: `read-only`
