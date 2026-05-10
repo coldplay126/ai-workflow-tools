@@ -8,6 +8,10 @@ from pathlib import Path
 from fixture_support import ROOT, REVIEW_RESULT, awf_env
 
 
+KO_ONBOARDING = ROOT / "docs" / "manuals" / "09-colleague-onboarding.ko.md"
+EN_ONBOARDING = ROOT / "docs" / "manuals" / "09-colleague-onboarding.en.md"
+
+
 def _run_awf(
     repo_root: Path,
     *args: str,
@@ -154,3 +158,20 @@ def test_colleague_onboarding_golden_path_is_deterministic(
     assert next_payload["provider"] == "fixture"
     assert next_payload["prompt"]
     assert next_payload["prompt_file"] == "(dry-run, not written)"
+
+
+def test_colleague_onboarding_docs_include_scenario_examples() -> None:
+    ko = KO_ONBOARDING.read_text(encoding="utf-8")
+    en = EN_ONBOARDING.read_text(encoding="utf-8")
+
+    for text in (ko, en):
+        assert "awf ready --repo-root ." in text
+        assert "awf scan . --no-ai" in text
+        assert "awf wf init" in text
+        assert "codex/run-wf.sh preflight review codex" in text
+        assert "pytest <" in text
+
+    assert "상황별 예시" in ko
+    assert "동료에게 말하는 예시" in ko
+    assert "Scenario Examples" in en
+    assert "Example Conversation" in en
