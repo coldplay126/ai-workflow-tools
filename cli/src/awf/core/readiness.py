@@ -146,6 +146,31 @@ def check_provider_probe(provider_name: str, config: AwfConfig) -> dict[str, Any
     return readiness_item("skip", f"no probe checker for provider: {provider_name}")
 
 
+def check_runner_readiness(runner_name: str) -> dict[str, Any]:
+    if runner_name == "pi":
+        command = os.environ.get("AWF_PI_COMMAND", "pi").strip() or "pi"
+        return {
+            "runner": runner_name,
+            "kind": "terminal_harness",
+            "installed": check_command_installed(command),
+            "configured": readiness_item(
+                "skip",
+                "Pi authentication and session state are managed by Pi; awf only detects the harness",
+            ),
+            "backend": readiness_item(
+                "skip",
+                "awf Pi execution adapter is planned; Pi is not selected as a dispatch backend yet",
+            ),
+        }
+    return {
+        "runner": runner_name,
+        "kind": "unknown",
+        "installed": readiness_item("skip", f"no readiness checker for runner: {runner_name}"),
+        "configured": readiness_item("skip", f"no readiness checker for runner: {runner_name}"),
+        "backend": readiness_item("skip", f"no awf backend registered for runner: {runner_name}"),
+    }
+
+
 def collect_doctor_report(config: AwfConfig, repo_root: str | None, *, probe: bool = False) -> dict[str, Any]:
     runtime_paths = resolve_runtime_paths(repo_root)
     provider_names = ["claude-code", "codex", "claude-sdk", "openai", "fixture"]
@@ -167,6 +192,7 @@ def collect_doctor_report(config: AwfConfig, repo_root: str | None, *, probe: bo
             "servers": [server.name for server in mcp_servers],
         },
         "providers": providers,
+        "runners": [check_runner_readiness("pi")],
         "dispatch": _collect_dispatch_status(repo_root),
     }
 

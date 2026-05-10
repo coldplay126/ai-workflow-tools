@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from awf.commands.ready import run_ready
@@ -122,17 +123,26 @@ def test_collect_ready_report_recommends_subproject_scan(tmp_path: Path, monkeyp
 def test_run_ready_json_and_human_output(tmp_path: Path, monkeypatch, capsys) -> None:
     repo, skills = _prepare_repo(tmp_path)
     monkeypatch.setenv("AWF_SKILLS_DIR", str(skills))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    pi = bin_dir / "pi"
+    pi.write_text("#!/bin/sh\necho pi\n", encoding="utf-8")
+    pi.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
 
     rc = run_ready(argparse.Namespace(repo_root=str(repo), json=True, probe=False))
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["repo_root"] == str(repo.resolve())
     assert payload["capabilities"][0]["name"] == "inspect"
+    assert payload["doctor"]["runners"][0]["runner"] == "pi"
+    assert payload["doctor"]["runners"][0]["installed"]["status"] == "ok"
 
     rc = run_ready(argparse.Namespace(repo_root=str(repo), json=False, probe=False))
     assert rc == 0
     out = capsys.readouterr().out
     assert "automation_level: 2 (provider execution)" in out
+    assert "runners: pi=ok" in out
     assert "recommended_next:" in out
 
 

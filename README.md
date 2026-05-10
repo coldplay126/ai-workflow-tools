@@ -125,6 +125,7 @@ Optional snippets:
 - `.workflow/` holds phase state and artifacts for gated feature work.
 - `.ai-context/` holds generated analysis output.
 - Provider adapters normalize Claude, Codex, OpenAI, subprocess, and fixture execution.
+- Runner backends stay separate from workflow state: inline dispatch and cmux-agent manage execution surfaces, while Pi is detected as a planned terminal harness integration.
 - The same contracts can be driven from Claude skills, Codex runner scripts, or the `awf` CLI.
 
 ## Import Notes
