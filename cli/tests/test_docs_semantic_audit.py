@@ -4,7 +4,7 @@ import argparse
 import json
 import re
 import shlex
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from awf.cli import KNOWN_COMMANDS, build_parser
 from awf.core.state import PHASE_GATE, PHASE_ORDER
@@ -12,11 +12,15 @@ from awf.core.state import PHASE_GATE, PHASE_ORDER
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CLI_README = REPO_ROOT / "cli" / "README.md"
+AGENT_CARDS_DIR = (
+    REPO_ROOT / "claude" / "skills" / "wf-orchestrator" / "templates" / "agent-cards"
+)
 SKILL_COMMAND_RE = re.compile(r"^\s+command:\s*[\"']?(.+?)[\"']?\s*$", re.MULTILINE)
 TEMPLATE_ARG_RE = re.compile(r"\{[^}]+\}")
 FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---", re.DOTALL)
 TOP_LEVEL_SCALAR_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*):\s*(.*?)\s*$")
 STALE_WF_ALIAS_RE = re.compile(r"/wf(?:\.|\b(?!-))")
+KNOWN_GATE_IDS = {gate for gate in PHASE_GATE.values() if gate is not None}
 
 
 def _subparser_action(
@@ -56,6 +60,14 @@ def _skill_files() -> tuple[Path, ...]:
     return tuple(sorted((REPO_ROOT / "claude" / "skills").glob("*/SKILL.md")))
 
 
+def _agent_card_files() -> tuple[Path, ...]:
+    return tuple(sorted(AGENT_CARDS_DIR.glob("*.json")))
+
+
+def _load_agent_card(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def _skill_frontmatter(path: Path) -> dict[str, str]:
     text = path.read_text(encoding="utf-8")
     match = FRONTMATTER_RE.match(text)
@@ -84,6 +96,16 @@ def _resolve_repo_template_path(value: str) -> Path:
     if value.startswith("repo/"):
         return REPO_ROOT / value.removeprefix("repo/")
     return REPO_ROOT / value
+
+
+def _is_workflow_relative_path(value: str) -> bool:
+    path = PurePosixPath(value)
+    return (
+        bool(value)
+        and "\\" not in value
+        and not path.is_absolute()
+        and ".." not in path.parts
+    )
 
 
 def test_known_commands_match_argparse_surface() -> None:
@@ -211,6 +233,167 @@ def test_workflow_phase_skill_contract_templates_exist_and_match_gates() -> None
                 f"{path.relative_to(REPO_ROOT)} card.gate.id="
                 f"{((card.get('gate') or {}).get('id'))!r} expected={expected_gate!r}"
             )
+
+    assert invalid == []
+
+
+def test_workflow_agent_cards_exist_for_every_phase() -> None:
+    expected = sorted(f"{phase}.json" for phase in PHASE_ORDER)
+    actual = [path.name for path in _agent_card_files()]
+    assert actual == expected
+
+
+def test_workflow_agent_card_identity_and_gate_ids_match_state_contracts() -> None:
+    invalid: list[str] = []
+    for path in _agent_card_files():
+        phase = path.stem
+        card = _load_agent_card(path)
+        expected_gate = PHASE_GATE.get(phase)
+        gate = card.get("gate") or {}
+
+        if phase not in PHASE_ORDER:
+            invalid.append(f"{path.relative_to(REPO_ROOT)} unknown phase={phase!r}")
+        if card.get("name") != f"phase-{phase}":
+            invalid.append(
+                f"{path.relative_to(REPO_ROOT)} name={card.get('name')!r}"
+            )
+        if gate.get("id") != expected_gate:
+            invalid.append(
+                f"{path.relative_to(REPO_ROOT)} gate.id={gate.get('id')!r} "
+                f"expected={expected_gate!r}"
+            )
+        pass_conditions = gate.get("pass_conditions")
+        if not isinstance(pass_conditions, list) or not pass_conditions:
+            invalid.append(
+                f"{path.relative_to(REPO_ROOT)} missing non-empty pass_conditions"
+            )
+
+    assert invalid == []
+
+
+def test_workflow_agent_card_pass_transitions_follow_phase_order() -> None:
+    invalid: list[str] = []
+    for path in _agent_card_files():
+        phase = path.stem
+        card = _load_agent_card(path)
+        gate = card.get("gate") or {}
+        expected_next = None
+        if phase in PHASE_ORDER:
+            phase_index = PHASE_ORDER.index(phase)
+            if phase_index + 1 < len(PHASE_ORDER):
+                expected_next = PHASE_ORDER[phase_index + 1]
+
+        on_pass = gate.get("on_pass") or {}
+        if on_pass.get("next_phase") != expected_next:
+            invalid.append(
+                f"{path.relative_to(REPO_ROOT)} on_pass.next_phase="
+                f"{on_pass.get('next_phase')!r} expected={expected_next!r}"
+            )
+
+        on_fail = gate.get("on_fail") or {}
+        for condition, action in on_fail.items():
+            if not isinstance(action, dict):
+                invalid.append(
+                    f"{path.relative_to(REPO_ROOT)} on_fail.{condition} not object"
+                )
+                continue
+            next_phase = action.get("next_phase")
+            if next_phase is not None and next_phase not in PHASE_ORDER:
+                invalid.append(
+                    f"{path.relative_to(REPO_ROOT)} on_fail.{condition}.next_phase="
+                    f"{next_phase!r}"
+                )
+
+    assert invalid == []
+
+
+def test_workflow_agent_card_required_state_gates_are_known_predecessors() -> None:
+    gate_to_phase = {
+        gate: phase for phase, gate in PHASE_GATE.items() if gate is not None
+    }
+    invalid: list[str] = []
+    for path in _agent_card_files():
+        phase = path.stem
+        card = _load_agent_card(path)
+        required_state = (card.get("input") or {}).get("required_state") or {}
+        gates = required_state.get("gates") or {}
+        if not isinstance(gates, dict):
+            invalid.append(
+                f"{path.relative_to(REPO_ROOT)} required_state.gates not object"
+            )
+            continue
+        if phase not in PHASE_ORDER:
+            invalid.append(f"{path.relative_to(REPO_ROOT)} unknown phase={phase!r}")
+            continue
+
+        phase_index = PHASE_ORDER.index(phase)
+        for gate_id in gates:
+            if gate_id not in KNOWN_GATE_IDS:
+                invalid.append(
+                    f"{path.relative_to(REPO_ROOT)} unknown required gate={gate_id!r}"
+                )
+                continue
+            gate_phase = gate_to_phase[gate_id]
+            if PHASE_ORDER.index(gate_phase) >= phase_index:
+                invalid.append(
+                    f"{path.relative_to(REPO_ROOT)} required gate={gate_id!r} "
+                    f"does not precede phase={phase!r}"
+                )
+
+    assert invalid == []
+
+
+def test_workflow_agent_card_agent_definitions_exist() -> None:
+    invalid: list[str] = []
+    for path in _agent_card_files():
+        card = _load_agent_card(path)
+        agent = card.get("agent")
+        if agent is None:
+            continue
+        if not isinstance(agent, dict):
+            invalid.append(f"{path.relative_to(REPO_ROOT)} agent not object")
+            continue
+        definition = agent.get("definition")
+        if not isinstance(definition, str) or not definition:
+            invalid.append(f"{path.relative_to(REPO_ROOT)} missing agent.definition")
+            continue
+        if not (REPO_ROOT / definition).is_file():
+            invalid.append(
+                f"{path.relative_to(REPO_ROOT)} missing agent.definition={definition!r}"
+            )
+
+    assert invalid == []
+
+
+def test_workflow_agent_card_required_and_output_paths_are_workflow_relative() -> None:
+    invalid: list[str] = []
+    for path in _agent_card_files():
+        card = _load_agent_card(path)
+        sections = (
+            (
+                "input.required_artifacts",
+                (card.get("input") or {}).get("required_artifacts"),
+            ),
+            ("output.artifacts", (card.get("output") or {}).get("artifacts")),
+        )
+        for section, artifacts in sections:
+            if not isinstance(artifacts, list) or not artifacts:
+                invalid.append(f"{path.relative_to(REPO_ROOT)} {section} missing list")
+                continue
+            for artifact in artifacts:
+                if not isinstance(artifact, dict):
+                    invalid.append(
+                        f"{path.relative_to(REPO_ROOT)} {section} entry not object"
+                    )
+                    continue
+                artifact_path = artifact.get("path")
+                if not isinstance(artifact_path, str) or not _is_workflow_relative_path(
+                    artifact_path
+                ):
+                    invalid.append(
+                        f"{path.relative_to(REPO_ROOT)} {section} "
+                        f"{artifact.get('key', '<unknown>')}.path={artifact_path!r}"
+                    )
 
     assert invalid == []
 
