@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import json
 import os
 import subprocess
 import shutil
@@ -325,6 +326,139 @@ def collect_doctor_report(config: AwfConfig, repo_root: str | None, *, probe: bo
     }
 
 
+def _dispatch_provider_config_path(repo_root: str | None) -> Path:
+    cwd = Path(repo_root or os.getcwd())
+    return cwd / ".workflow" / "provider-config.json"
+
+
+def _collect_dispatch_preference(repo_root: str | None) -> dict[str, Any]:
+    from awf.core.dispatch import resolve_preference_from_config
+
+    path = _dispatch_provider_config_path(repo_root)
+    base: dict[str, Any] = {
+        "provider_config_path": str(path),
+        "provider_config_exists": path.is_file(),
+        "surface_preference": "auto",
+        "raw_surface_preference": None,
+        "source": "default",
+        "status": "default",
+        "detail": (
+            "no workflow provider-config found; dispatch surface preference "
+            "defaults to auto"
+        ),
+    }
+    if not path.is_file():
+        return base
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {
+            **base,
+            "provider_config_exists": True,
+            "source": "invalid_provider_config",
+            "status": "invalid",
+            "detail": f"provider-config could not be parsed; using auto: {exc}",
+        }
+    if not isinstance(data, dict):
+        return {
+            **base,
+            "provider_config_exists": True,
+            "source": "invalid_provider_config",
+            "status": "invalid",
+            "detail": "provider-config root is not an object; using auto",
+        }
+
+    section = data.get("dispatch", {})
+    if "dispatch" in data and not isinstance(section, dict):
+        return {
+            **base,
+            "provider_config_exists": True,
+            "source": "invalid_provider_config",
+            "status": "invalid",
+            "detail": "provider-config dispatch section is not an object; using auto",
+        }
+    raw_value = None
+    if isinstance(section, dict) and "surface_preference" in section:
+        raw_value = section.get("surface_preference")
+    resolved = resolve_preference_from_config(data)
+    raw_text = None if raw_value is None else str(raw_value)
+    if raw_value is None:
+        return {
+            **base,
+            "provider_config_exists": True,
+            "source": "provider_config_default",
+            "status": "default",
+            "detail": (
+                "provider-config exists but dispatch.surface_preference is "
+                "unset; using auto"
+            ),
+        }
+    normalized = raw_text.strip().lower() if raw_text is not None else ""
+    if normalized != resolved:
+        return {
+            **base,
+            "provider_config_exists": True,
+            "surface_preference": resolved,
+            "raw_surface_preference": raw_text,
+            "source": "invalid_provider_config",
+            "status": "invalid",
+            "detail": (
+                "unsupported dispatch.surface_preference "
+                f"{raw_text!r}; using auto"
+            ),
+        }
+    return {
+        **base,
+        "provider_config_exists": True,
+        "surface_preference": resolved,
+        "raw_surface_preference": raw_text,
+        "source": "provider_config",
+        "status": "configured",
+        "detail": f"provider-config requests dispatch.surface_preference={resolved}",
+    }
+
+
+def _dispatch_preference_readiness(
+    preference: str,
+    *,
+    cmux_backend_ready: bool,
+    cmux_on_path: bool,
+    pi_backend_ready: bool,
+) -> dict[str, Any]:
+    if preference == "inline":
+        return readiness_item("ok", "inline dispatch is always available")
+    if preference == "auto":
+        return readiness_item(
+            "ok",
+            "auto dispatch can always fall back to inline",
+        )
+    if preference == "cmux":
+        if cmux_backend_ready:
+            return readiness_item("ok", "cmux dispatch preference is ready")
+        detail = (
+            "cmux-agent is on PATH but no active cmux backend is ready; "
+            "dispatch falls back to inline"
+            if cmux_on_path
+            else "cmux dispatch requested but cmux-agent is not on PATH; "
+            "dispatch falls back to inline"
+        )
+        return readiness_item("caution", detail)
+    if preference == "pi":
+        if pi_backend_ready:
+            return readiness_item("ok", "Pi dispatch preference is ready")
+        return readiness_item(
+            "caution",
+            (
+                "Pi dispatch requested but pi is not on PATH; dispatch falls "
+                "back to inline"
+            ),
+        )
+    return readiness_item(
+        "caution",
+        f"unsupported dispatch preference {preference}; dispatch falls back to inline",
+    )
+
+
 def _collect_dispatch_status(repo_root: str | None = None) -> dict[str, Any]:
     """Snapshot which dispatch backends are usable for ``repo_root``.
 
@@ -345,6 +479,8 @@ def _collect_dispatch_status(repo_root: str | None = None) -> dict[str, Any]:
     cmux_on_path = shutil.which("cmux-agent") is not None
     cmux_backend_ready = cmux_dispatch_available(cwd)
     pi_backend_ready = pi_dispatch_available()
+    preference = _collect_dispatch_preference(repo_root)
+    preference_name = str(preference.get("surface_preference") or "auto")
     available_surfaces = [SURFACE_INLINE]
     if cmux_backend_ready:
         available_surfaces.append(SURFACE_CMUX)
@@ -358,6 +494,13 @@ def _collect_dispatch_status(repo_root: str | None = None) -> dict[str, Any]:
         "pi_backend_ready": pi_backend_ready,
         "cwd_checked": str(cwd),
         "available_surfaces": available_surfaces,
+        "surface_preference": preference,
+        "surface_preference_ready": _dispatch_preference_readiness(
+            preference_name,
+            cmux_backend_ready=cmux_backend_ready,
+            cmux_on_path=cmux_on_path,
+            pi_backend_ready=pi_backend_ready,
+        ),
     }
 
 

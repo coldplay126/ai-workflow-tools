@@ -91,6 +91,14 @@ def run_ready(args: argparse.Namespace) -> int:
             f"(version={version.get('status')}, "
             f"surface={pi_readiness.get('dispatch_surface')})"
         )
+    dispatch = payload.get("doctor", {}).get("dispatch", {}) or {}
+    preference = dispatch.get("surface_preference", {}) or {}
+    preference_ready = dispatch.get("surface_preference_ready", {}) or {}
+    if preference:
+        print(
+            f"  dispatch: preference={preference.get('surface_preference')} "
+            f"({preference_ready.get('status')})"
+        )
     print("")
     print("capabilities:")
     for cap in payload["capabilities"]:
