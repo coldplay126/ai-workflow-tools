@@ -208,5 +208,7 @@ python3 cli/tests/run_pi_field_smoke.py --npm-exec --json --write-result
 와 `billing_context: "anthropic_extra_usage"`는 Claude Extra Usage 한도
 부족을 뜻합니다. `--write-result`는 최신 결과를
 `.awf-operations/pi-field-smoke/latest.json`에 저장하고, `awf doctor` /
-`awf ready`가 이를 요약합니다. 자세한 판정 기준은
+`awf ready`가 이를 요약합니다. `awf ready`는 24시간이 지난 결과를 stale로
+보고 재검증을 추천하며, provider auth/quota 실패를 `recommended_next`에
+반영합니다. 자세한 판정 기준은
 [Pi Field Validation](./pi-field-validation.md)을 참고합니다.

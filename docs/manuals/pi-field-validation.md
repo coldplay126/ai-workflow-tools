@@ -78,6 +78,10 @@ When `--write-result` is used, the latest result is stored at
 `.awf-operations/pi-field-smoke/latest.json`. `awf doctor --repo-root . --json`
 and `awf ready --repo-root . --json` summarize that latest result under
 `pi_readiness.last_field_smoke`, including `ok`, `reason`, and `recorded_at`.
+`awf ready` treats results older than 24 hours as stale and recommends a fresh
+field smoke before relying on Pi dispatch. Blocking reasons such as
+`provider_quota_exhausted` or `missing_provider_auth` are also promoted into
+`recommended_next` so Pi remains opt-in until the provider path is fixed.
 
 ### Anthropic subscription auth
 

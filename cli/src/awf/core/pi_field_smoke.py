@@ -11,10 +11,23 @@ from awf.core.operational_metrics import operations_root
 ARTIFACT_SCHEMA = "awf_pi_field_smoke_latest_v1"
 PI_FIELD_SMOKE_DIR = "pi-field-smoke"
 LATEST_RESULT = "latest.json"
+STALE_AFTER_HOURS = 24
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def pi_field_smoke_latest_path(repo_root: str | Path) -> Path:
@@ -43,7 +56,11 @@ def write_pi_field_smoke_result(
     return target
 
 
-def read_pi_field_smoke_summary(repo_root: str | Path) -> dict[str, Any]:
+def read_pi_field_smoke_summary(
+    repo_root: str | Path,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
     path = pi_field_smoke_latest_path(repo_root)
     base: dict[str, Any] = {
         "status": "missing",
@@ -85,6 +102,18 @@ def read_pi_field_smoke_summary(repo_root: str | Path) -> dict[str, Any]:
             "detail": "latest Pi field smoke payload is not an object",
         }
 
+    recorded_at = data.get("recorded_at")
+    recorded_dt = _parse_iso_datetime(recorded_at)
+    age_hours = None
+    stale = True
+    stale_reason = "recorded_at_missing_or_invalid"
+    if recorded_dt is not None:
+        effective_now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        age_seconds = max((effective_now - recorded_dt).total_seconds(), 0)
+        age_hours = round(age_seconds / 3600, 2)
+        stale = age_hours > STALE_AFTER_HOURS
+        stale_reason = "older_than_threshold" if stale else "fresh"
+
     diagnosis = (
         payload.get("diagnosis")
         if isinstance(payload.get("diagnosis"), dict)
@@ -94,11 +123,17 @@ def read_pi_field_smoke_summary(repo_root: str | Path) -> dict[str, Any]:
         **base,
         "status": "found",
         "schema": data.get("schema"),
-        "recorded_at": data.get("recorded_at"),
+        "recorded_at": recorded_at,
+        "stale": stale,
+        "stale_reason": stale_reason,
+        "age_hours": age_hours,
+        "stale_after_hours": STALE_AFTER_HOURS,
         "ok": bool(payload.get("ok")),
         "reason": payload.get("reason"),
         "diagnosis_kind": diagnosis.get("kind"),
-        "billing_context": payload.get("billing_context") or diagnosis.get("billing_context"),
+        "billing_context": (
+            payload.get("billing_context") or diagnosis.get("billing_context")
+        ),
         "next_action": payload.get("next_action") or diagnosis.get("next_action"),
         "pi_command_source": payload.get("pi_command_source"),
         "pi_command": payload.get("pi_command"),
