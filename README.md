@@ -154,7 +154,7 @@ uv run --project cmux-agent --group dev python -m pytest cmux-agent/tests -q
 - `.workflow/`는 gated feature 작업의 phase state와 artifact를 보관합니다.
 - `.ai-context/`는 분석 결과와 resume/incremental 상태를 보관합니다.
 - `.awf-operations/`는 운영 evidence와 후속 판단 입력을 보관합니다.
-- provider adapter는 Claude, Codex, OpenAI, subprocess, fixture 실행을 정규화합니다.
+- provider adapter는 Claude, Codex, Gemini, OpenAI, subprocess, fixture 실행을 정규화합니다.
 - runner backend는 workflow state와 분리됩니다. inline/cmux/Pi는 실행 surface이고, awf state가 canonical source입니다.
 - 멀티에이전트는 별도 상태 저장소가 아니라 review/verify/analyze 구간에서 신뢰도를 높이는 실행 전략입니다.
 
@@ -389,7 +389,7 @@ Optional snippets:
 - `.workflow/` holds phase state and artifacts for gated feature work.
 - `.ai-context/` holds generated analysis output plus resume and incremental state.
 - `.awf-operations/` holds operating evidence and follow-up decision inputs.
-- Provider adapters normalize Claude, Codex, OpenAI, subprocess, and fixture execution.
+- Provider adapters normalize Claude, Codex, Gemini, OpenAI, subprocess, and fixture execution.
 - Runner backends stay separate from workflow state: inline dispatch, cmux-agent, and Pi manage execution surfaces while awf remains the canonical state owner.
 - Multi-agent mode is an execution strategy for review, verify, and analysis confidence, not a separate state store.
 - The same contracts can be driven from Claude skills, Codex runner scripts, or the `awf` CLI.
