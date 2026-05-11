@@ -1,6 +1,6 @@
 # awf-cli
 
-`awf-cli`는 `ai-workflow-tools`의 도구 중립 코어 계약을 Python 진입점으로 노출하는 실험적 CLI입니다. 현재 운영 우선 대상은 `claude-code`, `codex`, `fixture`이며 `claude-sdk`와 `openai`는 optional provider입니다.
+`awf-cli`는 `ai-workflow-tools`의 도구 중립 코어 계약을 Python 진입점으로 노출하는 실험적 CLI입니다. 현재 운영 우선 대상은 `claude-code`, `codex`, `gemini`, `fixture`이며 `claude-sdk`와 `openai`는 optional provider입니다.
 
 현재 상태 요약:
 - `ready`/`doctor`: repo-level deterministic preflight, runtime diagnostics, dispatch surface/Pi readiness 요약을 제공
@@ -248,12 +248,17 @@ max_output_tokens = 8192
 command = "codex"
 flags = ["exec", "--sandbox", "workspace-write"]
 
+[provider.gemini]
+command = "gemini"
+flags = ["--output-format", "text"]
+model = ""
+
 [paths]
 analysis_docs = "~/Documents/GitHub/analysis-docs"
 awf_github = "~/Documents/GitHub"
 
 [permissions]
-allowed_tools = ["provider:claude-code", "provider:codex", "provider:fixture", "provider:claude-sdk", "provider:openai", "tool:file.read", "tool:file.glob", "tool:file.grep", "tool:git.diff", "tool:git.log"]
+allowed_tools = ["provider:claude-code", "provider:codex", "provider:gemini", "provider:fixture", "provider:claude-sdk", "provider:openai", "tool:file.read", "tool:file.glob", "tool:file.grep", "tool:git.diff", "tool:git.log"]
 disabled_tools = []
 yolo = false
 ```
@@ -263,6 +268,7 @@ yolo = false
 - `claude-sdk`
 - `openai`
 - `codex`
+- `gemini`
 - `fixture` (테스트용)
 
 `claude-sdk`는 optional provider입니다. 사용하려면 `anthropic` 패키지와 API key가 필요합니다.
@@ -277,6 +283,7 @@ yolo = false
 - `server`는 명시 가능하지만, `[mcp_defaults]`가 설정돼 있으면 provider tool 호출에서 생략할 수 있음
 MCP-backed tool guidance는 [awf CLI architecture](../docs/architecture/awf-cli-architecture.md)의 구현 메모와 위 원칙을 기준으로 유지합니다.
 `codex`는 현재 `wf next --provider codex` 경로와 review/verify 검증에 맞춰져 있습니다.
+`gemini`는 Gemini CLI 기반 provider입니다. 모델을 비워두면 Gemini CLI Auto에 맡기고, 특정 모델을 고정할 때만 `provider.gemini.model` 또는 `AWF_GEMINI_MODEL`을 설정합니다.
 `openai`도 optional provider이지만 현재는 실운영 우선순위 밖의 experimental provider입니다.
 `analyze`와 `wf next`는 provider 실행 전에 `permissions`를 검사합니다. `claude-sdk`와 `openai`의 tool loop는 `tool:file.read`, `tool:file.glob`, `tool:file.grep`, `tool:git.diff`, `tool:git.log` 권한도 함께 검사합니다. 필요하면 `--yolo`로 일시 우회할 수 있습니다.
 `claude-code`는 기본적으로 Claude Code의 `default` permission mode를 사용합니다. 자동화 환경에서 권한 확인을 우회해야 할 때만 `--yolo`를 사용하면 `bypassPermissions`로 전환됩니다.

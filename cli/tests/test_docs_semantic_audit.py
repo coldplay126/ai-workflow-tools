@@ -7,6 +7,7 @@ import shlex
 from pathlib import Path, PurePosixPath
 
 from awf.cli import KNOWN_COMMANDS, build_parser
+from awf.core.config import AwfConfig
 from awf.core.state import PHASE_GATE, PHASE_ORDER
 
 
@@ -128,6 +129,27 @@ def test_cli_readme_mentions_current_command_surface() -> None:
             needle = f"awf {command} {subcommand}"
             if needle not in readme:
                 missing.append(needle)
+
+    assert missing == []
+
+
+def test_readmes_mention_builtin_providers() -> None:
+    cli_readme = CLI_README.read_text(encoding="utf-8")
+    root_readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    builtin_providers = sorted(
+        key
+        for key, value in AwfConfig.defaults().raw.get("provider", {}).items()
+        if isinstance(value, dict) and key not in {"aliases"}
+    )
+
+    missing: list[str] = []
+    for provider in builtin_providers:
+        if f"`{provider}`" not in cli_readme and f"provider:{provider}" not in cli_readme:
+            missing.append(f"cli/README.md provider={provider}")
+
+    for display_name in ("Claude", "Codex", "Gemini", "OpenAI", "fixture"):
+        if display_name not in root_readme:
+            missing.append(f"README.md provider_display={display_name}")
 
     assert missing == []
 
