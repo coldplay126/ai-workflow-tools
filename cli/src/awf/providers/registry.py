@@ -9,6 +9,7 @@ from awf.providers.claude_code import ClaudeCodeProvider
 from awf.providers.claude_sdk import ClaudeSdkProvider
 from awf.providers.codex import CodexProvider
 from awf.providers.fixture import FixtureProvider
+from awf.providers.gemini import GeminiProvider
 from awf.providers.openai import OpenAiProvider
 
 ProviderFactory = Callable[[AwfConfig], Provider]
@@ -28,6 +29,7 @@ class ProviderRegistry:
             "claude-sdk": self._create_claude_sdk,
             "codex": self._create_codex,
             "fixture": self._create_fixture,
+            "gemini": self._create_gemini,
             "openai": self._create_openai,
         }
         self._custom: dict[str, ProviderFactory] = {}
@@ -120,6 +122,17 @@ class ProviderRegistry:
         settings = config.provider_settings("fixture")
         result_file = settings.get("result_file", "")
         return FixtureProvider(str(result_file))
+
+    def _create_gemini(self, config: AwfConfig) -> Provider:
+        settings = config.provider_settings("gemini")
+        command = settings.get("command")
+        flags = settings.get("flags")
+        model = settings.get("model")
+        return GeminiProvider(
+            command=str(command) if command else None,
+            flags=list(flags) if isinstance(flags, list) else None,
+            model=str(model) if model is not None else None,
+        )
 
     def _create_openai(self, config: AwfConfig) -> Provider:
         settings = config.provider_settings("openai")

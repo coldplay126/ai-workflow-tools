@@ -7,7 +7,7 @@ from argparse import Namespace
 from pathlib import Path
 
 from cmux_agent.cli import commands as command_module
-from cmux_agent.domain.models import Agent, AgentRole, RunStatus
+from cmux_agent.domain.models import Agent, AgentRole, Run, RunStatus
 from cmux_agent.infrastructure.cmux import CmuxResult
 from cmux_agent.infrastructure.filesystem import AgentFileSystem
 from cmux_agent.infrastructure.storage import StateStore
@@ -111,6 +111,32 @@ def _send_texts(fake: FakeCmux) -> list[dict]:
     return [payload for name, payload in fake.calls if name == "send_text"]
 
 
+def test_send_creates_unique_dispatch_artifacts(tmp_path, monkeypatch):
+    monkeypatch.setattr(command_module, "_active_cwd", str(tmp_path))
+
+    fs = AgentFileSystem(tmp_path / ".agent")
+    fs.init()
+    store = StateStore(fs.db_path)
+    run = Run(run_id="run-1", status=RunStatus.RUNNING, workspace_id="workspace:1")
+    store.save_run(run)
+    store.save_agent(
+        Agent(
+            run_id=run.run_id,
+            role=AgentRole.WORKER,
+            name="worker-1",
+            surface_id="surface:1",
+        )
+    )
+
+    command_module.cmd_send(Namespace(recipient="worker-1", message="first"))
+    command_module.cmd_send(Namespace(recipient="worker-1", message="second"))
+
+    artifacts = sorted(fs.outbox.glob("*-controller-dispatch.json"))
+    assert len(artifacts) == 2
+    payloads = [json.loads(path.read_text(encoding="utf-8")) for path in artifacts]
+    assert {payload["message"] for payload in payloads} == {"first", "second"}
+
+
 def test_start_task_and_spawn_preserve_template_contract(tmp_path, monkeypatch):
     fake = FakeCmux()
     monkeypatch.setattr(command_module, "CmuxAdapter", lambda: fake)
@@ -177,7 +203,7 @@ def test_start_task_and_spawn_preserve_template_contract(tmp_path, monkeypatch):
     )
     assert any(
         call["surface_id"] == "surface:3"
-        and call["text"] == "npx @openai/codex -c model_reasoning_effort=xhigh\n"
+        and call["text"] == "codex -c model_reasoning_effort=xhigh\n"
         for call in texts
     )
     assert any(
@@ -267,7 +293,7 @@ def test_start_can_attach_current_session_as_orchestrator(tmp_path, monkeypatch,
     )
     assert any(
         call["surface_id"] == "surface:2"
-        and "npx @openai/codex" in call["text"]
+        and "codex" in call["text"]
         for call in send_texts
     )
     assert any(

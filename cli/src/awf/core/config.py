@@ -63,6 +63,11 @@ class AwfConfig:
                         "command": os.environ.get("AWF_CODEX_COMMAND", "codex"),
                         "flags": ["exec", "--sandbox", "workspace-write"],
                     },
+                    "gemini": {
+                        "command": os.environ.get("AWF_GEMINI_COMMAND", "gemini"),
+                        "flags": ["--output-format", "text"],
+                        "model": os.environ.get("AWF_GEMINI_MODEL", ""),
+                    },
                     "fixture": {
                         "result_file": "",
                     },
@@ -81,6 +86,7 @@ class AwfConfig:
                         "provider:claude-sdk",
                         "provider:openai",
                         "provider:codex",
+                        "provider:gemini",
                         "provider:fixture",
                         "tool:file.read",
                         "tool:file.glob",

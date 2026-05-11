@@ -4,7 +4,7 @@ T7 uses ``unittest.mock.patch`` on the module-level ``subprocess.run`` reference
 inside ``awf.providers.subprocess_provider`` so that timeout + error paths are
 verified deterministically (no real process, no sleep).
 
-T8 adds ``@pytest.mark.live`` skeletons for the two CLI-based providers
+T8 adds ``@pytest.mark.live`` skeletons for CLI-based providers
 (``claude-code``, ``codex``). These are deselected by default via the
 ``addopts = "-m 'not live'"`` setting in ``pyproject.toml``.
 """

@@ -221,7 +221,7 @@ def test_runtime_uses_purpose_names_and_protocol_templates_for_dynamic_workers(t
     assert ".workflow/agent-cards/review.json" in protocol
     assert any(
         call["surface_id"] == "surface:3"
-        and call["text"] == "npx @openai/codex -c model_reasoning_effort=high\n"
+        and call["text"] == "codex -c model_reasoning_effort=high\n"
         for call in _calls(cmux, "send_text")
     )
 
