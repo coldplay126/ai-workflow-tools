@@ -87,6 +87,19 @@ def check_provider_readiness(provider_name: str, config: AwfConfig) -> dict[str,
             "installed": check_command_installed(command),
             "configured": readiness_item("skip", "CLI auth is not checked in doctor MVP"),
         }
+    if provider_name == "gemini":
+        command = str(settings.get("command") or os.environ.get("AWF_GEMINI_COMMAND", "gemini"))
+        model = str(settings.get("model") or os.environ.get("AWF_GEMINI_MODEL", "") or "")
+        model_detail = "auto" if model.strip().lower() in {"", "auto", "gemini-auto", "gemini"} else model
+        return {
+            "provider": provider_name,
+            "installed": check_command_installed(command),
+            "configured": readiness_item(
+                "skip",
+                f"CLI auth is not checked in doctor MVP (model={model_detail})",
+                model=model_detail,
+            ),
+        }
     if provider_name == "claude-sdk":
         env_var = str(settings.get("api_key_env") or "ANTHROPIC_API_KEY")
         return {
@@ -148,6 +161,9 @@ def check_provider_probe(provider_name: str, config: AwfConfig) -> dict[str, Any
         return check_subprocess_probe(command)
     if provider_name == "codex":
         command = str(settings.get("command") or os.environ.get("AWF_CODEX_COMMAND", "codex"))
+        return check_subprocess_probe(command)
+    if provider_name == "gemini":
+        command = str(settings.get("command") or os.environ.get("AWF_GEMINI_COMMAND", "gemini"))
         return check_subprocess_probe(command)
     if provider_name in {"claude-sdk", "openai"}:
         return readiness_item("skip", "SDK network probe is not enabled in doctor MVP")
@@ -317,7 +333,7 @@ def check_runner_readiness(
 def collect_doctor_report(config: AwfConfig, repo_root: str | None, *, probe: bool = False) -> dict[str, Any]:
     runtime_paths = resolve_runtime_paths(repo_root)
     resolved_repo_root = str(runtime_paths["repo_root"])
-    provider_names = ["claude-code", "codex", "claude-sdk", "openai", "fixture"]
+    provider_names = ["claude-code", "codex", "gemini", "claude-sdk", "openai", "fixture"]
     providers = [check_provider_readiness(name, config) for name in provider_names]
     if probe:
         for item in providers:

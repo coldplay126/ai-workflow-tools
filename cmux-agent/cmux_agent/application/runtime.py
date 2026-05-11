@@ -16,7 +16,7 @@ from cmux_agent.infrastructure.storage import StateStore
 
 
 PROVIDER_COMMANDS = {
-    "codex": "npx @openai/codex",
+    "codex": "codex",
 }
 
 

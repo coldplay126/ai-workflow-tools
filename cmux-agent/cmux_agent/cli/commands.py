@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
 from cmux_agent.application.broker import MessageBroker
@@ -1216,7 +1217,7 @@ def cmd_send(args: argparse.Namespace) -> None:
         "recipient": args.recipient,
         "message": args.message,
     }
-    artifact_name = f"{int(time.time())}-controller-dispatch.json"
+    artifact_name = f"{time.time_ns()}-{uuid.uuid4().hex[:8]}-controller-dispatch.json"
     artifact_path = fs.outbox / artifact_name
     artifact_path.write_text(
         json.dumps(artifact, ensure_ascii=False, indent=2), encoding="utf-8",

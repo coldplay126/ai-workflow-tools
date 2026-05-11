@@ -89,6 +89,11 @@ provider, skill, scan, workflow, operations wiki 상태를 한 번에 모아 현
 `collectors/`, `analyzers/`, `importers/` 같은 root-level 소스 디렉토리를
 분석 단위로 잡을 수 있습니다.
 
+Gemini CLI를 기본 provider로 쓰려면 `provider.default = "gemini"`를 설정합니다.
+`provider.gemini.model`을 비워두면 Gemini CLI Auto가 작업에 맞는 Gemini 3
+모델을 고릅니다. 특정 모델을 고정하려면 `AWF_GEMINI_MODEL=gemini-3.1-pro`
+처럼 환경변수나 `.awf.toml`로 지정합니다.
+
 ### 첫 workflow 순서
 
 처음에는 작은 gated loop로 시작합니다.
@@ -242,6 +247,10 @@ recognized from `requirements.txt`, `setup.cfg`, `Pipfile`, or `poetry.lock` in
 addition to `pyproject.toml` and `setup.py`; script-style repos without `src/`
 can still expose root-level units such as `collectors/`, `analyzers/`, and
 `importers/`.
+
+To use Gemini CLI as the default provider, set `provider.default = "gemini"`.
+Leave `provider.gemini.model` empty for Gemini CLI Auto, or set
+`AWF_GEMINI_MODEL=gemini-3.1-pro` / `.awf.toml` to pin a specific model.
 
 ### First workflow sequence
 

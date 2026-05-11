@@ -210,7 +210,7 @@ class TestBrokerRouting:
         assert payload["result"] == "spawned worker-api (codex)"
         assert any(call[0] == "new_surface" for call in cmux.calls)
         assert any(
-            call[0] == "send_text" and "npx @openai/codex" in call[1]["text"]
+            call[0] == "send_text" and call[1]["text"] == "codex\n"
             for call in cmux.calls
         )
 

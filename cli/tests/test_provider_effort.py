@@ -5,6 +5,7 @@ from unittest import mock
 
 from awf.providers.claude_code import ClaudeCodeProvider
 from awf.providers.codex import CodexProvider
+from awf.providers.gemini import GeminiProvider
 
 
 class TestClaudeCodeProviderEffort:
@@ -58,6 +59,49 @@ class TestCodexProviderEffort:
         assert ["--add-dir", "/tmp/docs"] == cmd[cmd.index("--add-dir"):cmd.index("--add-dir") + 2]
         assert ["--output-schema", "/tmp/awf-schema.json"] == cmd[cmd.index("--output-schema"):cmd.index("--output-schema") + 2]
         assert cmd[-1] == "-"
+
+
+class TestGeminiProvider:
+    def test_auto_model_omits_model_flag(self):
+        provider = GeminiProvider(command="gemini", flags=["--output-format", "text"], model="")
+        completed = SimpleNamespace(returncode=0, stdout="ok", stderr="")
+        with mock.patch("awf.providers.gemini.subprocess.run", return_value=completed) as run_mock:
+            result = provider.complete("prompt", cwd="/tmp/repo", add_dirs=["/tmp/docs"])
+
+        assert result.returncode == 0
+        cmd = run_mock.call_args.args[0]
+        assert cmd[:3] == ["gemini", "--output-format", "text"]
+        assert "--model" not in cmd
+        assert ["--include-directories", "/tmp/docs"] == cmd[
+            cmd.index("--include-directories"):cmd.index("--include-directories") + 2
+        ]
+        assert cmd[-2:] == ["--prompt", ""]
+        assert run_mock.call_args.kwargs["input"] == "prompt"
+
+    def test_explicit_model_is_passed(self):
+        provider = GeminiProvider(
+            command="gemini",
+            flags=["--output-format", "text"],
+            model="gemini-3.1-pro",
+        )
+        completed = SimpleNamespace(returncode=0, stdout="ok", stderr="")
+        with mock.patch("awf.providers.gemini.subprocess.run", return_value=completed) as run_mock:
+            provider.complete("prompt")
+
+        cmd = run_mock.call_args.args[0]
+        assert ["--model", "gemini-3.1-pro"] == cmd[
+            cmd.index("--model"):cmd.index("--model") + 2
+        ]
+
+    def test_set_permission_mode_maps_yolo(self):
+        provider = GeminiProvider(command="gemini", flags=["--output-format", "text"])
+        provider.set_permission_mode("bypassPermissions")
+        assert provider.flags == [
+            "--output-format",
+            "text",
+            "--approval-mode",
+            "yolo",
+        ]
 
 
 class TestPhaseEffort:
