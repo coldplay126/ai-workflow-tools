@@ -137,6 +137,41 @@ def test_send_creates_unique_dispatch_artifacts(tmp_path, monkeypatch):
     assert {payload["message"] for payload in payloads} == {"first", "second"}
 
 
+def test_start_uses_template_provider_fallbacks(tmp_path, monkeypatch):
+    fake = FakeCmux()
+    monkeypatch.setattr(command_module, "CmuxAdapter", lambda: fake)
+    monkeypatch.setattr(command_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(command_module, "_active_cwd", str(tmp_path))
+    monkeypatch.setattr(command_module, "_active_template_dir", None)
+    monkeypatch.setattr(
+        "cmux_agent.application.runtime.shutil.which",
+        lambda command: f"/bin/{command}" if command == "claude" else None,
+    )
+
+    command_module.cmd_start(
+        Namespace(
+            cwd=str(tmp_path),
+            template="conductor",
+            templates_dir=str(TEMPLATES_ROOT),
+        )
+    )
+
+    send_texts = _send_texts(fake)
+    assert any(call["text"] == "claude --effort max\n" for call in send_texts)
+    assert not any(call["text"].startswith("gemini ") for call in send_texts)
+    assert not any(call["text"].startswith("codex ") for call in send_texts)
+    assert any(
+        name == "log"
+        and payload["message"] == "provider fallback: worker-plan gemini -> claude"
+        for name, payload in fake.calls
+    )
+    assert any(
+        name == "log"
+        and payload["message"] == "provider fallback: worker-impl codex -> claude"
+        for name, payload in fake.calls
+    )
+
+
 def test_start_task_and_spawn_preserve_template_contract(tmp_path, monkeypatch):
     fake = FakeCmux()
     monkeypatch.setattr(command_module, "CmuxAdapter", lambda: fake)

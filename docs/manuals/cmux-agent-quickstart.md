@@ -64,6 +64,12 @@ Available built-in templates include:
 | `feature` | Full gated feature workflow | Claude orchestrator + Codex plan/review/impl/verify/test workers |
 | `conductor` | Dynamic model-aware orchestration for complex coding work | Claude orchestrator + Gemini planning, Claude review, Codex implementation/verification |
 
+Template entries can define `fallbacks`. If the requested provider CLI is not
+on `PATH`, `cmux-agent` uses the first installed fallback provider with that
+fallback's own flags. Without explicit `fallbacks`, known providers use a
+conservative built-in order: Gemini falls back to Claude then Codex, Claude
+falls back to Codex then Gemini, and Codex falls back to Claude then Gemini.
+
 The selected template is written to `.agent/template-state.json` so the separate `watch` and `spawn` processes keep using the same provider config and worker protocols.
 The controller tab starts `watch` through the same Python environment that ran
 `start`, so a stale globally installed `cmux-agent` binary is not used for the

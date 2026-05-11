@@ -1,22 +1,72 @@
 {
   "orchestrator": {
     "provider": "claude",
-    "flags": "--effort max"
+    "flags": "--effort max",
+    "fallbacks": [
+      {
+        "provider": "gemini",
+        "flags": "--skip-trust --approval-mode yolo"
+      },
+      {
+        "provider": "codex",
+        "flags": "-c model_reasoning_effort=xhigh"
+      }
+    ]
   },
   "worker-plan": {
     "provider": "gemini",
-    "flags": "--skip-trust --approval-mode yolo"
+    "flags": "--skip-trust --approval-mode yolo",
+    "fallbacks": [
+      {
+        "provider": "claude",
+        "flags": "--effort max"
+      },
+      {
+        "provider": "codex",
+        "flags": "-c model_reasoning_effort=xhigh"
+      }
+    ]
   },
   "worker-review": {
     "provider": "claude",
-    "flags": "--effort max"
+    "flags": "--effort max",
+    "fallbacks": [
+      {
+        "provider": "gemini",
+        "flags": "--skip-trust --approval-mode yolo"
+      },
+      {
+        "provider": "codex",
+        "flags": "-c model_reasoning_effort=xhigh"
+      }
+    ]
   },
   "worker-impl": {
     "provider": "codex",
-    "flags": "-c model_reasoning_effort=xhigh"
+    "flags": "-c model_reasoning_effort=xhigh",
+    "fallbacks": [
+      {
+        "provider": "claude",
+        "flags": "--effort max"
+      },
+      {
+        "provider": "gemini",
+        "flags": "--skip-trust --approval-mode yolo"
+      }
+    ]
   },
   "worker-verify": {
     "provider": "codex",
-    "flags": "-c model_reasoning_effort=xhigh"
+    "flags": "-c model_reasoning_effort=xhigh",
+    "fallbacks": [
+      {
+        "provider": "claude",
+        "flags": "--effort max"
+      },
+      {
+        "provider": "gemini",
+        "flags": "--skip-trust --approval-mode yolo"
+      }
+    ]
   }
 }

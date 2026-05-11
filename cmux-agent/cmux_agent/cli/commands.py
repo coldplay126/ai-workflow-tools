@@ -23,6 +23,7 @@ from cmux_agent.application.runtime import (
     normalize_agent_entry,
     parse_surface_ref,
     provider_command,
+    resolve_provider_selection,
 )
 from cmux_agent.application.watcher import ArtifactWatcher
 from cmux_agent.domain.events import agent_registered, run_created, run_status_changed
@@ -833,9 +834,15 @@ def cmd_start(args: argparse.Namespace) -> None:
     for agent in agents:
         if agent.role in (AgentRole.ORCHESTRATOR, AgentRole.WORKER) and agent.surface_id:
             entry = _normalize_agent_entry(config.get(agent.name, "claude"))
-            provider = entry.get("provider", "claude")
-            flags = entry.get("flags", "")
-            command = provider_command(provider, flags)
+            selected = resolve_provider_selection(entry)
+            if selected.used_fallback:
+                cmux.log(
+                    f"provider fallback: {agent.name} {selected.requested_provider} -> {selected.provider}",
+                    level="warning",
+                    source="cmux-agent",
+                    workspace_id=ws_ref,
+                )
+            command = provider_command(selected.provider, selected.flags)
             cmux.send_text(
                 f"{command}\n",
                 surface_id=agent.surface_id,
