@@ -11,7 +11,7 @@ from cmux_agent.domain.models import Agent, AgentRole
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TEMPLATES_ROOT = REPO_ROOT / "templates" / "cmux"
-PROFILES = ("feature", "bugfix", "review")
+PROFILES = ("feature", "bugfix", "review", "conductor")
 ALLOWED_PROVIDERS = {"claude", "codex", "gemini"}
 
 

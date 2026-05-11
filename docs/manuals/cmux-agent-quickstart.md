@@ -55,6 +55,15 @@ uv run --project cmux-agent cmux-agent \
   start
 ```
 
+Available built-in templates include:
+
+| Template | When to use it | Default provider shape |
+| --- | --- | --- |
+| `review` | Focused review of a diff, PR, or file set | Claude orchestrator + Codex review worker |
+| `bugfix` | Investigate and fix a known defect | Claude orchestrator + Codex investigate/fix workers |
+| `feature` | Full gated feature workflow | Claude orchestrator + Codex plan/review/impl/verify/test workers |
+| `conductor` | Dynamic model-aware orchestration for complex coding work | Claude orchestrator + Gemini planning, Claude review, Codex implementation/verification |
+
 The selected template is written to `.agent/template-state.json` so the separate `watch` and `spawn` processes keep using the same provider config and worker protocols.
 The controller tab starts `watch` through the same Python environment that ran
 `start`, so a stale globally installed `cmux-agent` binary is not used for the

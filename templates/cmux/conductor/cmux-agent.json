@@ -1,0 +1,22 @@
+{
+  "orchestrator": {
+    "provider": "claude",
+    "flags": "--effort max"
+  },
+  "worker-plan": {
+    "provider": "gemini",
+    "flags": "--skip-trust --approval-mode yolo"
+  },
+  "worker-review": {
+    "provider": "claude",
+    "flags": "--effort max"
+  },
+  "worker-impl": {
+    "provider": "codex",
+    "flags": "-c model_reasoning_effort=xhigh"
+  },
+  "worker-verify": {
+    "provider": "codex",
+    "flags": "-c model_reasoning_effort=xhigh"
+  }
+}
