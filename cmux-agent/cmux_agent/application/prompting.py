@@ -50,6 +50,9 @@ ARTIFACT_FORMAT_CONTROL_SPAWN = {
         "name": "<선택: 명시 이름이 꼭 필요할 때만>",
         "provider": "claude|codex|gemini",
         "flags": "<선택>",
+        "fallbacks": [
+            {"provider": "claude|codex|gemini", "flags": "<선택>"}
+        ],
     },
 }
 
@@ -321,6 +324,7 @@ class PromptBuilder:
                 "- 작업 규모를 분석해 병렬화가 유효하면 새 worker를 요청한다.\n"
                 "- 가능하면 `name`보다 `template`/`role`로 목적을 지정한다. 예: `review` → `worker-review`.\n"
                 "- provider는 작업 성격에 맞게 `claude`, `codex`, `gemini` 중 선택한다.\n"
+                "- 특정 provider가 없을 수 있으면 `fallbacks`에 대체 provider와 provider별 flags를 지정한다.\n"
                 "- 새 worker가 생성되면 controller가 결과 메시지로 worker 이름을 알려준다.\n"
                 "\n"
                 "```json\n"

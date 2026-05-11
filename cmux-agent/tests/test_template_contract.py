@@ -26,6 +26,17 @@ def _entry_provider(entry: str | dict) -> str:
     return str(entry.get("provider", ""))
 
 
+def _entry_fallbacks(entry: str | dict) -> list[dict]:
+    if not isinstance(entry, dict):
+        return []
+    raw = entry.get("fallbacks", entry.get("fallback", []))
+    if isinstance(raw, (str, dict)):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    return [{"provider": item} if isinstance(item, str) else item for item in raw]
+
+
 def test_cmux_profiles_have_valid_config_and_matching_worker_protocols():
     assert (TEMPLATES_ROOT / "ORCHESTRATOR-COMMON.md").is_file()
     assert (TEMPLATES_ROOT / "workers" / "WORKER-COMMON.md").is_file()
@@ -40,6 +51,8 @@ def test_cmux_profiles_have_valid_config_and_matching_worker_protocols():
         for name, entry in config.items():
             provider = _entry_provider(entry)
             assert provider in ALLOWED_PROVIDERS
+            for fallback in _entry_fallbacks(entry):
+                assert fallback.get("provider") in ALLOWED_PROVIDERS
             if name.startswith("worker-"):
                 assert (TEMPLATES_ROOT / "workers" / f"{name.upper()}.md").is_file()
 

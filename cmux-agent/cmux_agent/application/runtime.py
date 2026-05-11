@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import re
+import shlex
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from cmux_agent.application.prompting import PromptBuilder
 from cmux_agent.domain.events import agent_registered
@@ -19,6 +22,12 @@ PROVIDER_COMMANDS = {
     "codex": "codex",
 }
 
+DEFAULT_PROVIDER_FALLBACKS = {
+    "gemini": ("claude", "codex"),
+    "claude": ("codex", "gemini"),
+    "codex": ("claude", "gemini"),
+}
+
 
 def normalize_agent_entry(entry: str | dict | None) -> dict:
     """Normalize a provider config entry into {provider, flags} shape."""
@@ -27,6 +36,83 @@ def normalize_agent_entry(entry: str | dict | None) -> dict:
     if isinstance(entry, str):
         return {"provider": entry}
     return dict(entry)
+
+
+@dataclass(frozen=True)
+class ProviderSelection:
+    provider: str
+    flags: str
+    requested_provider: str
+    used_fallback: bool = False
+
+
+def _provider_binary(provider: str) -> str:
+    command = PROVIDER_COMMANDS.get(provider, provider)
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return command
+    return parts[0] if parts else command
+
+
+def _provider_available(
+    provider: str,
+    *,
+    command_exists: Callable[[str], str | None] | None = None,
+) -> bool:
+    exists = command_exists or shutil.which
+    return bool(exists(_provider_binary(provider)))
+
+
+def _fallback_entries(entry: dict) -> list[dict]:
+    raw = entry.get("fallbacks", entry.get("fallback", []))
+    if not raw:
+        return []
+    if isinstance(raw, (str, dict)):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    return [normalize_agent_entry(item) for item in raw]
+
+
+def resolve_provider_selection(
+    entry: str | dict | None,
+    *,
+    default_provider: str = "claude",
+    command_exists: Callable[[str], str | None] | None = None,
+) -> ProviderSelection:
+    normalized = normalize_agent_entry(entry)
+    requested = str(normalized.get("provider", "") or default_provider)
+    flags = str(normalized.get("flags", "") or "")
+    if _provider_available(requested, command_exists=command_exists):
+        return ProviderSelection(
+            provider=requested,
+            flags=flags,
+            requested_provider=requested,
+        )
+
+    candidates = _fallback_entries(normalized)
+    candidates.extend({"provider": provider} for provider in DEFAULT_PROVIDER_FALLBACKS.get(requested, ()))
+
+    seen = {requested}
+    for candidate in candidates:
+        provider = str(candidate.get("provider", "") or "")
+        if not provider or provider in seen:
+            continue
+        seen.add(provider)
+        if _provider_available(provider, command_exists=command_exists):
+            return ProviderSelection(
+                provider=provider,
+                flags=str(candidate.get("flags", "") or ""),
+                requested_provider=requested,
+                used_fallback=True,
+            )
+
+    return ProviderSelection(
+        provider=requested,
+        flags=flags,
+        requested_provider=requested,
+    )
 
 
 def provider_command(provider: str, flags: str = "") -> str:
@@ -95,16 +181,20 @@ class AgentRuntime:
             return SpawnResult(ok=False, name=worker_name, error="agent already exists")
 
         entry = self._provider_entry(worker_name, purpose=purpose)
-        selected_provider = provider or str(entry.get("provider", "") or "claude")
-        selected_flags = flags if flags is not None else str(entry.get("flags", "") or "")
+        if provider is not None:
+            selected = resolve_provider_selection(
+                {"provider": provider, "flags": flags or ""},
+            )
+        else:
+            selected = resolve_provider_selection(entry)
 
         created = self._cmux.new_surface(workspace_id=self._workspace_id)
         if not created.ok:
-            return SpawnResult(ok=False, name=worker_name, provider=selected_provider, error=created.stderr or "cmux new-surface failed")
+            return SpawnResult(ok=False, name=worker_name, provider=selected.provider, error=created.stderr or "cmux new-surface failed")
 
         surface_id = parse_surface_ref(created.stdout)
         if not surface_id:
-            return SpawnResult(ok=False, name=worker_name, provider=selected_provider, error="cmux surface ref missing")
+            return SpawnResult(ok=False, name=worker_name, provider=selected.provider, error="cmux surface ref missing")
 
         agent = Agent(
             run_id=self._run_id,
@@ -123,7 +213,7 @@ class AgentRuntime:
             template_dir=self._template_dir,
         )
 
-        command = provider_command(selected_provider, selected_flags)
+        command = provider_command(selected.provider, selected.flags)
         self._cmux.send_text(f"{command}\n", surface_id=surface_id, workspace_id=self._workspace_id)
         self._cmux.send_text(
             self._prompt.build_startup_prompt(agent),
@@ -131,14 +221,21 @@ class AgentRuntime:
             workspace_id=self._workspace_id,
         )
         self._cmux.send_key("enter", surface_id=surface_id, workspace_id=self._workspace_id)
+        if selected.used_fallback:
+            self._cmux.log(
+                f"provider fallback: {worker_name} {selected.requested_provider} -> {selected.provider}",
+                level="warning",
+                source="cmux-agent",
+                workspace_id=self._workspace_id,
+            )
         self._cmux.notify(title="cmux-agent", body=f"Worker spawned: {worker_name}")
         self._cmux.log(
-            f"worker spawned: {worker_name} ({selected_provider})",
+            f"worker spawned: {worker_name} ({selected.provider})",
             level="success",
             source="cmux-agent",
             workspace_id=self._workspace_id,
         )
-        return SpawnResult(ok=True, name=worker_name, surface_id=surface_id, provider=selected_provider)
+        return SpawnResult(ok=True, name=worker_name, surface_id=surface_id, provider=selected.provider)
 
     def _resolve_worker_name(self, requested: str | None, *, purpose: str | None = None) -> str:
         if requested:

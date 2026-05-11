@@ -40,7 +40,10 @@ watcher가 처리한 artifact는 `.agent/processed/`로 이동한다. 검증 실
     "role": "<선택: template alias>",
     "name": "<선택: 명시 이름이 꼭 필요할 때만>",
     "provider": "claude|codex|gemini",
-    "flags": "<선택>"
+    "flags": "<선택>",
+    "fallbacks": [
+      { "provider": "claude|codex|gemini", "flags": "<선택>" }
+    ]
   }
 }
 ```
@@ -50,6 +53,7 @@ watcher가 처리한 artifact는 `.agent/processed/`로 이동한다. 검증 실
 목적을 생략한 경우에만 `worker-auto-N` fallback이 사용된다.
 
 controller가 새 worker 이름을 result 메시지로 알려주면 그 worker에게 dispatch한다.
+요청한 provider CLI가 설치되어 있지 않으면 cmux-agent는 `fallbacks`에 있는 provider 중 PATH에서 찾을 수 있는 첫 번째 provider를 사용한다. `fallbacks`가 없으면 `gemini → claude → codex`, `claude → codex → gemini`, `codex → claude → gemini` 순서의 기본 fallback을 시도한다. fallback provider에는 원래 provider flags를 재사용하지 않으므로, 필요한 경우 provider별 flags를 `fallbacks`에 명시한다.
 
 ## 동적 라우팅 정책
 요청을 받으면 먼저 난이도와 작업 유형을 판단한 뒤, 필요한 만큼만 worker를 사용한다.
