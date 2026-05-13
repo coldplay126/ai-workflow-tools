@@ -94,6 +94,11 @@ def _build_parser() -> argparse.ArgumentParser:
     # agents
     p_agents = sub.add_parser("agents", help="등록된 agent 목록")
     p_agents.add_argument("run_id", nargs="?", help="run ID")
+    p_agents.add_argument(
+        "--json",
+        action="store_true",
+        help="JSON 출력 (Claude #precise/#cross 등 dispatch path 감지에 사용).",
+    )
 
     # watch
     p_watch = sub.add_parser("watch", help="outbox watcher 시작")

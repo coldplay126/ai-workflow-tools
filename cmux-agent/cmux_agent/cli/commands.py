@@ -1081,6 +1081,24 @@ def cmd_agents(args: argparse.Namespace) -> None:
     run_id = _resolve_run_id(args, store)
 
     agents = store.get_agents(run_id)
+
+    if getattr(args, "json", False):
+        import json as _json
+
+        payload = {
+            "run_id": run_id,
+            "agents": [
+                {
+                    "name": a.name,
+                    "role": a.role.value,
+                    "surface_id": a.surface_id,
+                }
+                for a in agents
+            ],
+        }
+        print(_json.dumps(payload, ensure_ascii=False))
+        return
+
     if not agents:
         print("등록된 agent가 없습니다.")
         return

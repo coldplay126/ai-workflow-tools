@@ -11,20 +11,35 @@ Claude Code(Master)가 프롬프트의 `#` 해시태그를 인식하여 Slave를
 | cross | Codex + Claude Sonnet 병렬 | `#cross` | 90s |
 | critical | Codex → Claude 순차 | `#critical` | 120s |
 
+### Slave dispatch 경로 선택 (우선순위)
+
+Slave를 호출하기 전에 cmux-agent 활성 여부를 먼저 확인한다.
+
+1. **cmux-agent broker** (활성 run이 있을 때 — **권장**):
+   - 감지: `cmux-agent agents` 가 0 exit + worker 1개 이상 반환, 또는 cwd의 `.agent/control-plane.sqlite3` 존재
+   - 호출: `cmux-agent send <worker-name> "<prompt>"` 로 dispatch artifact 작성 → broker가 worker surface에 자동 주입
+   - worker 이름 예: `worker-impl`, `worker-review`, `worker-verify`, `worker-investigate`
+   - 장점: claude 본 세션이 다른 작업을 계속할 수 있음 (background tab에서 진행), 결과는 result artifact로 회수, 토큰 절감
+2. **MCP fallback** (cmux-agent 미활성):
+   - `mcp__codex__codex` (sandbox: read-only — Codex Slave 규칙 참조)
+   - 단점: claude 세션 점유 + tool-call 왕복 + JSON 직렬화 오버헤드. precise/cross/critical 모드에서 응답이 수십 초 ~ 분 단위로 느려질 수 있음
+
+운영 보고 (2026-05-13 BLIP Gem cycle §12.5): cmux-agent 활성 상태에서도 MCP를 호출하면 broker dispatch 대비 평균 3-5배 느림. 활성 검출이 명확할 때는 **반드시 broker 경로**를 사용한다.
+
 ### 실행 규칙
 
 **#precise** — 정확도 우선 (코드 분석, 보안 검토):
-1. Codex(`mcp__codex__codex`, sandbox: read-only)에게 코드 분석 위임
-2. Codex 결과를 Claude가 검증 + 보완
+1. cmux-agent 활성이면 `cmux-agent send worker-investigate "<분석 요청>"` (또는 review/verify worker), 미활성이면 `mcp__codex__codex` (sandbox: read-only)
+2. Codex 결과를 Claude가 검증 + 보완 (broker 경로는 result artifact의 conclusion 필드, MCP 경로는 tool result)
 3. 4-Block Format으로 최종 출력
 
 **#cross** — 교차 검증 (고위험 변경):
-1. Codex(`mcp__codex__codex`) + Claude Sonnet(`claude --print --bare --model sonnet`) 병렬 실행
+1. cmux-agent 활성이면 `cmux-agent send worker-review` + `claude --print --bare --model sonnet` 병렬, 미활성이면 `mcp__codex__codex` + `claude --print --bare --model sonnet` 병렬
 2. Claude Opus가 양쪽 결과 비교 + 차이점 하이라이트
 3. 4-Block Format으로 최종 출력
 
 **#critical** — 순차 심층 분석 (프로덕션 배포, 롤백):
-1. Step 1 — Codex(Precision): 코드/설정 정밀 분석 (90s)
+1. Step 1 — Codex(Precision): cmux-agent broker 또는 `mcp__codex__codex`로 코드/설정 정밀 분석 (90s)
 2. Step 2 — Claude(Master): Codex 결과 기반 종합 판정 + 영향도 분석
 3. 4-Block Format: 결론/근거/리스크/실행안
 

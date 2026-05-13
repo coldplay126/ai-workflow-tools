@@ -615,14 +615,16 @@ workflow 운영 자동화/정책 P2 항목 3건 처리. §3.2 verify fix-loop gu
 
 - **증상**: claude가 codex worker를 cmux-agent dispatch가 아닌 `mcp__codex__codex` MCP 호출로 실행. JSON 직렬화 + tool-call 왕복 + claude session 한 번 더 점유로 오버헤드 큼. 동일 작업을 cmux-agent에서는 background tab에서 진행하지만 MCP 경로는 claude 본 세션을 점유.
 - **영향**: precise/cross/critical 모드 + #precise/#cross 해시태그 사용 시 응답이 수십 초 ~ 분 단위로 느려짐. cycle 자율 진행률 저하.
-- **추정 원인 (확인 필요)**:
-  - `awf wf next --mode` dispatch가 cmux-agent worker spawn이 아닌 inline Codex MCP로 fallback
-  - 또는 multi-agent skill/protocol이 Codex 호출을 MCP 우선으로 안내
-  - 또는 cmux-agent dispatch가 실패해 silent downgrade
-- **follow-up**: 별도 cycle 권장.
-  - `awf wf next` provider routing 로깅 추가 (어느 경로로 dispatch 했는지)
-  - cmux-agent dispatch 실패 시 hard error (silent MCP fallback 금지)
-  - multi-agent skill의 Codex 호출 규약 — "cmux-agent 활성 시 broker dispatch, 미활성 시 MCP" 분기 명시
+- **진단 결론 (2026-05-13)**: MCP 호출은 `awf wf next` 경로(subprocess CodexProvider)가 아니라 **Claude 본 세션이 `~/.claude/CLAUDE.md`의 `#precise`/`#cross`/`#critical` 프로토콜을 해석할 때** `mcp__codex__codex` tool을 호출하기 때문. snippet (`snippets/claude-md-multi-agent.md`)에 명시적으로 MCP 도구가 지정되어 있어, cmux-agent 활성 여부와 무관하게 MCP 경로로 가도록 안내됨.
+- **resolution (2026-05-13, §12.5 fix)**:
+  - `snippets/claude-md-multi-agent.md`에 "Slave dispatch 경로 선택 (우선순위)" 섹션 신설. cmux-agent 활성 시 broker (`cmux-agent send`), 미활성 시 MCP fallback으로 분기 명시.
+  - 각 mode(#precise/#cross/#critical) 본문에 cmux-agent 활성 여부 분기 추가.
+  - `cmux-agent agents --json` 옵션 추가 — Claude(Master)가 Bash로 빠르게 활성 worker 목록 검증 가능 (예: `cmux-agent agents --json | jq '.agents | length'`).
+  - 별도 cycle 권장 (남은 follow-up):
+    - `awf wf next` provider routing 로깅 추가 (어느 경로로 dispatch 했는지)
+    - 사용자가 `~/.claude/CLAUDE.md`에 snippet을 다시 install (setup.sh re-run 또는 manual replace)
+    - SKILL 파일에 동일 분기 반영 (예: `claude/skills/wf-orchestrator/SKILL.md`)
+- commit (§12.5 fix branch).
 
 ### 12.6 잔여 (Group A/B/C 이후)
 
