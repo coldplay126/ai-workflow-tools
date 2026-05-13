@@ -1,7 +1,7 @@
 {
   "orchestrator": {
     "provider": "claude",
-    "flags": "--effort max"
+    "flags": "--model claude-opus-4-7 --effort max --permission-mode acceptEdits"
   },
   "worker-plan": {
     "provider": "codex",

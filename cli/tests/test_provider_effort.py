@@ -28,6 +28,16 @@ class TestClaudeCodeProviderEffort:
         provider.set_permission_mode("bypassPermissions")
         assert provider.flags == ["--print", "--permission-mode", "bypassPermissions"]
 
+    def test_set_model_adds_when_absent(self):
+        provider = ClaudeCodeProvider(command="echo", flags=["--print"])
+        provider.set_model("sonnet")
+        assert provider.flags == ["--print", "--model", "sonnet"]
+
+    def test_set_model_replaces_existing_flag(self):
+        provider = ClaudeCodeProvider(command="echo", flags=["--print", "--model", "opus"])
+        provider.set_model("claude-sonnet-4-6")
+        assert provider.flags == ["--print", "--model", "claude-sonnet-4-6"]
+
 
 class TestCodexProviderEffort:
     def test_default_no_reasoning_effort(self):
@@ -150,6 +160,31 @@ class TestPhaseEffort:
 
         _apply_phase_effort(provider, provider_config, "plan")
         assert provider.reasoning_effort == "xhigh"
+
+    def test_apply_phase_effort_injects_inline_model(self):
+        """inline_model이 --model flag로 주입되어야 CLI invocation에서 모델 분기가 동작."""
+        from awf.commands.wf import _apply_phase_effort
+
+        provider = ClaudeCodeProvider(command="echo", flags=["--print"])
+        provider_config = {
+            "phase_models": {"impl": {"inline_model": "sonnet", "effort": "high"}}
+        }
+
+        _apply_phase_effort(provider, provider_config, "impl")
+        assert provider.effort == "high"
+        assert "--model" in provider.flags
+        assert provider.flags[provider.flags.index("--model") + 1] == "sonnet"
+
+    def test_apply_phase_effort_inline_model_replaces_existing(self):
+        from awf.commands.wf import _apply_phase_effort
+
+        provider = ClaudeCodeProvider(command="echo", flags=["--print", "--model", "opus"])
+        provider_config = {
+            "phase_models": {"impl": {"inline_model": "claude-sonnet-4-6"}}
+        }
+
+        _apply_phase_effort(provider, provider_config, "impl")
+        assert provider.flags == ["--print", "--model", "claude-sonnet-4-6"]
 
     def test_apply_phase_sandbox_codex_read_only(self):
         from awf.commands.wf import _apply_phase_sandbox
