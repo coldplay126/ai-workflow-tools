@@ -414,6 +414,40 @@ def test_aggregate_scope_check_handles_zero_planned():
     assert "Graph expansion factor" in body
 
 
+def test_aggregate_scope_check_surfaces_multi_repo_coverage():
+    """Multi-repo runs section + per-sibling table should appear when
+    `repo_count > 1` payloads are present (post-PR-#117)."""
+    legacy = {"ts": "2026-05-15T00:00:00+00:00", "type": "scope_check",
+              "payload": _scope_check_payload()}
+    multi = {"ts": "2026-05-15T00:00:01+00:00", "type": "scope_check",
+             "payload": _scope_check_payload(
+                 repo_count=2,
+                 repo_error_count=0,
+                 per_repo=[
+                     {"name": "", "changed": 1, "violations": 0, "error": None},
+                     {"name": "api", "changed": 2, "violations": 1, "error": None},
+                 ],
+             )}
+    body = aggregate_scope_check([legacy, multi])
+    assert "## Multi-repo coverage" in body
+    # 1 of 2 runs is multi-repo → 50.0%
+    assert "Multi-repo runs: **1** of 2" in body
+    # Per-sibling table appears for the api repo, with 1 violation.
+    assert "| `api` |" in body
+
+
+def test_aggregate_scope_check_omits_sibling_table_when_only_single_repo_runs():
+    """No multi-repo data → no sibling table rendered (legacy parity)."""
+    body = aggregate_scope_check([
+        {"ts": "2026-05-15T00:00:00+00:00", "type": "scope_check",
+         "payload": _scope_check_payload()}
+    ])
+    # Section header still appears but sibling table should not.
+    assert "## Multi-repo coverage" in body
+    assert "Multi-repo runs: **0** of 1" in body
+    assert "| sibling |" not in body
+
+
 def test_aggregate_dispatch_performance_zero_workers():
     body = aggregate_dispatch_performance([
         {"ts": "2026-05-15T00:00:00+00:00", "type": "dispatch_complete",

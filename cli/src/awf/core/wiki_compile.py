@@ -254,6 +254,38 @@ def aggregate_scope_check(events: list[dict]) -> str:
     else:
         lines.append("_(no base_branch values recorded)_")
     lines.append("")
+
+    # Multi-repo coverage — payloads without `repo_count` predate PR #117
+    # and are treated as single-repo for consistency.
+    multi_repo_runs = sum(1 for p in payloads if int(p.get("repo_count", 1)) > 1)
+    sibling_runs: dict[str, int] = {}
+    sibling_violations: dict[str, int] = {}
+    repo_errors_total = 0
+    for p in payloads:
+        for entry in p.get("per_repo") or []:
+            name = str(entry.get("name") or "")
+            if not name:
+                continue  # cycle root tracked separately via repo_count
+            sibling_runs[name] = sibling_runs.get(name, 0) + 1
+            sibling_violations[name] = sibling_violations.get(name, 0) + int(entry.get("violations", 0))
+        repo_errors_total += int(p.get("repo_error_count", 0))
+
+    lines.append("## Multi-repo coverage")
+    lines.append("")
+    lines.append(
+        f"- Multi-repo runs: **{multi_repo_runs}** of {n} "
+        f"({_safe_div(multi_repo_runs, n) * 100:.1f}%)"
+    )
+    lines.append(f"- Total repo-level errors (config issues): **{repo_errors_total}**")
+    lines.append("")
+    if sibling_runs:
+        lines.append("| sibling | runs | total violations |")
+        lines.append("|---|---:|---:|")
+        for name in sorted(sibling_runs):
+            lines.append(
+                f"| `{name}` | {sibling_runs[name]} | {sibling_violations.get(name, 0)} |"
+            )
+        lines.append("")
     return "\n".join(lines) + "\n"
 
 

@@ -210,10 +210,31 @@ def _is_gitignored_by_pattern(repo_root: Path, path: str) -> bool:
 def _workflow_status(repo_root: Path) -> dict[str, Any]:
     workflow_dir = repo_root / ".workflow"
     state_path = workflow_dir / "state.json"
+    manifest_path = workflow_dir / "manifest.json"
     gitignored = _is_gitignored_by_pattern(repo_root, ".workflow")
     warning = None
     if gitignored:
         warning = ".workflow/ is ignored by .gitignore; workflow state is local-only"
+
+    # Validate `sibling_repos` in manifest.json so operator typos surface
+    # at `awf ready` time instead of `awf wf scope-check` time
+    # (see docs/specs/multi-repo-scope.md §3.1, PR #117 follow-up).
+    manifest_status = "missing"
+    manifest_error: str | None = None
+    sibling_count = 0
+    if manifest_path.is_file():
+        try:
+            from awf.core.wf_scope import load_sibling_repos
+            siblings = load_sibling_repos(repo_root)
+            sibling_count = len(siblings)
+            manifest_status = "ok"
+        except ValueError as exc:
+            manifest_status = "invalid"
+            manifest_error = str(exc)
+        except Exception as exc:  # pragma: no cover - defensive
+            manifest_status = "invalid"
+            manifest_error = f"unexpected error: {exc}"
+
     return {
         "status": "ready" if state_path.is_file() else "not_started",
         "workflow_dir_exists": workflow_dir.is_dir(),
@@ -221,6 +242,9 @@ def _workflow_status(repo_root: Path) -> dict[str, Any]:
         "state_path": str(state_path),
         "gitignored": gitignored,
         "warning": warning,
+        "manifest_status": manifest_status,
+        "manifest_error": manifest_error,
+        "sibling_repo_count": sibling_count,
     }
 
 
@@ -489,6 +513,8 @@ def evaluate_ready_gate(report: dict[str, Any], gate: str) -> dict[str, Any]:
     scan_status = str(report["scan"]["status"])
     skills_status = str(report["skills"]["status"])
     workflow_status = str(report["workflow"]["status"])
+    manifest_status = str(report["workflow"].get("manifest_status") or "missing")
+    manifest_error = report["workflow"].get("manifest_error")
     operations_status = str(report["operations"]["status"])
 
     if gate == "inspect":
@@ -563,6 +589,17 @@ def evaluate_ready_gate(report: dict[str, Any], gate: str) -> dict[str, Any]:
                 recommended_next=[{
                     "command": 'awf wf init "small feature" --repo-root .',
                     "why": "initialize workflow state before running phases",
+                }],
+            )
+        if manifest_status == "invalid":
+            return _gate_payload(
+                gate=gate,
+                decision="block",
+                reason=f"manifest.json sibling_repos invalid: {manifest_error}",
+                required_capabilities=["workflow"],
+                recommended_next=[{
+                    "command": "edit .workflow/manifest.json",
+                    "why": "fix sibling_repos schema (docs/specs/multi-repo-scope.md §3.1)",
                 }],
             )
         if skills_status != "ready":

@@ -163,8 +163,23 @@ def record_scope_check(
     """Persist a ScopeCheckResult summary.
 
     Counts plus violation paths (typically a small set; useful for
-    later-stage triage without re-running the check).
+    later-stage triage without re-running the check). When the result has a
+    multi-repo `per_repo` breakdown, a compact summary is included so the
+    wiki aggregator can distinguish single- vs multi-repo cycles.
     """
+    per_repo_compact: list[dict] = []
+    repo_count = 0
+    repo_error_count = 0
+    for r in getattr(result, "per_repo", ()) or ():
+        per_repo_compact.append({
+            "name": r.name,
+            "changed": len(r.changed_files),
+            "violations": len(r.violations),
+            "error": r.error,
+        })
+        repo_count += 1
+        if r.error:
+            repo_error_count += 1
     payload = {
         "base_branch": result.base_branch,
         "planned_count": len(result.planned_set),
@@ -174,6 +189,12 @@ def record_scope_check(
         "violation_paths": [v.path for v in result.violations],
         "planned_not_changed_count": len(result.planned_not_changed),
     }
+    # Only emit the multi-repo fields when there's actual per-repo data.
+    # Keeps single-repo cycles' JSONL identical to pre-PR-#117 shape.
+    if per_repo_compact:
+        payload["repo_count"] = repo_count
+        payload["repo_error_count"] = repo_error_count
+        payload["per_repo"] = per_repo_compact
     return record_event(repo_root, "scope_check", payload)
 
 
