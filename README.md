@@ -106,12 +106,18 @@ awf wf init "small scoped improvement" --repo-root .
 awf ready --repo-root . --gate workflow-run
 awf wf next --repo-root . --dry-run --output-format json
 awf wf next --repo-root .
+awf wf apply-result review <result-file>     # 또는 verify / impl / test — impl/test도 자동 G4/G6 marking
+awf wf pr --dry-run                          # cycle 완료 후 PR 생성 미리보기
+awf wf pr                                    # gh pr create 실행
 awf ready --repo-root .
 ```
 
 `--output-format json`을 붙인 dry-run은 자동화에서 소비할 수 있는 구조화된
 prompt preview를 출력합니다. `.workflow/`가 프로젝트 `.gitignore`에 있으면
-`awf ready`가 local-only workflow state 경고를 표시합니다.
+`awf ready`가 local-only workflow state 경고를 표시합니다. `awf wf next`는
+in_progress phase에 30분 이내 fresh result가 있으면 abort + apply-result 힌트를
+보여줍니다 (`--force`로 override 가능). verify phase는 3회 째부터 경고, 6회
+째에 hard abort + replan/continue 안내가 출력됩니다.
 
 Pi는 기본 dispatch surface가 아니라 opt-in runner입니다. Pi를 쓰려면 먼저
 field-smoke evidence를 남기고 `ready`가 그 결과를 읽게 합니다.
@@ -264,12 +270,18 @@ awf wf init "small scoped improvement" --repo-root .
 awf ready --repo-root . --gate workflow-run
 awf wf next --repo-root . --dry-run --output-format json
 awf wf next --repo-root .
+awf wf apply-result review <result-file>     # also accepts verify / impl / test — impl & test gates auto-marked
+awf wf pr --dry-run                          # preview PR title/body before opening
+awf wf pr                                    # invoke `gh pr create`
 awf ready --repo-root .
 ```
 
 Dry-runs with `--output-format json` emit structured prompt previews for
 automation. If `.workflow/` is ignored by the target repo's `.gitignore`,
-`awf ready` reports that workflow state is local-only.
+`awf ready` reports that workflow state is local-only. `awf wf next` aborts
+with an apply-result hint if an in_progress phase has a fresh result file
+on disk (override with `--force`); verify gets a warning at the 3rd
+execution and a hard abort at the 6th to prevent verify fix-loop spirals.
 
 Pi remains opt-in. When using Pi dispatch, first persist field-smoke evidence
 and let `ready` incorporate the result:
@@ -367,8 +379,20 @@ uv run --project cmux-agent cmux-agent smoke
 uv run --project cmux-agent cmux-agent status --failures
 uv run --project cmux-agent cmux-agent failures
 uv run --project cmux-agent cmux-agent events --failures
+uv run --project cmux-agent cmux-agent agents --json    # machine-readable agent list (broker availability check)
 uv run --project cli awf cmux failures --repo-root .
 ```
+
+When the cycle is finished, `cmux-agent stop` closes the cmux surfaces and workspace by default;
+pass `--keep-workspace` to retain them for debugging.
+
+### Multi-agent routing: prefer broker over MCP
+
+For `#precise` / `#cross` / `#critical` hashtag modes, Claude routes Codex worker calls
+through the active `cmux-agent` broker when available (broker dispatch is ~3–5× faster
+than `mcp__codex__codex`). Detect with `cmux-agent agents --json | jq '.agents | length'`;
+if 0, fall back to MCP. See `snippets/claude-md-multi-agent.md` and the resolution log in
+[`docs/gaps/2026-05-13-blip-gem-cycle-operational-issues.md`](docs/gaps/2026-05-13-blip-gem-cycle-operational-issues.md) §12.5.
 
 ## Claude Code Setup
 

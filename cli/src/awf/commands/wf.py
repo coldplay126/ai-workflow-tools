@@ -334,8 +334,34 @@ def run_wf_decide(args: argparse.Namespace) -> int:
         if not phase:
             raise ValueError("No current workflow phase found.")
         phase_state = ((state.get("phases") or {}).get(phase) or {})
-        if phase_state.get("status") != "deciding":
-            raise ValueError(f"Phase `{phase}` is not in deciding state.")
+        current_status = str(phase_state.get("status") or "")
+        # §1.6: --force-from lets the operator decide from non-deciding states.
+        # The decision is logged via history append below so the override is auditable.
+        force_from = getattr(args, "force_from", None)
+        if current_status != "deciding":
+            if force_from == "any" or force_from == current_status:
+                from awf.core.state import _now_iso, _save_workflow_state  # local import
+
+                state.setdefault("history", []).append({
+                    "phase": phase,
+                    "action": "force_decide",
+                    "timestamp": _now_iso(),
+                    "details": (
+                        f"force_from={force_from} prior_status={current_status} "
+                        f"decision={args.decision}"
+                    ),
+                })
+                _save_workflow_state(args.repo_root, state)
+                print(
+                    f"force_decide: phase `{phase}` was {current_status}, overriding to apply decision "
+                    f"`{args.decision}` (--force-from={force_from})",
+                    file=sys.stderr,
+                )
+            else:
+                msg = f"Phase `{phase}` is not in deciding state (current: {current_status})."
+                if force_from is None:
+                    msg += " Pass `--force-from <status|any>` to override."
+                raise ValueError(msg)
 
         if args.decision == "replan":
             target_phase = args.target or "plan"
@@ -612,10 +638,27 @@ def run_wf_next(args: argparse.Namespace) -> int:
         selected_provider = candidate
         timeout_sec = getattr(provider, "timeout_sec", None)
         schema_cleanup_path = _apply_workflow_output_schema(provider, phase)
+        # §12.5 routing log — surface the dispatch path so operators can see whether
+        # the worker ran inline (subprocess), via cmux-agent broker, or fell back.
+        # The multi-agent code emits its own per-mode line for cross/critical/precise;
+        # this covers the default single-agent path.
+        dispatch_pref = "inline"
+        try:
+            from awf.core.dispatch import resolve_preference_from_config
+
+            dispatch_pref = resolve_preference_from_config(provider_config)
+        except Exception:
+            pass
         if timeout_sec is not None:
-            print(f"provider_running: {candidate} (timeout: {timeout_sec}s)", file=sys.stderr)
+            print(
+                f"provider_running: {candidate} surface={dispatch_pref} (timeout: {timeout_sec}s)",
+                file=sys.stderr,
+            )
         else:
-            print(f"provider_running: {candidate}", file=sys.stderr)
+            print(
+                f"provider_running: {candidate} surface={dispatch_pref}",
+                file=sys.stderr,
+            )
         native_task = TaskDefinition(
             task_id=str(uuid.uuid4()),
             parent_task_id=None,

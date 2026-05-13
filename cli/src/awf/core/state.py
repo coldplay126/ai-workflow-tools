@@ -769,4 +769,19 @@ def apply_gate_result(
         }
     )
     _save_workflow_state(explicit_root, state)
+    # §3.4 cycle-complete hook: when the workflow reaches its terminal state,
+    # remind the operator to create the PR. Printing only (no subprocess) keeps
+    # this safe in CI and dry-run scenarios; the `awf wf pr` step stays explicit.
+    if passed and state.get("currentPhase") in {"completed", "done"}:
+        try:
+            import sys as _sys
+
+            print(
+                "\n🎉 cycle complete: all gates passed.\n"
+                "   next step: run `awf wf pr [--base main] [--draft]` to open the PR\n"
+                "             or `awf wf pr --dry-run` to preview the title/body first.",
+                file=_sys.stderr,
+            )
+        except Exception:
+            pass
     return state
