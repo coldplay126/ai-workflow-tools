@@ -16,6 +16,7 @@ from awf.commands.skills import run_skills_list
 from awf.commands.init import run_init
 from awf.commands.scan import run_scan
 from awf.commands.wf_apply import run_wf_apply_result
+from awf.commands.wf_pr import run_wf_pr
 from awf.commands.wf import (
     run_wf_decide,
     run_wf_detect_class,
@@ -199,6 +200,27 @@ def build_parser() -> argparse.ArgumentParser:
     wf_gate_parser.add_argument("--result-file", help="Path to provider result file (required for review/verify). Accepts raw or enveloped JSON.")
     wf_gate_parser.add_argument("--json", action="store_true", help="Also print structured JSON output.")
     wf_gate_parser.set_defaults(handler=run_wf_gate)
+
+    wf_pr_parser = wf_subparsers.add_parser(
+        "pr",
+        help="Create a GitHub PR from the current workflow cycle metadata (§3.4).",
+    )
+    wf_pr_parser.add_argument("--repo-root", help="Repository root containing .workflow/.")
+    wf_pr_parser.add_argument("--base", help="Base branch for the PR. Default: main.")
+    wf_pr_parser.add_argument("--title", help="Override the auto-generated PR title.")
+    wf_pr_parser.add_argument("--body", help="Override the auto-generated PR body (markdown).")
+    wf_pr_parser.add_argument(
+        "--no-fill",
+        action="store_true",
+        help="Skip auto body generation. Useful with `--body` or `gh`-side templates.",
+    )
+    wf_pr_parser.add_argument("--draft", action="store_true", help="Create the PR as a draft.")
+    wf_pr_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the proposed `gh pr create` arguments without invoking gh.",
+    )
+    wf_pr_parser.set_defaults(handler=run_wf_pr)
 
     wf_detect_class_parser = wf_subparsers.add_parser("detect-class", help="Detect change class from concept text.")
     wf_detect_class_parser.add_argument("concept", nargs="?", default="", help="Concept text to classify.")

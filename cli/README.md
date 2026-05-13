@@ -27,8 +27,9 @@
 - `awf wf status`: `.workflow/state.json` 요약 출력 + 최근 work_history 세션 표시
 - `awf wf next [--phase <name>] [--mode solo|quick|precise|cross|critical] [--auto-apply] [--non-interactive] [--no-ready-gate]`: 다음 phase 해석, delegated prompt 생성, `.workflow/tmp/`에 prompt/result 저장, fallback chain 시도, phase를 `in_progress`로 표시. Provider-backed 실행은 기본적으로 `awf ready --gate workflow-run`를 먼저 통과해야 한다. `--dry-run --output-format json`은 prompt preview를 구조화 JSON으로 출력하고 state/prompt 파일을 쓰지 않는다
 - `awf wf decide <continue|replan|abort> [--phase <name>] [--target <phase>]`: deciding 상태의 closed-loop workflow phase에 수동 결정을 반영
-- `awf wf apply-result <phase> <result-file>`: review/verify JSON 결과를 artifact markdown으로 반영하고 gate/state를 갱신
-- `awf wf gate <phase>`: plan/review/verify deterministic gate 평가
+- `awf wf apply-result <phase> <result-file>`: review/verify/impl/test JSON 결과를 artifact markdown으로 반영하고 gate/state를 갱신
+- `awf wf gate <phase>`: plan/review/verify/impl/test deterministic gate 평가
+- `awf wf pr [--base main] [--draft] [--dry-run]`: 현재 cycle의 state.json + concept.md를 PR title/body로 합성해 `gh pr create` 호출
 - `awf wf detect-class <concept>`: concept text 기반 change class 판정
 - `awf wf expand-scope`: 저장된 import graph의 reverse dependents/imports로 allowed-files 확장
 - `awf wf scope-check`: `git diff`와 allowed-files를 비교하는 deterministic G5 scope check
