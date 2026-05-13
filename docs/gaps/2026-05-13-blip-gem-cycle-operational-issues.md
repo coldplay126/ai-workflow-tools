@@ -293,12 +293,14 @@
 
 ### 8.2 provider-config.json 설정 (cycle별)
 ```json
-"phase_models": {
-  "plan":   { "effort": "max",  "codex_reasoning": "xhigh" },
-  "review": { "effort": "max",  "codex_reasoning": "xhigh" },
-  "impl":   { "inline_model": "sonnet", "effort": "high", "codex_reasoning": "xhigh" },
-  "verify": { "effort": "max",  "codex_reasoning": "xhigh" },
-  "test":   { "inline_model": "sonnet", "effort": "high", "codex_reasoning": "xhigh" }
+{
+  "phase_models": {
+    "plan":   { "effort": "max",  "codex_reasoning": "xhigh" },
+    "review": { "effort": "max",  "codex_reasoning": "xhigh" },
+    "impl":   { "inline_model": "sonnet", "effort": "high", "codex_reasoning": "xhigh" },
+    "verify": { "effort": "max",  "codex_reasoning": "xhigh" },
+    "test":   { "inline_model": "sonnet", "effort": "high", "codex_reasoning": "xhigh" }
+  }
 }
 ```
 impl/test는 `inline_model=sonnet` + `effort=high` (가성비)
