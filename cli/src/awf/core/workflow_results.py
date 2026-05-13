@@ -25,16 +25,91 @@ def _recommendation_text(finding: dict[str, Any]) -> str:
     return str(finding.get("recommendation", "") or finding.get("suggestion", "") or "-")
 
 
+def _is_stream_result_event(payload: Any) -> bool:
+    """Recognise a claude-code stream-json result event."""
+    return (
+        isinstance(payload, dict)
+        and payload.get("type") == "result"
+        and isinstance(payload.get("result"), str)
+    )
+
+
+def _unwrap_stream_result_payload(result_text: str) -> dict[str, Any] | None:
+    """Extract the worker envelope embedded in a stream-json result event's text."""
+    stripped = result_text.strip()
+    if not stripped:
+        return None
+    try:
+        parsed = json.loads(stripped)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+    inner_start = stripped.find("{")
+    inner_end = stripped.rfind("}")
+    if inner_start == -1 or inner_end <= inner_start:
+        return None
+    try:
+        parsed = json.loads(stripped[inner_start : inner_end + 1])
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        return None
+    return None
+
+
 def _parse_result_json(path: str) -> dict[str, Any]:
+    """Parse a worker result file into a single dict envelope.
+
+    Supports three formats:
+    1. A single JSON document (legacy path).
+    2. Claude Code stream-json output (one JSON event per line, ending with
+       a `{"type": "result", "result": "<text>", ...}` envelope). When the
+       worker ran with `--json-schema`, the `result` field is itself a JSON
+       document — we unwrap one level. The same unwrapping applies when the
+       whole file happens to be a single result-event JSON document.
+    3. JSON object embedded in surrounding prose (extract by first `{` /
+       last `}`); kept as a last-resort fallback.
+
+    §1.3 fix: the verify executor runs claude with
+    `--output-format stream-json --include-partial-messages`, so the result
+    file is multi-line line-delimited JSON. Previously json.loads on the
+    whole file raised `Extra data` and the substring fallback merged events
+    into invalid JSON; the gate evaluator then marked PASS results as FAIL.
+    """
     raw = Path(path).read_text(encoding="utf-8").strip()
     try:
-        return json.loads(raw)
+        outer = json.loads(raw)
+        if _is_stream_result_event(outer):
+            unwrapped = _unwrap_stream_result_payload(outer["result"])
+            if unwrapped is not None:
+                return unwrapped
+        return outer
     except json.JSONDecodeError:
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            raise ValueError(f"Unable to locate JSON object in {path}")
-        return json.loads(raw[start : end + 1])
+        pass
+
+    final_result_text: str | None = None
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if _is_stream_result_event(event):
+            final_result_text = event["result"]
+
+    if final_result_text is not None:
+        unwrapped = _unwrap_stream_result_payload(final_result_text)
+        if unwrapped is not None:
+            return unwrapped
+
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError(f"Unable to locate JSON object in {path}")
+    return json.loads(raw[start : end + 1])
 
 
 def load_result_envelope(path: str, *, phase: str, provider: str) -> dict[str, Any]:
@@ -263,6 +338,97 @@ def render_verify_report(
     return "\n".join(lines), gate_passed
 
 
+def render_impl_report(
+    data: dict[str, Any],
+    gate_passed: bool,
+    gate_checks: list[dict[str, Any]],
+    synthesis_summary: Optional[dict[str, Any]] = None,
+) -> tuple[str, bool]:
+    """Render the impl phase markdown report.
+
+    Schema is intentionally permissive — agent cards can add stricter
+    `gate.pass_conditions`. Defaults reflect the §1.1 baseline criteria
+    (lint clean / build PASS / tasks complete / commits exist).
+    """
+    tasks_completed = _as_list(data.get("tasks_completed"))
+    tasks_pending = _as_list(data.get("tasks_pending"))
+    commits = _as_list(data.get("commits"))
+    findings = _as_list(data.get("findings"))
+
+    lines = [
+        "# Implementation Report",
+        "",
+        "## Summary",
+        f"- Conclusion: {data.get('conclusion') or ('PASS' if gate_passed else 'FAIL')}",
+        f"- Tasks completed: {len(tasks_completed)}",
+        f"- Tasks pending: {len(tasks_pending)}",
+        f"- Commits: {len(commits)}",
+        f"- Lint clean: {data.get('lint_clean', 'N/A')}",
+        f"- Build passed: {data.get('build_passed', 'N/A')}",
+        f"- Gate G4: {'PASS' if gate_passed else 'FAIL'}",
+    ]
+    lines.extend(_render_synthesis_summary(synthesis_summary))
+    if tasks_completed:
+        lines.extend(["", "## Tasks Completed"] + [f"- {t}" for t in tasks_completed])
+    if tasks_pending:
+        lines.extend(["", "## Tasks Pending"] + [f"- {t}" for t in tasks_pending])
+    if commits:
+        lines.extend(["", "## Commits"] + [f"- {c}" for c in commits])
+    if findings:
+        lines.extend(["", "## Findings", "", "| ID | Severity | File | Summary |", "|----|----------|------|---------|"])
+        for f in findings:
+            lines.append(
+                f"| {f.get('id', '-')} | {f.get('severity', '-')} | "
+                f"{f.get('file', '-')} | {f.get('summary', '-')} |"
+            )
+    lines.extend(["", "## Gate Checks"])
+    lines.extend([f"- {'PASS' if item['passed'] else 'FAIL'}: {item['condition']} ({item['detail']})" for item in gate_checks] or ["- None"])
+    lines.append("")
+    return "\n".join(lines), gate_passed
+
+
+def render_test_report(
+    data: dict[str, Any],
+    gate_passed: bool,
+    gate_checks: list[dict[str, Any]],
+    synthesis_summary: Optional[dict[str, Any]] = None,
+) -> tuple[str, bool]:
+    """Render the test phase markdown report."""
+    suites = _as_list(data.get("suites"))
+    regressions = _as_list(data.get("regressions"))
+    acceptance = data.get("acceptance", {}) if isinstance(data.get("acceptance"), dict) else {}
+    coverage = data.get("coverage", {}) if isinstance(data.get("coverage"), dict) else {}
+
+    suite_passed = sum(_int_value(s.get("passed")) for s in suites)
+    suite_failed = sum(_int_value(s.get("failed")) for s in suites)
+
+    lines = [
+        "# Test Report",
+        "",
+        "## Summary",
+        f"- Conclusion: {data.get('conclusion') or ('PASS' if gate_passed else 'FAIL')}",
+        f"- Suites: {len(suites)} (passed={suite_passed}, failed={suite_failed})",
+        f"- Regressions: {len(regressions)}",
+        f"- Acceptance: {acceptance.get('passed', 'N/A')}/{acceptance.get('total', 'N/A')}",
+        f"- Coverage %: {coverage.get('percentage', 'N/A')}",
+        f"- Gate G6: {'PASS' if gate_passed else 'FAIL'}",
+    ]
+    lines.extend(_render_synthesis_summary(synthesis_summary))
+    if suites:
+        lines.extend(["", "## Suites", "", "| Name | Passed | Failed | Duration |", "|------|--------|--------|----------|"])
+        for s in suites:
+            lines.append(
+                f"| {s.get('name', '-')} | {s.get('passed', '-')} | "
+                f"{s.get('failed', '-')} | {s.get('duration_sec', '-')} |"
+            )
+    if regressions:
+        lines.extend(["", "## Regressions"] + [f"- {r.get('id', '-')}: {r.get('detail', r)}" for r in regressions])
+    lines.extend(["", "## Gate Checks"])
+    lines.extend([f"- {'PASS' if item['passed'] else 'FAIL'}: {item['condition']} ({item['detail']})" for item in gate_checks] or ["- None"])
+    lines.append("")
+    return "\n".join(lines), gate_passed
+
+
 def _failure_context_for_result(phase: str, data: dict[str, Any]) -> dict[str, Any]:
     findings = _as_list(data.get("findings"))
     context: dict[str, Any] = {
@@ -302,12 +468,17 @@ def apply_workflow_result(
 ) -> Tuple[Path, bool]:
     root = resolve_repo_root(explicit_root)
     wf_dir = root / ".workflow"
-    if phase == "review":
-        output_path = wf_dir / "artifacts" / "review-report.md"
-    elif phase == "verify":
-        output_path = wf_dir / "artifacts" / "verification-report.md"
-    else:
-        raise ValueError(f"apply-result currently supports review/verify only: {phase}")
+    artifact_names = {
+        "review": "review-report.md",
+        "verify": "verification-report.md",
+        "impl": "implementation-report.md",
+        "test": "test-report.md",
+    }
+    if phase not in artifact_names:
+        raise ValueError(
+            f"apply-result supports {sorted(artifact_names)}: got {phase}"
+        )
+    output_path = wf_dir / "artifacts" / artifact_names[phase]
 
     try:
         envelope = load_result_envelope(result_path, phase=phase, provider="unknown")
@@ -359,8 +530,12 @@ def apply_workflow_result(
             passed = False
         elif phase == "review":
             markdown, passed = render_review_report(data, gate_passed, gate_checks, synthesis_summary=synthesis_summary)
-        else:
+        elif phase == "verify":
             markdown, passed = render_verify_report(data, gate_passed, gate_checks, synthesis_summary=synthesis_summary)
+        elif phase == "impl":
+            markdown, passed = render_impl_report(data, gate_passed, gate_checks, synthesis_summary=synthesis_summary)
+        else:
+            markdown, passed = render_test_report(data, gate_passed, gate_checks, synthesis_summary=synthesis_summary)
     except Exception as exc:
         markdown = _render_malformed_report(phase, f"invalid_json:{exc}", _raw_result_text(result_path))
         passed = False

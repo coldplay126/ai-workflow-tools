@@ -314,24 +314,24 @@ class TestWorkflowStateHint:
         assert "awf wf apply-result --phase review" in hint
         assert str(cycle_root) in hint
 
-    def test_workflow_impl_phase_emits_manual_state_hint(self, setup):
+    def test_workflow_plan_phase_emits_manual_state_hint(self, setup):
+        """apply-result 미지원 phase (plan/approve/done)는 수동 갱신 안내."""
         broker, _store, fs, *_ = setup
         cycle_root = fs.base.parent
         wf_dir = cycle_root / ".workflow"
         wf_dir.mkdir(parents=True, exist_ok=True)
         (wf_dir / "state.json").write_text(
             json.dumps({
-                "id": "2026-05-13-impl-demo",
-                "currentPhase": "impl",
-                "phases": {"impl": {"status": "in_progress"}},
+                "id": "2026-05-13-plan-demo",
+                "currentPhase": "plan",
+                "phases": {"plan": {"status": "in_progress"}},
             }),
             encoding="utf-8",
         )
         hint = broker._workflow_state_hint()
-        assert "phase=impl" in hint
-        # apply-result 미지원이므로 수동 안내
+        assert "phase=plan" in hint
         assert "수동" in hint
-        assert "apply-result" not in hint or "미지원" in hint
+        assert "미지원" in hint
 
     def test_invalid_state_json_returns_empty(self, setup):
         broker, _store, fs, *_ = setup
@@ -339,3 +339,119 @@ class TestWorkflowStateHint:
         wf_dir.mkdir(parents=True, exist_ok=True)
         (wf_dir / "state.json").write_text("not json", encoding="utf-8")
         assert broker._workflow_state_hint() == ""
+
+    def test_impl_phase_hint_describes_auto_apply(self, setup):
+        broker, _store, fs, *_ = setup
+        wf_dir = fs.base.parent / ".workflow"
+        wf_dir.mkdir(parents=True, exist_ok=True)
+        (wf_dir / "state.json").write_text(
+            json.dumps({
+                "id": "auto-cycle",
+                "currentPhase": "impl",
+                "phases": {"impl": {"status": "in_progress"}},
+            }),
+            encoding="utf-8",
+        )
+        hint = broker._workflow_state_hint()
+        # impl is now in _APPLY_RESULT_SUPPORTED_PHASES → hard hook hint, not manual
+        assert "phase=impl" in hint
+        assert "apply-result --phase impl" in hint
+        assert "수동" not in hint
+
+
+class TestAutoApplyResultHook:
+    """§1.7 hard hook: broker triggers awf wf apply-result on result artifact."""
+
+    def test_no_workflow_no_invocation(self, setup, monkeypatch):
+        broker, *_ = setup
+        captured = []
+        monkeypatch.setattr(
+            "cmux_agent.application.broker.subprocess.run",
+            lambda *args, **kwargs: captured.append((args, kwargs)),
+        )
+        broker._maybe_auto_apply_result({"result_file": "x.json", "phase": "impl"})
+        assert captured == []
+
+    def test_missing_fields_no_invocation(self, setup, monkeypatch):
+        broker, _store, fs, *_ = setup
+        wf_dir = fs.base.parent / ".workflow"
+        wf_dir.mkdir(parents=True, exist_ok=True)
+        (wf_dir / "state.json").write_text(
+            json.dumps({"id": "c", "currentPhase": "impl", "phases": {"impl": {"status": "x"}}}),
+            encoding="utf-8",
+        )
+        captured = []
+        monkeypatch.setattr(
+            "cmux_agent.application.broker.subprocess.run",
+            lambda *args, **kwargs: captured.append((args, kwargs)),
+        )
+        broker._maybe_auto_apply_result({"phase": "impl"})  # no result_file
+        broker._maybe_auto_apply_result({"result_file": "r.json"})  # no phase, but currentPhase=impl supplies it
+        # second call's result_file doesn't exist on disk → still no subprocess
+        assert captured == []
+
+    def test_unsupported_phase_no_invocation(self, setup, monkeypatch, tmp_path):
+        broker, _store, fs, *_ = setup
+        wf_dir = fs.base.parent / ".workflow"
+        wf_dir.mkdir(parents=True, exist_ok=True)
+        (wf_dir / "state.json").write_text(
+            json.dumps({"id": "c", "currentPhase": "plan", "phases": {"plan": {"status": "x"}}}),
+            encoding="utf-8",
+        )
+        result_file = fs.base.parent / "r.json"
+        result_file.write_text("{}", encoding="utf-8")
+        captured = []
+        monkeypatch.setattr(
+            "cmux_agent.application.broker.subprocess.run",
+            lambda *args, **kwargs: captured.append((args, kwargs)),
+        )
+        broker._maybe_auto_apply_result({"result_file": "r.json", "phase": "plan"})
+        assert captured == []
+
+    def test_supported_phase_runs_subprocess(self, setup, monkeypatch):
+        broker, _store, fs, *_ = setup
+        wf_dir = fs.base.parent / ".workflow"
+        wf_dir.mkdir(parents=True, exist_ok=True)
+        (wf_dir / "state.json").write_text(
+            json.dumps({"id": "c", "currentPhase": "impl", "phases": {"impl": {"status": "x"}}}),
+            encoding="utf-8",
+        )
+        result_file = fs.base.parent / "impl-result.json"
+        result_file.write_text("{}", encoding="utf-8")
+
+        captured = []
+
+        class _CompletedStub:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def _fake_run(*args, **kwargs):
+            captured.append((args, kwargs))
+            return _CompletedStub()
+
+        monkeypatch.setattr("cmux_agent.application.broker.subprocess.run", _fake_run)
+        broker._maybe_auto_apply_result({"result_file": "impl-result.json", "phase": "impl"})
+        assert len(captured) == 1
+        args, kwargs = captured[0]
+        invoked_cmd = args[0]
+        assert invoked_cmd[:3] == ["awf", "wf", "apply-result"]
+        assert invoked_cmd[3] == "impl"
+        assert invoked_cmd[4] == str(result_file)
+        assert kwargs.get("cwd") == str(fs.base.parent)
+
+    def test_missing_result_file_no_subprocess(self, setup, monkeypatch):
+        broker, _store, fs, *_ = setup
+        wf_dir = fs.base.parent / ".workflow"
+        wf_dir.mkdir(parents=True, exist_ok=True)
+        (wf_dir / "state.json").write_text(
+            json.dumps({"id": "c", "currentPhase": "verify", "phases": {"verify": {"status": "x"}}}),
+            encoding="utf-8",
+        )
+        captured = []
+        monkeypatch.setattr(
+            "cmux_agent.application.broker.subprocess.run",
+            lambda *args, **kwargs: captured.append((args, kwargs)),
+        )
+        broker._maybe_auto_apply_result({"result_file": "nonexistent.json", "phase": "verify"})
+        assert captured == []
