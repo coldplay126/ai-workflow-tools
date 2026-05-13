@@ -1627,6 +1627,10 @@ def run_wf_scope_check(args: argparse.Namespace) -> int:
     except json.JSONDecodeError as exc:
         print(f"error: allowed-files.json is not valid JSON: {exc}", file=sys.stderr)
         return 2
+    except ValueError as exc:
+        # Malformed sibling_repos in manifest.json. See multi-repo-scope spec §5.
+        print(f"error: manifest.json sibling_repos invalid: {exc}", file=sys.stderr)
+        return 2
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -1648,9 +1652,17 @@ def run_wf_scope_check(args: argparse.Namespace) -> int:
 
     if args.json:
         print(json.dumps(result.to_json(), ensure_ascii=False, indent=2))
-        return 1 if result.violation_count > 0 else 0
+        return _scope_check_exit_code(result)
 
-    print(f"=== Scope Check (base: {result.base_branch}) ===")
+    is_multi = len(result.per_repo) > 1
+    if is_multi:
+        sibling_count = len(result.per_repo) - 1
+        print(
+            f"=== Scope Check (multi-repo: 1 root + {sibling_count} sibling"
+            f"{'s' if sibling_count != 1 else ''}) ==="
+        )
+    else:
+        print(f"=== Scope Check (base: {result.base_branch}) ===")
     print(
         f"planned: {len(result.planned_set)}, "
         f"expanded: {len(result.expanded_set)}, "
@@ -1659,15 +1671,37 @@ def run_wf_scope_check(args: argparse.Namespace) -> int:
     counts: dict[str, int] = {STATUS_PLANNED: 0, STATUS_EXPANDED: 0, STATUS_VIOLATION: 0}
     for c in result.classifications:
         counts[c.status] = counts.get(c.status, 0) + 1
-    print(
+    verdict_line = (
         f"verdict: {counts[STATUS_PLANNED]} planned, "
         f"{counts[STATUS_EXPANDED]} expanded, "
         f"{counts[STATUS_VIOLATION]} violation(s)"
     )
+    if result.repo_error_count:
+        verdict_line += f", {result.repo_error_count} repo error(s)"
+    print(verdict_line)
 
     icon = {STATUS_PLANNED: "✓", STATUS_EXPANDED: "+", STATUS_VIOLATION: "✗"}
-    for c in result.classifications:
-        print(f"  {icon.get(c.status, '?')} {c.status:<10} {c.path}  ({c.reason})")
+    if is_multi:
+        for r in result.per_repo:
+            header = f"[{r.name or 'root'} @ {r.base_branch or '?'}]"
+            print(f"\n{header}")
+            if r.error:
+                print(f"  ERROR: {r.error} — path {r.path}")
+                continue
+            print(
+                f"  planned: {len([p for p in result.planned_set if _belongs_to(p, r.name)])}, "
+                f"changed: {len(r.changed_files)}"
+            )
+            for c in r.classifications:
+                print(f"  {icon.get(c.status, '?')} {c.status:<10} {c.path}  ({c.reason})")
+        if any(v.reason.startswith("unknown sibling") for v in result.violations):
+            print("\n[unknown sibling prefixes in allowed-files.json]")
+            for v in result.violations:
+                if v.reason.startswith("unknown sibling"):
+                    print(f"  ✗ violation  {v.path}  ({v.reason})")
+    else:
+        for c in result.classifications:
+            print(f"  {icon.get(c.status, '?')} {c.status:<10} {c.path}  ({c.reason})")
 
     if result.planned_not_changed:
         print(
@@ -1679,4 +1713,18 @@ def run_wf_scope_check(args: argparse.Namespace) -> int:
         if len(result.planned_not_changed) > 10:
             print(f"  ... and {len(result.planned_not_changed) - 10} more")
 
+    return _scope_check_exit_code(result)
+
+
+def _belongs_to(prefixed_path: str, repo_name: str) -> bool:
+    if not repo_name:
+        return not prefixed_path.startswith("@")
+    return prefixed_path.startswith(f"@{repo_name}/")
+
+
+def _scope_check_exit_code(result) -> int:
+    # Repo-level errors are config mistakes (missing path, branch ambiguous,
+    # not-a-git-repo). Distinguish from scope violations via exit code 2.
+    if result.repo_error_count > 0:
+        return 2
     return 1 if result.violation_count > 0 else 0
