@@ -455,10 +455,16 @@ class MessageBroker:
             "state_path": state_path,
         }
 
-    _APPLY_RESULT_SUPPORTED_PHASES = {"review", "verify"}
+    _APPLY_RESULT_SUPPORTED_PHASES = {"review", "verify", "impl", "test"}
 
     def _workflow_state_hint(self) -> str:
-        """active workflow가 있으면 dispatch prompt에 추가할 state 갱신 안내."""
+        """active workflow가 있으면 dispatch prompt에 추가할 state 갱신 안내.
+
+        review/verify/impl/test phase는 apply-result로 자동 처리 가능하므로
+        worker가 `result_file` + `phase` 필드를 포함한 result artifact를 발행하면
+        broker가 _maybe_auto_apply_result로 awf wf apply-result를 호출한다 (§1.7 hard hook).
+        plan/approve/done 등은 broker가 자동 처리 못 하므로 수동 안내 유지.
+        """
         ctx = self._active_workflow_context()
         if not ctx:
             return ""
@@ -469,12 +475,11 @@ class MessageBroker:
             return (
                 "\n📂 active workflow detected: "
                 f"id={ctx['id']} phase={phase} status={ctx['phase_status']}\n"
-                "   작업 완료 후 결과 JSON을 cycle root에 저장하고 "
-                f"`awf wf apply-result --phase {phase} "
-                f"--result-file <path>` (cwd={cycle_root}) 를 실행하여 "
-                "state.json을 자동 갱신하세요.\n"
+                f"   완료 시 결과 JSON을 cycle root에 저장하고 result artifact의 "
+                f"`result_file` + `phase` 필드에 경로/단계를 명시하세요. "
+                f"broker가 `awf wf apply-result --phase {phase} --result-file <path>` "
+                f"(cwd={cycle_root})를 자동 실행하여 state.json을 갱신합니다.\n"
             )
-        # impl/test/plan/done 등 apply-result 미지원 phase
         return (
             "\n📂 active workflow detected: "
             f"id={ctx['id']} phase={phase} status={ctx['phase_status']}\n"
@@ -483,6 +488,52 @@ class MessageBroker:
             "(phases[phase].status, history 추가). "
             "stale state는 cycle 추적을 방해합니다.\n"
         )
+
+    def _maybe_auto_apply_result(self, payload: dict) -> None:
+        """result artifact의 `result_file` + `phase`로 apply-result subprocess 호출.
+
+        §1.7 hard hook — 두 가지 모두 충족 시에만 동작 (no-op otherwise):
+        - `.workflow/state.json`이 있어 active workflow context 검출됨
+        - payload에 `result_file` (cycle root 상대/절대 경로) + `phase`
+          (review/verify/impl/test 중 하나)가 모두 존재
+
+        실패해도 dispatch 흐름 자체는 깨뜨리지 않는다 (logger.warning + early return).
+        """
+        ctx = self._active_workflow_context()
+        if not ctx:
+            return
+        result_file = payload.get("result_file")
+        phase = payload.get("phase") or ctx.get("currentPhase")
+        if not isinstance(result_file, str) or not isinstance(phase, str):
+            return
+        if phase not in self._APPLY_RESULT_SUPPORTED_PHASES:
+            logger.info("apply-result skip: phase %s not in supported set", phase)
+            return
+        cycle_root = self._fs.base.parent
+        candidate = Path(result_file)
+        if not candidate.is_absolute():
+            candidate = cycle_root / candidate
+        if not candidate.is_file():
+            logger.warning("apply-result skip: result_file not found at %s", candidate)
+            return
+        try:
+            completed = subprocess.run(
+                ["awf", "wf", "apply-result", phase, str(candidate)],
+                cwd=str(cycle_root),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            logger.warning("apply-result subprocess failed: %s", exc)
+            return
+        if completed.returncode == 0:
+            logger.info("apply-result %s applied (file=%s)", phase, candidate)
+            print(f"  ⚙ awf wf apply-result {phase} OK ({candidate.name})", flush=True)
+        else:
+            stderr = (completed.stderr or "").strip()[:400]
+            logger.warning("apply-result %s returned %d: %s", phase, completed.returncode, stderr)
+            print(f"  ⚠ awf wf apply-result {phase} returned {completed.returncode}", flush=True)
 
     def _branch_safety_warning(self) -> str:
         """forbidden branch 위에 있으면 dispatch 프롬프트에 prepend할 경고 문자열을 반환.
@@ -558,3 +609,6 @@ class MessageBroker:
 
         self._cmux.notify(title="cmux-agent", body=summary)
         self._cmux.log(summary, level="info", source="cmux-agent")
+
+        if msg_type == MessageType.RESULT:
+            self._maybe_auto_apply_result(payload)

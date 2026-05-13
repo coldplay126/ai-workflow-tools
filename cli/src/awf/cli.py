@@ -160,6 +160,12 @@ def build_parser() -> argparse.ArgumentParser:
     wf_next_parser.add_argument("--dry-run", action="store_true", help="Print phase metadata and prompt without invoking the provider.")
     wf_next_parser.add_argument("--print-prompt", action="store_true", help="Print the delegated prompt before execution.")
     wf_next_parser.add_argument("--auto-apply", action="store_true", help="Automatically apply review/verify results into workflow artifacts when possible.")
+    wf_next_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-run executor even when the phase is already in_progress. Without this flag, "
+             "in_progress phases abort with a fresh-result hint to avoid duplicate work (§1.4).",
+    )
     wf_next_parser.add_argument("--output-format", choices=["text", "json"], default="text", help="Output format. json outputs structured data to stdout.")
     wf_next_parser.add_argument("--no-ready-gate", action="store_true", help="Bypass the internal awf ready --gate workflow-run preflight.")
     wf_next_parser.set_defaults(handler=run_wf_next)
@@ -176,15 +182,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     wf_apply_parser = wf_subparsers.add_parser(
         "apply-result",
-        help="Render provider JSON results into workflow artifacts for review/verify.",
+        help="Render provider JSON results into workflow artifacts for review/verify/impl/test.",
     )
-    wf_apply_parser.add_argument("phase", choices=["review", "verify"], help="Workflow phase to apply.")
+    wf_apply_parser.add_argument(
+        "phase",
+        choices=["review", "verify", "impl", "test"],
+        help="Workflow phase to apply.",
+    )
     wf_apply_parser.add_argument("result_file", help="Path to a provider JSON result file.")
     wf_apply_parser.add_argument("--repo-root", help="Repository root containing .workflow/. Defaults to current or parent directories.")
     wf_apply_parser.set_defaults(handler=run_wf_apply_result)
 
-    wf_gate_parser = wf_subparsers.add_parser("gate", help="Run deterministic gate evaluation (plan, review, verify).")
-    wf_gate_parser.add_argument("phase", help="Phase to evaluate gate for (plan, review, verify).")
+    wf_gate_parser = wf_subparsers.add_parser("gate", help="Run deterministic gate evaluation (plan, review, verify, impl, test).")
+    wf_gate_parser.add_argument("phase", help="Phase to evaluate gate for (plan, review, verify, impl, test).")
     wf_gate_parser.add_argument("--repo-root", help="Repository root containing .workflow/.")
     wf_gate_parser.add_argument("--result-file", help="Path to provider result file (required for review/verify). Accepts raw or enveloped JSON.")
     wf_gate_parser.add_argument("--json", action="store_true", help="Also print structured JSON output.")

@@ -15,27 +15,25 @@
 - **증상**: `error: deterministic gate not yet implemented for 'impl'. supported: plan, review, verify`
 - **영향**: impl 종료 시 G4 marking을 awf CLI로 자동 처리 불가. state.json 수동 update 또는 `awf wf next` 우회 필요
 - **우회**: state.json을 Master inline으로 직접 edit (`impl.status=completed`, `gates.G4.passed=true`) + history 추가
-- **follow-up**: `awf wf gate impl`에 deterministic 검증 추가 (lint clean / build PASS / tasks [X] 모두 / commits 존재 등)
+- **resolution (2026-05-13, partial)**: `_GATE_SUPPORTED_PHASES`에 `impl`/`test` 추가, `awf wf gate impl --result-file` 명령이 동작. 단 deterministic 검증 규칙(lint/build/tasks/commits)은 후속 agent card 작업으로 분리. commit (Group A).
+- **follow-up (잔여)**: agent-cards/impl.json + agent-cards/test.json에 deterministic pass_conditions 정의
 
 ### 1.2 `awf wf apply-result` impl 미지원
 - **증상**: `apply-result {review,verify}` — impl 미지원
 - **영향**: impl phase의 executor result를 state.json에 자동 반영 불가
-- **follow-up**: impl phase도 apply-result 지원 또는 별도 `awf wf decide` 흐름 정비
+- **resolution (2026-05-13)**: `apply_workflow_result` 가 review/verify/impl/test 4개 phase 지원. `render_impl_report` + `render_test_report` 추가 (implementation-report.md / test-report.md 산출). G4/G6 자동 marking. commit (Group A).
 
 ### 1.3 `awf wf gate verify`가 stream-json result 파싱 실패
 - **증상**: `invalid_json: Extra data: line 1 column 146 (char 145)` → `structured_result_shape FAIL`
 - **원인**: `awf wf next`의 verify executor가 `claude --output-format stream-json --include-partial-messages`로 실행 → result file에 multi-line JSON event stream 포함. gate evaluator가 single JSON envelope만 파싱 시도
 - **영향**: result file의 `conclusion` content는 PASS인데 gate FAIL 처리. G5 자동 marking 실패
 - **우회**: state.json에 G5=PASS_MANUAL 직접 marking (verdict='PASS_MANUAL', note에 limitation 명시)
-- **follow-up**:
-  - `apply-result`/`gate` evaluator가 stream-json 형식도 파싱하도록 수정
-  - 또는 executor가 마지막 result envelope만 별도 file로 export
-  - 또는 `--output-format json` (non-stream) 옵션 강제
+- **resolution (2026-05-13)**: `_parse_result_json`에 stream-json detection + 마지막 `{"type": "result"}` event의 `result` 필드 unwrap 로직 추가. 7 신규 단위 테스트로 single doc / embedded / stream multi-line / nested-prose / partial-corrupted / malformed 케이스 검증. commit (Group A).
 
 ### 1.4 `awf wf next` 재호출 시 phase=in_progress executor 중복 가동
 - **증상**: phase=in_progress 상태에서 `awf wf next` 호출 시 `warning: phase already in_progress; re-running delegated execution` 메시지 + executor 다시 실행 (~5분 작업 중복)
 - **영향**: 비용·시간 낭비. cmux-agent worker가 이미 같은 작업 했어도 awf executor가 또 별도 Claude 인스턴스로 실행
-- **follow-up**: `awf wf next`가 마지막 result file의 mtime/conclusion을 보고 skip 또는 confirm prompt. 또는 `--force` flag 분리
+- **resolution (2026-05-13)**: `--force` flag 추가 + `_find_fresh_result_file`로 `.workflow/tmp/result-{phase}-*.txt`의 30분 이내 mtime 검출. 신선한 result가 있고 `--force` 없으면 abort + apply-result 명령 힌트 출력. 신선한 result 없으면 (진짜 stall) 경고 후 재실행. commit (Group A).
 
 ### 1.5 `awf wf scope-check`가 wf root git diff만 검사 (multi-repo 미지원)
 - **증상**: planned_files에 `blip-market-api/...`, `blip-market-manager/...` 명시되어 있으나 wf root의 `git diff origin/main..HEAD`만 분석 → sibling repo 변경 0건 인식
@@ -58,7 +56,8 @@
 - **follow-up**:
   - cmux-agent broker.py의 `_inject_and_notify`에 awf CLI hook 추가 (dispatch 시 `awf wf next`, result 시 `awf wf apply-result`)
   - 또는 worker prompt에 "각 task 완료 시 awf 명령 호출" instruction 명시 (WORKER-IMPL.md / ORCHESTRATOR.md protocol 수정)
-- **resolution (2026-05-13, 경량판)**: 두 번째 follow-up 채택. broker가 dispatch 시 cycle root의 `.workflow/state.json`을 감지하여 active workflow가 있으면 prompt에 안내 prepend (`_active_workflow_context` + `_workflow_state_hint`). review/verify phase는 `awf wf apply-result --phase {phase} --result-file <path>` 명령을, 그 외 phase는 state.json 수동 갱신을 안내한다. apply-result의 impl/test 지원 + stream-json parsing은 §1.2/§1.3과 함께 P1 cycle에서 처리. commit `eb69f96`
+- **resolution (2026-05-13, 경량판)**: 두 번째 follow-up 채택. broker가 dispatch 시 cycle root의 `.workflow/state.json`을 감지하여 active workflow가 있으면 prompt에 안내 prepend (`_active_workflow_context` + `_workflow_state_hint`). review/verify phase는 `awf wf apply-result --phase {phase} --result-file <path>` 명령을, 그 외 phase는 state.json 수동 갱신을 안내한다. commit `eb69f96`.
+- **resolution (2026-05-13, hard hook 격상)**: §1.2가 impl/test apply-result를 지원하면서 hint가 모든 review/verify/impl/test에 적용. 추가로 broker `_maybe_auto_apply_result`가 worker result artifact의 `result_file`+`phase` 필드를 검출하면 subprocess로 `awf wf apply-result` 자동 실행 (3-tier guard: active workflow + 지원 phase + result file 존재). worker는 result 작성 후 broker가 state.json까지 자동 갱신. commit (Group A).
 
 ---
 
@@ -237,9 +236,10 @@
 |---|---|---|---|
 | **P0 (사용량 폭발 — 최우선)** | model routing | impl/test phase에 sonnet 강제 (8장). 컨셉 자체 미동작. 즉시 적용 가능한 우회 8.8 | ✅ **FIXED** (`f4a1abf`) |
 | **P0 (반복 발생, 매번 수동 우회)** | broker | timing race fix sync to repo (2.1) + dispatch send sleep (2.3) + 권한 dialog 자동 처리 (2.4) + busy 검출 정밀화 (2.7) | ✅ **FIXED** (`cc0aa54`) |
-| **P0** | awf CLI | state.json 자동 transition (1.7) — cmux-agent ↔ awf hook | ✅ **FIXED (lightweight)** (`eb69f96`) |
+| **P0** | awf CLI | state.json 자동 transition (1.7) — cmux-agent ↔ awf hook | ✅ **FIXED (lightweight + hard hook)** (`eb69f96` + Group A) |
 | **P0** | workflow | base branch validator (3.3) — main 직커밋 사고 재발 방지 | ✅ **FIXED** (`eb69f96`) |
-| **P1** | awf CLI | gate evaluator stream-json 파싱 (1.3) + scope-check multi-repo (1.5) | open |
+| **P1** | awf CLI | gate evaluator stream-json 파싱 (1.3) + scope-check multi-repo (1.5) | ✅ **§1.3 FIXED** (Group A) / §1.5 open |
+| **P1** | awf CLI | apply-result impl/test (1.2) + in_progress duplicate guard (1.4) | ✅ **FIXED** (Group A) |
 | **P1** | broker | workspace auto-close (2.9) + multi-watcher singleton (2.8) | open |
 | **P2** | workflow | verify fix loop 종결 정책 (3.2) — verdict 결정 기준 명확화 | open |
 | **P2** | workflow | PR 자동 생성 (3.4) + result file 명명 (3.5) | open |
@@ -464,3 +464,59 @@ impl/test는 `inline_model=sonnet` + `effort=high` (가성비)
    - 분석/검토 (orchestrator/plan/review/verify): `claude-opus-4-7` + `--effort max`
    - 구현/수정/테스트 (worker-impl/fix/test): `claude-sonnet-4-6`
    - 모든 claude entry에 `--permission-mode acceptEdits` 명시 (권한 dialog 감소)
+
+---
+
+## 10. Group A Resolution log (2026-05-13 — feat/awf-wf-hardening-group-a)
+
+P1 잔여 중 awf CLI 하드닝 4개 항목 후속 처리.
+
+### 10.1 변경 요약
+
+| commit | 범위 | 처리된 gap 항목 |
+|---|---|---|
+| (Group A 단일 commit 또는 logical 그룹) | `_parse_result_json` stream-json detection + last-result-event unwrap | §1.3 |
+| 동일 | `apply_workflow_result` impl/test phase 지원 + `render_impl_report`/`render_test_report` + CLI parser 4-phase whitelist + `wf gate` impl/test 추가 | §1.1 (partial) / §1.2 |
+| 동일 | `awf wf next --force` flag + `_find_fresh_result_file` mtime 검사로 in_progress 중복 가동 방지 | §1.4 |
+| 동일 | broker `_maybe_auto_apply_result` — result artifact의 `result_file`+`phase` 필드 검출 시 subprocess로 apply-result 자동 호출 (hard hook) | §1.7 (격상) |
+
+### 10.2 변경 메트릭
+
+| repo / area | 파일 수 | LOC delta |
+|---|---|---|
+| `cli/src/awf/` | 4 (commands/wf.py, cli.py, core/workflow_results.py, core/gates.py 미수정) | +180 / -10 |
+| `cli/tests/` | 3 신규 (test_workflow_results_parse.py, test_workflow_results_apply.py, test_wf_fresh_result.py) | +260 / -0 |
+| `cmux-agent/cmux_agent/` | 1 (application/broker.py) | +70 / -5 |
+| `cmux-agent/tests/` | 1 (tests/test_broker.py) | +120 / -5 |
+
+### 10.3 검증
+
+- `awf cli` 602/602 PASS (이전 591 → +18 신규 케이스: parser 7, apply 5, fresh-result 6)
+- `cmux-agent` 110/110 PASS (이전 104 → +6 신규: workflow_state_hint impl, auto-apply hook 5)
+- 신규 단위 테스트가 §1.2/1.3/1.4/1.7 hard hook 흐름을 회귀 가드
+
+### 10.4 운영 절차 추가 변경점
+
+이번 Group A로 다음 동작이 새로 가능:
+
+1. **`awf wf apply-result impl <result-file>`**: implementation-report.md 산출 + G4 자동 marking
+2. **`awf wf apply-result test <result-file>`**: test-report.md 산출 + G6 자동 marking
+3. **stream-json 형식 result 파일**: `awf wf apply-result` / `awf wf gate`가 자동으로 마지막 `{"type": "result"}` event를 unwrap. workaround로 별도 envelope 추출하던 절차 불필요.
+4. **`awf wf next` 안전망**: in_progress 단계에서 30분 이내 result 파일이 있으면 abort + apply-result 힌트. `--force`로 의도적 재실행 가능.
+5. **worker → broker auto state**: result artifact에 `result_file`/`phase` 필드를 포함하면 broker가 cycle root에서 `awf wf apply-result`를 자동 실행. workflow state.json이 worker 작업과 동시에 fresh 유지된다.
+
+### 10.5 잔여 (P1+ 미해결)
+
+| 항목 | 비고 |
+|---|---|
+| §1.1 deterministic gate 규칙 | impl/test agent card pass_conditions 정의 |
+| §1.5 scope-check multi-repo | manifest 확장 |
+| §1.6 `awf wf decide` 상태 강제 | force-from CLI |
+| §2.8 multi-watcher singleton | PID lock |
+| §2.9 workspace auto-close | cmd_stop 확장 |
+| §3.2 verify fix-loop 종결 정책 | verify spec 결정성 |
+| §3.4 PR 자동 생성 | `awf wf done` 확장 |
+| §3.5 result file 명명 규약 | round/timestamp |
+| §2.10 dual-mode worker spawn | workspace selection |
+| §4.2 session 재사용 | cycle 단위 token 절감 |
+| §8.7-P1 model routing telemetry | phase별 token + 비용 report |

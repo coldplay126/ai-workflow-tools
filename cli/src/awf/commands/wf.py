@@ -117,7 +117,7 @@ def _workflow_idempotency_key(state: dict, phase: str) -> str:
     return f"{state.get('id', 'wf')}:{phase}:{replan_count}"
 
 
-_GATE_SUPPORTED_PHASES = {"plan", "review", "verify"}
+_GATE_SUPPORTED_PHASES = {"plan", "review", "verify", "impl", "test"}
 
 
 def run_wf_gate(args: argparse.Namespace) -> int:
@@ -141,8 +141,8 @@ def run_wf_gate(args: argparse.Namespace) -> int:
     if phase == "plan":
         passed, evaluations = evaluate_plan_gate(repo_root)
     else:
-        # For review/verify, read result JSON from --result-file or stdin
-        # Uses the same parser as awf wf next to handle prose-wrapped JSON
+        # For review/verify/impl/test, read result JSON from --result-file or stdin.
+        # Uses the same parser as awf wf next to handle prose-wrapped + stream-json results.
         from awf.core.workflow_results import load_result_json
         result_data: dict = {}
         if args.result_file:
@@ -481,7 +481,37 @@ def run_wf_next(args: argparse.Namespace) -> int:
         data={"stage": "prepare", "description": "prepare workflow prompt and execution context"},
     )
     if state.get("currentPhase") == phase and state.get("phases", {}).get(phase, {}).get("status") == "in_progress":
-        print(f"warning: phase `{phase}` is already in_progress; re-running delegated execution.", file=sys.stderr)
+        # §1.4: avoid silently re-running a multi-minute executor when the
+        # caller may not have realised the phase is still in_progress. If a
+        # recent result file exists, abort with a hint; without --force the
+        # operator must apply-result or explicitly override.
+        force = bool(getattr(args, "force", False))
+        fresh_result = _find_fresh_result_file(args.repo_root, phase, max_age_sec=1800)
+        if fresh_result is not None and not force:
+            print(
+                f"error: phase `{phase}` is already in_progress and a fresh result file exists.",
+                file=sys.stderr,
+            )
+            print(f"  result_file: {fresh_result}", file=sys.stderr)
+            print(
+                f"  apply it with `awf wf apply-result {phase} {fresh_result}`,",
+                file=sys.stderr,
+            )
+            print(
+                "  or re-execute with `--force` if the previous result is stale.",
+                file=sys.stderr,
+            )
+            return 2
+        if force:
+            print(
+                f"warning: phase `{phase}` is already in_progress; --force re-running delegated execution.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"warning: phase `{phase}` is already in_progress (no fresh result detected); re-running delegated execution.",
+                file=sys.stderr,
+            )
     print(f"prompt_file: {prompt_path}")
     processor.emit(
         event_type=EventType.ARTIFACT_CREATED,
@@ -1185,6 +1215,39 @@ def _run_finding_feedback_loop(
                 "pattern": pattern,
             },
         )
+
+
+def _find_fresh_result_file(
+    explicit_root: Optional[str],
+    phase: str,
+    *,
+    max_age_sec: int = 1800,
+) -> Optional[Path]:
+    """Return the newest .workflow/tmp/result-{phase}-*.txt if it is fresh.
+
+    §1.4 helper: when the operator re-runs `awf wf next` on an in_progress
+    phase, this detects whether a recent executor result already exists so we
+    can suggest applying it instead of re-executing. `max_age_sec` defaults
+    to 30 minutes — well over a typical verify executor's runtime but short
+    enough that genuinely stalled phases will fall through.
+    """
+    try:
+        root = resolve_repo_root(explicit_root)
+    except Exception:
+        return None
+    tmp_dir = root / ".workflow" / "tmp"
+    if not tmp_dir.is_dir():
+        return None
+    candidates = sorted(
+        (p for p in tmp_dir.glob(f"result-{phase}-*.txt") if p.is_file()),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not candidates:
+        return None
+    newest = candidates[0]
+    age = time.time() - newest.stat().st_mtime
+    return newest if age <= max_age_sec else None
 
 
 def _resolve_phase_effort(provider_config: dict, phase: str) -> dict[str, str | None]:
