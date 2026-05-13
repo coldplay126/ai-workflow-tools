@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import subprocess
 import time
 from pathlib import Path
 
@@ -24,6 +26,22 @@ from cmux_agent.infrastructure.storage import StateStore
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
+
+# Branches workers must not commit directly to. Exact match or glob-like prefix.
+# 2026-05-13 BLIP Gem cycle §3.3 incident: worker pushed feat commits straight to
+# `main` on a sibling repo, triggering Argo CD's prod manifest auto-update.
+FORBIDDEN_BRANCH_PATTERNS = (
+    re.compile(r"^main$"),
+    re.compile(r"^master$"),
+    re.compile(r"^production$"),
+    re.compile(r"^prod$"),
+    re.compile(r"^release(/|-).*"),
+    re.compile(r"^prod(/|-).*"),
+)
+
+
+def _is_forbidden_branch(name: str) -> bool:
+    return any(p.match(name) for p in FORBIDDEN_BRANCH_PATTERNS)
 
 
 class MessageBroker:
@@ -394,6 +412,102 @@ class MessageBroker:
             self._drain_permission_dialogs(surface_id)
         return not self._input_stuck(surface_id) and not self._detect_permission_dialog(surface_id)
 
+    def _current_branch(self, cwd: Path) -> str | None:
+        """cycle root cwd의 현재 git branch. git repo 아니거나 detached/error 시 None."""
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(cwd), "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode != 0:
+            return None
+        name = result.stdout.strip()
+        return name if name and name != "HEAD" else None
+
+    def _active_workflow_context(self) -> dict | None:
+        """cycle root의 .workflow/state.json을 읽어 active workflow 정보를 반환.
+
+        없거나 파싱 실패면 None. 있으면 {"id", "currentPhase", "phase_status"} dict.
+        §1.7 incident 대응: cmux-agent broker가 작업 진행하는 동안 state.json이
+        stale인 채로 멈춰서 cycle 진행도 추적이 불가능했다. 본 함수는 dispatch
+        시점에 phase context를 worker prompt에 주입할 수 있게 정보 추출만 한다.
+        """
+        state_path = self._fs.base.parent / ".workflow" / "state.json"
+        if not state_path.is_file():
+            return None
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        current_phase = state.get("currentPhase")
+        if not current_phase:
+            return None
+        phases = state.get("phases") or {}
+        phase_meta = phases.get(current_phase) or {}
+        return {
+            "id": state.get("id", "unknown"),
+            "currentPhase": str(current_phase),
+            "phase_status": str(phase_meta.get("status", "unknown")),
+            "state_path": state_path,
+        }
+
+    _APPLY_RESULT_SUPPORTED_PHASES = {"review", "verify"}
+
+    def _workflow_state_hint(self) -> str:
+        """active workflow가 있으면 dispatch prompt에 추가할 state 갱신 안내."""
+        ctx = self._active_workflow_context()
+        if not ctx:
+            return ""
+        phase = ctx["currentPhase"]
+        cycle_root = self._fs.base.parent
+        state_path = ctx["state_path"]
+        if phase in self._APPLY_RESULT_SUPPORTED_PHASES:
+            return (
+                "\n📂 active workflow detected: "
+                f"id={ctx['id']} phase={phase} status={ctx['phase_status']}\n"
+                "   작업 완료 후 결과 JSON을 cycle root에 저장하고 "
+                f"`awf wf apply-result --phase {phase} "
+                f"--result-file <path>` (cwd={cycle_root}) 를 실행하여 "
+                "state.json을 자동 갱신하세요.\n"
+            )
+        # impl/test/plan/done 등 apply-result 미지원 phase
+        return (
+            "\n📂 active workflow detected: "
+            f"id={ctx['id']} phase={phase} status={ctx['phase_status']}\n"
+            f"   현재 phase '{phase}'는 awf wf apply-result 미지원이므로 "
+            f"작업 완료 후 {state_path}에 진행 상황을 수동으로 반영하세요 "
+            "(phases[phase].status, history 추가). "
+            "stale state는 cycle 추적을 방해합니다.\n"
+        )
+
+    def _branch_safety_warning(self) -> str:
+        """forbidden branch 위에 있으면 dispatch 프롬프트에 prepend할 경고 문자열을 반환.
+
+        §3.3 incident 재발 방지: worker가 base branch 확인 없이 main에 직커밋.
+        broker는 cycle root cwd만 알 수 있고, sibling repo는 못 보므로 hard block
+        대신 명시적 경고를 주입한다. multi-repo cycle에서도 work tree가 main이면
+        sibling도 main인 경우가 많아 실용적으로 유용하다.
+        """
+        cycle_root = self._fs.base.parent
+        branch = self._current_branch(cycle_root)
+        if branch and _is_forbidden_branch(branch):
+            return (
+                f"\n⚠️  CRITICAL — base branch protection (cycle root: {cycle_root}):\n"
+                f"   현재 branch = `{branch}` (forbidden). "
+                f"이 cycle의 모든 git commit은 feature branch에서만 수행하세요.\n"
+                f"   작업 시작 전 각 대상 repo에서 `git branch --show-current`로 확인하고, "
+                f"main/master/production 이면 새 feat/* branch를 만들어 checkout 후 진행하세요.\n"
+            )
+        # branch 모르면 일반 안내 (정상적 multi-repo 운영 대비 보조 reminder)
+        return (
+            "\n📌 base branch 안내: 각 대상 repo에서 작업 시작 전 "
+            "`git branch --show-current`를 확인하고, main/master/production 직커밋은 금지입니다.\n"
+        )
+
     def _inject_and_notify(
         self,
         recipient: str,
@@ -417,6 +531,12 @@ class MessageBroker:
                 msg_type=msg_type,
                 payload=payload,
             )
+            if msg_type == MessageType.DISPATCH:
+                injection = (
+                    self._branch_safety_warning()
+                    + self._workflow_state_hint()
+                    + injection
+                )
             # 1) recipient AI CLI가 작업 중이면 idle 될 때까지 대기.
             #    busy 상태에서 send_text하면 cmux input queue에 흡수되지 못하고 lost됨.
             idle_ok = self._wait_for_idle(agent.surface_id, max_wait=180.0)

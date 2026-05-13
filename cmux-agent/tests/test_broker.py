@@ -239,3 +239,103 @@ class TestBrokerRouting:
         payload = json.loads(inbox_files[0].read_text())
         assert payload["result"] == "spawned worker-review (claude)"
         assert payload["context"]["agent"]["name"] == "worker-review"
+
+
+class TestBranchSafety:
+    """§3.3 base branch validator: dispatch 시 forbidden branch 경고 주입."""
+
+    def test_is_forbidden_branch(self):
+        from cmux_agent.application.broker import _is_forbidden_branch
+
+        assert _is_forbidden_branch("main")
+        assert _is_forbidden_branch("master")
+        assert _is_forbidden_branch("production")
+        assert _is_forbidden_branch("prod")
+        assert _is_forbidden_branch("release/2026.05")
+        assert _is_forbidden_branch("release-hotfix")
+        assert _is_forbidden_branch("prod/staging")
+        assert not _is_forbidden_branch("feat/new")
+        assert not _is_forbidden_branch("fix/cmux-broker-buffer-sync")
+        assert not _is_forbidden_branch("maintenance")  # not master
+        assert not _is_forbidden_branch("releases")  # only `release` + sep
+
+    def test_branch_warning_when_on_forbidden_branch(self, tmp_path, setup):
+        """cycle root이 main branch git repo면 경고 텍스트가 포함되어야 함."""
+        broker, store, fs, _, cmux = setup
+
+        # fs.base는 tmp_path/.agent — parent를 git init main으로 세팅
+        cycle_root = fs.base.parent
+        import subprocess as sp
+        sp.run(["git", "init", "-q", "-b", "main", str(cycle_root)], check=True)
+        sp.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "-C", str(cycle_root), "commit", "--allow-empty", "-m", "init"],
+            check=True,
+            capture_output=True,
+        )
+
+        warning = broker._branch_safety_warning()
+        assert "CRITICAL" in warning
+        assert "`main`" in warning
+        assert "forbidden" in warning
+
+    def test_branch_warning_generic_when_no_git(self, setup):
+        """non-git cwd면 일반 reminder 반환."""
+        broker, *_ = setup
+        warning = broker._branch_safety_warning()
+        # tmp_path는 보통 non-git이라 generic reminder 반환
+        assert "base branch" in warning
+        assert "CRITICAL" not in warning
+
+
+class TestWorkflowStateHint:
+    """§1.7 active workflow detection: dispatch 시 state.json 갱신 안내 주입."""
+
+    def test_no_workflow_returns_empty_hint(self, setup):
+        broker, *_ = setup
+        assert broker._workflow_state_hint() == ""
+
+    def test_workflow_review_phase_emits_apply_result_hint(self, setup):
+        broker, _store, fs, *_ = setup
+        cycle_root = fs.base.parent
+        wf_dir = cycle_root / ".workflow"
+        wf_dir.mkdir(parents=True, exist_ok=True)
+        (wf_dir / "state.json").write_text(
+            json.dumps({
+                "id": "2026-05-13-demo",
+                "currentPhase": "review",
+                "phases": {"review": {"status": "in_progress"}},
+            }),
+            encoding="utf-8",
+        )
+        hint = broker._workflow_state_hint()
+        assert "2026-05-13-demo" in hint
+        assert "phase=review" in hint
+        assert "awf wf apply-result --phase review" in hint
+        assert str(cycle_root) in hint
+
+    def test_workflow_impl_phase_emits_manual_state_hint(self, setup):
+        broker, _store, fs, *_ = setup
+        cycle_root = fs.base.parent
+        wf_dir = cycle_root / ".workflow"
+        wf_dir.mkdir(parents=True, exist_ok=True)
+        (wf_dir / "state.json").write_text(
+            json.dumps({
+                "id": "2026-05-13-impl-demo",
+                "currentPhase": "impl",
+                "phases": {"impl": {"status": "in_progress"}},
+            }),
+            encoding="utf-8",
+        )
+        hint = broker._workflow_state_hint()
+        assert "phase=impl" in hint
+        # apply-result 미지원이므로 수동 안내
+        assert "수동" in hint
+        assert "apply-result" not in hint or "미지원" in hint
+
+    def test_invalid_state_json_returns_empty(self, setup):
+        broker, _store, fs, *_ = setup
+        wf_dir = fs.base.parent / ".workflow"
+        wf_dir.mkdir(parents=True, exist_ok=True)
+        (wf_dir / "state.json").write_text("not json", encoding="utf-8")
+        assert broker._workflow_state_hint() == ""
