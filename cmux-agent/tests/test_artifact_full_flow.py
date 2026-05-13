@@ -96,6 +96,22 @@ class FakeCmux:
         )
         return CmuxResult(ok=True, stdout="", stderr="")
 
+    def read_screen(
+        self,
+        *,
+        surface_id: str | None = None,
+        workspace_id: str | None = None,
+        lines: int = 30,
+    ) -> CmuxResult:
+        self.calls.append(
+            (
+                "read_screen",
+                {"surface_id": surface_id, "workspace_id": workspace_id, "lines": lines},
+            )
+        )
+        # idle 화면 (busy 마커 없음) 반환 → broker가 즉시 dispatch 진행
+        return CmuxResult(ok=True, stdout="", stderr="")
+
     def notify(self, title: str, body: str = "") -> CmuxResult:
         self.calls.append(("notify", {"title": title, "body": body}))
         return CmuxResult(ok=True, stdout="", stderr="")
