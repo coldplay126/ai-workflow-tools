@@ -711,6 +711,26 @@ def run_wf_next(args: argparse.Namespace) -> int:
                 except FileNotFoundError:
                     pass
         captured_output = result.stdout if (result.stdout or "").strip() else (result.stderr or "")
+        # §8.7-P1: record phase telemetry (best-effort, never blocks the workflow).
+        try:
+            from awf.core.state import record_phase_telemetry
+            from awf.core.usage import estimate_cost
+
+            usage = getattr(result, "usage", None)
+            in_tok = int(getattr(usage, "input_tokens", 0) or 0) if usage else 0
+            out_tok = int(getattr(usage, "output_tokens", 0) or 0) if usage else 0
+            if in_tok or out_tok:
+                cost = estimate_cost(candidate, in_tok, out_tok)
+                record_phase_telemetry(
+                    args.repo_root,
+                    phase,
+                    input_tokens=in_tok,
+                    output_tokens=out_tok,
+                    cost_usd=cost,
+                    provider=candidate,
+                )
+        except Exception:
+            pass
         result_path = save_workflow_result(
             args.repo_root,
             phase,

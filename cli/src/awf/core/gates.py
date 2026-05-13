@@ -276,6 +276,45 @@ def evaluate_gate(explicit_root: Optional[str], phase: str, result_data: dict[st
         elif condition == "REVIEW_CONFLICT count == 0 (when multi-LLM)":
             passed = True
             detail = "multi_llm_conflicts=0 (not yet modeled)"
+        # --- §1.1 impl gate (G4) conditions ---
+        elif condition == "tasks.pending == 0":
+            pending = len(_as_list(result_data.get("tasks_pending")))
+            passed = pending == 0
+            detail = f"tasks_pending={pending}"
+        elif condition == "lint_clean == true":
+            lint_clean = bool(result_data.get("lint_clean", False))
+            passed = lint_clean is True
+            detail = f"lint_clean={lint_clean}"
+        elif condition == "build_passed == true":
+            build_passed = bool(result_data.get("build_passed", False))
+            passed = build_passed is True
+            detail = f"build_passed={build_passed}"
+        elif condition == "commits.count > 0":
+            commit_count = len(_as_list(result_data.get("commits")))
+            passed = commit_count > 0
+            detail = f"commit_count={commit_count}"
+        # --- §1.1 test gate (G6) conditions ---
+        elif condition == "suites.failed == 0":
+            suites = _as_list(result_data.get("suites"))
+            total_failed = sum(int(s.get("failed", 0) or 0) for s in suites if isinstance(s, dict))
+            passed = total_failed == 0
+            detail = f"suites_failed={total_failed}"
+        elif condition == "regressions.count == 0":
+            reg_count = len(_as_list(result_data.get("regressions")))
+            passed = reg_count == 0
+            detail = f"regression_count={reg_count}"
+        elif condition == "acceptance.passed == acceptance.total":
+            acceptance = result_data.get("acceptance") or {}
+            if not isinstance(acceptance, dict):
+                acceptance = {}
+            ap = int(acceptance.get("passed", 0) or 0)
+            at = int(acceptance.get("total", 0) or 0)
+            passed = ap == at and at > 0  # require at least one acceptance item
+            detail = f"acceptance={ap}/{at}"
+        elif condition == "coverage.percentage >= 70":
+            percentage = float(coverage.get("percentage", 0) or 0)
+            passed = percentage >= 70
+            detail = f"coverage_percentage={percentage}"
         else:
             passed = False
             detail = "unsupported_condition_requires_evaluator_update"

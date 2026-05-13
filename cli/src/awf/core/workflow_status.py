@@ -134,6 +134,31 @@ def summarize_workflow_state(state: dict) -> str:
             elapsed_str = f" ({elapsed:.0f}s)" if elapsed else ""
             lines.append(f"  {icon} {a.get('provider', '?')}/{a.get('role', '?')}{elapsed_str}")
 
+    # §8.7-P1 telemetry: per-phase token + cost totals if recorded.
+    telemetry = state.get("telemetry") or {}
+    phase_tele = telemetry.get("phases") or {}
+    if isinstance(phase_tele, dict) and phase_tele:
+        lines.append("telemetry:")
+        total_in = 0
+        total_out = 0
+        total_cost = 0.0
+        for name, info in sorted(phase_tele.items()):
+            if not isinstance(info, dict):
+                continue
+            in_tok = int(info.get("input_tokens", 0) or 0)
+            out_tok = int(info.get("output_tokens", 0) or 0)
+            cost = float(info.get("cost_usd", 0) or 0)
+            runs = int(info.get("runs", 0) or 0)
+            total_in += in_tok
+            total_out += out_tok
+            total_cost += cost
+            lines.append(
+                f"  - {name}: in={in_tok:,} out={out_tok:,} cost=${cost:.4f} runs={runs}"
+            )
+        lines.append(
+            f"  total: in={total_in:,} out={total_out:,} cost=${total_cost:.4f}"
+        )
+
     loop = state.get("loop", {}) or {}
     last_escape = loop.get("lastEscape")
     if isinstance(last_escape, dict) and last_escape:

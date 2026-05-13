@@ -72,10 +72,12 @@
   "gate": {
     "id": "G4",
     "pass_conditions": [
-      "all tasks in tasks.md marked [X]",
-      "lint_command errors == 0 (if lint_command configured)",
-      "all phases have commits"
+      "tasks.pending == 0",
+      "lint_clean == true",
+      "build_passed == true",
+      "commits.count > 0"
     ],
+    "_pass_conditions_doc": "Worker result schema: { tasks_completed: [...], tasks_pending: [...], lint_clean: bool, build_passed: bool, commits: [...] }",
     "on_pass": { "next_phase": "verify" },
     "on_fail": {
       "incomplete_tasks": { "next_phase": "impl" }
