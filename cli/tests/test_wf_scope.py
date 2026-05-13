@@ -550,3 +550,322 @@ def test_scope_check_raises_when_allowed_files_missing(tmp_path: Path):
 
     with pytest.raises(FileNotFoundError):
         check_scope_violations(tmp_path, base_branch="main")
+
+
+# --------------------------------------------------------------------------
+# Multi-repo scope check (docs/specs/multi-repo-scope.md)
+# --------------------------------------------------------------------------
+
+def _write_manifest(repo_root: Path, siblings: list[dict]) -> None:
+    wf_dir = repo_root / ".workflow"
+    wf_dir.mkdir(parents=True, exist_ok=True)
+    (wf_dir / "manifest.json").write_text(
+        json.dumps({"version": "1.0.0", "sibling_repos": siblings}), encoding="utf-8"
+    )
+
+
+def _setup_sibling_repo(
+    repo_root: Path,
+    *,
+    base_files: list[str],
+    changed_files: list[str],
+    base: str = "main",
+    branch_name: str = "feature",
+) -> None:
+    """Initialize a sibling git repo with base→branch changes (no allowed-files)."""
+    import subprocess
+
+    _init_repo_with_branch(repo_root, base=base)
+    for path in base_files:
+        full = repo_root / path
+        full.parent.mkdir(parents=True, exist_ok=True)
+        full.write_text("// base\n", encoding="utf-8")
+    (repo_root / "README.md").write_text("seed\n", encoding="utf-8")
+    _commit_all(repo_root, "base")
+    subprocess.run(["git", "checkout", "-q", "-b", branch_name], cwd=repo_root, check=True)
+    for path in changed_files:
+        full = repo_root / path
+        full.parent.mkdir(parents=True, exist_ok=True)
+        full.write_text("// modified\n", encoding="utf-8")
+    if changed_files:
+        _commit_all(repo_root, "feature changes")
+
+
+def test_scope_check_no_siblings_backward_compat(tmp_path: Path):
+    """No manifest → behaves exactly like before; per_repo holds only root."""
+    from awf.core.wf_scope import check_scope_violations
+
+    _setup_repo_with_changes(
+        tmp_path,
+        planned=["src/a.ts"],
+        expanded=[],
+        base_files=["src/a.ts"],
+        changed_files=["src/a.ts"],
+    )
+    result = check_scope_violations(tmp_path, base_branch="main")
+    assert result.violation_count == 0
+    assert len(result.per_repo) == 1
+    assert result.per_repo[0].name == ""
+    assert result.per_repo[0].error is None
+    assert result.repo_errors == ()
+
+
+def test_scope_check_single_sibling_planned(tmp_path: Path):
+    """Sibling repo whose changes are all in planned_files → PASS."""
+    from awf.core.wf_scope import check_scope_violations
+
+    root = tmp_path / "root"
+    sibling = tmp_path / "sibling-api"
+    root.mkdir()
+    sibling.mkdir()
+
+    _setup_sibling_repo(
+        sibling,
+        base_files=["src/handler.ts"],
+        changed_files=["src/handler.ts"],
+        branch_name="feature",
+    )
+    _setup_repo_with_changes(
+        root,
+        planned=["src/main.ts", "@api/src/handler.ts"],
+        expanded=[],
+        base_files=["src/main.ts"],
+        changed_files=["src/main.ts"],
+    )
+    _write_manifest(root, [
+        {"name": "api", "path": "../sibling-api", "branch": "main"}
+    ])
+
+    result = check_scope_violations(root, base_branch="main")
+    assert result.violation_count == 0, [v.path for v in result.violations]
+    assert len(result.per_repo) == 2
+    # Top-level changed_files carry the sibling prefix.
+    assert "src/main.ts" in result.changed_files
+    assert "@api/src/handler.ts" in result.changed_files
+
+
+def test_scope_check_sibling_violation_aggregates_to_top_level(tmp_path: Path):
+    """Sibling changes a file outside allowed-files → violation surfaced with prefix."""
+    from awf.core.wf_scope import check_scope_violations
+
+    root = tmp_path / "root"
+    sibling = tmp_path / "sibling-api"
+    root.mkdir()
+    sibling.mkdir()
+
+    _setup_sibling_repo(
+        sibling,
+        base_files=["src/handler.ts", "src/leak.ts"],
+        changed_files=["src/handler.ts", "src/leak.ts"],
+        branch_name="feature",
+    )
+    _setup_repo_with_changes(
+        root,
+        planned=["@api/src/handler.ts"],
+        expanded=[],
+        base_files=["src/main.ts"],
+        changed_files=[],
+    )
+    _write_manifest(root, [{"name": "api", "path": "../sibling-api", "branch": "main"}])
+
+    result = check_scope_violations(root, base_branch="main")
+    violation_paths = {v.path for v in result.violations}
+    assert "@api/src/leak.ts" in violation_paths
+    assert result.violation_count == 1
+
+
+def test_scope_check_aggregates_violations_across_repos(tmp_path: Path):
+    """Each repo with 1 violation → top-level shows 2 violations with prefixes."""
+    from awf.core.wf_scope import check_scope_violations
+
+    root = tmp_path / "root"
+    sibling = tmp_path / "sibling-api"
+    root.mkdir()
+    sibling.mkdir()
+
+    _setup_sibling_repo(
+        sibling,
+        base_files=["src/handler.ts", "src/leak.ts"],
+        changed_files=["src/leak.ts"],
+        branch_name="feature",
+    )
+    _setup_repo_with_changes(
+        root,
+        planned=["src/main.ts"],
+        expanded=[],
+        base_files=["src/main.ts", "src/extra.ts"],
+        changed_files=["src/extra.ts"],
+    )
+    _write_manifest(root, [{"name": "api", "path": "../sibling-api", "branch": "main"}])
+
+    result = check_scope_violations(root, base_branch="main")
+    paths = sorted(v.path for v in result.violations)
+    assert paths == ["@api/src/leak.ts", "src/extra.ts"]
+
+
+def test_scope_check_unknown_prefix_in_allowed_files(tmp_path: Path):
+    """`@unknown/` in planned_files → violation surfaced (catch typos)."""
+    from awf.core.wf_scope import check_scope_violations
+
+    _setup_repo_with_changes(
+        tmp_path,
+        planned=["src/main.ts", "@typo/foo.ts"],
+        expanded=[],
+        base_files=["src/main.ts"],
+        changed_files=["src/main.ts"],
+    )
+    # no manifest at all
+    result = check_scope_violations(tmp_path, base_branch="main")
+    typos = [v for v in result.violations if v.path == "@typo/foo.ts"]
+    assert len(typos) == 1
+    assert "unknown sibling" in typos[0].reason
+
+
+def test_scope_check_missing_sibling_path_yields_repo_error(tmp_path: Path):
+    """Sibling path missing → RepoScopeResult.error="missing_repo", not a violation."""
+    from awf.core.wf_scope import REPO_ERROR_MISSING, check_scope_violations
+
+    _setup_repo_with_changes(
+        tmp_path,
+        planned=["src/main.ts"],
+        expanded=[],
+        base_files=["src/main.ts"],
+        changed_files=["src/main.ts"],
+    )
+    _write_manifest(tmp_path, [{"name": "ghost", "path": "../ghost-repo"}])
+
+    result = check_scope_violations(tmp_path, base_branch="main")
+    assert result.repo_error_count == 1
+    assert result.repo_errors[0].name == "ghost"
+    assert result.repo_errors[0].error == REPO_ERROR_MISSING
+    # missing-repo is not counted as a scope violation
+    assert result.violation_count == 0
+
+
+def test_scope_check_sibling_not_git_repo(tmp_path: Path):
+    """Path exists but no `.git` → error="not_git_repo"."""
+    from awf.core.wf_scope import REPO_ERROR_NOT_GIT, check_scope_violations
+
+    root = tmp_path / "root"
+    plain_dir = tmp_path / "sibling-plain"
+    root.mkdir()
+    plain_dir.mkdir()
+    (plain_dir / "file.txt").write_text("x", encoding="utf-8")
+
+    _setup_repo_with_changes(
+        root,
+        planned=["src/main.ts"],
+        expanded=[],
+        base_files=["src/main.ts"],
+        changed_files=["src/main.ts"],
+    )
+    _write_manifest(root, [{"name": "plain", "path": "../sibling-plain"}])
+
+    result = check_scope_violations(root, base_branch="main")
+    assert result.repo_error_count == 1
+    assert result.repo_errors[0].error == REPO_ERROR_NOT_GIT
+
+
+def test_scope_check_sibling_branch_fallback_to_default(tmp_path: Path):
+    """Sibling without explicit branch → fallback to default branch detection."""
+    from awf.core.wf_scope import check_scope_violations
+
+    root = tmp_path / "root"
+    sibling = tmp_path / "sibling-api"
+    root.mkdir()
+    sibling.mkdir()
+
+    _setup_sibling_repo(
+        sibling,
+        base_files=["src/handler.ts"],
+        changed_files=["src/handler.ts"],
+        branch_name="feature",
+    )
+    _setup_repo_with_changes(
+        root,
+        planned=["@api/src/handler.ts"],
+        expanded=[],
+        base_files=["src/main.ts"],
+        changed_files=[],
+    )
+    # branch field omitted on purpose — fallback should resolve to "main".
+    _write_manifest(root, [{"name": "api", "path": "../sibling-api"}])
+
+    result = check_scope_violations(root, base_branch="main")
+    # Sibling's base branch resolved from default candidates.
+    sibling_result = next(r for r in result.per_repo if r.name == "api")
+    assert sibling_result.error is None
+    assert sibling_result.base_branch == "main"
+    assert result.violation_count == 0
+
+
+def test_scope_check_to_json_includes_per_repo_block(tmp_path: Path):
+    """to_json() exposes per_repo + repo_errors for downstream consumers."""
+    from awf.core.wf_scope import check_scope_violations
+
+    root = tmp_path / "root"
+    sibling = tmp_path / "sibling-api"
+    root.mkdir()
+    sibling.mkdir()
+
+    _setup_sibling_repo(
+        sibling,
+        base_files=["src/handler.ts"],
+        changed_files=["src/handler.ts"],
+        branch_name="feature",
+    )
+    _setup_repo_with_changes(
+        root,
+        planned=["@api/src/handler.ts"],
+        expanded=[],
+        base_files=["src/main.ts"],
+        changed_files=[],
+    )
+    _write_manifest(root, [
+        {"name": "api", "path": "../sibling-api", "branch": "main"},
+        {"name": "ghost", "path": "../ghost-repo"},
+    ])
+
+    payload = check_scope_violations(root, base_branch="main").to_json()
+    assert "per_repo" in payload
+    assert {p["name"] for p in payload["per_repo"]} == {"", "api", "ghost"}
+    # repo_errors mirrors per_repo entries with non-null error.
+    assert len(payload["repo_errors"]) == 1
+    assert payload["repo_errors"][0]["name"] == "ghost"
+
+
+def test_load_sibling_repos_rejects_malformed_entries(tmp_path: Path):
+    import pytest
+    from awf.core.wf_scope import load_sibling_repos
+
+    cases = [
+        [{"name": "", "path": "../x"}],                  # empty name
+        [{"name": "a/b", "path": "../x"}],               # invalid chars
+        [{"name": "a", "path": ""}],                      # empty path
+        [{"name": "a", "path": "./sub"}],                 # not sibling
+        [{"name": "a", "path": "/abs/path"}],             # absolute
+        [{"name": "dup", "path": "../a"}, {"name": "dup", "path": "../b"}],  # duplicate
+    ]
+    for siblings in cases:
+        _write_manifest(tmp_path, siblings)
+        with pytest.raises(ValueError):
+            load_sibling_repos(tmp_path)
+
+
+def test_load_sibling_repos_empty_when_field_missing(tmp_path: Path):
+    """No sibling_repos field or empty list → []. Backward-compat path."""
+    from awf.core.wf_scope import load_sibling_repos
+
+    # No manifest at all
+    assert load_sibling_repos(tmp_path) == []
+
+    # Manifest without sibling_repos
+    (tmp_path / ".workflow").mkdir()
+    (tmp_path / ".workflow" / "manifest.json").write_text(
+        json.dumps({"version": "1.0.0"}), encoding="utf-8"
+    )
+    assert load_sibling_repos(tmp_path) == []
+
+    # Empty list
+    _write_manifest(tmp_path, [])
+    assert load_sibling_repos(tmp_path) == []

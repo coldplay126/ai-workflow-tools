@@ -217,6 +217,7 @@ DEFAULT_MANIFEST = {
         "integration": None,
         "e2e": None,
     },
+    "sibling_repos": [],
 }
 
 def _now_iso() -> str:

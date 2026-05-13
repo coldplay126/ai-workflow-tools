@@ -222,12 +222,41 @@ STATUS_PLANNED = "planned"
 STATUS_EXPANDED = "expanded"
 STATUS_VIOLATION = "violation"
 
+# Repo-level errors that prevent classification (config issues, not violations).
+REPO_ERROR_MISSING = "missing_repo"
+REPO_ERROR_NOT_GIT = "not_git_repo"
+REPO_ERROR_BRANCH_UNKNOWN = "branch_unknown"
+REPO_ERROR_DIFF_FAILED = "git_diff_failed"
+
 
 @dataclass(frozen=True)
 class FileClassification:
     path: str
     status: str  # "planned" | "expanded" | "violation"
     reason: str  # explanation that the verify SKILL can quote verbatim
+
+
+@dataclass(frozen=True)
+class SiblingRepo:
+    """Sibling repo declared in .workflow/manifest.json.
+
+    See docs/specs/multi-repo-scope.md §3.1.
+    """
+    name: str
+    path: str       # cycle-root-relative; must start with ".."
+    branch: str | None  # None → fall back to default branch detection
+
+
+@dataclass(frozen=True)
+class RepoScopeResult:
+    """Per-repo slice of a multi-repo scope check."""
+    name: str            # "" for cycle root, else sibling.name
+    path: str            # cycle-root-relative
+    base_branch: str     # resolved base branch (or "" when error blocks resolution)
+    changed_files: tuple[str, ...]
+    classifications: tuple[FileClassification, ...]
+    violations: tuple[FileClassification, ...]
+    error: str | None    # one of REPO_ERROR_* or None
 
 
 @dataclass(frozen=True)
@@ -240,10 +269,19 @@ class ScopeCheckResult:
     violations: tuple[FileClassification, ...]
     # Files in planned that were not actually changed (informational).
     planned_not_changed: tuple[str, ...]
+    # Per-repo breakdown. Always contains at least the cycle root (name="").
+    per_repo: tuple[RepoScopeResult, ...] = ()
+    # Repo-level errors (missing path, not-git, etc.). Surface separately
+    # from scope violations so operators can distinguish config mistakes.
+    repo_errors: tuple[RepoScopeResult, ...] = ()
 
     @property
     def violation_count(self) -> int:
         return len(self.violations)
+
+    @property
+    def repo_error_count(self) -> int:
+        return len(self.repo_errors)
 
     def to_json(self) -> dict:
         return {
@@ -260,6 +298,27 @@ class ScopeCheckResult:
                 for c in self.classifications
             ],
             "planned_not_changed": list(self.planned_not_changed),
+            "per_repo": [
+                {
+                    "name": r.name,
+                    "path": r.path,
+                    "base_branch": r.base_branch,
+                    "changed_files": list(r.changed_files),
+                    "classifications": [
+                        {"path": c.path, "status": c.status, "reason": c.reason}
+                        for c in r.classifications
+                    ],
+                    "violations": [
+                        {"path": v.path, "reason": v.reason} for v in r.violations
+                    ],
+                    "error": r.error,
+                }
+                for r in self.per_repo
+            ],
+            "repo_errors": [
+                {"name": r.name, "path": r.path, "error": r.error}
+                for r in self.repo_errors
+            ],
         }
 
 
@@ -310,6 +369,86 @@ def _resolve_base_branch(repo_root: Path, explicit: str | None) -> str:
     )
 
 
+_SIBLING_NAME_OK = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
+
+
+def _valid_sibling_name(name: str) -> bool:
+    return bool(name) and all(ch in _SIBLING_NAME_OK for ch in name)
+
+
+def load_sibling_repos(repo_root: Path) -> list[SiblingRepo]:
+    """Load and validate `sibling_repos` from `.workflow/manifest.json`.
+
+    Returns an empty list when the manifest is absent, malformed, or has no
+    `sibling_repos` field — that's the documented backward-compat path
+    (docs/specs/multi-repo-scope.md §3.1).
+
+    Raises ValueError when a declared entry is malformed (bad name, missing
+    path, non-relative path, path not starting with ".."). The caller maps
+    that to exit-code 2.
+    """
+    manifest_path = repo_root / ".workflow" / "manifest.json"
+    if not manifest_path.is_file():
+        return []
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    raw = manifest.get("sibling_repos")
+    if not isinstance(raw, list) or not raw:
+        return []
+
+    result: list[SiblingRepo] = []
+    seen_names: set[str] = set()
+    for idx, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise ValueError(f"sibling_repos[{idx}]: must be an object")
+        name = str(entry.get("name") or "").strip()
+        path = str(entry.get("path") or "").strip()
+        branch_raw = entry.get("branch")
+        branch = str(branch_raw).strip() if isinstance(branch_raw, str) and branch_raw.strip() else None
+        if not _valid_sibling_name(name):
+            raise ValueError(
+                f"sibling_repos[{idx}].name: must be non-empty and match [A-Za-z0-9_-]+ (got {name!r})"
+            )
+        if name in seen_names:
+            raise ValueError(f"sibling_repos[{idx}].name: duplicate {name!r}")
+        seen_names.add(name)
+        if not path:
+            raise ValueError(f"sibling_repos[{idx}].path: required")
+        # Must be a relative sibling: ".." prefix prevents sub-paths inside cycle root.
+        if Path(path).is_absolute() or not path.startswith(".."):
+            raise ValueError(
+                f"sibling_repos[{idx}].path: must be a sibling relative path starting with '..' (got {path!r})"
+            )
+        result.append(SiblingRepo(name=name, path=path, branch=branch))
+    return result
+
+
+_SIBLING_PREFIX = "@"
+
+
+def _split_sibling_path(path: str) -> tuple[str | None, str]:
+    """Split a file path into (sibling_name | None, real_path).
+
+    "@foo/bar.ts" → ("foo", "bar.ts")
+    "src/main.ts" → (None, "src/main.ts")
+
+    A `@<name>/` prefix declares that the file belongs to a sibling repo.
+    A `@` without a `/` separator is treated as a literal filename (file
+    starting with @) for safety.
+    """
+    if not path.startswith(_SIBLING_PREFIX):
+        return None, path
+    rest = path[len(_SIBLING_PREFIX):]
+    if "/" not in rest:
+        return None, path
+    name, _, real = rest.partition("/")
+    if not _valid_sibling_name(name):
+        return None, path
+    return name, real
+
+
 def _build_expansion_reason_index(payload: dict) -> dict[str, str]:
     """Map each expanded path to its `dependent_of:X` / `import_of:X` reason."""
     audit = payload.get("graph_expansion") or {}
@@ -321,6 +460,101 @@ def _build_expansion_reason_index(payload: dict) -> dict[str, str]:
         if path and reason and path not in index:
             index[path] = reason
     return index
+
+
+def _classify_one_repo(
+    *,
+    repo_path: Path,
+    name: str,
+    rel_path: str,
+    base_branch_override: str | None,
+    planned: list[str],
+    expanded: list[str],
+    expansion_reasons: dict[str, str],
+) -> RepoScopeResult:
+    """Run scope classification for a single repo (root or sibling).
+
+    Errors (missing path, not-a-git-repo, branch resolution failure,
+    git diff failure) are surfaced as `RepoScopeResult.error` rather than
+    raised, so the caller can aggregate them next to successful repos.
+
+    The returned classifications/violations use the repo's *real* relative
+    paths (no `@<name>/` prefix). The caller adds the prefix when
+    flattening to top-level aggregates.
+    """
+    if not repo_path.is_dir():
+        return RepoScopeResult(
+            name=name, path=rel_path, base_branch="",
+            changed_files=(), classifications=(), violations=(),
+            error=REPO_ERROR_MISSING,
+        )
+    # .git can be a directory (normal clone) or a file (git worktree).
+    if not (repo_path / ".git").exists():
+        return RepoScopeResult(
+            name=name, path=rel_path, base_branch="",
+            changed_files=(), classifications=(), violations=(),
+            error=REPO_ERROR_NOT_GIT,
+        )
+    try:
+        base = _resolve_base_branch(repo_path, base_branch_override)
+    except RuntimeError:
+        return RepoScopeResult(
+            name=name, path=rel_path, base_branch="",
+            changed_files=(), classifications=(), violations=(),
+            error=REPO_ERROR_BRANCH_UNKNOWN,
+        )
+    try:
+        raw_changed = _git_diff_changed_files(repo_path, base)
+    except RuntimeError:
+        return RepoScopeResult(
+            name=name, path=rel_path, base_branch=base,
+            changed_files=(), classifications=(), violations=(),
+            error=REPO_ERROR_DIFF_FAILED,
+        )
+    # `.workflow/` is WF infrastructure (artifacts, state.json, etc.), not
+    # user-authored source. Excluding it here matches operator intuition —
+    # nobody puts these paths in `planned_files` or `expanded_files`.
+    changed = [p for p in raw_changed if not p.startswith(".workflow/")]
+
+    planned_set = set(planned)
+    expanded_set = set(expanded)
+    classifications: list[FileClassification] = []
+    violations: list[FileClassification] = []
+    for path in changed:
+        if path in planned_set:
+            classifications.append(
+                FileClassification(path=path, status=STATUS_PLANNED, reason="in planned_files")
+            )
+        elif path in expanded_set:
+            reason = expansion_reasons.get(path) or "in expanded_files"
+            classifications.append(
+                FileClassification(path=path, status=STATUS_EXPANDED, reason=reason)
+            )
+        else:
+            c = FileClassification(
+                path=path,
+                status=STATUS_VIOLATION,
+                reason="not in planned_files or expanded_files",
+            )
+            classifications.append(c)
+            violations.append(c)
+
+    return RepoScopeResult(
+        name=name,
+        path=rel_path,
+        base_branch=base,
+        changed_files=tuple(changed),
+        classifications=tuple(classifications),
+        violations=tuple(violations),
+        error=None,
+    )
+
+
+def _prefix_path(repo_name: str, path: str) -> str:
+    """Render a per-repo path with its sibling prefix for top-level aggregates."""
+    if not repo_name:
+        return path
+    return f"@{repo_name}/{path}"
 
 
 def check_scope_violations(
@@ -335,59 +569,158 @@ def check_scope_violations(
     ``planned_files`` and (when ``include_expanded`` is True)
     ``expanded_files`` from ``.workflow/artifacts/allowed-files.json``.
 
+    When `.workflow/manifest.json` declares `sibling_repos`, the check walks
+    each sibling repo as well and aggregates results. Files in allowed-files
+    are routed to the right repo via the `@<sibling-name>/` prefix
+    (docs/specs/multi-repo-scope.md §3.2). Unprefixed paths target the
+    cycle root.
+
     Returns per-file classifications plus a focused list of violations.
     """
     payload = load_allowed_files(repo_root)
-    planned = sorted({p for p in planned_files_from_payload(payload) if p})
-    expanded = (
-        sorted({p for p in (payload.get("expanded_files") or []) if p})
+    planned_raw = [p for p in planned_files_from_payload(payload) if p]
+    expanded_raw = (
+        [p for p in (payload.get("expanded_files") or []) if p]
         if include_expanded
         else []
     )
-    expansion_reasons = _build_expansion_reason_index(payload) if include_expanded else {}
+    expansion_reasons_raw = _build_expansion_reason_index(payload) if include_expanded else {}
 
-    base = _resolve_base_branch(repo_root, base_branch)
-    raw_changed = _git_diff_changed_files(repo_root, base)
-    # `.workflow/` is WF infrastructure (artifacts, state.json, etc.), not
-    # user-authored source. Excluding it here matches operator intuition —
-    # nobody puts these paths in `planned_files` or `expanded_files`.
-    changed = [p for p in raw_changed if not p.startswith(".workflow/")]
+    siblings = load_sibling_repos(repo_root)
+    sibling_by_name = {s.name: s for s in siblings}
 
-    planned_set = set(planned)
-    expanded_set = set(expanded)
+    # Partition planned/expanded files by which repo they belong to.
+    planned_by_repo: dict[str, list[str]] = {"": []}
+    expanded_by_repo: dict[str, list[str]] = {"": []}
+    expansion_reasons_by_repo: dict[str, dict[str, str]] = {"": {}}
+    for s in siblings:
+        planned_by_repo[s.name] = []
+        expanded_by_repo[s.name] = []
+        expansion_reasons_by_repo[s.name] = {}
 
-    classifications: list[FileClassification] = []
-    violations: list[FileClassification] = []
-    for path in changed:
-        if path in planned_set:
-            classifications.append(
-                FileClassification(path=path, status=STATUS_PLANNED, reason="in planned_files")
-            )
-        elif path in expanded_set:
-            reason = expansion_reasons.get(path) or "in expanded_files"
-            classifications.append(
-                FileClassification(path=path, status=STATUS_EXPANDED, reason=reason)
-            )
+    # Top-level violations for unknown sibling prefixes — config typos must
+    # not silently pass. See docs/specs/multi-repo-scope.md §5.
+    extra_violations: list[FileClassification] = []
+    seen_unknown: set[str] = set()
+
+    for p in planned_raw:
+        sibling, real = _split_sibling_path(p)
+        if sibling is None:
+            planned_by_repo[""].append(real)
+        elif sibling in sibling_by_name:
+            planned_by_repo[sibling].append(real)
         else:
-            classification = FileClassification(
-                path=path,
-                status=STATUS_VIOLATION,
-                reason="not in planned_files or expanded_files",
-            )
-            classifications.append(classification)
-            violations.append(classification)
+            if p not in seen_unknown:
+                extra_violations.append(FileClassification(
+                    path=p, status=STATUS_VIOLATION,
+                    reason=f"unknown sibling in planned_files: {sibling}",
+                ))
+                seen_unknown.add(p)
 
-    changed_set = set(changed)
-    planned_not_changed = tuple(sorted(planned_set - changed_set))
+    for p in expanded_raw:
+        sibling, real = _split_sibling_path(p)
+        reason = expansion_reasons_raw.get(p)
+        if sibling is None:
+            expanded_by_repo[""].append(real)
+            if reason:
+                expansion_reasons_by_repo[""][real] = reason
+        elif sibling in sibling_by_name:
+            expanded_by_repo[sibling].append(real)
+            if reason:
+                expansion_reasons_by_repo[sibling][real] = reason
+        else:
+            if p not in seen_unknown:
+                extra_violations.append(FileClassification(
+                    path=p, status=STATUS_VIOLATION,
+                    reason=f"unknown sibling in expanded_files: {sibling}",
+                ))
+                seen_unknown.add(p)
+
+    # Classify each repo independently.
+    per_repo: list[RepoScopeResult] = []
+    repo_errors: list[RepoScopeResult] = []
+
+    root_result = _classify_one_repo(
+        repo_path=repo_root,
+        name="",
+        rel_path=".",
+        base_branch_override=base_branch,
+        planned=planned_by_repo[""],
+        expanded=expanded_by_repo[""],
+        expansion_reasons=expansion_reasons_by_repo[""],
+    )
+    per_repo.append(root_result)
+    if root_result.error:
+        repo_errors.append(root_result)
+
+    for s in siblings:
+        sib_path = (repo_root / s.path).resolve()
+        r = _classify_one_repo(
+            repo_path=sib_path,
+            name=s.name,
+            rel_path=s.path,
+            base_branch_override=base_branch or s.branch,
+            planned=planned_by_repo[s.name],
+            expanded=expanded_by_repo[s.name],
+            expansion_reasons=expansion_reasons_by_repo[s.name],
+        )
+        per_repo.append(r)
+        if r.error:
+            repo_errors.append(r)
+
+    # Aggregate with sibling prefixes restored for human-readable output.
+    agg_classifications: list[FileClassification] = []
+    agg_violations: list[FileClassification] = list(extra_violations)
+    agg_changed: list[str] = []
+    agg_planned_not_changed: list[str] = []
+
+    # Planned-but-not-changed for each repo, then prefix.
+    for r in per_repo:
+        if r.error:
+            continue
+        prefix = r.name
+        for c in r.classifications:
+            agg_classifications.append(FileClassification(
+                path=_prefix_path(prefix, c.path),
+                status=c.status,
+                reason=c.reason,
+            ))
+        for v in r.violations:
+            agg_violations.append(FileClassification(
+                path=_prefix_path(prefix, v.path),
+                status=v.status,
+                reason=v.reason,
+            ))
+        for f in r.changed_files:
+            agg_changed.append(_prefix_path(prefix, f))
+        repo_planned = set(planned_by_repo[prefix])
+        repo_changed = set(r.changed_files)
+        for path in sorted(repo_planned - repo_changed):
+            agg_planned_not_changed.append(_prefix_path(prefix, path))
+
+    # Top-level planned/expanded sets keep prefixes so consumers can
+    # round-trip them back to allowed-files entries.
+    top_planned = sorted({
+        _prefix_path(repo_name, p)
+        for repo_name, files in planned_by_repo.items()
+        for p in files
+    })
+    top_expanded = sorted({
+        _prefix_path(repo_name, p)
+        for repo_name, files in expanded_by_repo.items()
+        for p in files
+    })
 
     return ScopeCheckResult(
-        base_branch=base,
-        planned_set=tuple(planned),
-        expanded_set=tuple(expanded),
-        changed_files=tuple(changed),
-        classifications=tuple(classifications),
-        violations=tuple(violations),
-        planned_not_changed=planned_not_changed,
+        base_branch=root_result.base_branch,
+        planned_set=tuple(top_planned),
+        expanded_set=tuple(top_expanded),
+        changed_files=tuple(agg_changed),
+        classifications=tuple(agg_classifications),
+        violations=tuple(agg_violations),
+        planned_not_changed=tuple(sorted(agg_planned_not_changed)),
+        per_repo=tuple(per_repo),
+        repo_errors=tuple(repo_errors),
     )
 
 
