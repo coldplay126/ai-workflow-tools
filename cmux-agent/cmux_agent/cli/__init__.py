@@ -11,6 +11,7 @@ from cmux_agent.cli.commands import (
     cmd_events,
     cmd_failures,
     cmd_messages,
+    cmd_recover,
     cmd_register,
     cmd_send,
     cmd_smoke,
@@ -70,6 +71,17 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="cmux workspace/surface를 닫지 않고 유지 (디버깅용). "
              "기본 동작: §2.9에 따라 run의 surface와 workspace를 자동으로 닫는다.",
+    )
+
+    # recover
+    p_recover = sub.add_parser(
+        "recover",
+        help="stale workspace 감지 시 run을 FAILED로 마킹하고 watcher lock을 정리 (§2.10)",
+    )
+    p_recover.add_argument(
+        "--force",
+        action="store_true",
+        help="workspace가 살아있어도 강제로 cleanup",
     )
 
     # register
@@ -150,6 +162,7 @@ def main(argv: list[str] | None = None) -> None:
         "start": cmd_start,
         "task": cmd_task,
         "stop": cmd_stop,
+        "recover": cmd_recover,
         "register": cmd_register,
         "spawn": cmd_spawn,
         "agents": cmd_agents,

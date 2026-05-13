@@ -44,6 +44,7 @@ SUPPORTED_COMMANDS = (
     "start",
     "task",
     "stop",
+    "recover",
     "register",
     "spawn",
     "agents",
@@ -931,6 +932,35 @@ def cmd_task(args: argparse.Namespace) -> None:
 
     cmux.log(f"task → orchestrator: {request[:50]}", level="info", source="cmux-agent")
     print(f"작업 주입 완료: orchestrator ({orch.surface_id})")
+
+
+# ---------------------------------------------------------------------------
+# recover
+# ---------------------------------------------------------------------------
+
+def cmd_recover(args: argparse.Namespace) -> None:
+    """§2.10 stale run recovery — drops a run whose cmux workspace is gone."""
+    from cmux_agent.application import recovery as _recovery
+
+    fs = _get_fs()
+    store = _get_store(fs)
+    event_log = _get_event_log(fs)
+    cmux = CmuxAdapter()
+
+    result = _recovery.recover_stale_run(
+        store=store,
+        event_log=event_log,
+        fs=fs,
+        cmux=cmux,
+        force=bool(getattr(args, "force", False)),
+    )
+    print(result.message)
+    if not result.ran and not result.workspace_alive and result.run_id is None:
+        # 활성 run 없음 → exit 0이지만 별도 메시지로 안내
+        return
+    if not result.ran and result.workspace_alive and not getattr(args, "force", False):
+        # Nothing to do; not an error.
+        sys.exit(0)
 
 
 # ---------------------------------------------------------------------------
