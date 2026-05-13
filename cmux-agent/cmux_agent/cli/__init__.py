@@ -65,6 +65,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_stop = sub.add_parser("stop", help="run 종료")
     p_stop.add_argument("run_id", nargs="?", help="run ID (기본: 최근)")
     p_stop.add_argument("--no-clean", dest="clean", action="store_false", help=".agent/ 디렉토리 유지")
+    p_stop.add_argument(
+        "--keep-workspace",
+        action="store_true",
+        help="cmux workspace/surface를 닫지 않고 유지 (디버깅용). "
+             "기본 동작: §2.9에 따라 run의 surface와 workspace를 자동으로 닫는다.",
+    )
 
     # register
     p_reg = sub.add_parser("register", help="agent 등록")

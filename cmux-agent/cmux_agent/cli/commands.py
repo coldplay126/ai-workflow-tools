@@ -26,6 +26,8 @@ from cmux_agent.application.runtime import (
     resolve_provider_selection,
 )
 from cmux_agent.application.watcher import ArtifactWatcher
+
+logger = logging.getLogger(__name__)
 from cmux_agent.domain.events import agent_registered, run_created, run_status_changed
 from cmux_agent.domain.models import Agent, AgentRole, Run, RunStatus
 from cmux_agent.infrastructure.cmux import CmuxAdapter
@@ -946,6 +948,45 @@ def cmd_stop(args: argparse.Namespace) -> None:
         print(f"Run을 찾을 수 없습니다: {run_id}", file=sys.stderr)
         sys.exit(1)
 
+    # §2.9: cmux workspace/surface 자동 정리 (--keep-workspace로 opt-out).
+    # 종료 후 cmux GUI에 surface가 잔여하면 사용자가 "done인지 멈춤인지" 혼동.
+    keep_workspace = bool(getattr(args, "keep_workspace", False))
+    if not keep_workspace:
+        cmux = CmuxAdapter()
+        agents = store.get_agents(run_id)
+        closed_surfaces: list[str] = []
+        for agent in agents:
+            surface_id = agent.surface_id
+            if not surface_id:
+                continue
+            try:
+                result = cmux.close_surface(surface_id)
+            except OSError as exc:
+                logger.warning("close_surface(%s) raised %s", surface_id, exc)
+                continue
+            if result.ok:
+                closed_surfaces.append(surface_id)
+            else:
+                logger.warning(
+                    "close_surface(%s) failed: %s", surface_id, (result.stderr or "").strip()
+                )
+        if closed_surfaces:
+            print(f"  ✓ surface 정리: {len(closed_surfaces)}개")
+        if run.workspace_id:
+            try:
+                ws_result = cmux.close_workspace(run.workspace_id)
+            except OSError as exc:
+                logger.warning("close_workspace(%s) raised %s", run.workspace_id, exc)
+            else:
+                if ws_result.ok:
+                    print(f"  ✓ workspace 정리: {run.workspace_id}")
+                else:
+                    logger.warning(
+                        "close_workspace(%s) failed: %s",
+                        run.workspace_id,
+                        (ws_result.stderr or "").strip(),
+                    )
+
     old = run.status.value
     store.update_run_status(run_id, RunStatus.COMPLETED)
     event_log.append(run_status_changed(run_id, old, "COMPLETED"))
@@ -1062,60 +1103,85 @@ def cmd_watch(args: argparse.Namespace) -> None:
     logging.root.setLevel(logging.INFO)
 
     fs = _get_fs()
-    template_dir = _restore_template_dir(fs)
-    store = _get_store(fs)
-    event_log = _get_event_log(fs)
-    cmux = CmuxAdapter()
 
-    run = store.get_active_run()
-    if not run:
-        print("활성 run이 없습니다.", file=sys.stderr)
+    # §2.8: PID lock to prevent multi-watcher race on the same outbox.
+    from cmux_agent.infrastructure import pid_lock
+
+    lock_state = pid_lock.acquire(fs.base)
+    if not lock_state.acquired:
+        print(
+            f"watcher가 이미 실행 중입니다: pid={lock_state.previous_pid} "
+            f"(lock={lock_state.path})",
+            file=sys.stderr,
+        )
+        print(
+            "  종료하려면 해당 프로세스를 stop하거나 lock 파일을 제거하세요.",
+            file=sys.stderr,
+        )
         sys.exit(1)
+    if lock_state.previous_pid is not None:
+        print(
+            f"  ⚙ stale watcher pid={lock_state.previous_pid} 정리하고 새로 시작합니다.",
+            flush=True,
+        )
 
-    prompt_builder = PromptBuilder(
-        outbox_path=str(fs.outbox),
-        inbox_base=str(fs.inbox),
-    )
-    runtime = AgentRuntime(
-        store=store,
-        event_log=event_log,
-        fs=fs,
-        cmux=cmux,
-        prompt_builder=prompt_builder,
-        run_id=run.run_id,
-        workspace_id=run.workspace_id,
-        template_dir=template_dir,
-        provider_config=_load_config(_active_cwd),
-    )
-    broker = MessageBroker(
-        store=store,
-        event_log=event_log,
-        fs=fs,
-        cmux=cmux,
-        prompt_builder=prompt_builder,
-        run_id=run.run_id,
-        workspace_id=run.workspace_id,
-        runtime=runtime,
-    )
-    watcher = ArtifactWatcher(fs.outbox, broker)
+    try:
+        template_dir = _restore_template_dir(fs)
+        store = _get_store(fs)
+        event_log = _get_event_log(fs)
+        cmux = CmuxAdapter()
 
-    print(f"Watcher 시작: {fs.outbox}")
-    print("Ctrl+C로 중지")
+        run = store.get_active_run()
+        if not run:
+            print("활성 run이 없습니다.", file=sys.stderr)
+            sys.exit(1)
 
-    cmux.set_status("watcher", "active", icon="eye", color="#00CC00")
+        prompt_builder = PromptBuilder(
+            outbox_path=str(fs.outbox),
+            inbox_base=str(fs.inbox),
+        )
+        runtime = AgentRuntime(
+            store=store,
+            event_log=event_log,
+            fs=fs,
+            cmux=cmux,
+            prompt_builder=prompt_builder,
+            run_id=run.run_id,
+            workspace_id=run.workspace_id,
+            template_dir=template_dir,
+            provider_config=_load_config(_active_cwd),
+        )
+        broker = MessageBroker(
+            store=store,
+            event_log=event_log,
+            fs=fs,
+            cmux=cmux,
+            prompt_builder=prompt_builder,
+            run_id=run.run_id,
+            workspace_id=run.workspace_id,
+            runtime=runtime,
+        )
+        watcher = ArtifactWatcher(fs.outbox, broker)
 
-    if getattr(args, "daemon", False):
-        watcher.start_background()
-        print("백그라운드 모드로 실행 중...")
-        try:
-            import signal
-            signal.pause()
-        except KeyboardInterrupt:
-            pass
-    else:
-        watcher.start()
+        print(f"Watcher 시작: {fs.outbox}")
+        print("Ctrl+C로 중지")
 
-    cmux.set_status("watcher", "stopped", color="#CC0000")
+        cmux.set_status("watcher", "active", icon="eye", color="#00CC00")
+
+        if getattr(args, "daemon", False):
+            watcher.start_background()
+            print("백그라운드 모드로 실행 중...")
+            try:
+                import signal
+                signal.pause()
+            except KeyboardInterrupt:
+                pass
+        else:
+            watcher.start()
+
+        cmux.set_status("watcher", "stopped", color="#CC0000")
+    finally:
+        pid_lock.release(lock_state)
 
 
 # ---------------------------------------------------------------------------
