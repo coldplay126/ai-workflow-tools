@@ -96,6 +96,11 @@ class FakeCmux:
         )
         return CmuxResult(ok=True, stdout="", stderr="")
 
+    def tree(self, workspace_id: str | None = None) -> CmuxResult:
+        # §2.10 spawn pre-check: stub workspace as reachable in tests.
+        self.calls.append(("tree", {"workspace_id": workspace_id}))
+        return CmuxResult(ok=True, stdout="OK", stderr="")
+
     def read_screen(
         self,
         *,

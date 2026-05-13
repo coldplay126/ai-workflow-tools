@@ -770,18 +770,91 @@ def apply_gate_result(
     )
     _save_workflow_state(explicit_root, state)
     # §3.4 cycle-complete hook: when the workflow reaches its terminal state,
-    # remind the operator to create the PR. Printing only (no subprocess) keeps
-    # this safe in CI and dry-run scenarios; the `awf wf pr` step stays explicit.
+    # remind the operator to create the PR — or invoke `awf wf pr` directly
+    # if provider-config.json opts in via `pr_creation.auto`.
     if passed and state.get("currentPhase") in {"completed", "done"}:
-        try:
-            import sys as _sys
-
-            print(
-                "\n🎉 cycle complete: all gates passed.\n"
-                "   next step: run `awf wf pr [--base main] [--draft]` to open the PR\n"
-                "             or `awf wf pr --dry-run` to preview the title/body first.",
-                file=_sys.stderr,
-            )
-        except Exception:
-            pass
+        _maybe_trigger_pr_creation(explicit_root)
     return state
+
+
+def _maybe_trigger_pr_creation(explicit_root: Optional[str]) -> None:
+    """Print cycle-complete hint, and optionally run ``awf wf pr`` (§3.4).
+
+    Reads ``pr_creation`` from provider-config.json:
+
+        {
+          "pr_creation": {
+            "auto": true,          # default false — only hint
+            "base": "main",
+            "draft": false,
+            "dry_run": false        # if true, run `awf wf pr --dry-run`
+          }
+        }
+
+    Failures (config missing, subprocess error, gh missing) only log; the
+    apply_gate_result caller never raises from the hook.
+    """
+    import sys as _sys
+
+    try:
+        provider_config = load_workflow_provider_config(explicit_root)
+    except Exception:
+        provider_config = {}
+
+    pr_cfg = provider_config.get("pr_creation") if isinstance(provider_config, dict) else None
+    pr_cfg = pr_cfg if isinstance(pr_cfg, dict) else {}
+    auto = bool(pr_cfg.get("auto", False))
+
+    if not auto:
+        print(
+            "\n🎉 cycle complete: all gates passed.\n"
+            "   next step: run `awf wf pr [--base main] [--draft]` to open the PR\n"
+            "             or `awf wf pr --dry-run` to preview the title/body first.\n"
+            "   tip: set `pr_creation.auto = true` in .workflow/provider-config.json "
+            "to invoke it automatically.",
+            file=_sys.stderr,
+        )
+        return
+
+    import subprocess as _subprocess
+
+    cmd = ["awf", "wf", "pr"]
+    base = str(pr_cfg.get("base") or "").strip()
+    if base:
+        cmd += ["--base", base]
+    if bool(pr_cfg.get("draft", False)):
+        cmd.append("--draft")
+    if bool(pr_cfg.get("dry_run", False)):
+        cmd.append("--dry-run")
+
+    cwd = None
+    if explicit_root:
+        cwd = str(find_repo_root(explicit_root))
+
+    print(
+        f"\n🎉 cycle complete: running `{' '.join(cmd)}` (pr_creation.auto=true)",
+        file=_sys.stderr,
+    )
+    try:
+        result = _subprocess.run(
+            cmd,
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            timeout=60,
+        )
+    except FileNotFoundError:
+        print("  ⚠ awf CLI not found on PATH — falling back to manual hint.", file=_sys.stderr)
+        return
+    except _subprocess.TimeoutExpired:
+        print("  ⚠ `awf wf pr` timed out after 60s — run it manually.", file=_sys.stderr)
+        return
+
+    if result.stdout:
+        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        print(
+            f"  ⚠ `awf wf pr` exited with {result.returncode}: {stderr[:300]}",
+            file=_sys.stderr,
+        )

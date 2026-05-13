@@ -140,6 +140,7 @@
 - **원인**: dual mode의 worker spawn target workspace가 active run의 workspace를 정확히 찾지 못함
 - **영향**: cross-validation 효과 zero, primary executor만으로 verify
 - **follow-up**: dispatch 모듈의 `_assign_workers` 경로 + cmux workspace selection 로직 점검
+- **resolution (2026-05-13, Group E, 진단 단계)**: 근본 원인은 cmux app이 닫힌 후 SQLite의 run.workspace_id는 그대로 남아 있어 spawn 시 stale ID가 cmux에 전달되는 것. `AgentRuntime.spawn_worker`에 workspace pre-check (`cmux tree --workspace <id>`) 추가 — workspace가 닫혀있으면 `SpawnResult.error`에 "cmux-agent stop && cmux-agent start" 복구 안내 포함. `new_surface`가 race로 실패해도 동일 hint append. 자동 복구(stale run 자동 cleanup)는 향후 작업. commit (Group E).
 
 ### 2.11 stream-json output 누적
 - **증상**: `claude --output-format stream-json` result file이 누적된 partial messages 포함 — last message가 `status:completed` envelope이지만 첫 line부터 line별 JSON event가 stream
@@ -183,6 +184,8 @@
 - **증상**: cycle 종료 후 PR 수동 생성 필요. branch push까지만 자동
 - **follow-up**: `awf wf done` 또는 cycle close 시 양쪽 repo gh pr create 자동 호출
 - **resolution (2026-05-13, Group C)**: `awf wf pr` 신규 subcommand. state.json + concept.md를 PR title/body로 합성 후 `gh pr create` 호출. flags: `--base`(default main) `--title`/`--body` override, `--draft`, `--no-fill`, `--dry-run`. `gh` 미설치/실패 시 graceful error. 자동 호출(cycle close 트리거)은 별도 cycle로 분리 — 다음 cycle에서 phase=done 진입 시 hook 추가 권장. commit (Group C).
+- **resolution (2026-05-13, Group D)**: `apply_gate_result` cycle-complete hook이 phase=completed/done 도달 시 stderr로 `awf wf pr` 가이드 출력 (no subprocess). commit (Group D).
+- **resolution (2026-05-13, Group E, 자동 호출 완성)**: `apply_gate_result` → `_maybe_trigger_pr_creation`이 provider-config의 `pr_creation.auto` flag를 읽어 true면 `awf wf pr` subprocess 자동 실행. `base`/`draft`/`dry_run` 필드로 PR 옵션 제어. gh/awf 미설치 또는 timeout 시 안내 메시지로 graceful fallback. commit (Group E).
 
 ### 3.5 result file 명명 규약 없음
 - **증상**: `result-verify-claude-code.txt` 같은 generic 이름 — 차수 구분 불가, 누적 시 overwrite
@@ -681,3 +684,122 @@ workflow 운영 자동화/정책 P2 항목 3건 처리. §3.2 verify fix-loop gu
 | §4.2 session 재사용 | cycle 단위 token 절감 |
 | §8.7-P1 model routing telemetry | phase별 token + 비용 report |
 | §3.4 자동 PR 호출 (subprocess) | 현재 hook은 stderr 안내까지만, gh 자동 실행은 별도 cycle |
+
+---
+
+## 14. Group E Resolution log (2026-05-13 — feat/awf-ops-group-e)
+
+작은 두 항목 묶음: §2.10 dual-mode spawn 진단 + §3.4 자동 호출 완성.
+
+### 14.1 변경 요약
+
+| 영역 | 처리 |
+|---|---|
+| `cmux-agent/cmux_agent/application/runtime.py` `spawn_worker` | §2.10 — `cmux tree --workspace <id>` precheck 추가. workspace 미존재 시 즉시 `SpawnResult.error`에 복구 안내 ("cmux-agent stop && cmux-agent start") 포함. `new_surface` race 실패도 동일 hint append. |
+| `cli/src/awf/core/state.py` `_maybe_trigger_pr_creation` | §3.4 — provider-config.json의 `pr_creation.{auto,base,draft,dry_run}` 필드 인식. auto=true면 `awf wf pr` subprocess 실행. timeout/FileNotFoundError graceful fallback. |
+
+### 14.2 변경 메트릭
+
+| repo / area | 파일 수 | LOC delta |
+|---|---|---|
+| `cmux-agent/cmux_agent/application/runtime.py` | 1 | +37 / -3 |
+| `cmux-agent/tests/` | 2 (test_spawn_workspace_check.py 신규, FakeCmux.tree() 확장) | +95 / -0 |
+| `cli/src/awf/core/state.py` | 1 | +75 / -10 |
+| `cli/tests/test_cycle_complete_hook.py` | 1 | +75 / -0 |
+
+### 14.3 검증
+
+- `awf cli` 634/634 PASS (이전 630 → +4 신규: cycle-hook auto-invoke 4)
+- `cmux-agent` 125/125 PASS (이전 123 → +2 신규: workspace check 2)
+
+### 14.4 운영 절차 추가 변경점
+
+1. **dual-mode worker spawn 실패 시 진단**:
+   - 이전: `worker 생성 실패: Workspace not found` (의미 불명)
+   - 현재: `workspace workspace:1 is not reachable (...) — run cmux-agent stop then cmux-agent start to reset`
+2. **`.workflow/provider-config.json`의 `pr_creation` 섹션 (옵션)**:
+   ```json
+   {
+     "pr_creation": {
+       "auto": true,
+       "base": "main",
+       "draft": false,
+       "dry_run": false
+     }
+   }
+   ```
+   `auto=true` 시 phase=done 도달하는 순간 `awf wf pr` 자동 실행. CI/자율 운영 cycle에 유용.
+
+### 14.5 잔여 (Group A~E 이후, P1+ 미해결)
+
+| 항목 | 비고 |
+|---|---|
+| §1.1 deterministic gate 규칙 | impl/test agent card pass_conditions |
+| §1.5 scope-check multi-repo | manifest 확장 (구조 변경 큼) |
+| §2.10 자동 복구 | 현재는 진단 단계까지만; stale run 자동 cleanup은 별도 |
+| §4.2 session 재사용 | cycle 단위 token 절감 |
+| §8.7-P1 model routing telemetry | phase별 token + 비용 report |
+
+---
+
+## 14. Cycle S (blip-server Phase 2.7) review phase 운영 이슈 (2026-05-13)
+
+### 14.1 cmux-agent review-phase wiring 미작동 (P1)
+
+**증상**: `cmux-agent start` + `cmux-agent spawn worker-review --role review --worker-template review` 으로 worker surface 생성 후 `cmux-agent send worker-review "<prompt>"` 로 dispatch artifact 작성. dispatch는 `.agent/inbox/worker-review/{uuid}.json` 으로 정상 라우팅됐으나, **worker surface 안의 claude CLI가 prompt를 자동으로 수신/실행하지 않음**. orchestrator + worker 둘 다 idle 상태로 무한 대기.
+
+**근본 원인 추정**:
+- `cmux-agent spawn` 은 cmux surface(pane) 예약만 수행하고, surface 안에서 claude CLI 자동 실행을 trigger 하지 않음
+- watcher daemon (pid=55418, .agent/.watcher.pid) 은 dispatch artifact를 inbox로 라우팅까지만 처리하고, worker surface 안에 prompt 자동 주입 메커니즘이 없음
+- 또는 worker가 inbox polling loop를 자체적으로 돌려야 하는데 `--worker-template review` 가 그 동작을 명시하지 않음
+
+**impact**: review/verify phase 에서 cmux-agent broker 경로(CLAUDE.md §Slave dispatch 우선순위 #1)를 사용 불가. MCP fallback 으로 강제 전환되며 3-5배 느림 → 사용자 중단 빈발.
+
+**재현 절차** (`/Users/steven/Documents/GitHub/blip-server-gem-admin-wt/.workflow/`):
+```bash
+cmux-agent start                                                     # surface 4개 생성
+cmux-agent spawn worker-review --role review --worker-template review  # worker-review surface:68 생성
+cmux-agent send worker-review "<review prompt>"                       # dispatch artifact 작성
+# → inbox/worker-review/{uuid}.json 도착, 하지만 worker surface는 idle 유지
+# → outbox에 result artifact 영구 미도착
+```
+
+**권장 수정 방향**:
+- `cmux-agent spawn --worker-template review` 가 surface 생성 시 claude CLI를 자동 실행 (`claude --print --bare --output-format json` 또는 interactive prompt) 까지 포함하도록 변경
+- 또는 worker template 안에 inbox polling loop 명시 (e.g. `while true; do read_inbox; process; sleep 1; done`)
+- 또는 `cmux-agent task "<prompt>"` 와 `cmux-agent send` 차이 명확화 + review/verify 권장 호출 패턴 문서화
+
+**우회**: single review (Claude Code 본 세션 artifact-reviewer agent) 다운그레이드. dual-mode 손실.
+
+### 14.2 cmux-agent worker default 모델 = 사용자 default (Opus) — sonnet 강제 옵션 미명시 (P2)
+
+**증상**: `cmux-agent spawn worker-review --provider claude` 로 spawn 시 worker surface 안에서 `claude` 바이너리가 사용자 default 모델로 실행. 현재 사용자 default가 Opus 4.7이면 worker도 Opus → review/verify worker가 sonnet 의도와 다르게 동작 (비용 ↑).
+
+**근본 원인**: `cmux_agent/application/runtime.py:21`:
+```python
+PROVIDER_COMMANDS = {
+    "codex": "codex",
+}
+```
+
+`claude` provider는 매핑이 없어 그대로 `claude` 바이너리 호출. `--model` 플래그 미주입.
+
+**우회**: `cmux-agent spawn worker-review --flags "--model sonnet"` 으로 명시 (검증 필요).
+
+**권장 수정 방향**:
+- `PROVIDER_COMMANDS` 에 `claude:sonnet`, `claude:opus`, `claude:haiku` 매핑 추가 (`claude --model sonnet` 등)
+- `--worker-template review` 가 기본 `--flags "--model sonnet"` 을 권장 (review/verify는 비용 절감 + 충분한 정확도)
+- AGENTS.md / CLAUDE.md 의 worker dispatch 가이드에 worker 모델 강제 패턴 명시
+
+### 14.3 영향 평가
+
+- **Cycle S (blip-server Phase 2.7)**: review phase 단계에서 cmux-agent broker 경로 우회 → single review 진행. dual-validation 1회 손실 (artifact-reviewer 단독은 정밀하지만 다양성 ↓).
+- **이전 운영 보고 (§12.5)** 에서 "활성 검출이 명확할 때는 반드시 broker 경로" 라고 명시했으나, 활성 검출 후에도 review-phase wiring 미작동 → 가이드라인이 review/verify phase 에서 무력화됨.
+
+### 14.4 후속 액션 우선순위
+
+| Priority | 항목 | 담당 cycle |
+|----------|------|-----------|
+| P1 | 14.1 cmux-agent spawn 시 worker template 자동 실행 wiring | ai-workflow-tools 별도 cycle |
+| P2 | 14.2 `claude:{model}` provider 매핑 추가 | 동일 cycle 가능 |
+| P2 | CLAUDE.md §Slave dispatch 에 review/verify 경로 검증 결과 명시 (현재는 impl phase 한정 확인) | doc-only |

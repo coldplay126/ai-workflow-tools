@@ -188,9 +188,43 @@ class AgentRuntime:
         else:
             selected = resolve_provider_selection(entry)
 
+        # §2.10: when the stored workspace was closed out-of-band (cmux quit,
+        # workspace dropped, etc.), `new-surface` returns "Workspace not found"
+        # with no actionable hint. Pre-check via `cmux tree --workspace <id>`
+        # so the SpawnResult can carry a recovery hint instead of a bare error.
+        if self._workspace_id:
+            tree = self._cmux.tree(workspace_id=self._workspace_id)
+            if not tree.ok:
+                stderr = (tree.stderr or "").strip()
+                return SpawnResult(
+                    ok=False,
+                    name=worker_name,
+                    provider=selected.provider,
+                    error=(
+                        f"workspace {self._workspace_id} is not reachable "
+                        f"({stderr or 'cmux tree failed'}). The cmux workspace "
+                        f"was likely closed while the run was still active — "
+                        f"run `cmux-agent stop` then `cmux-agent start` to "
+                        f"reset, or pass `--keep-workspace` next time to keep "
+                        f"surfaces alive on stop."
+                    ),
+                )
+
         created = self._cmux.new_surface(workspace_id=self._workspace_id)
         if not created.ok:
-            return SpawnResult(ok=False, name=worker_name, provider=selected.provider, error=created.stderr or "cmux new-surface failed")
+            stderr = (created.stderr or "").strip()
+            hint = ""
+            if "workspace" in stderr.lower() and "not found" in stderr.lower():
+                hint = (
+                    f" — workspace {self._workspace_id} may have been closed; "
+                    f"run `cmux-agent stop` then `cmux-agent start` to reset."
+                )
+            return SpawnResult(
+                ok=False,
+                name=worker_name,
+                provider=selected.provider,
+                error=(stderr or "cmux new-surface failed") + hint,
+            )
 
         surface_id = parse_surface_ref(created.stdout)
         if not surface_id:
