@@ -33,6 +33,11 @@ class FakeCmux:
         self.calls.append(("close_workspace", {"workspace_id": workspace_id}))
         return CmuxResult(ok=True, stdout=f"OK {workspace_id}", stderr="")
 
+    def close_surface(self, surface_id: str) -> CmuxResult:
+        self.calls.append(("close_surface", {"surface_id": surface_id}))
+        self._surfaces.discard(surface_id)
+        return CmuxResult(ok=True, stdout=f"OK {surface_id}", stderr="")
+
     def tree(self, workspace_id: str | None = None) -> CmuxResult:
         self.calls.append(("tree", {"workspace_id": workspace_id}))
         payload = {

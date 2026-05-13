@@ -127,14 +127,12 @@
 - **증상**: cmux-agent run이 stop된 후에도 watcher process가 orphan으로 살아남음. 새 run start 시 또 watcher 추가 → 2개 watcher가 같은 `.agent/outbox/` polling → file race
 - **로그**: `artifact 파싱 실패: ... — [Errno 2] No such file or directory` (한 watcher가 file 이동 후 다른 watcher가 시도)
 - **우회**: 두 watcher process kill 후 새 run 시작
-- **follow-up**:
-  - cmux-agent `cmd_start`에 cwd-based singleton lock (existing watcher 검출 → reuse 또는 stop)
-  - 또는 PID file 사용
+- **resolution (2026-05-13, Group B)**: `cmux_agent/infrastructure/pid_lock.py` 신설 + `cmd_watch`에 `.agent/.watcher.pid` 파일 기반 lock 통합. 살아있는 watcher가 있으면 새 watch는 exit code 1로 abort + 안내 메시지, stale lock(이미 죽은 pid)이면 silently 인계하고 메시지 출력. signal 0 검사로 cross-platform 동작. commit (Group B).
 
 ### 2.9 workspace auto-close 부재
 - **증상**: `cmux-agent stop` 시 SQLite 상태만 정리. cmux GUI의 workspace surfaces는 그대로 잔여 → 사용자 혼동 ("done인지 멈춤인지 모름")
 - **우회**: Master가 수동으로 `cmux close-workspace --workspace <id>` 호출
-- **follow-up**: `cmd_stop`에 `cmux.close_surface(...)` + `cmux.close_workspace(...)` 추가. `--keep-workspace` flag로 opt-out 제공
+- **resolution (2026-05-13, Group B)**: `cmd_stop`이 등록된 모든 agent의 `surface_id`를 순회하며 `cmux.close_surface()` 호출 후 `cmux.close_workspace()`로 workspace 정리. `--keep-workspace` flag로 opt-out 가능 (디버깅용). close 실패는 logger.warning에 그치고 정리 흐름은 계속. commit (Group B).
 
 ### 2.10 cmux-agent dual mode worker spawn 실패
 - **증상**: `awf wf next`의 dual mode가 secondary worker (plan_conformance, quality_validation)를 cmux로 spawn 시도 → `failed to spawn cmux worker for role: worker 생성 실패: Workspace not found` → 즉시 solo downgrade
@@ -240,7 +238,7 @@
 | **P0** | workflow | base branch validator (3.3) — main 직커밋 사고 재발 방지 | ✅ **FIXED** (`eb69f96`) |
 | **P1** | awf CLI | gate evaluator stream-json 파싱 (1.3) + scope-check multi-repo (1.5) | ✅ **§1.3 FIXED** (Group A) / §1.5 open |
 | **P1** | awf CLI | apply-result impl/test (1.2) + in_progress duplicate guard (1.4) | ✅ **FIXED** (Group A) |
-| **P1** | broker | workspace auto-close (2.9) + multi-watcher singleton (2.8) | open |
+| **P1** | broker | workspace auto-close (2.9) + multi-watcher singleton (2.8) | ✅ **FIXED** (Group B) |
 | **P2** | workflow | verify fix loop 종결 정책 (3.2) — verdict 결정 기준 명확화 | open |
 | **P2** | workflow | PR 자동 생성 (3.4) + result file 명명 (3.5) | open |
 | **P3** | meta | cmux-agent repo sync + upstream PR (5.1) | ✅ **FIXED** (`cc0aa54`) |
@@ -512,8 +510,58 @@ P1 잔여 중 awf CLI 하드닝 4개 항목 후속 처리.
 | §1.1 deterministic gate 규칙 | impl/test agent card pass_conditions 정의 |
 | §1.5 scope-check multi-repo | manifest 확장 |
 | §1.6 `awf wf decide` 상태 강제 | force-from CLI |
-| §2.8 multi-watcher singleton | PID lock |
-| §2.9 workspace auto-close | cmd_stop 확장 |
+| §3.2 verify fix-loop 종결 정책 | verify spec 결정성 |
+| §3.4 PR 자동 생성 | `awf wf done` 확장 |
+| §3.5 result file 명명 규약 | round/timestamp |
+| §2.10 dual-mode worker spawn | workspace selection |
+| §4.2 session 재사용 | cycle 단위 token 절감 |
+| §8.7-P1 model routing telemetry | phase별 token + 비용 report |
+
+---
+
+## 11. Group B Resolution log (2026-05-13 — feat/cmux-agent-runtime-hardening-group-b)
+
+cmux-agent 런타임 안정성 P1 항목 처리. Group A에 비해 변경 면적이 작지만 사용자 경험에 직접적 — orphan watcher 정리, 종료 시 workspace 자동 close.
+
+### 11.1 변경 요약
+
+| 영역 | 처리된 gap 항목 |
+|---|---|
+| `cmux_agent/infrastructure/pid_lock.py` (신규) + `cmd_watch` 통합 | §2.8 — `.agent/.watcher.pid` 기반 singleton lock |
+| `cmd_stop` + `--keep-workspace` flag + `CmuxAdapter.close_surface`/`close_workspace` 호출 | §2.9 — 종료 시 cmux GUI 자동 정리 |
+
+### 11.2 변경 메트릭
+
+| repo / area | 파일 수 | LOC delta |
+|---|---|---|
+| `cmux-agent/cmux_agent/` | 3 (cli/__init__.py, cli/commands.py, infrastructure/pid_lock.py 신규) | +160 / -65 |
+| `cmux-agent/tests/` | 3 (test_pid_lock.py 신규, test_cmd_stop.py 신규, test_runtime_full_flow.py FakeCmux 확장) | +180 / -0 |
+
+### 11.3 검증
+
+- `cmux-agent` 120/120 PASS (이전 110 → +10 신규: pid_lock 6, cmd_stop 4)
+- `awf cli` 602/602 PASS (변경 없음, 회귀 가드)
+
+### 11.4 운영 절차 추가 변경점
+
+1. **`cmux-agent watch` 중복 방지**:
+   - 첫 watch 실행 시 `.agent/.watcher.pid` 작성 (현재 pid)
+   - 두 번째 watch 실행 시 lock 검출 → 이미 실행 중이면 exit 1 + "pid=N (lock=path) 종료하려면..."
+   - 이전 watch가 SIGKILL 등으로 죽었을 때(stale pid) silently 인계 + "stale watcher pid=N 정리하고 새로 시작합니다" 메시지
+   - 정상 종료/Ctrl+C 시 try/finally로 lock 파일 자동 제거
+
+2. **`cmux-agent stop` workspace 정리**:
+   - 기본: 모든 등록 agent의 surface 닫기 + workspace 닫기
+   - `--keep-workspace`: 둘 다 건너뛰기 (디버깅/검증용)
+   - 실패해도 cmd_stop은 정상 종료 (best-effort)
+
+### 11.5 잔여 (Group A/B 이후 P1+ 미해결)
+
+| 항목 | 비고 |
+|---|---|
+| §1.1 deterministic gate 규칙 | impl/test agent card pass_conditions |
+| §1.5 scope-check multi-repo | manifest 확장 |
+| §1.6 `awf wf decide` 상태 강제 | force-from CLI |
 | §3.2 verify fix-loop 종결 정책 | verify spec 결정성 |
 | §3.4 PR 자동 생성 | `awf wf done` 확장 |
 | §3.5 result file 명명 규약 | round/timestamp |
