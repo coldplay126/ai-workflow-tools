@@ -467,6 +467,57 @@ def run_wf_next(args: argparse.Namespace) -> int:
     except Exception:
         pass
 
+    # §3.2: detect verify fix-loop overruns BEFORE marking the phase
+    # in_progress. The BLIP Gem cycle hit 7 verify rounds because nothing
+    # in the toolchain capped repeated executions; with this guard the
+    # operator gets a warning at 3 and a hard abort with hint at 5.
+    fix_loop_status, projected_executions = _verify_fix_loop_status(state, phase)
+    if fix_loop_status == "abort":
+        force = bool(getattr(args, "force", False))
+        if not force:
+            print(
+                f"error: verify phase has reached the fix-loop hard limit "
+                f"(executions would become {projected_executions}, max="
+                f"{VERIFY_FIX_LOOP_HARD_LIMIT}).",
+                file=sys.stderr,
+            )
+            print(
+                "  Repeated verify failures usually indicate the spec needs "
+                "replanning or remaining issues should be accepted as debt.",
+                file=sys.stderr,
+            )
+            print(
+                "  options:",
+                file=sys.stderr,
+            )
+            print(
+                "    - `awf wf decide replan` to revise the plan",
+                file=sys.stderr,
+            )
+            print(
+                "    - `awf wf decide continue` to accept current state",
+                file=sys.stderr,
+            )
+            print(
+                "    - re-run `awf wf next` with `--force` to bypass this guard "
+                "(record why in history).",
+                file=sys.stderr,
+            )
+            return 2
+        print(
+            f"warning: verify fix-loop hard limit bypassed via --force "
+            f"(execution #{projected_executions}).",
+            file=sys.stderr,
+        )
+    elif fix_loop_status == "warn":
+        print(
+            f"warning: verify has been executed {projected_executions} times "
+            f"this cycle (warn threshold={VERIFY_FIX_LOOP_WARN_THRESHOLD}, "
+            f"hard limit={VERIFY_FIX_LOOP_HARD_LIMIT}). Consider "
+            "`awf wf decide replan` or accepting remaining findings as debt.",
+            file=sys.stderr,
+        )
+
     mark_phase_in_progress(args.repo_root, phase)
     processor.emit(
         event_type=EventType.PHASE_STARTED,
@@ -1215,6 +1266,33 @@ def _run_finding_feedback_loop(
                 "pattern": pattern,
             },
         )
+
+
+VERIFY_FIX_LOOP_WARN_THRESHOLD = 3
+VERIFY_FIX_LOOP_HARD_LIMIT = 5
+
+
+def _verify_fix_loop_status(state: dict, phase: str) -> tuple[str, int]:
+    """§3.2: classify the current verify-loop depth.
+
+    Returns ("ok" | "warn" | "abort", executions). Only the verify phase is
+    subject to the cap — other phases keep the existing retry budget logic.
+    Both thresholds are intentionally hardcoded for now; a later cycle can
+    promote them to `provider-config.json` once we have telemetry to pick
+    sensible per-team defaults.
+    """
+    if phase != "verify":
+        return ("ok", 0)
+    executions = int(state.get("phases", {}).get(phase, {}).get("executions", 0) or 0)
+    # `executions` is incremented inside mark_phase_in_progress; at the
+    # decision point we look at the count BEFORE the upcoming increment,
+    # so the next run will be executions+1.
+    next_executions = executions + 1
+    if next_executions > VERIFY_FIX_LOOP_HARD_LIMIT:
+        return ("abort", next_executions)
+    if next_executions >= VERIFY_FIX_LOOP_WARN_THRESHOLD:
+        return ("warn", next_executions)
+    return ("ok", next_executions)
 
 
 def _find_fresh_result_file(

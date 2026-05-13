@@ -302,11 +302,44 @@ def save_workflow_prompt(explicit_root: Optional[str], phase: str, provider_name
     return prompt_path
 
 
-def save_workflow_result(explicit_root: Optional[str], phase: str, provider_name: str, content: str) -> Path:
+def save_workflow_result(
+    explicit_root: Optional[str],
+    phase: str,
+    provider_name: str,
+    content: str,
+    *,
+    round_index: int | None = None,
+) -> Path:
+    """Persist a worker result file under `.workflow/tmp/`.
+
+    §3.5: filenames now accumulate per round so re-execution does not
+    overwrite the previous run's output. Pattern:
+        result-{phase}-r{round}-{epoch_ms}-{safe_provider}.txt
+    `round_index` defaults to the current `phases[phase].retries` value
+    when not explicitly provided; the legacy overwrite path is no longer
+    used. `_find_fresh_result_file` already globs `result-{phase}-*.txt`
+    by mtime, so both legacy and new filenames are picked up transparently.
+    """
+    import time as _time
+
     root = find_repo_root(explicit_root)
     tmp_dir = root / ".workflow" / "tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     safe_provider = provider_name.replace(":", "_")
-    result_path = tmp_dir / f"result-{phase}-{safe_provider}.txt"
+
+    if round_index is None:
+        try:
+            from awf.core.state import load_workflow_state
+
+            state = load_workflow_state(explicit_root)
+            round_index = int(
+                state.get("phases", {}).get(phase, {}).get("retries", 0) or 0
+            )
+        except Exception:
+            round_index = 0
+    round_index = max(int(round_index), 0)
+
+    epoch_ms = int(_time.time() * 1000)
+    result_path = tmp_dir / f"result-{phase}-r{round_index}-{epoch_ms}-{safe_provider}.txt"
     result_path.write_text(content, encoding="utf-8")
     return result_path

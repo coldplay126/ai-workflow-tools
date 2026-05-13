@@ -516,6 +516,10 @@ def mark_phase_in_progress(explicit_root: Optional[str], phase: str) -> dict:
     phases = state.setdefault("phases", {})
     phase_state = phases.setdefault(phase, {"status": "pending", "retries": 0})
     _clear_phase_runtime_markers(phase_state)
+    # §3.2: per-phase execution counter for fix-loop detection. Distinct from
+    # `retries` (which only increments on apply_gate_result FAIL) — `executions`
+    # tracks every time `awf wf next` starts this phase regardless of outcome.
+    phase_state["executions"] = int(phase_state.get("executions", 0) or 0) + 1
     phase_state["status"] = "in_progress"
     phase_state["startedAt"] = _now_iso()
     state["currentPhase"] = phase

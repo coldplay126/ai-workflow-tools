@@ -162,6 +162,7 @@
   - verify spec을 결정적으로 정의 (CRITICAL=배포 차단, HIGH=배포 가능 with debt 등)
   - 또는 verify 후보 finding을 cycle 시작 시 freeze (review/plan 단계에서 미리 식별)
   - 또는 fix loop 최대 N회 정책 (예: 3회 후 자동 PASS_WITH_DEBT)
+- **resolution (2026-05-13, Group C)**: 세 번째 follow-up 채택. `mark_phase_in_progress`가 phase별 `executions` counter를 증가 (retries와 별도 — apply_gate_result FAIL 시점이 아닌 awf wf next 시점 카운트). `awf wf next`가 verify phase의 다음 execution이 warn threshold(3) 도달 시 경고, hard limit(5) 초과 시 abort + replan/continue/--force 안내. PASS_WITH_DEBT 자동 변환은 보수적으로 생략하고 사람 결정(`awf wf decide`)을 강제. commit (Group C).
 
 ### 3.3 worker가 base branch 자동 검증 안 함 (main 직커밋 사고)
 - **증상**: worker가 작업 시 working tree branch 검증 없이 commit + push 진행 → manager repo의 본 cycle 작업 2 commits이 main에 직접 들어감
@@ -180,10 +181,12 @@
 ### 3.4 PR 자동 생성 부재
 - **증상**: cycle 종료 후 PR 수동 생성 필요. branch push까지만 자동
 - **follow-up**: `awf wf done` 또는 cycle close 시 양쪽 repo gh pr create 자동 호출
+- **resolution (2026-05-13, Group C)**: `awf wf pr` 신규 subcommand. state.json + concept.md를 PR title/body로 합성 후 `gh pr create` 호출. flags: `--base`(default main) `--title`/`--body` override, `--draft`, `--no-fill`, `--dry-run`. `gh` 미설치/실패 시 graceful error. 자동 호출(cycle close 트리거)은 별도 cycle로 분리 — 다음 cycle에서 phase=done 진입 시 hook 추가 권장. commit (Group C).
 
 ### 3.5 result file 명명 규약 없음
 - **증상**: `result-verify-claude-code.txt` 같은 generic 이름 — 차수 구분 불가, 누적 시 overwrite
 - **follow-up**: `result-{phase}-{cycle_round}-{timestamp}.json` 형식 강제 + 누적 보관
+- **resolution (2026-05-13, Group C)**: `save_workflow_result`가 `result-{phase}-r{round}-{epoch_ms}-{provider}.txt` 형식으로 저장. round는 state의 phases[phase].retries에서 derive (없으면 0). 같은 round 내 여러 호출도 epoch_ms로 구분되어 overwrite 없음. `_find_fresh_result_file`은 기존 glob 패턴(`result-{phase}-*.txt`)으로 신·구 이름 모두 mtime 정렬해 픽업하므로 backward compat 유지. commit (Group C).
 
 ### 3.6 CD repo / Argo CD 연동 (production manifest auto-update)
 - **증상**: main push 시 ci.yml의 argo job이 CD repo (Space-Oddity-Inc/CD)의 `{repo}/{env}` branch에 deployment manifest commit. 본 cycle main 직커밋 사고로 manager production manifest가 본 cycle image hash로 갱신 (`bump version up to 5d84b11...`). Argo CD는 manual sync라 production cluster는 안전했지만 manifest는 OutOfSync 상태
@@ -239,8 +242,8 @@
 | **P1** | awf CLI | gate evaluator stream-json 파싱 (1.3) + scope-check multi-repo (1.5) | ✅ **§1.3 FIXED** (Group A) / §1.5 open |
 | **P1** | awf CLI | apply-result impl/test (1.2) + in_progress duplicate guard (1.4) | ✅ **FIXED** (Group A) |
 | **P1** | broker | workspace auto-close (2.9) + multi-watcher singleton (2.8) | ✅ **FIXED** (Group B) |
-| **P2** | workflow | verify fix loop 종결 정책 (3.2) — verdict 결정 기준 명확화 | open |
-| **P2** | workflow | PR 자동 생성 (3.4) + result file 명명 (3.5) | open |
+| **P2** | workflow | verify fix loop 종결 정책 (3.2) — verdict 결정 기준 명확화 | ✅ **FIXED** (Group C) |
+| **P2** | workflow | PR 자동 생성 (3.4) + result file 명명 (3.5) | ✅ **FIXED** (Group C) |
 | **P3** | meta | cmux-agent repo sync + upstream PR (5.1) | ✅ **FIXED** (`cc0aa54`) |
 | **P3** | enhancement | dual mode worker spawn fix (2.10) + session reuse (4.2) | open |
 
@@ -568,3 +571,68 @@ cmux-agent 런타임 안정성 P1 항목 처리. Group A에 비해 변경 면적
 | §2.10 dual-mode worker spawn | workspace selection |
 | §4.2 session 재사용 | cycle 단위 token 절감 |
 | §8.7-P1 model routing telemetry | phase별 token + 비용 report |
+
+---
+
+## 12. Group C Resolution log (2026-05-13 — feat/awf-workflow-ops-group-c)
+
+workflow 운영 자동화/정책 P2 항목 3건 처리. §3.2 verify fix-loop guard, §3.4 PR 자동 생성, §3.5 result file 명명 규약.
+
+### 12.1 변경 요약
+
+| 영역 | 처리된 gap 항목 |
+|---|---|
+| `cli/src/awf/core/workflow_prompt.py` `save_workflow_result` | §3.5 — `result-{phase}-r{round}-{epoch_ms}-{provider}.txt` 누적 |
+| `cli/src/awf/core/state.py` `mark_phase_in_progress` | §3.2 prerequisite — phase별 `executions` counter |
+| `cli/src/awf/commands/wf.py` `_verify_fix_loop_status` + dispatcher | §3.2 — verify warn at 3 / hard abort at 5 |
+| `cli/src/awf/commands/wf_pr.py` (신규) + cli.py 등록 | §3.4 — `awf wf pr` subcommand |
+| `cli/README.md` | apply-result/gate phase 4종 + pr 명령 안내 |
+
+### 12.2 변경 메트릭
+
+| repo / area | 파일 수 | LOC delta |
+|---|---|---|
+| `cli/src/awf/core/` | 2 (workflow_prompt.py, state.py) | +45 / -5 |
+| `cli/src/awf/commands/` | 2 (wf.py, wf_pr.py 신규) | +240 / -1 |
+| `cli/src/awf/cli.py` | 1 | +22 / -0 |
+| `cli/tests/` | 3 신규 (test_workflow_result_naming.py, test_wf_fix_loop.py, test_wf_pr.py) | +260 / -0 |
+| `cli/README.md` | 1 | +3 / -2 |
+
+### 12.3 검증
+
+- `awf cli` 622/622 PASS (이전 608 → +20 신규: naming 6, fix-loop 7, pr 7)
+- cmux-agent 120/120 PASS (회귀 가드)
+
+### 12.4 운영 절차 추가 변경점
+
+1. **`awf wf pr [--base main] [--draft] [--dry-run]`**: state.json + concept.md를 합성한 PR title/body로 `gh pr create`. CI/cycle 마감 시 수동 명령 하나로 PR 생성.
+2. **verify fix-loop guard**: 4번째 verify 실행 시 stderr 경고, 6번째 시 hard abort + `awf wf decide replan|continue` 안내. `--force`로 override 가능 (단 history에 사유 기록 권장).
+3. **result file 누적**: `result-{phase}-r{round}-{epoch_ms}-{provider}.txt`. 재실행해도 이전 결과 보존. fresh-result 검출은 mtime 기반이라 신·구 모두 호환.
+
+### 12.5 다음 cycle 권장 — Codex MCP vs cmux-agent 라우팅 (NEW, 2026-05-13)
+
+운영 중 추가 발견 (Group C 머지 직후 사용자 보고):
+
+- **증상**: claude가 codex worker를 cmux-agent dispatch가 아닌 `mcp__codex__codex` MCP 호출로 실행. JSON 직렬화 + tool-call 왕복 + claude session 한 번 더 점유로 오버헤드 큼. 동일 작업을 cmux-agent에서는 background tab에서 진행하지만 MCP 경로는 claude 본 세션을 점유.
+- **영향**: precise/cross/critical 모드 + #precise/#cross 해시태그 사용 시 응답이 수십 초 ~ 분 단위로 느려짐. cycle 자율 진행률 저하.
+- **추정 원인 (확인 필요)**:
+  - `awf wf next --mode` dispatch가 cmux-agent worker spawn이 아닌 inline Codex MCP로 fallback
+  - 또는 multi-agent skill/protocol이 Codex 호출을 MCP 우선으로 안내
+  - 또는 cmux-agent dispatch가 실패해 silent downgrade
+- **follow-up**: 별도 cycle 권장.
+  - `awf wf next` provider routing 로깅 추가 (어느 경로로 dispatch 했는지)
+  - cmux-agent dispatch 실패 시 hard error (silent MCP fallback 금지)
+  - multi-agent skill의 Codex 호출 규약 — "cmux-agent 활성 시 broker dispatch, 미활성 시 MCP" 분기 명시
+
+### 12.6 잔여 (Group A/B/C 이후)
+
+| 항목 | 비고 |
+|---|---|
+| §1.1 deterministic gate 규칙 | impl/test agent card pass_conditions |
+| §1.5 scope-check multi-repo | manifest 확장 |
+| §1.6 `awf wf decide` 상태 강제 | force-from CLI |
+| §2.10 dual-mode worker spawn | workspace selection |
+| §4.2 session 재사용 | cycle 단위 token 절감 |
+| §8.7-P1 model routing telemetry | phase별 token + 비용 report |
+| §12.5 Codex MCP routing (NEW) | dispatch path 진단 + cmux-agent 우선 강제 |
+| §3.4 PR auto-trigger on phase=done | 현재는 수동 명령만, 자동 hook 별도 |
