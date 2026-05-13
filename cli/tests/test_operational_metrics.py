@@ -167,6 +167,14 @@ class _ClassificationStub:
 
 
 @dataclass
+class _RepoResultStub:
+    name: str
+    changed_files: tuple = ()
+    violations: tuple = ()
+    error: str | None = None
+
+
+@dataclass
 class _ScopeStub:
     base_branch: str
     planned_set: tuple
@@ -175,6 +183,7 @@ class _ScopeStub:
     violations: tuple
     planned_not_changed: tuple
     classifications: tuple = ()
+    per_repo: tuple = ()
 
     @property
     def violation_count(self) -> int:
@@ -198,6 +207,50 @@ def test_record_scope_check_extracts_violation_paths(tmp_path):
     assert p["planned_count"] == 2
     assert p["violation_count"] == 1
     assert p["violation_paths"] == ["d"]
+
+
+def test_record_scope_check_omits_per_repo_for_legacy_single_repo_result(tmp_path):
+    """Legacy ScopeCheckResult without `per_repo` keeps the old payload shape."""
+    stub = _ScopeStub(
+        base_branch="main",
+        planned_set=("a",),
+        expanded_set=(),
+        changed_files=("a",),
+        violations=(),
+        planned_not_changed=(),
+    )
+    record_scope_check(tmp_path, stub)
+    [event] = list(iter_events(tmp_path))
+    p = event["payload"]
+    assert "per_repo" not in p
+    assert "repo_count" not in p
+    assert "repo_error_count" not in p
+
+
+def test_record_scope_check_includes_per_repo_summary_for_multi_repo(tmp_path):
+    """Multi-repo result emits compact per_repo summary + repo_count fields."""
+    stub = _ScopeStub(
+        base_branch="main",
+        planned_set=("a", "@api/x"),
+        expanded_set=(),
+        changed_files=("a", "@api/x"),
+        violations=(),
+        planned_not_changed=(),
+        per_repo=(
+            _RepoResultStub(name="", changed_files=("a",)),
+            _RepoResultStub(name="api", changed_files=("x",)),
+            _RepoResultStub(name="ghost", error="missing_repo"),
+        ),
+    )
+    record_scope_check(tmp_path, stub)
+    [event] = list(iter_events(tmp_path))
+    p = event["payload"]
+    assert p["repo_count"] == 3
+    assert p["repo_error_count"] == 1
+    names = [entry["name"] for entry in p["per_repo"]]
+    assert names == ["", "api", "ghost"]
+    ghost_entry = next(e for e in p["per_repo"] if e["name"] == "ghost")
+    assert ghost_entry["error"] == "missing_repo"
 
 
 def test_operations_root_resolves_to_dot_awf_operations(tmp_path):

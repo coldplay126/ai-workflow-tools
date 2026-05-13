@@ -74,6 +74,14 @@ def run_ready(args: argparse.Namespace) -> int:
     )
     if payload["workflow"].get("warning"):
         print(f"    warning: {payload['workflow']['warning']}")
+    manifest_status = payload["workflow"].get("manifest_status")
+    if manifest_status == "invalid":
+        print(f"    manifest: invalid — {payload['workflow'].get('manifest_error')}")
+    elif manifest_status == "ok" and payload["workflow"].get("sibling_repo_count"):
+        print(
+            f"    manifest: ok ({payload['workflow']['sibling_repo_count']} sibling repo"
+            f"{'s' if payload['workflow']['sibling_repo_count'] != 1 else ''})"
+        )
     print(
         f"  operations: {_fmt_status(payload['operations']['status'])} "
         f"(profile={payload['operations']['profile_exists']})"

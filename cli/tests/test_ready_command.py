@@ -353,3 +353,77 @@ def test_evaluate_workflow_run_gate_allows_provider_caution(tmp_path: Path, monk
 
     assert gate["decision"] == "allow"
     assert gate["exit_code"] == 0
+
+
+# ---------------------------------------------------------------------------
+# sibling_repos manifest validation in ready (PR #117 follow-up)
+# ---------------------------------------------------------------------------
+
+
+def _write_manifest(repo: Path, payload: dict) -> None:
+    workflow = repo / ".workflow"
+    workflow.mkdir(exist_ok=True)
+    (workflow / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_collect_ready_report_marks_valid_sibling_manifest_as_ok(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo, skills = _prepare_repo(tmp_path, workflow_started=True)
+    monkeypatch.setenv("AWF_SKILLS_DIR", str(skills))
+    _write_manifest(repo, {
+        "version": "1.0.0",
+        "sibling_repos": [{"name": "api", "path": "../sibling-api"}],
+    })
+
+    report = collect_ready_report(str(repo))
+    assert report["workflow"]["manifest_status"] == "ok"
+    assert report["workflow"]["sibling_repo_count"] == 1
+    assert report["workflow"]["manifest_error"] is None
+
+
+def test_collect_ready_report_marks_invalid_sibling_manifest(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo, skills = _prepare_repo(tmp_path, workflow_started=True)
+    monkeypatch.setenv("AWF_SKILLS_DIR", str(skills))
+    # `path` must start with ".." per docs/specs/multi-repo-scope.md §3.1
+    _write_manifest(repo, {
+        "version": "1.0.0",
+        "sibling_repos": [{"name": "api", "path": "./sub"}],
+    })
+
+    report = collect_ready_report(str(repo))
+    assert report["workflow"]["manifest_status"] == "invalid"
+    assert "sibling" in (report["workflow"]["manifest_error"] or "").lower()
+
+
+def test_workflow_run_gate_blocks_on_invalid_sibling_manifest(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo, skills = _prepare_repo(tmp_path, workflow_started=True)
+    monkeypatch.setenv("AWF_SKILLS_DIR", str(skills))
+    _write_manifest(repo, {
+        "version": "1.0.0",
+        "sibling_repos": [{"name": "bad name", "path": "../x"}],  # invalid chars
+    })
+
+    report = collect_ready_report(str(repo))
+    gate = evaluate_ready_gate(report, "workflow-run")
+    assert gate["decision"] == "block"
+    assert "sibling_repos invalid" in gate["reason"]
+
+
+def test_workflow_run_gate_allows_when_no_sibling_repos(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Backward compat: manifest without sibling_repos is still 'ok'."""
+    repo, skills = _prepare_repo(tmp_path, workflow_started=True)
+    monkeypatch.setenv("AWF_SKILLS_DIR", str(skills))
+    _write_manifest(repo, {"version": "1.0.0"})  # no sibling_repos field
+
+    report = collect_ready_report(str(repo))
+    assert report["workflow"]["manifest_status"] == "ok"
+    assert report["workflow"]["sibling_repo_count"] == 0
+    gate = evaluate_ready_gate(report, "workflow-run")
+    assert gate["decision"] == "allow"
