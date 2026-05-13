@@ -16,7 +16,7 @@
 - **영향**: impl 종료 시 G4 marking을 awf CLI로 자동 처리 불가. state.json 수동 update 또는 `awf wf next` 우회 필요
 - **우회**: state.json을 Master inline으로 직접 edit (`impl.status=completed`, `gates.G4.passed=true`) + history 추가
 - **resolution (2026-05-13, partial)**: `_GATE_SUPPORTED_PHASES`에 `impl`/`test` 추가, `awf wf gate impl --result-file` 명령이 동작. 단 deterministic 검증 규칙(lint/build/tasks/commits)은 후속 agent card 작업으로 분리. commit (Group A).
-- **follow-up (잔여)**: agent-cards/impl.json + agent-cards/test.json에 deterministic pass_conditions 정의
+- **resolution (2026-05-13, Group F)**: impl/test agent-card에 deterministic `pass_conditions` 4개씩 정의 + `evaluate_gate`에 evaluator 추가. impl: `tasks.pending == 0`, `lint_clean == true`, `build_passed == true`, `commits.count > 0`. test: `suites.failed == 0`, `regressions.count == 0`, `acceptance.passed == acceptance.total`, `coverage.percentage >= 70`. 빈 acceptance(0/0)는 fail로 guard. 9 신규 단위 테스트. commit (Group F).
 
 ### 1.2 `awf wf apply-result` impl 미지원
 - **증상**: `apply-result {review,verify}` — impl 미지원
@@ -739,6 +739,60 @@ workflow 운영 자동화/정책 P2 항목 3건 처리. §3.2 verify fix-loop gu
 | §2.10 자동 복구 | 현재는 진단 단계까지만; stale run 자동 cleanup은 별도 |
 | §4.2 session 재사용 | cycle 단위 token 절감 |
 | §8.7-P1 model routing telemetry | phase별 token + 비용 report |
+
+---
+
+## 15. Group F Resolution log (2026-05-13 — feat/awf-ops-group-f)
+
+운영 자율성 + 비용 가시화 2건. impl/test deterministic gate + phase별 token/cost telemetry.
+
+### 15.1 변경 요약
+
+| 영역 | 처리 |
+|---|---|
+| `cli/src/awf/core/gates.py` | §1.1 — impl 4 / test 4 deterministic condition evaluator (`tasks.pending == 0`, `lint_clean == true`, `build_passed == true`, `commits.count > 0`, `suites.failed == 0`, `regressions.count == 0`, `acceptance.passed == acceptance.total`, `coverage.percentage >= 70`) |
+| `claude/skills/wf-orchestrator/templates/agent-cards/impl.json` + `test.json` | §1.1 — 사람 문구를 machine-evaluable 조건으로 교체 + `_pass_conditions_doc`에 worker result schema 명시 |
+| `cli/src/awf/core/state.py` `record_phase_telemetry` | §8.7-P1 — `state.telemetry.phases[phase]` 누적 (input_tokens, output_tokens, cost_usd, runs, providers, lastUpdatedAt) |
+| `cli/src/awf/commands/wf.py` single-agent provider 후 hook | §8.7-P1 — provider result의 usage에서 토큰 추출, `estimate_cost`로 USD 계산, `record_phase_telemetry` 호출 (best-effort) |
+| `cli/src/awf/core/workflow_status.py` `summarize_workflow_state` | §8.7-P1 — telemetry 블록 출력 (phase별 + total) |
+
+### 15.2 변경 메트릭
+
+| repo / area | 파일 수 | LOC delta |
+|---|---|---|
+| `cli/src/awf/core/gates.py` | 1 | +45 / -3 |
+| `cli/src/awf/core/state.py` | 1 | +45 / -0 |
+| `cli/src/awf/core/workflow_status.py` | 1 | +24 / -0 |
+| `cli/src/awf/commands/wf.py` | 1 | +22 / -0 |
+| `claude/skills/wf-orchestrator/templates/agent-cards/` | 2 | +12 / -8 |
+| `cli/tests/` | 2 신규 (test_gate_impl_test_conditions.py, test_phase_telemetry.py) | +250 / -0 |
+
+### 15.3 검증
+
+- `awf cli` 650/650 PASS (이전 634 → +16 신규: gate-conditions 9, telemetry 7)
+- `cmux-agent` 125/125 PASS (회귀 가드)
+
+### 15.4 운영 절차 추가 변경점
+
+1. **`awf wf gate impl` / `awf wf gate test` 자동 판정**:
+   - 이전: shape validation만 통과하면 PASS (실질 검증 부재)
+   - 현재: agent-card pass_conditions 4건씩 자동 평가. 하나라도 실패하면 G4/G6 FAIL.
+2. **`awf wf status` 출력에 telemetry 블록 추가** (telemetry 데이터가 있을 때만):
+   ```
+   telemetry:
+     - impl: in=12,345 out=6,789 cost=$0.0205 runs=2
+     - verify: in=45,678 out=2,345 cost=$0.0518 runs=3
+     total: in=58,023 out=9,134 cost=$0.0723
+   ```
+3. Worker가 발행하는 result JSON에 위 조건 필드를 채워야 자동 gate가 PASS — agent-card의 `_pass_conditions_doc`에 스키마 명시.
+
+### 15.5 잔여 (Group A~F 이후)
+
+| 항목 | 비고 |
+|---|---|
+| §1.5 scope-check multi-repo | manifest 확장 (구조 변경 큼) — 단독 cycle 권장 |
+| §2.10 자동 복구 | stale run cleanup |
+| §4.2 session 재사용 | cycle 단위 token 절감 |
 
 ---
 

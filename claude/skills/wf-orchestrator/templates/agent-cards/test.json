@@ -75,10 +75,12 @@
   "gate": {
     "id": "G6",
     "pass_conditions": [
-      "regression.fail == 0 (or test_command is null + manual confirmed)",
-      "acceptance auto-verified items all pass",
-      "manual items signed by user (if any)"
+      "suites.failed == 0",
+      "regressions.count == 0",
+      "acceptance.passed == acceptance.total",
+      "coverage.percentage >= 70"
     ],
+    "_pass_conditions_doc": "Worker result schema: { suites: [{passed,failed,...}], regressions: [...], acceptance: {passed,total}, coverage: {percentage} }",
     "on_pass": { "next_phase": "done" },
     "on_fail": {
       "regression_failure": { "next_phase": "impl" }

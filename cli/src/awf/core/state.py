@@ -436,6 +436,49 @@ def load_workflow_state(explicit_root: Optional[str] = None) -> dict:
         return json.loads(retry_raw)
 
 
+def record_phase_telemetry(
+    explicit_root: Optional[str],
+    phase: str,
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    cost_usd: float,
+    provider: Optional[str] = None,
+) -> None:
+    """Append phase-level token/cost telemetry to state.json (§8.7-P1).
+
+    Accumulates across multiple runs (verify retries, replans, etc.) so the
+    operator can see total spend per phase at the end of a cycle via
+    `awf wf status`. Best-effort: any error short-circuits silently because
+    telemetry must not block the workflow.
+    """
+    try:
+        state = load_workflow_state(explicit_root)
+    except Exception:
+        return
+
+    telemetry = state.setdefault("telemetry", {})
+    phases = telemetry.setdefault("phases", {})
+    entry = phases.setdefault(
+        phase,
+        {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0, "runs": 0, "providers": []},
+    )
+    entry["input_tokens"] = int(entry.get("input_tokens", 0) or 0) + max(0, int(input_tokens))
+    entry["output_tokens"] = int(entry.get("output_tokens", 0) or 0) + max(0, int(output_tokens))
+    entry["cost_usd"] = round(
+        float(entry.get("cost_usd", 0) or 0) + max(0.0, float(cost_usd)),
+        6,
+    )
+    entry["runs"] = int(entry.get("runs", 0) or 0) + 1
+    if provider and provider not in (entry.get("providers") or []):
+        entry.setdefault("providers", []).append(provider)
+    entry["lastUpdatedAt"] = _now_iso()
+    try:
+        _save_workflow_state(explicit_root, state)
+    except Exception:
+        pass
+
+
 def load_workflow_provider_config(explicit_root: Optional[str] = None) -> dict:
     root = find_repo_root(explicit_root)
     provider_path = root / ".workflow" / "provider-config.json"
