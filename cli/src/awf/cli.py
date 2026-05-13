@@ -179,6 +179,12 @@ def build_parser() -> argparse.ArgumentParser:
     wf_decide_parser.add_argument("--repo-root", help="Repository root containing .workflow/. Defaults to current or parent directories.")
     wf_decide_parser.add_argument("--phase", help="Target phase. Defaults to currentPhase from workflow state.")
     wf_decide_parser.add_argument("--target", help="Replan target phase. Defaults to plan when decision=replan.")
+    wf_decide_parser.add_argument(
+        "--force-from",
+        choices=["in_progress", "failed", "completed", "aborted", "any"],
+        help="Allow the decision when the phase is in this status instead of 'deciding' (§1.6). "
+             "'any' bypasses the status check entirely. The phase + status are written to history with action='force_decide'.",
+    )
     wf_decide_parser.set_defaults(handler=run_wf_decide)
 
     wf_apply_parser = wf_subparsers.add_parser(

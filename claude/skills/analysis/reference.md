@@ -193,7 +193,7 @@ Layer 3 진입 전, 다음 게이트를 순서대로 실행:
 **프로바이더 선택**:
 - `analysis-pipeline.json`의 `stage_routing.{scale}.stage1`에 따름 (기본: `codex`)
 - `awf-cli`에서는 `_resolve_stage_provider()`가 scale별 provider를 자동 선택
-- Claude Code에서는 `mcp__codex__codex` (read-only sandbox, file_access: true)로 직접 호출
+- Claude Code에서는 cmux-agent 활성 시 `cmux-agent send <worker>`로 broker 경로(권장, 2026-05-13 §12.5), 미활성 시 `mcp__codex__codex` (read-only sandbox, file_access: true) fallback
 
 **awf-cli 실행 시**: stage1 provider가 글로벌 기본 provider와 다를 때만 파일별 분석 실행.
 파일별로 역할/import/export/summary를 JSON으로 추출하여 `.tmp/stage1-file-analyses.json`에 저장.
@@ -235,7 +235,7 @@ Layer 3 진입 전, 다음 게이트를 순서대로 실행:
 ```
 
 **Codex 실패 시 fallback**:
-1. JSON 파싱 실패 → `mcp__codex__codex-reply(threadId, "응답을 valid JSON으로 다시 출력하세요. { 로 시작하여 } 로 끝나야 합니다.")` (1회)
+1. JSON 파싱 실패 → broker 경로면 `cmux-agent send <worker> "응답을 valid JSON으로 다시 출력하세요. { 로 시작하여 } 로 끝나야 합니다."`, MCP 경로면 `mcp__codex__codex-reply(threadId, ...)` (1회)
 2. 재실패 또는 타임아웃 → Sonnet 에이전트로 fallback (Agent tool, model: sonnet), 도메인 XML 번들을 전달하여 동일 분석 수행
 
 **종합**: Codex 4-Block 결과의 `evidence` 섹션에서 3관점 데이터 추출 → 📄 `.tmp/stage1-analysis.md`

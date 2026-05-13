@@ -48,6 +48,7 @@
 - **증상**: `error: Phase 'impl' is not in deciding state` (impl=in_progress에서 호출 시)
 - **영향**: continue/replan/abort 결정을 in_progress 직접 transition으로 처리 불가
 - **follow-up**: `awf wf decide --force-from <state>` 옵션 추가 또는 manual transition CLI 분리
+- **resolution (2026-05-13, Group D)**: `awf wf decide --force-from <status|any>` 추가. 현재 phase status가 인자와 일치하거나 `any`일 때 deciding 검사 우회. 결정 적용 전 history에 `force_decide` 액션(prior_status + force_from + decision 포함) 자동 기록되어 audit 가능. commit (Group D).
 
 ### 1.7 state.json 자동 transition 부재 (cmux-agent와 awf 분리)
 - **증상**: cmux-agent worker가 작업 진행하는 동안 state.json 갱신 0건. 마지막 갱신은 G3 approve 시점에서 멈춤
@@ -638,3 +639,45 @@ workflow 운영 자동화/정책 P2 항목 3건 처리. §3.2 verify fix-loop gu
 | §8.7-P1 model routing telemetry | phase별 token + 비용 report |
 | §12.5 Codex MCP routing (NEW) | dispatch path 진단 + cmux-agent 우선 강제 |
 | §3.4 PR auto-trigger on phase=done | 현재는 수동 명령만, 자동 hook 별도 |
+
+---
+
+## 13. Group D Resolution log (2026-05-13 — feat/awf-ops-group-d)
+
+운영 잔여 follow-up 4건 + README 최신화. 모두 작은 변경으로 묶어 한 PR.
+
+### 13.1 변경 요약
+
+| 영역 | 처리된 follow-up |
+|---|---|
+| `claude/skills/wf-orchestrator/SKILL.md` + `claude/skills/analysis/reference.md` | §12.5 SKILL 동기 — broker-first 분기 미러링 (스킬 본문에서 MCP-only 가정 제거) |
+| `cli/src/awf/commands/wf.py` `provider_running` 로그 | §12.5 routing 로그 — `surface=<inline|cmux|pi|auto>` 출력 추가 |
+| `cli/src/awf/cli.py` + `commands/wf.py` `run_wf_decide` | §1.6 — `awf wf decide --force-from {status|any}` + history `force_decide` 액션 |
+| `cli/src/awf/core/state.py` `apply_gate_result` | §3.4 — cycle 완료 시 stderr에 `awf wf pr` 가이드 출력 (subprocess 호출 없음) |
+| `README.md` | quickstart 코드 블록에 apply-result 4-phase / `awf wf pr` 추가, cmux-agent diagnostics에 `agents --json` 추가, "Multi-agent routing" 박스 신설, in_progress guard / verify fix-loop 안내 보강 |
+
+### 13.2 변경 메트릭
+
+| repo / area | 파일 수 | LOC delta |
+|---|---|---|
+| `claude/skills/` | 2 | +14 / -7 |
+| `cli/src/awf/` | 3 (cli.py, commands/wf.py, core/state.py) | +60 / -8 |
+| `cli/tests/` | 2 신규 (test_wf_decide_force.py, test_cycle_complete_hook.py) | +160 / -0 |
+| `README.md` | 1 | +20 / -8 |
+
+### 13.3 검증
+
+- `awf cli` 630/630 PASS (이전 622 → +8 신규: decide-force 5, cycle-hook 3)
+- `cmux-agent` 123/123 PASS (회귀 가드)
+- `tests/test_docs_links.py`의 awf bash 예제 파서 통과 (README 명령이 argparse로 실제 파싱 가능한지 검증)
+
+### 13.4 잔여 (Group D 이후 P1+ 미해결)
+
+| 항목 | 비고 |
+|---|---|
+| §1.1 deterministic gate 규칙 | impl/test agent card pass_conditions |
+| §1.5 scope-check multi-repo | manifest 확장 (구조 변경 큼) |
+| §2.10 dual-mode worker spawn | workspace selection |
+| §4.2 session 재사용 | cycle 단위 token 절감 |
+| §8.7-P1 model routing telemetry | phase별 token + 비용 report |
+| §3.4 자동 PR 호출 (subprocess) | 현재 hook은 stderr 안내까지만, gh 자동 실행은 별도 cycle |

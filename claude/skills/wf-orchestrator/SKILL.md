@@ -221,12 +221,21 @@ Schema:
 
 **[Step B2: 디스패치]**
 
-| 프로바이더 | 호출 방식 | 폴백 |
-|-----------|----------|------|
-| `codex` | `mcp__codex__codex(prompt, sandbox:"read-only", cwd)` | `codex exec -s read-only "prompt"` (Bash) |
-| `claude:<model>` | `claude --print --bare --model <model> --output-format json --max-budget-usd <budget> "prompt"` (Bash) | fallback_chain 다음 |
+**Dispatch 경로 선택 (우선순위, 2026-05-13 §12.5)**
 
-**모든 호출은 동기. `run_in_background: true` 사용 금지.**
+Codex 워커 호출 전에 cmux-agent 활성 여부를 먼저 확인한다. 활성이면 broker, 미활성이면 MCP fallback. broker 경로는 본 세션을 점유하지 않으므로 평균 3-5배 빠르다.
+
+| 활성 상태 | Codex 호출 방식 |
+|---|---|
+| cmux-agent 활성 (`.agent/control-plane.sqlite3` 존재 또는 `cmux-agent agents --json` 반환) | **권장** — `cmux-agent send <worker-name> "<prompt>"` (예: `worker-impl`, `worker-review`, `worker-verify`) |
+| cmux-agent 미활성 | `mcp__codex__codex(prompt, sandbox:"read-only", cwd)` |
+
+| 프로바이더 | 호출 방식 (broker 활성) | 호출 방식 (MCP fallback) | 추가 폴백 |
+|-----------|----------|----------|------|
+| `codex` | `cmux-agent send worker-<role> "prompt"` | `mcp__codex__codex(prompt, sandbox:"read-only", cwd)` | `codex exec -s read-only "prompt"` (Bash) |
+| `claude:<model>` | `cmux-agent send worker-<role> "prompt"` (worker가 claude 모델로 실행) 또는 inline `claude --print --bare --model <model> --output-format json --max-budget-usd <budget> "prompt"` | inline (위와 동일) | fallback_chain 다음 |
+
+**모든 호출은 동기. `run_in_background: true` 사용 금지.** broker 경로의 경우 result artifact가 inbox에 도착할 때까지 대기한다.
 
 **[Step B3: 응답 수신 + 파싱 + Format Retry]**
 
