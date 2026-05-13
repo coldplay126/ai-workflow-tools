@@ -141,6 +141,7 @@
 - **영향**: cross-validation 효과 zero, primary executor만으로 verify
 - **follow-up**: dispatch 모듈의 `_assign_workers` 경로 + cmux workspace selection 로직 점검
 - **resolution (2026-05-13, Group E, 진단 단계)**: 근본 원인은 cmux app이 닫힌 후 SQLite의 run.workspace_id는 그대로 남아 있어 spawn 시 stale ID가 cmux에 전달되는 것. `AgentRuntime.spawn_worker`에 workspace pre-check (`cmux tree --workspace <id>`) 추가 — workspace가 닫혀있으면 `SpawnResult.error`에 "cmux-agent stop && cmux-agent start" 복구 안내 포함. `new_surface`가 race로 실패해도 동일 hint append. 자동 복구(stale run 자동 cleanup)는 향후 작업. commit (Group E).
+- **resolution (2026-05-13, Group G, 자동 복구 완성)**: `cmux_agent/application/recovery.py` 신설 — `probe_workspace(cmux, id)` + `recover_stale_run(store, event_log, fs, cmux, force=False)`. workspace 죽음 검출 시 run을 FAILED로 자동 marking, watcher PID lock 자동 제거. 신규 `cmux-agent recover [--force]` 명령으로 명시적 복구 가능. 8 신규 단위 테스트. commit (Group G).
 
 ### 2.11 stream-json output 누적
 - **증상**: `claude --output-format stream-json` result file이 누적된 partial messages 포함 — last message가 `status:completed` envelope이지만 첫 line부터 line별 JSON event가 stream
@@ -793,6 +794,50 @@ workflow 운영 자동화/정책 P2 항목 3건 처리. §3.2 verify fix-loop gu
 | §1.5 scope-check multi-repo | manifest 확장 (구조 변경 큼) — 단독 cycle 권장 |
 | §2.10 자동 복구 | stale run cleanup |
 | §4.2 session 재사용 | cycle 단위 token 절감 |
+
+---
+
+## 16. Group G Resolution log (2026-05-13 — feat/cmux-agent-stale-run-recovery)
+
+§2.10 자동 복구. Group E의 진단을 실제 복구 동작으로 격상.
+
+### 16.1 변경 요약
+
+| 영역 | 처리 |
+|---|---|
+| `cmux_agent/application/recovery.py` (신규) | `probe_workspace(cmux, id)` + `recover_stale_run(store, event_log, fs, cmux, force=False)` — workspace 상태 진단 + run 자동 FAILED marking + watcher PID lock 제거 |
+| `cmux_agent/cli/__init__.py` + `commands.py` `cmd_recover` | `cmux-agent recover [--force]` 신규 명령. SUPPORTED_COMMANDS에 추가 |
+
+### 16.2 변경 메트릭
+
+| repo / area | 파일 수 | LOC delta |
+|---|---|---|
+| `cmux-agent/cmux_agent/application/recovery.py` | 1 (신규) | +120 / -0 |
+| `cmux-agent/cmux_agent/cli/__init__.py` | 1 | +12 / -0 |
+| `cmux-agent/cmux_agent/cli/commands.py` | 1 | +28 / -0 |
+| `cmux-agent/tests/test_recovery.py` | 1 (신규) | +110 / -0 |
+
+### 16.3 검증
+
+- `cmux-agent` 133/133 PASS (이전 125 → +8 신규: probe 3 + recover 5)
+- `awf cli` 650/650 PASS (변경 없음)
+
+### 16.4 운영 절차 추가 변경점
+
+1. **`cmux-agent recover`** 신규 명령:
+   - cmux app을 강제 종료한 뒤 다음 `cmux-agent start`가 stale workspace로 실패할 때 한 줄로 복구
+   - 동작: 활성 run의 workspace를 `cmux tree`로 검증 → 죽었으면 run을 FAILED로 자동 marking + `.agent/.watcher.pid` 제거
+   - `--force`로 살아있는 workspace도 강제 cleanup (디버깅용)
+2. **운영 흐름 변화** (Group E 진단 → Group G 복구):
+   - 이전: `cmux-agent stop && cmux-agent start` 두 단계
+   - 현재: `cmux-agent recover && cmux-agent start` (stop 불필요 — workspace가 이미 죽음)
+
+### 16.5 잔여 (Group A~G 이후, P1+ 미해결)
+
+| 항목 | 비고 |
+|---|---|
+| §1.5 scope-check multi-repo | manifest 확장 — 단독 L cycle |
+| §4.2 session 재사용 | cycle 단위 token 절감 — 단독 L cycle |
 
 ---
 
