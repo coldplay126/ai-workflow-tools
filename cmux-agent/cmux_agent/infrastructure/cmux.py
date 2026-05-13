@@ -173,6 +173,21 @@ class CmuxAdapter:
             args.extend(["--surface", surface_id])
         return self._run(*args)
 
+    def read_screen(
+        self,
+        *,
+        surface_id: str | None = None,
+        workspace_id: str | None = None,
+        lines: int = 30,
+    ) -> CmuxResult:
+        args = ["read-screen"]
+        if workspace_id:
+            args.extend(["--workspace", workspace_id])
+        if surface_id:
+            args.extend(["--surface", surface_id])
+        args.extend(["--lines", str(lines)])
+        return self._run(*args)
+
     # -- 알림 / 상태 ---------------------------------------------------------
 
     def notify(self, title: str, body: str = "") -> CmuxResult:

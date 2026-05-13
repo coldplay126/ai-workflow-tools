@@ -132,7 +132,9 @@ class PromptBuilder:
         msg_type: MessageType,
         payload: dict,
     ) -> str:
-        message = payload.get("message", "")
+        # orchestrator/worker may use `message` or `task` field for the body.
+        # falling back to `task` prevents an empty injection (silent dispatch failure).
+        message = payload.get("message") or payload.get("task") or ""
 
         if msg_type == MessageType.DISPATCH:
             # 프로토콜 파일이 있으면 참조 지시 추가

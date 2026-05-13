@@ -266,6 +266,17 @@ class ClaudeCodeProvider(SubprocessProvider, GatewayProvider):
                 return
         self.flags.extend(["--permission-mode", mode])
 
+    def set_model(self, model: str) -> None:
+        """Set or replace Claude Code model. Accepts CLI aliases (sonnet, opus, haiku) or full ids."""
+        for index, flag in enumerate(self.flags):
+            if flag == "--model" and index + 1 < len(self.flags):
+                self.flags[index + 1] = model
+                return
+            if flag.startswith("--model="):
+                self.flags[index] = f"--model={model}"
+                return
+        self.flags.extend(["--model", model])
+
     def complete(
         self,
         prompt: str,

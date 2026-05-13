@@ -1,7 +1,7 @@
 {
   "orchestrator": {
     "provider": "claude",
-    "flags": "--effort max",
+    "flags": "--model claude-opus-4-7 --effort max --permission-mode acceptEdits",
     "fallbacks": [
       {
         "provider": "gemini",
@@ -19,7 +19,7 @@
     "fallbacks": [
       {
         "provider": "claude",
-        "flags": "--effort max"
+        "flags": "--model claude-opus-4-7 --effort max --permission-mode acceptEdits"
       },
       {
         "provider": "codex",
@@ -29,7 +29,7 @@
   },
   "worker-review": {
     "provider": "claude",
-    "flags": "--effort max",
+    "flags": "--model claude-opus-4-7 --effort max --permission-mode acceptEdits",
     "fallbacks": [
       {
         "provider": "gemini",
@@ -47,7 +47,7 @@
     "fallbacks": [
       {
         "provider": "claude",
-        "flags": "--effort max"
+        "flags": "--model claude-sonnet-4-6 --permission-mode acceptEdits"
       },
       {
         "provider": "gemini",
@@ -61,7 +61,7 @@
     "fallbacks": [
       {
         "provider": "claude",
-        "flags": "--effort max"
+        "flags": "--model claude-opus-4-7 --effort max --permission-mode acceptEdits"
       },
       {
         "provider": "gemini",

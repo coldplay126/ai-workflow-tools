@@ -1194,16 +1194,28 @@ def _resolve_phase_effort(provider_config: dict, phase: str) -> dict[str, str | 
     return {
         "effort": phase_model.get("effort"),
         "codex_reasoning": phase_model.get("codex_reasoning"),
+        "inline_model": phase_model.get("inline_model"),
     }
 
 
 def _apply_phase_effort(provider, provider_config: dict, phase: str) -> None:
-    """Apply phase-specific effort settings to a provider instance."""
+    """Apply phase-specific effort and model settings to a provider instance.
+
+    Without set_model wiring, `phase_models.{phase}.inline_model` would only
+    flip the provider alias (claude-code → claude:sonnet) inside
+    _resolve_phase_provider; on the actual CLI command it would never produce
+    a `--model` flag when the global provider was already `claude-code`.
+    That left impl/test phases on the opus default, which is the cost spike
+    described in 2026-05-13 BLIP Gem cycle issues §8.
+    """
     effort = _resolve_phase_effort(provider_config, phase)
     if hasattr(provider, "effort") and effort.get("effort"):
         provider.effort = effort["effort"]
     if hasattr(provider, "reasoning_effort") and effort.get("codex_reasoning"):
         provider.reasoning_effort = effort["codex_reasoning"]
+    inline_model = effort.get("inline_model")
+    if inline_model and hasattr(provider, "set_model"):
+        provider.set_model(str(inline_model))
 
 
 def _resolve_phase_provider(

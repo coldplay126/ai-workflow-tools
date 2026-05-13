@@ -157,7 +157,12 @@ def test_start_uses_template_provider_fallbacks(tmp_path, monkeypatch):
     )
 
     send_texts = _send_texts(fake)
-    assert any(call["text"] == "claude --effort max\n" for call in send_texts)
+    # conductor 템플릿: orchestrator/plan/review/verify 의 claude entry는 opus 명시,
+    # worker-impl fallback claude는 sonnet 명시 (BLIP Gem cycle §8 model routing).
+    opus_cmd = "claude --model claude-opus-4-7 --effort max --permission-mode acceptEdits\n"
+    sonnet_cmd = "claude --model claude-sonnet-4-6 --permission-mode acceptEdits\n"
+    assert any(call["text"] == opus_cmd for call in send_texts)
+    assert any(call["text"] == sonnet_cmd for call in send_texts)
     assert not any(call["text"].startswith("gemini ") for call in send_texts)
     assert not any(call["text"].startswith("codex ") for call in send_texts)
     assert any(
@@ -227,7 +232,8 @@ def test_start_task_and_spawn_preserve_template_contract(tmp_path, monkeypatch):
         for call in texts
     )
     assert any(
-        call["surface_id"] == "surface:2" and call["text"] == "claude --effort max\n"
+        call["surface_id"] == "surface:2"
+        and call["text"] == "claude --model claude-opus-4-7 --effort max --permission-mode acceptEdits\n"
         for call in texts
     )
     assert any(

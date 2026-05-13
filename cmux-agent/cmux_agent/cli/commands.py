@@ -848,17 +848,22 @@ def cmd_start(args: argparse.Namespace) -> None:
                 surface_id=agent.surface_id,
                 workspace_id=ws_ref,
             )
+            # AI CLI(claude/codex/gemini) interactive 세션이 ready 상태로 진입할 때까지 대기.
+            # claude code는 splash + welcome banner 표시에 3-8초 소요. 10초 안전 default.
+            time.sleep(10)
             cmux.send_text(
                 prompt_builder.build_startup_prompt(agent),
                 surface_id=agent.surface_id,
                 workspace_id=ws_ref,
             )
+            # send_text 와 send_key("enter") 사이 buffer — input box가 텍스트를 완전히 수신할 시간.
+            time.sleep(0.8)
             cmux.send_key(
                 "enter",
                 surface_id=agent.surface_id,
                 workspace_id=ws_ref,
             )
-            time.sleep(0.3)
+            time.sleep(0.5)
 
     cmux.notify(title="cmux-agent", body=f"Run 시작: {run.run_id[:8]}")
     cmux.log(f"run started: {run.run_id[:8]}", level="success", source="cmux-agent")
