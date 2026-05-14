@@ -256,11 +256,21 @@ def run_wf_status(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    try:
+        repo_root = resolve_repo_root(args.repo_root)
+    except Exception:
+        repo_root = None
+
     if args.json:
-        print(json.dumps(state, ensure_ascii=False, indent=2))
+        from awf.core.cmux_health import probe_cmux_broker_health
+
+        payload = dict(state)
+        if repo_root is not None:
+            payload["cmux_broker_health"] = probe_cmux_broker_health(repo_root)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
-    print(summarize_workflow_state(state))
+    print(summarize_workflow_state(state, repo_root=repo_root))
 
     # K5: Show work_history sessions
     from awf.core.work_history import list_sessions
