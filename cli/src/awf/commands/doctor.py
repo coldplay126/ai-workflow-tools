@@ -29,6 +29,19 @@ def run_doctor(args: argparse.Namespace) -> int:
     print(f"session_db: {payload['paths']['session_db']}")
     print(f"mcp_servers: {payload['mcp']['server_count']} ({', '.join(payload['mcp']['servers']) or 'none'})")
 
+    freshness = payload.get("install_freshness") or {}
+    status = freshness.get("status")
+    if status == "stale":
+        print("")
+        print("⚠ install_freshness: STALE")
+        print(f"  {freshness.get('detail')}")
+        if freshness.get("reinstall_command"):
+            print(f"  fix: {freshness['reinstall_command']}")
+    elif status == "in_sync":
+        print(f"install_freshness: in_sync ({freshness.get('file_count_installed')} files)")
+    elif status == "editable":
+        print("install_freshness: editable (source == installed)")
+
     dispatch = payload.get("dispatch", {})
     if dispatch:
         surfaces = ", ".join(dispatch.get("available_surfaces") or ["inline"])
