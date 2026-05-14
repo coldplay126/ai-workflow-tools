@@ -28,12 +28,16 @@ db0d5b2 Group A — apply-result impl/test + stream-json + in_progress guard + h
 - `cmux-agent` **133/133** PASS
 - CI green on 모든 PR
 
-### 1.3 잔여 P1+ (1개, L 규모)
+### 1.3 잔여 P1+ (1개, M 규모로 축소)
 
 | 항목 | 규모 | 트리거 |
 |---|---|---|
-| ~~§1.5 multi-repo scope-check~~ | ~~L~~ | **완료 (2026-05-13)** — `docs/specs/multi-repo-scope.md` + `cli/src/awf/core/wf_scope.py` 멀티 레포 지원, 11개 신규 테스트. PR 미생성 상태 |
-| §4.2 session 재사용 | L | telemetry(§8.7-P1) 데이터 1-2 cycle 누적 후 ROI 확인 |
+| ~~§1.5 multi-repo scope-check~~ | ~~L~~ | **완료 (2026-05-13)** — PR #117 머지. `docs/specs/multi-repo-scope.md` |
+| ~~§1.5 후속 P2 (manifest validation + per-repo metrics)~~ | ~~S-M~~ | **완료 (2026-05-14)** — PR #118 머지 |
+| ~~§1.5 후속 P2 (cross-repo expand-scope)~~ | ~~M-L~~ | **완료 (2026-05-14)** — PR #119 머지. `docs/specs/cross-repo-expand-scope.md` |
+| §4.2 session 재사용 (impl) | M | **spec 사전 완료 (2026-05-14)** — `docs/specs/session-reuse.md`. impl은 telemetry(§8.7-P1) 1-2 cycle 누적 후 ROI 확인 |
+
+후속 cycle 인계는 `docs/gaps/2026-05-14-handover-next-session.md` 참조.
 
 상세 정의: `docs/gaps/2026-05-13-blip-gem-cycle-operational-issues.md` §16.5
 
