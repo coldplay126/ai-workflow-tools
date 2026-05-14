@@ -240,11 +240,12 @@ class FileClassification:
 class SiblingRepo:
     """Sibling repo declared in .workflow/manifest.json.
 
-    See docs/specs/multi-repo-scope.md §3.1.
+    See docs/specs/multi-repo-scope.md §3.1 + docs/specs/cross-repo-expand-scope.md §3.1.
     """
     name: str
-    path: str       # cycle-root-relative; must start with ".."
-    branch: str | None  # None → fall back to default branch detection
+    path: str                  # cycle-root-relative; must start with ".."
+    branch: str | None         # None → fall back to default branch detection
+    analysis_docs: str | None = None  # cycle-root-relative; None → 4-stage fallback
 
 
 @dataclass(frozen=True)
@@ -421,7 +422,21 @@ def load_sibling_repos(repo_root: Path) -> list[SiblingRepo]:
             raise ValueError(
                 f"sibling_repos[{idx}].path: must be a sibling relative path starting with '..' (got {path!r})"
             )
-        result.append(SiblingRepo(name=name, path=path, branch=branch))
+        analysis_docs_raw = entry.get("analysis_docs")
+        analysis_docs: str | None = None
+        if analysis_docs_raw is not None:
+            if not isinstance(analysis_docs_raw, str) or not analysis_docs_raw.strip():
+                raise ValueError(
+                    f"sibling_repos[{idx}].analysis_docs: must be a non-empty string when set"
+                )
+            analysis_docs = analysis_docs_raw.strip()
+            if Path(analysis_docs).is_absolute():
+                raise ValueError(
+                    f"sibling_repos[{idx}].analysis_docs: must be relative (got {analysis_docs!r})"
+                )
+        result.append(SiblingRepo(
+            name=name, path=path, branch=branch, analysis_docs=analysis_docs
+        ))
     return result
 
 
@@ -447,6 +462,274 @@ def _split_sibling_path(path: str) -> tuple[str | None, str]:
     if not _valid_sibling_name(name):
         return None, path
     return name, real
+
+
+# ---------------------------------------------------------------------------
+# Multi-repo expansion — docs/specs/cross-repo-expand-scope.md
+# ---------------------------------------------------------------------------
+
+
+# Repo expansion statuses.
+EXP_STATUS_OK = "ok"
+EXP_STATUS_NO_DOCS_ROOT = "no_docs_root"
+EXP_STATUS_NO_REPO = "no_repo"
+
+# How the docs_root was resolved (informational; surfaces in audit + JSON output).
+DOCS_ROOT_SOURCE_MANIFEST = "manifest"
+DOCS_ROOT_SOURCE_AWF_TOML = "awf_toml"
+DOCS_ROOT_SOURCE_CONVENTION = "convention"
+DOCS_ROOT_SOURCE_NONE = "none"
+
+
+@dataclass(frozen=True)
+class RepoExpansionResult:
+    """Per-repo slice of a multi-repo expand-scope run."""
+    name: str                    # "" for cycle root, else sibling.name
+    docs_root: str | None        # resolved path string, or None
+    docs_root_source: str        # DOCS_ROOT_SOURCE_*
+    status: str                  # EXP_STATUS_*
+    planned_in_repo: int
+    added_in_repo: int
+    inner: ExpansionResult | None  # None when status != "ok"
+
+
+@dataclass(frozen=True)
+class MultiRepoExpansionResult:
+    """Aggregate of per-repo ExpansionResults, drop-in compatible with
+    ExpansionResult for apply_expansion_to_payload (same field surface)."""
+    planned: tuple[str, ...]
+    added: tuple[str, ...]
+    entries: tuple[ExpansionEntry, ...]
+    coverage: dict[str, str] = field(default_factory=dict)
+    direction: str = "dependents"
+    depth: int | None = DEFAULT_DEPTH
+    per_repo: tuple[RepoExpansionResult, ...] = ()
+
+
+def resolve_sibling_docs_root(
+    cycle_root: Path,
+    sibling: SiblingRepo,
+) -> tuple[Path | None, str]:
+    """Return (docs_root | None, docs_root_source).
+
+    Resolution order (docs/specs/cross-repo-expand-scope.md §3.2):
+      1. manifest sibling.analysis_docs (cycle-root-relative)
+      2. sibling repo's .awf.toml `[paths] analysis_docs`
+      3. convention: `<sibling_path>.parent / "analysis-docs"`
+      4. None when no candidate exists.
+
+    Each candidate is checked for `is_dir()` before being returned;
+    a declared-but-missing path falls through to the next candidate.
+    """
+    # 1. Manifest-declared
+    if sibling.analysis_docs:
+        candidate = (cycle_root / sibling.analysis_docs).resolve()
+        if candidate.is_dir():
+            return candidate, DOCS_ROOT_SOURCE_MANIFEST
+
+    sibling_path = (cycle_root / sibling.path).resolve()
+
+    # 2. Sibling repo's own .awf.toml
+    if sibling_path.is_dir():
+        try:
+            from awf.core.config import resolve_runtime_paths
+            paths = resolve_runtime_paths(str(sibling_path))
+            docs_str = paths.get("analysis_docs") if isinstance(paths, dict) else None
+            if docs_str:
+                candidate = Path(docs_str)
+                if candidate.is_dir():
+                    return candidate, DOCS_ROOT_SOURCE_AWF_TOML
+        except Exception:
+            # Sibling .awf.toml absent or malformed — fall through to convention.
+            pass
+
+    # 3. Convention: sibling-of-sibling analysis-docs
+    if sibling_path.parent.is_dir():
+        candidate = sibling_path.parent / "analysis-docs"
+        if candidate.is_dir():
+            return candidate.resolve(), DOCS_ROOT_SOURCE_CONVENTION
+
+    return None, DOCS_ROOT_SOURCE_NONE
+
+
+def expand_allowed_files_multi_repo(
+    repo_root: Path,
+    planned_files: list[str],
+    *,
+    direction: str = "dependents",
+    depth: int | None = DEFAULT_DEPTH,
+    runtime_only: bool = False,
+    root_docs_root: Path | None = None,
+    services: list[str] | None = None,
+) -> MultiRepoExpansionResult:
+    """Multi-repo orchestrator over `expand_allowed_files`.
+
+    Partitions `planned_files` by `@<sibling>/` prefix, resolves each repo's
+    docs_root (cycle root via `root_docs_root` / `--service` flag; siblings
+    via `resolve_sibling_docs_root`), runs `expand_allowed_files` per repo,
+    and aggregates with prefix-restored paths.
+
+    When `sibling_repos` is empty, the result is equivalent to a single-repo
+    expansion wrapped in MultiRepoExpansionResult (one per_repo entry).
+    """
+    if direction not in VALID_DIRECTIONS:
+        raise ValueError(
+            f"invalid direction {direction!r}; expected one of {VALID_DIRECTIONS}"
+        )
+
+    siblings = load_sibling_repos(repo_root)
+    sibling_by_name = {s.name: s for s in siblings}
+
+    # Partition planned files by repo. Unknown @<name>/ prefixes are surfaced
+    # by scope-check (PR #117) — expand-scope silently skips them.
+    by_repo: dict[str, list[str]] = {"": []}
+    for s in siblings:
+        by_repo[s.name] = []
+    unknown_prefixes: list[str] = []
+    for p in planned_files:
+        if not p:
+            continue
+        sibling, real = _split_sibling_path(p)
+        if sibling is None:
+            by_repo[""].append(real)
+        elif sibling in sibling_by_name:
+            by_repo[sibling].append(real)
+        else:
+            unknown_prefixes.append(p)
+
+    per_repo: list[RepoExpansionResult] = []
+    agg_added: list[str] = []
+    agg_entries: list[ExpansionEntry] = []
+    agg_coverage: dict[str, str] = {}
+
+    # --- Cycle root ---
+    root_planned = by_repo[""]
+    if root_planned:
+        if root_docs_root is None:
+            # Caller (CLI) is expected to pass root_docs_root; only the
+            # legacy single-repo callers reach here without one.
+            from awf.core.config import resolve_runtime_paths
+            root_docs_root = Path(resolve_runtime_paths(str(repo_root))["analysis_docs"])
+        result = expand_allowed_files(
+            root_planned,
+            root_docs_root,
+            services=services,
+            direction=direction,
+            depth=depth,
+            runtime_only=runtime_only,
+        )
+        per_repo.append(RepoExpansionResult(
+            name="", docs_root=str(root_docs_root),
+            docs_root_source=DOCS_ROOT_SOURCE_CONVENTION,
+            status=EXP_STATUS_OK,
+            planned_in_repo=len(root_planned),
+            added_in_repo=len(result.added),
+            inner=result,
+        ))
+        agg_added.extend(result.added)
+        agg_entries.extend(result.entries)
+        agg_coverage.update(result.coverage)
+    else:
+        per_repo.append(RepoExpansionResult(
+            name="", docs_root=str(root_docs_root) if root_docs_root else None,
+            docs_root_source=DOCS_ROOT_SOURCE_CONVENTION,
+            status=EXP_STATUS_OK,
+            planned_in_repo=0, added_in_repo=0, inner=None,
+        ))
+
+    # --- Each sibling ---
+    for s in siblings:
+        sib_planned = by_repo[s.name]
+        sibling_path = (repo_root / s.path).resolve()
+        prefix = f"@{s.name}/"
+
+        if not sibling_path.is_dir():
+            per_repo.append(RepoExpansionResult(
+                name=s.name, docs_root=None,
+                docs_root_source=DOCS_ROOT_SOURCE_NONE,
+                status=EXP_STATUS_NO_REPO,
+                planned_in_repo=len(sib_planned), added_in_repo=0, inner=None,
+            ))
+            continue
+
+        docs_root, docs_root_source = resolve_sibling_docs_root(repo_root, s)
+        if docs_root is None:
+            per_repo.append(RepoExpansionResult(
+                name=s.name, docs_root=None,
+                docs_root_source=docs_root_source,
+                status=EXP_STATUS_NO_DOCS_ROOT,
+                planned_in_repo=len(sib_planned), added_in_repo=0, inner=None,
+            ))
+            continue
+
+        if not sib_planned:
+            per_repo.append(RepoExpansionResult(
+                name=s.name, docs_root=str(docs_root),
+                docs_root_source=docs_root_source,
+                status=EXP_STATUS_OK,
+                planned_in_repo=0, added_in_repo=0, inner=None,
+            ))
+            continue
+
+        # `--service` is a cycle-root concept (see spec §6 edge cases);
+        # siblings always scan their full docs_root.
+        sib_result = expand_allowed_files(
+            sib_planned,
+            docs_root,
+            services=None,
+            direction=direction,
+            depth=depth,
+            runtime_only=runtime_only,
+        )
+        per_repo.append(RepoExpansionResult(
+            name=s.name, docs_root=str(docs_root),
+            docs_root_source=docs_root_source,
+            status=EXP_STATUS_OK,
+            planned_in_repo=len(sib_planned),
+            added_in_repo=len(sib_result.added),
+            inner=sib_result,
+        ))
+        # Restore the @<name>/ prefix on every aggregated entry.
+        for added in sib_result.added:
+            agg_added.append(prefix + added)
+        for entry in sib_result.entries:
+            agg_entries.append(ExpansionEntry(
+                path=prefix + entry.path,
+                # Reasons reference planned files, which were stripped to
+                # repo-local paths — restore the prefix for clarity in audit.
+                reason=_prefix_reason(entry.reason, prefix),
+            ))
+        for cov_path, cov_val in sib_result.coverage.items():
+            agg_coverage[prefix + cov_path] = cov_val
+
+    # planned set in aggregate output: keep prefixes for symmetry with
+    # scope-check's top-level view.
+    agg_planned = [p for p in planned_files if p]
+    # Drop unknown-prefix paths from aggregate output (silently — scope-check
+    # already flags them). They never had a target docs_root anyway.
+    agg_planned = [p for p in agg_planned if p not in unknown_prefixes]
+
+    return MultiRepoExpansionResult(
+        planned=tuple(agg_planned),
+        added=tuple(sorted(set(agg_added))),
+        entries=tuple(agg_entries),
+        coverage=agg_coverage,
+        direction=direction,
+        depth=depth,
+        per_repo=tuple(per_repo),
+    )
+
+
+def _prefix_reason(reason: str, prefix: str) -> str:
+    """Add `@<name>/` prefix to the file path embedded in an expansion reason.
+
+    Reasons have the form `dependent_of:<path>` / `import_of:<path>`. The
+    prefix tagging keeps audit trails interpretable across repos.
+    """
+    for tag in ("dependent_of:", "import_of:"):
+        if reason.startswith(tag):
+            return f"{tag}{prefix}{reason[len(tag):]}"
+    return reason
 
 
 def _build_expansion_reason_index(payload: dict) -> dict[str, str]:
@@ -724,21 +1007,38 @@ def check_scope_violations(
     )
 
 
-def apply_expansion_to_payload(payload: dict, result: ExpansionResult) -> dict:
-    """Merge an ExpansionResult into an allowed-files payload.
+def apply_expansion_to_payload(payload: dict, result) -> dict:
+    """Merge an ExpansionResult (or MultiRepoExpansionResult) into a payload.
 
     Adds an ``expanded_files`` array (sorted, deduplicated) and a
     ``graph_expansion`` audit object so downstream verification can tell
-    expansions apart from user-authored entries.
+    expansions apart from user-authored entries. When the result is a
+    `MultiRepoExpansionResult`, the audit also includes a `per_repo` array
+    so each sibling's contribution stays attributable
+    (docs/specs/cross-repo-expand-scope.md §4.5).
     """
     new_payload = dict(payload)
     expanded = sorted(set(result.added) - set(planned_files_from_payload(new_payload)))
     new_payload["expanded_files"] = expanded
-    new_payload["graph_expansion"] = {
+    audit: dict = {
         "direction": result.direction,
         "depth": result.depth,
         "added_count": len(expanded),
         "entries": [{"path": e.path, "reason": e.reason} for e in result.entries],
         "coverage": dict(result.coverage),
     }
+    per_repo = getattr(result, "per_repo", None)
+    if per_repo:
+        audit["per_repo"] = [
+            {
+                "name": r.name,
+                "docs_root": r.docs_root,
+                "docs_root_source": r.docs_root_source,
+                "status": r.status,
+                "planned_in_repo": r.planned_in_repo,
+                "added_in_repo": r.added_in_repo,
+            }
+            for r in per_repo
+        ]
+    new_payload["graph_expansion"] = audit
     return new_payload

@@ -31,7 +31,7 @@
 - `awf wf gate <phase>`: plan/review/verify/impl/test deterministic gate 평가
 - `awf wf pr [--base main] [--draft] [--dry-run]`: 현재 cycle의 state.json + concept.md를 PR title/body로 합성해 `gh pr create` 호출
 - `awf wf detect-class <concept>`: concept text 기반 change class 판정
-- `awf wf expand-scope`: 저장된 import graph의 reverse dependents/imports로 allowed-files 확장
+- `awf wf expand-scope`: 저장된 import graph의 reverse dependents/imports로 allowed-files 확장. `.workflow/manifest.json`의 `sibling_repos`가 선언되면 각 sibling repo의 import graph도 로드해서 `@<name>/...` prefix 경로를 함께 확장한다. sibling의 docs_root는 manifest `analysis_docs` → sibling repo의 `.awf.toml` → convention `<sibling>.parent/analysis-docs` 순으로 해석되며 없으면 expansion skip + 경고 (docs/specs/cross-repo-expand-scope.md)
 - `awf wf scope-check`: `git diff`와 allowed-files를 비교하는 deterministic G5 scope check. `.workflow/manifest.json`의 `sibling_repos: [{name, path, branch}]`이 선언되면 각 sibling repo의 `git diff`도 합산한다. allowed-files 경로는 `@<name>/...` prefix로 sibling repo의 파일을 가리킨다 (docs/specs/multi-repo-scope.md). exit 코드는 violation 있으면 1, repo-level config 오류(missing path, branch 미해석 등)는 2
 - `awf wf reset`: workflow state를 다시 `plan` phase로 초기화
 - `awf config show`: 3-level merge 결과와 resolved path 확인

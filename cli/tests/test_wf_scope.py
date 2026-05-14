@@ -869,3 +869,258 @@ def test_load_sibling_repos_empty_when_field_missing(tmp_path: Path):
     # Empty list
     _write_manifest(tmp_path, [])
     assert load_sibling_repos(tmp_path) == []
+
+
+# --------------------------------------------------------------------------
+# Cross-repo expand-scope (docs/specs/cross-repo-expand-scope.md)
+# --------------------------------------------------------------------------
+
+
+def _setup_cycle_root_with_manifest(
+    repo_root: Path,
+    siblings: list[dict],
+    planned: list[str],
+) -> None:
+    """Create a cycle root with .workflow/manifest.json + allowed-files.json."""
+    from awf.core.wf_scope import save_allowed_files
+
+    repo_root.mkdir(exist_ok=True)
+    _write_manifest(repo_root, siblings)
+    save_allowed_files(repo_root, {"planned_files": planned})
+
+
+def test_load_sibling_repos_accepts_optional_analysis_docs(tmp_path: Path):
+    from awf.core.wf_scope import load_sibling_repos
+
+    _write_manifest(tmp_path, [
+        {"name": "api", "path": "../sibling-api", "analysis_docs": "../analysis-docs/api"},
+    ])
+    [s] = load_sibling_repos(tmp_path)
+    assert s.analysis_docs == "../analysis-docs/api"
+
+
+def test_load_sibling_repos_rejects_absolute_analysis_docs(tmp_path: Path):
+    import pytest
+    from awf.core.wf_scope import load_sibling_repos
+
+    _write_manifest(tmp_path, [
+        {"name": "api", "path": "../sibling-api", "analysis_docs": "/abs/docs"},
+    ])
+    with pytest.raises(ValueError):
+        load_sibling_repos(tmp_path)
+
+
+def test_resolve_sibling_docs_root_prefers_manifest(tmp_path: Path):
+    from awf.core.wf_scope import (
+        DOCS_ROOT_SOURCE_MANIFEST,
+        SiblingRepo,
+        resolve_sibling_docs_root,
+    )
+
+    cycle = tmp_path / "cycle"
+    cycle.mkdir()
+    docs = tmp_path / "docs-manifest"
+    docs.mkdir()
+    sib = SiblingRepo(
+        name="api", path="../sibling-api", branch=None,
+        analysis_docs="../docs-manifest",
+    )
+    (tmp_path / "sibling-api").mkdir()
+    out, source = resolve_sibling_docs_root(cycle, sib)
+    assert out is not None
+    assert out.resolve() == docs.resolve()
+    assert source == DOCS_ROOT_SOURCE_MANIFEST
+
+
+def test_resolve_sibling_docs_root_falls_back_to_convention(tmp_path: Path):
+    """When neither manifest.analysis_docs nor sibling .awf.toml exists,
+    `<sibling_path>.parent/analysis-docs` is used."""
+    from awf.core.wf_scope import (
+        DOCS_ROOT_SOURCE_CONVENTION,
+        SiblingRepo,
+        resolve_sibling_docs_root,
+    )
+
+    cycle = tmp_path / "cycle"
+    cycle.mkdir()
+    (tmp_path / "sibling-api").mkdir()
+    (tmp_path / "analysis-docs").mkdir()
+    sib = SiblingRepo(name="api", path="../sibling-api", branch=None)
+    out, source = resolve_sibling_docs_root(cycle, sib)
+    assert out is not None
+    assert out.resolve() == (tmp_path / "analysis-docs").resolve()
+    assert source == DOCS_ROOT_SOURCE_CONVENTION
+
+
+def test_resolve_sibling_docs_root_returns_none_when_no_candidate(tmp_path: Path):
+    from awf.core.wf_scope import (
+        DOCS_ROOT_SOURCE_NONE,
+        SiblingRepo,
+        resolve_sibling_docs_root,
+    )
+
+    cycle = tmp_path / "cycle"
+    cycle.mkdir()
+    (tmp_path / "sibling-api").mkdir()
+    # No convention dir, no manifest field, no sibling .awf.toml.
+    sib = SiblingRepo(name="api", path="../sibling-api", branch=None)
+    out, source = resolve_sibling_docs_root(cycle, sib)
+    assert out is None
+    assert source == DOCS_ROOT_SOURCE_NONE
+
+
+def test_expand_multi_repo_no_siblings_yields_single_repo_entry(tmp_path: Path):
+    from awf.core.wf_scope import expand_allowed_files_multi_repo
+
+    docs_root = tmp_path / "docs"
+    _write_unit_graph(docs_root, "svc", "alpha", _build_chain_graph())
+    cycle = tmp_path / "cycle"
+    _setup_cycle_root_with_manifest(cycle, siblings=[], planned=["src/service.ts"])
+
+    result = expand_allowed_files_multi_repo(
+        cycle, ["src/service.ts"],
+        direction="dependents", depth=1, root_docs_root=docs_root,
+    )
+    assert result.added == ("src/controller.ts",)
+    assert len(result.per_repo) == 1
+    assert result.per_repo[0].name == ""
+    assert result.per_repo[0].status == "ok"
+
+
+def test_expand_multi_repo_prefixes_sibling_entries(tmp_path: Path):
+    from awf.core.wf_scope import expand_allowed_files_multi_repo
+
+    root_docs = tmp_path / "root-docs"
+    _write_unit_graph(root_docs, "svc", "alpha", _build_chain_graph())
+    sib_docs = tmp_path / "analysis-docs"  # convention path for sibling
+    _write_unit_graph(sib_docs, "svc", "beta", _build_chain_graph())
+
+    cycle = tmp_path / "cycle"
+    (tmp_path / "sibling-api").mkdir()
+    _setup_cycle_root_with_manifest(
+        cycle,
+        siblings=[{"name": "api", "path": "../sibling-api"}],  # convention fallback
+        planned=["src/service.ts", "@api/src/service.ts"],
+    )
+
+    result = expand_allowed_files_multi_repo(
+        cycle, ["src/service.ts", "@api/src/service.ts"],
+        direction="dependents", depth=1, root_docs_root=root_docs,
+    )
+    # Root expanded controller.ts (no prefix), sibling expanded @api/controller.ts.
+    assert "src/controller.ts" in result.added
+    assert "@api/src/controller.ts" in result.added
+    # Sibling entry's reason should also carry the prefix.
+    sibling_entries = [e for e in result.entries if e.path.startswith("@api/")]
+    assert sibling_entries
+    assert sibling_entries[0].reason == "dependent_of:@api/src/service.ts"
+
+
+def test_expand_multi_repo_no_docs_root_skips_with_status(tmp_path: Path):
+    """A sibling with no resolvable docs_root → status=no_docs_root, no
+    expansion, but the root repo still expands normally (exit 0 path)."""
+    from awf.core.wf_scope import expand_allowed_files_multi_repo
+
+    root_docs = tmp_path / "root-docs"
+    _write_unit_graph(root_docs, "svc", "alpha", _build_chain_graph())
+    cycle = tmp_path / "cycle"
+    (tmp_path / "sibling-api").mkdir()  # path exists, no analysis-docs
+    _setup_cycle_root_with_manifest(
+        cycle,
+        siblings=[{"name": "api", "path": "../sibling-api"}],
+        planned=["src/service.ts", "@api/src/foo.ts"],
+    )
+
+    result = expand_allowed_files_multi_repo(
+        cycle, ["src/service.ts", "@api/src/foo.ts"],
+        direction="dependents", depth=1, root_docs_root=root_docs,
+    )
+    api_entry = next(r for r in result.per_repo if r.name == "api")
+    assert api_entry.status == "no_docs_root"
+    assert api_entry.added_in_repo == 0
+    # Root still expanded.
+    assert "src/controller.ts" in result.added
+
+
+def test_expand_multi_repo_no_repo_skips_with_status(tmp_path: Path):
+    """Sibling path missing → status=no_repo, expansion skipped."""
+    from awf.core.wf_scope import expand_allowed_files_multi_repo
+
+    root_docs = tmp_path / "root-docs"
+    _write_unit_graph(root_docs, "svc", "alpha", _build_chain_graph())
+    cycle = tmp_path / "cycle"
+    _setup_cycle_root_with_manifest(
+        cycle,
+        siblings=[{"name": "ghost", "path": "../ghost-repo"}],
+        planned=["src/service.ts", "@ghost/x.ts"],
+    )
+
+    result = expand_allowed_files_multi_repo(
+        cycle, ["src/service.ts", "@ghost/x.ts"],
+        direction="dependents", depth=1, root_docs_root=root_docs,
+    )
+    ghost = next(r for r in result.per_repo if r.name == "ghost")
+    assert ghost.status == "no_repo"
+    assert ghost.docs_root is None
+
+
+def test_expand_multi_repo_unknown_prefix_silently_dropped(tmp_path: Path):
+    """@<unknown>/ entries are not in manifest → ignored by expand-scope
+    (scope-check separately surfaces them as violations)."""
+    from awf.core.wf_scope import expand_allowed_files_multi_repo
+
+    root_docs = tmp_path / "root-docs"
+    _write_unit_graph(root_docs, "svc", "alpha", _build_chain_graph())
+    cycle = tmp_path / "cycle"
+    _setup_cycle_root_with_manifest(cycle, siblings=[], planned=["src/service.ts"])
+
+    result = expand_allowed_files_multi_repo(
+        cycle,
+        ["src/service.ts", "@typo/foo.ts"],
+        direction="dependents", depth=1, root_docs_root=root_docs,
+    )
+    assert "@typo/foo.ts" not in result.planned
+    assert "src/controller.ts" in result.added
+
+
+def test_apply_expansion_to_payload_records_per_repo_audit(tmp_path: Path):
+    from awf.core.wf_scope import (
+        apply_expansion_to_payload,
+        expand_allowed_files_multi_repo,
+    )
+
+    root_docs = tmp_path / "root-docs"
+    _write_unit_graph(root_docs, "svc", "alpha", _build_chain_graph())
+    cycle = tmp_path / "cycle"
+    (tmp_path / "sibling-api").mkdir()
+    _setup_cycle_root_with_manifest(
+        cycle,
+        siblings=[{"name": "api", "path": "../sibling-api"}],
+        planned=["src/service.ts", "@api/x.ts"],
+    )
+
+    result = expand_allowed_files_multi_repo(
+        cycle, ["src/service.ts", "@api/x.ts"],
+        direction="dependents", depth=1, root_docs_root=root_docs,
+    )
+    payload = {"planned_files": ["src/service.ts", "@api/x.ts"]}
+    out = apply_expansion_to_payload(payload, result)
+    audit = out["graph_expansion"]
+    assert "per_repo" in audit
+    names = [r["name"] for r in audit["per_repo"]]
+    assert "" in names and "api" in names
+    api_audit = next(r for r in audit["per_repo"] if r["name"] == "api")
+    assert api_audit["status"] == "no_docs_root"
+
+
+def test_apply_expansion_to_payload_single_repo_omits_per_repo(tmp_path: Path):
+    """Backward compat: single-repo callers still get the legacy audit shape."""
+    from awf.core.wf_scope import apply_expansion_to_payload, expand_allowed_files
+
+    docs_root = tmp_path / "docs"
+    _write_unit_graph(docs_root, "svc", "alpha", _build_chain_graph())
+    result = expand_allowed_files(
+        ["src/service.ts"], docs_root=docs_root, direction="dependents",
+    )
+    out = apply_expansion_to_payload({"planned_files": ["src/service.ts"]}, result)
+    assert "per_repo" not in out["graph_expansion"]
