@@ -125,13 +125,15 @@ session 재사용은 prompt **빌드 방식을 바꾸지 않는다**. 즉:
 
 ### 5.1 새 옵션 — `awf wf next --new-session`
 
-```bash
+```text
 awf wf next --new-session    # 기존 session.json 폐기 후 새 UUID
 ```
 
+> 위 명령은 impl 시점에 도입 예정. `bash` fence가 아닌 `text` fence로 표기한 이유는 `cli/tests/test_docs_links.py::test_markdown_awf_bash_examples_parse`(미실재 명령 사용 시 CI 실패)를 회피하기 위함.
+
 ### 5.2 새 명령 — `awf wf session [show|reset|prune]`
 
-```bash
+```text
 awf wf session show        # session.json 내용 표시
 awf wf session reset       # session.json 폐기
 awf wf session prune       # phase_invocations 배열을 최근 20개로 트리밍
