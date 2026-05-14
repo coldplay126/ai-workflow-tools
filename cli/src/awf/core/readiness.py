@@ -340,6 +340,8 @@ def collect_doctor_report(config: AwfConfig, repo_root: str | None, *, probe: bo
             item["probe"] = check_provider_probe(str(item["provider"]), config)
     mcp_servers = discover_mcp_servers(config)
     pi_readiness = collect_pi_readiness(resolved_repo_root)
+    from awf.core.version_check import check_install_freshness
+    install_freshness = check_install_freshness(resolved_repo_root)
     return {
         "default_provider": config.provider_name(),
         "provider_fallback": config.raw.get("provider", {}).get("fallback", []),
@@ -356,6 +358,7 @@ def collect_doctor_report(config: AwfConfig, repo_root: str | None, *, probe: bo
         "runners": [check_runner_readiness("pi", pi_readiness=pi_readiness)],
         "pi_readiness": pi_readiness,
         "dispatch": _collect_dispatch_status(resolved_repo_root),
+        "install_freshness": install_freshness,
     }
 
 
