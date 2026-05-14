@@ -1492,12 +1492,18 @@ def run_wf_expand_scope(args: argparse.Namespace) -> int:
     Reads the planned_files list, looks each path up in the per-unit
     import graphs written by `awf analyze`, and either prints a diff
     (--dry-run) or writes back the merged payload with an audit trail.
+
+    When `.workflow/manifest.json` declares `sibling_repos`, each sibling's
+    planned files (via `@<name>/` prefix) are expanded against that repo's
+    own docs_root (docs/specs/cross-repo-expand-scope.md).
     """
     from awf.core.wf_scope import (
         VALID_DIRECTIONS,
         apply_expansion_to_payload,
         expand_allowed_files,
+        expand_allowed_files_multi_repo,
         load_allowed_files,
+        load_sibling_repos,
         planned_files_from_payload,
         save_allowed_files,
     )
@@ -1538,30 +1544,71 @@ def run_wf_expand_scope(args: argparse.Namespace) -> int:
     services = list(args.service) if args.service else None
     depth = None if args.depth in (None, 0) else int(args.depth)
 
-    result = expand_allowed_files(
-        planned,
-        docs_root,
-        services=services,
-        direction=args.direction,
-        depth=depth,
-        runtime_only=bool(args.runtime_only),
-    )
+    # Sibling-aware path when manifest declares any sibling_repos. Falls back
+    # to single-repo expand for full backward compat (PR #117 contract).
+    try:
+        siblings = load_sibling_repos(repo_root)
+    except ValueError as exc:
+        print(f"error: manifest.json sibling_repos invalid: {exc}", file=sys.stderr)
+        return 2
 
-    if args.json:
-        print(
-            json.dumps(
-                {
-                    "planned": list(result.planned),
-                    "added": list(result.added),
-                    "entries": [{"path": e.path, "reason": e.reason} for e in result.entries],
-                    "coverage": dict(result.coverage),
-                    "direction": result.direction,
-                    "depth": result.depth,
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
+    if siblings:
+        result = expand_allowed_files_multi_repo(
+            repo_root,
+            planned,
+            direction=args.direction,
+            depth=depth,
+            runtime_only=bool(args.runtime_only),
+            root_docs_root=docs_root,
+            services=services,
         )
+        # Surface no_docs_root / no_repo siblings (stderr, exit 0 per spec §4.2).
+        for r in result.per_repo:
+            if r.status == "no_docs_root":
+                print(
+                    f"warning: sibling '{r.name}' has no docs_root — run "
+                    f"`awf analyze` for that repo to improve coverage",
+                    file=sys.stderr,
+                )
+            elif r.status == "no_repo":
+                print(
+                    f"warning: sibling '{r.name}' path does not exist; "
+                    f"expansion skipped",
+                    file=sys.stderr,
+                )
+    else:
+        result = expand_allowed_files(
+            planned,
+            docs_root,
+            services=services,
+            direction=args.direction,
+            depth=depth,
+            runtime_only=bool(args.runtime_only),
+        )
+
+    per_repo = getattr(result, "per_repo", None)
+    if args.json:
+        out: dict = {
+            "planned": list(result.planned),
+            "added": list(result.added),
+            "entries": [{"path": e.path, "reason": e.reason} for e in result.entries],
+            "coverage": dict(result.coverage),
+            "direction": result.direction,
+            "depth": result.depth,
+        }
+        if per_repo:
+            out["per_repo"] = [
+                {
+                    "name": r.name,
+                    "docs_root": r.docs_root,
+                    "docs_root_source": r.docs_root_source,
+                    "status": r.status,
+                    "planned_in_repo": r.planned_in_repo,
+                    "added_in_repo": r.added_in_repo,
+                }
+                for r in per_repo
+            ]
+        print(json.dumps(out, ensure_ascii=False, indent=2))
     else:
         print(f"planned: {len(result.planned)} file(s)")
         print(
@@ -1572,6 +1619,24 @@ def run_wf_expand_scope(args: argparse.Namespace) -> int:
             print(f"  + {entry.path}  ({entry.reason})")
         if len(result.entries) > 30:
             print(f"  ... and {len(result.entries) - 30} more")
+        if per_repo and len(per_repo) > 1:
+            print("\nper-repo:")
+            for r in per_repo:
+                label = r.name or "root"
+                docs = r.docs_root or "(none)"
+                print(
+                    f"  [{label:<16}] planned={r.planned_in_repo:<3} "
+                    f"added={r.added_in_repo:<3} status={r.status:<13} "
+                    f"docs_root={docs}"
+                )
+            no_docs = [r.name for r in per_repo if r.status == "no_docs_root"]
+            if no_docs:
+                print(
+                    f"\nnote: {len(no_docs)} repo(s) have no docs_root — "
+                    f"run `awf analyze` for those repos to improve coverage"
+                )
+                for name in no_docs:
+                    print(f"  · {name}")
         ungraphed = sorted(
             p for p, status in result.coverage.items() if status != "no_graph" and not status.startswith("found_in:")
         )
