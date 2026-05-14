@@ -1428,12 +1428,41 @@ def _resolve_phase_provider(
     phase: str,
     config: "AwfConfig",
 ) -> str:
-    """Resolve provider for a phase.  Priority: CLI --provider > phase_models > global default."""
+    """Resolve provider for a phase.
+
+    Priority order:
+      1. CLI ``--provider`` override
+      2. ``phase_routing.{phase}.primary`` when ``mode == "delegated"``
+         (delegated routes explicitly pick a provider; ignoring this would
+         silently dispatch through ``phase_models.inline_model`` and bypass
+         operator intent — see CLAUDE.md "Codex Slave 규칙")
+      3. ``phase_models.{phase}.inline_model``
+      4. Global default provider
+
+    When ``phase_routing.{phase}.mode == "delegated"`` AND ``inline_model`` is
+    also set, the delegated route wins and a one-line stderr warning surfaces
+    the conflict so the operator can clean up the config.
+    """
     if explicit:
         return explicit
-    phase_models = provider_config.get("phase_models", {})
-    phase_model = phase_models.get(phase, {})
+    phase_routing = provider_config.get("phase_routing", {}) or {}
+    routing_cfg = phase_routing.get(phase, {}) or {}
+    routing_mode = routing_cfg.get("mode")
+    routing_primary = routing_cfg.get("primary")
+
+    phase_models = provider_config.get("phase_models", {}) or {}
+    phase_model = phase_models.get(phase, {}) or {}
     inline_model = phase_model.get("inline_model")
+
+    if routing_mode == "delegated" and routing_primary:
+        if inline_model:
+            print(
+                f"warning: phase_routing.{phase}.primary={routing_primary!r} "
+                f"takes precedence over phase_models.{phase}.inline_model={inline_model!r}",
+                file=sys.stderr,
+            )
+        return _INLINE_MODEL_ALIASES.get(str(routing_primary), str(routing_primary))
+
     if inline_model:
         return _INLINE_MODEL_ALIASES.get(str(inline_model), str(inline_model))
     return config.provider_name()
