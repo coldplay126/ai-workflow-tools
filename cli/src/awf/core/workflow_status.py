@@ -1,9 +1,20 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+from awf.core.cmux_health import probe_cmux_broker_health
 from awf.core.event_sync_summary import summarize_event_sync
 
 
-def summarize_workflow_state(state: dict) -> str:
+_DETAIL_HIDE_STATUSES = {"absent", "ok", "fresh", "alive"}
+
+
+def summarize_workflow_state(state: dict, repo_root: str | Path | None = None) -> str:
+    """Workflow state를 사람이 읽는 텍스트로 요약한다.
+
+    ``repo_root`` 가 전달되면 cmux-agent broker health 한 줄을 끝에 추가한다.
+    미전달(None) 시 cmux 통합을 생략한다 (회귀 호환).
+    """
     lines = [
         f"id: {state.get('id', '-')}",
         f"repo: {state.get('repo', '-')}",
@@ -193,5 +204,19 @@ def summarize_workflow_state(state: dict) -> str:
                 lines.append(f"  - {transition} ({decision}, {reason}, {at})")
             else:
                 lines.append(f"  - {transition} ({decision}, {at})")
+
+    if repo_root is not None:
+        cmux = probe_cmux_broker_health(repo_root)
+        cmux_status = cmux.get("status", "error")
+        detail = cmux.get("detail")
+        suffix = f" ({detail})" if detail else ""
+        lines.append(f"cmux_broker_health: {cmux_status}{suffix}")
+        for key in ("events_log", "sqlite_integrity"):
+            sub = cmux.get(key) or {}
+            sub_status = sub.get("status")
+            if sub_status and sub_status not in _DETAIL_HIDE_STATUSES:
+                sub_detail = sub.get("detail", "")
+                sub_suffix = f" ({sub_detail})" if sub_detail else ""
+                lines.append(f"  {key}: {sub_status}{sub_suffix}")
 
     return "\n".join(lines)
