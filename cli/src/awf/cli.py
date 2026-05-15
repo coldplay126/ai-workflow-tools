@@ -9,6 +9,7 @@ from awf.commands.analyze import run_analyze
 from awf.commands.chat import run_chat
 from awf.commands.cmux import run_cmux_failures, run_cmux_runs, run_cmux_tail
 from awf.commands.config import run_config_show
+from awf.commands.dashboard import run_dashboard_command
 from awf.commands.doctor import run_doctor
 from awf.commands.mcp import run_mcp_check, run_mcp_invoke, run_mcp_list, run_mcp_read
 from awf.commands.ready import run_ready
@@ -40,7 +41,7 @@ from awf.commands.wiki import (
 from awf.core.router import route_natural_language
 
 
-KNOWN_COMMANDS = {"chat", "analyze", "wf", "config", "skills", "mcp", "doctor", "ready", "scan", "init", "cmux", "wiki"}
+KNOWN_COMMANDS = {"chat", "analyze", "wf", "config", "skills", "mcp", "doctor", "ready", "scan", "init", "cmux", "wiki", "dashboard"}
 
 
 def _should_skip_execution_confirmation(args: argparse.Namespace) -> bool:
@@ -534,6 +535,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     wiki_compile_parser.add_argument("--no-ready-gate", action="store_true", help="Bypass the internal awf ready --gate operations preflight.")
     wiki_compile_parser.set_defaults(handler=run_wiki_compile)
+
+    dashboard_parser = subparsers.add_parser(
+        "dashboard",
+        help="rich Live 2-panel TUI — workflow state + cmux broker health (D2 MVP).",
+    )
+    dashboard_parser.add_argument(
+        "--repo-root",
+        help="Repository root containing .workflow/. Defaults to current or parent directories.",
+    )
+    dashboard_parser.add_argument(
+        "--interval",
+        type=int,
+        default=5,
+        help="Refresh interval in seconds. Clamped to 1~60. Default: 5.",
+    )
+    dashboard_parser.set_defaults(handler=run_dashboard_command)
 
     scan_parser = subparsers.add_parser("scan", help="Auto-discover project structure for analysis config.")
     scan_parser.add_argument("repo_path", nargs="?", help="Path to a single repo to scan.")
