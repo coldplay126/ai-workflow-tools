@@ -62,3 +62,66 @@ class TestWfStatusJson:
         assert rc == 0
         text = capsys.readouterr().out
         assert "cmux_broker_health: unavailable" in text
+
+
+class TestWfStatusWatch:
+    """ATC-001/003/007 — argparse + mutex + no-watch backward compat."""
+
+    def test_watch_option_parsed(self):
+        from awf.cli import build_parser
+
+        parser = build_parser()
+        args = parser.parse_args(["wf", "status", "--watch", "--interval", "3"])
+        assert args.watch is True
+        assert args.interval == 3
+
+    def test_watch_defaults(self):
+        from awf.cli import build_parser
+
+        parser = build_parser()
+        args = parser.parse_args(["wf", "status"])
+        assert args.watch is False
+        assert args.interval == 5
+
+    def test_watch_json_mutex(self, tmp_path: Path, capsys):
+        _init_workflow(tmp_path)
+        args = argparse.Namespace(
+            repo_root=str(tmp_path), json=True, watch=True, interval=5,
+        )
+        rc = run_wf_status(args)
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "--watch is incompatible with --json" in err
+
+    def test_status_no_watch_unchanged(self, tmp_path: Path, capsys):
+        """ATC-007 regression: omitting --watch keeps the single-shot text path."""
+        _init_workflow(tmp_path)
+        with patch("awf.core.cmux_health.subprocess.run", side_effect=FileNotFoundError):
+            args = argparse.Namespace(
+                repo_root=str(tmp_path), json=False, watch=False, interval=5,
+            )
+            rc = run_wf_status(args)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "current_phase:" in out
+        assert "cmux_broker_health:" in out
+
+    def test_watch_enters_run_watch(self, tmp_path: Path):
+        """ATC-008 (entry-point coverage): args.watch=True dispatches to run_watch."""
+        _init_workflow(tmp_path)
+        args = argparse.Namespace(
+            repo_root=str(tmp_path), json=False, watch=True, interval=5,
+        )
+        called = {}
+
+        def fake_run_watch(render_fn, interval, **kwargs):
+            called["interval"] = interval
+            called["sample"] = render_fn()
+            return 0
+
+        with patch("awf.core.watch_loop.run_watch", side_effect=fake_run_watch):
+            with patch("awf.core.cmux_health.subprocess.run", side_effect=FileNotFoundError):
+                rc = run_wf_status(args)
+        assert rc == 0
+        assert called["interval"] == 5
+        assert "current_phase:" in called["sample"]

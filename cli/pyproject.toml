@@ -17,6 +17,9 @@ sdk = [
   "anthropic>=0.52.0",
   "openai>=1.75.0",
 ]
+tui = [
+  "rich>=13.0.0",
+]
 
 [dependency-groups]
 dev = [

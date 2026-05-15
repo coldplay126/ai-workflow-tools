@@ -138,6 +138,17 @@ def build_parser() -> argparse.ArgumentParser:
     wf_status_parser = wf_subparsers.add_parser("status", help="Show .workflow/state.json summary.")
     wf_status_parser.add_argument("--repo-root", help="Repository root containing .workflow/. Defaults to current or parent directories.")
     wf_status_parser.add_argument("--json", action="store_true", help="Print raw JSON instead of a text summary.")
+    wf_status_parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="Refresh the status summary at a fixed interval until Ctrl+C. Incompatible with --json.",
+    )
+    wf_status_parser.add_argument(
+        "--interval",
+        type=int,
+        default=5,
+        help="Refresh interval in seconds when --watch is set. Clamped to 1~60. Default: 5.",
+    )
     wf_status_parser.set_defaults(handler=run_wf_status)
 
     wf_next_parser = wf_subparsers.add_parser(

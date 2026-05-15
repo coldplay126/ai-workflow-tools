@@ -250,6 +250,11 @@ def run_wf_detect_class(args: argparse.Namespace) -> int:
 
 
 def run_wf_status(args: argparse.Namespace) -> int:
+    watch = bool(getattr(args, "watch", False))
+    if watch and getattr(args, "json", False):
+        print("error: --watch is incompatible with --json", file=sys.stderr)
+        return 2
+
     try:
         state = load_workflow_state(args.repo_root)
     except Exception as exc:
@@ -260,6 +265,25 @@ def run_wf_status(args: argparse.Namespace) -> int:
         repo_root = resolve_repo_root(args.repo_root)
     except Exception:
         repo_root = None
+
+    if watch:
+        from awf.core.watch_loop import clamp_interval, run_watch
+
+        raw_interval = int(getattr(args, "interval", 5))
+        interval = clamp_interval(raw_interval)
+
+        # repo_root may be None if the resolver failed; pass it through to
+        # summarize_workflow_state which already tolerates None.
+        repo_root_for_render = repo_root
+
+        def render_fn() -> str:
+            try:
+                fresh = load_workflow_state(args.repo_root)
+            except Exception as exc:  # state file removed/corrupted mid-loop
+                return f"error: {exc}"
+            return summarize_workflow_state(fresh, repo_root=repo_root_for_render)
+
+        return run_watch(render_fn, interval)
 
     if args.json:
         from awf.core.cmux_health import probe_cmux_broker_health
