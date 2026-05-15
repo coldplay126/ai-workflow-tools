@@ -24,7 +24,7 @@
 - `awf analyze <service> --catalog`: 서비스 전체 분석 현황. config의 단위 정의(분모) + .ai-context(분자) join
 - `awf analyze <service> --cycles`: 저장된 import graph 기준 순환 의존성 리포트
 - `awf wf init <concept> [--no-ready-gate]`: `.workflow` 초기화 + `.work_history/` 세션 자동 생성. 기본적으로 `awf ready --gate workflow-init`를 먼저 통과해야 한다
-- `awf wf status`: `.workflow/state.json` 요약 출력 + 최근 work_history 세션 표시
+- `awf wf status [--watch] [--interval N]`: `.workflow/state.json` 요약 출력 + 최근 work_history 세션 표시. `--watch`는 일정 간격(기본 5초, 1~60초 clamp)으로 화면을 in-place refresh — `awf-cli[tui]` extras 설치 시 Rich Live, 미설치 시 ANSI fallback. 자세한 동작은 아래 `awf wf status --watch (live refresh)` 섹션 참조
 - `awf wf next [--phase <name>] [--mode solo|quick|precise|cross|critical] [--auto-apply] [--non-interactive] [--no-ready-gate]`: 다음 phase 해석, delegated prompt 생성, `.workflow/tmp/`에 prompt/result 저장, fallback chain 시도, phase를 `in_progress`로 표시. Provider-backed 실행은 기본적으로 `awf ready --gate workflow-run`를 먼저 통과해야 한다. `--dry-run --output-format json`은 prompt preview를 구조화 JSON으로 출력하고 state/prompt 파일을 쓰지 않는다
 - `awf wf decide <continue|replan|abort> [--phase <name>] [--target <phase>]`: deciding 상태의 closed-loop workflow phase에 수동 결정을 반영
 - `awf wf apply-result <phase> <result-file>`: review/verify/impl/test JSON 결과를 artifact markdown으로 반영하고 gate/state를 갱신
@@ -130,6 +130,28 @@ NO_COLOR=1 uv run --project cli awf cmux tail --repo-root . | cat
 uv run --project cli --no-editable --reinstall-package awf-cli awf --help
 ```
 
+## awf wf status --watch (live refresh)
+
+`awf wf status --watch`는 일정 간격으로 화면을 갱신해 workflow state + cmux broker health 전이를 단일 터미널에서 실시간 관찰할 수 있게 한다. PR #126 (commit 4482f4f) 도입.
+
+설치 (rich 기반 Rich Live가 필요하면):
+
+```bash
+# uv tool 사용자 — rich을 awf-cli tool venv에 함께 설치
+uv tool install --force --reinstall --with 'rich>=13.0.0' awf-cli
+
+# pip 사용자 — optional extras로 설치
+pip install 'awf-cli[tui]'
+```
+
+rich이 설치되어 있지 않아도 동작한다 — ANSI escape (`\x1b[2J\x1b[H`) 기반 clear-and-print fallback이 자동 적용되고, stderr에 `note: install awf-cli[tui] for richer rendering` 안내가 **process 내 1회만** 출력된다.
+
+옵션 동작:
+- `--watch`: store_true. 일정 간격으로 refresh
+- `--interval N`: refresh 간격(초). 기본 `5`, 허용 범위 `1~60`. 범위 밖이면 stderr 경고 + 가장 가까운 경계값 사용
+- `--watch + --json`은 mutex — 함께 사용하면 stderr `error: --watch is incompatible with --json` + exit code 2
+- `Ctrl+C`: KeyboardInterrupt를 캐치하여 마지막 frame을 한 번 출력하고 exit 0 (traceback 없음)
+
 ## awf cmux (observability)
 
 `awf cmux`는 cmux-agent가 기록한 `.agent/events.jsonl`(4필드: `ts / event / run_id / data`)을 read-only로 소비해 구조화된 타임라인과 run 요약을 노출한다. cmux-agent 패키지를 import하지 않고 자체 JSONL parser로 동작하므로 cmux-agent 설치 여부와 무관하게 사용 가능하다.
@@ -137,7 +159,7 @@ uv run --project cli --no-editable --reinstall-package awf-cli awf --help
 - `awf cmux tail` — 고정폭 4컬럼(`ts / run_id-prefix / event / summary`) 출력. `-f/--follow`는 폴링 기반이며 `Ctrl-C`로 exit 0. `--run-id`, `--event`, `--limit N`, `--json` 필터/포맷 지원
 - `awf cmux runs` — 전체 스캔 후 run_id별 `STARTED / STATUS / EVENTS / DURATION` 요약. `--json`으로 구조화 출력
 - `awf cmux failures` — `artifact.validation_failed`와 `message.failed`만 출력. `--run-id`, `--limit N`, `--json` 지원
-- 컬러는 stdout이 tty이고 `NO_COLOR`가 설정되지 않은 경우에만 ANSI escape 사용 (`rich`/`colorama` 등 외부 라이브러리 미사용)
+- 컬러는 stdout이 tty이고 `NO_COLOR`가 설정되지 않은 경우에만 ANSI escape 사용 (`rich`/`colorama` 등 외부 라이브러리 미사용). 참고: `awf cmux` 명령군은 rich 미사용을 유지하며, `awf wf status --watch`만 optional `[tui]` extras로 rich Live를 사용하고 미설치 시 ANSI fallback으로 동작한다
 - `--follow`에서 파일 rotation(`st_ino` 변경 또는 size 축소)이 감지되면 defensive하게 재오픈한다
 
 Path 해석 우선순위:
