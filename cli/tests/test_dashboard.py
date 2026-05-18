@@ -11,6 +11,17 @@ import pytest
 
 from awf.core import dashboard
 
+# rich is an optional extras (`awf-cli[tui]`) but tests that exercise rich.Live /
+# Panel / Layout require it. CI environments without rich auto-skip those classes
+# instead of erroring out. rich import 분기 자체(TestRichImportFailure)는 rich
+# 미설치도 검증해야 하므로 module-level importorskip은 사용하지 않고 개별 클래스에
+# skipif marker 를 적용한다.
+_RICH_AVAILABLE = dashboard._try_import_rich() is not None
+_requires_rich = pytest.mark.skipif(
+    not _RICH_AVAILABLE,
+    reason="requires rich (awf-cli[tui]) — install with `pip install rich>=13.0.0`",
+)
+
 
 @pytest.fixture(autouse=True)
 def _no_real_sleep(monkeypatch):
@@ -80,6 +91,7 @@ class TestIntervalClampReuse:
         assert capsys.readouterr().err == ""
 
 
+@_requires_rich
 class TestKeyBindings:
     """ATC-006/007/008 — q quit / Ctrl+C / r force refresh."""
 
@@ -124,6 +136,7 @@ class TestKeyBindings:
         assert rc == 0
 
 
+@_requires_rich
 class TestAutoRefresh:
     """interval 도달 시 자동 refresh — max_iters 로 안전 종료."""
 
@@ -147,6 +160,7 @@ class TestAutoRefresh:
         assert call_count["n"] >= 3
 
 
+@_requires_rich
 class TestPanelRendering:
     """ATC-004 / ATC-005 — workflow + broker panel 렌더."""
 
