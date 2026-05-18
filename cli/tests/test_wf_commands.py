@@ -125,3 +125,45 @@ class TestWfStatusWatch:
         assert rc == 0
         assert called["interval"] == 5
         assert "current_phase:" in called["sample"]
+
+
+class TestDashboardArgparse:
+    """D2 ATC-001 — dashboard subparser registration + handler dispatch."""
+
+    def test_dashboard_subparser_parses_options(self):
+        from awf.cli import build_parser
+        from awf.commands.dashboard import run_dashboard_command
+
+        parser = build_parser()
+        args = parser.parse_args(["dashboard", "--repo-root", ".", "--interval", "3"])
+        assert args.command == "dashboard"
+        assert args.repo_root == "."
+        assert args.interval == 3
+        assert args.handler is run_dashboard_command
+
+    def test_dashboard_defaults(self):
+        from awf.cli import build_parser
+
+        parser = build_parser()
+        args = parser.parse_args(["dashboard"])
+        assert args.command == "dashboard"
+        assert args.repo_root is None
+        assert args.interval == 5
+
+    def test_dashboard_handler_invokes_run_dashboard(self, tmp_path: Path):
+        """handler 가 run_dashboard 를 올바른 인자로 호출하는지."""
+        from awf.commands.dashboard import run_dashboard_command
+
+        called = {}
+
+        def fake_run_dashboard(repo_root, interval, **kwargs):
+            called["repo_root"] = repo_root
+            called["interval"] = interval
+            return 0
+
+        with patch("awf.commands.dashboard.run_dashboard", side_effect=fake_run_dashboard):
+            args = argparse.Namespace(repo_root=str(tmp_path), interval=7)
+            rc = run_dashboard_command(args)
+        assert rc == 0
+        assert called["repo_root"] == str(tmp_path)
+        assert called["interval"] == 7
