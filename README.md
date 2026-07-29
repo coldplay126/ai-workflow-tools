@@ -126,6 +126,9 @@ workflow provider config에서 surface를 명시합니다.
 awf agents sync-omp --repo-root .
 awf doctor --repo-root . --probe
 # .workflow/provider-config.json: dispatch.surface_preference = "omp"
+# .workflow/provider-config.json: dispatch.omp.coordination_surface = "native"
+# .workflow/provider-config.json: dispatch.omp.no_session = false
+# .workflow/provider-config.json: dispatch.omp.capacity = 8
 ```
 
 OMP native dispatch writes redacted schema-v2 records under
@@ -315,6 +318,9 @@ select the surface in the workflow provider config:
 awf agents sync-omp --repo-root .
 awf doctor --repo-root . --probe
 # .workflow/provider-config.json: dispatch.surface_preference = "omp"
+# .workflow/provider-config.json: dispatch.omp.coordination_surface = "native"
+# .workflow/provider-config.json: dispatch.omp.no_session = false
+# .workflow/provider-config.json: dispatch.omp.capacity = 8
 ```
 
 OMP native dispatch stores redacted schema-v2 records in

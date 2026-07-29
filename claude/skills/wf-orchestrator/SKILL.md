@@ -79,15 +79,23 @@ Dispatch Surface Policy를 따릅니다.
 1. **OMP host-native**: 현재 호스트가 `task`와 `hub`를 제공하면 독립 역할을 한
    번의 batch task로 실행합니다. Agent Card의 `agent.name`을 task의 `agent`로,
    `output_schema`를 `outputSchema`로 전달하고 write 역할은 isolated workspace를
-   사용합니다. 완료된 task의 agent ID, `agent://`/`history://` URI, model, usage,
-   patch를 phase evidence에 기록합니다. 후속 피드백은 새 agent를 만들지 않고
-   `hub send`로 기존 agent를 재사용합니다.
-2. **AWF CLI OMP adapter**: `dispatch.surface_preference=omp`이면 `omp --mode json
-   --no-session -p`를 worker별로 실행하고 NDJSON의 session/model/provider/usage를
+   사용합니다. 완료된 task의 실제 ID, `agent://`/`history://` URI, resolved model,
+   usage를 phase evidence에 기록합니다.
+2. **AWF CLI OMP native coordinator**: `dispatch.surface_preference=omp`와
+   `dispatch.omp.coordination_surface=native`이면 하나의 persisted OMP host가 한 번의
+   `task` batch를 실행합니다. capacity, strict/permissive schema, isolation, structured
+   cancellation과 완료 partial-result 보존을 적용하고 schema-v2 provenance를
    `.workflow/artifacts/dispatch/omp-*.json`에 저장합니다.
-3. **Fallback**: OMP 명령이 없으면 명시적인 경고 후 inline으로 전환합니다.
-   `awf doctor --probe`가 성공하지 않은 환경에서는 OMP adapter를 운영 경로로
-   간주하지 않습니다.
+3. **Durable follow-up**: `awf agents followup-omp`로 저장된 host session을 resume하여
+   정확한 task ID에 먼저 `hub send`합니다. 원래 registry task가 unavailable일 때만
+   exact `history://`를 읽고 lineage-linked successor 하나를 생성합니다.
+4. **Print 호환 경로**: `coordination_surface=print`일 때만 worker별
+   `omp --mode json -p` subprocess를 사용합니다. 이 경로는 strict schema, isolation,
+   structured batch cancellation, durable follow-up을 지원한다고 간주하지 않습니다.
+5. **선택 실패 정책**: 명시한 surface가 unavailable 또는 required capability와
+   incompatible이면 inline으로 조용히 전환하지 않고 실패합니다. `auto`는 capability,
+   cost budget, priority를 먼저 적용하고 routing 설정이 없을 때만 기존 inline/cmux
+   heuristic을 유지합니다.
 
 approve/done과 scope hash 승인은 parent session만 수행합니다. OMP todo, agent
 registry, transcript는 provenance이며 gate 통과 조건이 아닙니다.
@@ -499,7 +507,7 @@ Agent Card에 `"hil": true`인 Phase는 항상 인라인 실행.
 
 ```json
 {
-  "version": "2.0.0",
+  "version": "2.3.0",
   "phase_routing": {
     "plan":    { "mode": "inline" },
     "review":  { "mode": "dual", "primary": "inline", "secondary": "codex" },
@@ -510,14 +518,19 @@ Agent Card에 `"hil": true`인 Phase는 항상 인라인 실행.
     "done":    { "mode": "inline" }
   },
   "dispatch": {
-    "surface_preference": "auto",
+    "surface_preference": "omp",
+    "routing": {
+      "required_capabilities": [],
+      "estimated_cost": {},
+      "max_cost_budget": null,
+      "priority": ["omp", "inline", "cmux", "pi"]
+    },
     "omp": {
       "command": "omp",
-      "no_session": true,
-      "role_models": {
-        "plan_conformance": "slow",
-        "quality_validation": "task"
-      }
+      "no_session": false,
+      "coordination_surface": "native",
+      "capacity": 8,
+      "role_models": {}
     }
   },
   "providers": {

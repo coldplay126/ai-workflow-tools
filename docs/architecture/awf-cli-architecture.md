@@ -530,16 +530,17 @@ awf wf next --mode critical                    # Codex → Sonnet → Primary �
 - `run(workers, *, cwd, strategy)` — 고정 리스트의 워커를 parallel/sequential 로 실행. cross / agent team (Phase 5) 가 사용.
 - `run_chained(steps, *, cwd)` — 각 step의 prompt 가 이전 `AgentResult` 리스트에 의존하는 체인. critical 이 사용. agent team 은 prior threading 이 blackboard 기반(파일 side-effect)이라 `run` 으로 회귀.
 
-백엔드는 `InlineDispatch` (ThreadPoolExecutor), `CmuxDispatch` (cmux-agent `.agent/` artifact 프로토콜), `OmpDispatch` (OMP NDJSON print adapter), `PiDispatch` (legacy Pi print-mode harness)이며 `provider-config.json`의 `dispatch.surface_preference`로 선택한다 (`auto`/`inline`/`cmux`/`omp`/`pi`). `auto`는 inline/cmux만 선택하고 OMP/Pi는 명시적 opt-in이다. OMP adapter는 role별 model override를 지원하고 session/provider/model/usage, native task/history handles, follow-up lineage, 응답 hash를 body 없이 schema-v2 `.workflow/artifacts/dispatch/omp-*.json`에 원자적으로 기록한다. OMP host-native skill 경로는 batch `task`, `hub`, isolation을 사용하되 awf state/gate는 parent가 단독 소유한다. cmux `run_chained`는 step별 worker를 role로 고정해 같은 터미널 컨텍스트를 chain 동안 누적한다.
+백엔드는 `InlineDispatch` (ThreadPoolExecutor), `CmuxDispatch` (cmux-agent `.agent/` artifact 프로토콜), `OmpDispatch` (native coordinator 또는 print 호환 경로), `PiDispatch` (legacy Pi print-mode harness)이며 `provider-config.json`의 `dispatch.surface_preference`로 선택한다 (`auto`/`inline`/`cmux`/`omp`/`pi`). 기본 template는 persisted OMP native coordinator를 선택한다. `auto`는 required capability, cost budget, priority를 먼저 적용하며 routing 설정이 없을 때만 기존 inline/cmux workload heuristic을 유지한다. 명시적 surface가 unavailable/incompatible이면 inline으로 암묵적 fallback하지 않는다. OMP native는 하나의 host에서 한 번의 `task` batch를 실행하고 schema/mode, isolation, capacity, cancellation, 실제 task lifecycle을 `AgentResult`로 정규화한다. session/provider/resolved model/usage, task/history handles, follow-up lineage와 응답 hash는 body 없이 schema-v2 `.workflow/artifacts/dispatch/omp-*.json`에 원자적으로 기록한다. `coordination_surface=print`는 worker별 subprocess 호환 경로이며 native 기능을 지원한다고 간주하지 않는다. awf state/gate는 parent가 단독 소유한다.
 
-Judge Rules (결정론적):
-1. `CRITICAL` finding 1건 이상 → FAIL
-2. `HIGH` finding 존재 시 phase별 gate 규칙에 따라 FAIL 또는 사용자 확인 필요
-3. Slave 불일치 → FAIL (보수적)
-4. 전부 PASS → PASS
+Judge Rules v2 (결정론적):
+1. 결과 없음 또는 유효한 결론 없음 → `FAIL`
+2. `CRITICAL`/`HIGH` finding 하나 이상 → 실행 상태와 무관하게 `FAIL`
+3. `category:location` 기준으로 중복 제거한 `MAJOR`/`MEDIUM` finding 2개 이상 → `FAIL`
+4. PASS/FAIL 불일치 → 유효 실행, confidence, 실제 evidence, 재현 정보를 0–5점으로 평가한다. 유효하고 grounded이며 3점 이상인 FAIL은 `FAIL`, 나머지는 `ESCALATE`와 `revalidation_required`를 반환한다.
+5. 모든 명시적 결론이 FAIL이면 `FAIL`; PASS와 invalid/missing conclusion이 섞이면 `ESCALATE`
+6. 그 외 unanimous PASS 또는 유효한 legacy unstructured success → `PASS`
 
-**주의**: severity 체계는 `CRITICAL|HIGH|MEDIUM|LOW`로 고정한다.
-`major/minor/info` 같은 별도 체계를 도입하지 않고, 기존 `review.json`, `verify.json`, `codex/AGENTS.md`와 동일하게 유지한다.
+severity 체계는 `CRITICAL|HIGH|MAJOR|MEDIUM|LOW` 입력을 수용한다. fail-closed 임계치는 위 순서대로 적용하며, 동일한 `AgentResult` 입력 순서에는 항상 동일한 verdict와 reason을 반환한다.
 
 ### 3.6 Operations data layer
 

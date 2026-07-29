@@ -1,6 +1,6 @@
 ---
 name: multi-agent
-version: 2.0.0
+version: 2.1.0
 description: "멀티에이전트 교차 검증. 서브에이전트 5모드 + 에이전트 팀 3레이어 아키텍처."
 type: protocol
 
@@ -31,10 +31,11 @@ team_mode:
     test: "happy_path + adversarial"
 
 judge_rules:
-  - "어느 agent든 critical severity → FAIL"
-  - "major severity 합산 2건 이상 → FAIL"
-  - "agent 간 결론 불일치 → FAIL (보수적)"
-  - "모든 agent PASS → PASS"
+  - "CRITICAL/HIGH finding 하나 이상 → FAIL"
+  - "category:location 중복 제거 후 MAJOR/MEDIUM 2건 이상 → FAIL"
+  - "PASS/FAIL 불일치에서 유효하고 grounded인 FAIL evidence score 3 이상 → FAIL"
+  - "약하거나 재현 불가한 불일치 또는 PASS+invalid 결과 → ESCALATE"
+  - "모든 명시적 결론 FAIL → FAIL; 모든 유효 결론 PASS → PASS"
 
 protocols:
   subagent:
@@ -78,12 +79,19 @@ protocols:
 OMP의 `task`/`hub`가 제공되면 Python team runner의 결정론적 gate를 유지하면서
 실행 계층만 host-native 기능으로 강화합니다.
 
-1. 서로 독립적인 worker는 한 번의 batch `task` 호출로 fan-out합니다.
-2. worker별 agent type, model/effort, output schema, isolation을 명시합니다.
-3. 후속 질문이나 수정은 새 worker를 만들지 않고 `hub`로 기존 agent에 전달합니다.
-4. `agent://` 결과와 `history://` transcript는 evidence/provenance로 보존합니다.
-5. `.workflow/state.json`과 gate 판정은 awf가 계속 소유합니다.
-6. approve/done HIL은 parent가 수행하며 subagent에 위임하지 않습니다.
+1. 서로 독립적인 worker는 하나의 persisted host에서 한 번의 batch `task`로
+   fan-out합니다.
+2. worker별 agent type, resolved model, output schema/mode, isolation을 보존합니다.
+3. capacity를 초과하면 실행 전에 실패하고, timeout/cancel 시 완료된 partial result를
+   보존하면서 host와 descendant process를 reap합니다.
+4. 실제 task lifecycle event의 ID와 상태만 성공 evidence로 인정하고
+   `agent://`/`history://`, usage, lineage를 schema-v2 provenance로 기록합니다.
+5. `awf agents followup-omp`는 exact task에 먼저 전달하며, 원 task가 unavailable일
+   때만 history 기반 successor를 하나 생성합니다.
+6. Judge v2는 `CRITICAL`/`HIGH`와 중복 제거된 다중 `MAJOR`/`MEDIUM`을 fail closed로
+   처리하고, 약하거나 재현 불가능한 PASS/FAIL 불일치는 `ESCALATE`로 재검증합니다.
+7. `.workflow/state.json`, gate, scope hash와 approve/done HIL은 parent가 계속
+   단독 소유합니다.
 
 순차 의존 작업, 같은 파일을 동시에 수정하는 작업, 단일 파일의 짧은 변경에는
 fan-out하지 않습니다.

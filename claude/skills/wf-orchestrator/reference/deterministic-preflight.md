@@ -75,14 +75,21 @@ awf wf next --phase <phase> --repo-root . --dry-run --output-format json
 `.workflow/state.json`과 `.workflow/artifacts/*`가 canonical workflow state입니다.
 Inline, cmux-agent, OMP, legacy Pi는 실행 surface일 뿐입니다.
 
-- 기본 실행은 inline 또는 provider-config가 선택한 provider입니다.
-- OMP 호스트에서 `task`/`hub`가 제공되면, 독립적인 작업은 OMP의 batch task,
-  structured output, per-agent isolation을 사용하고 후속 조정은 기존 agent를
-  `hub`로 재사용합니다.
-- OMP의 todo, agent registry, `agent://`/`history://` artifact는 실행 provenance로만
-  취급합니다. awf phase/gate 상태를 대신하거나 직접 통과시키지 않습니다.
-- approve/done HIL은 항상 parent session이 처리합니다. headless subagent가 사용자
-  승인이나 gate 통과를 대행하면 안 됩니다.
+- provider-config가 선택한 surface를 사용합니다. 기본 template는 persisted
+  `OMP native` coordinator를 선택하며, routing 설정이 없는 `auto`만 기존
+  inline/cmux heuristic을 유지합니다.
+- OMP native는 한 host session에서 독립 작업을 한 번의 batch `task`로 실행하고
+  structured output, per-agent isolation, capacity, cancellation과 완료 partial-result
+  보존을 적용합니다.
+- OMP task ID와 `agent://`/`history://`는 schema-v2 provenance로 기록합니다.
+  `awf agents followup-omp`는 exact task에 먼저 `hub send`하고 registry task가
+  unavailable일 때만 exact history에서 lineage-linked successor 하나를 생성합니다.
+- `coordination_surface=print`는 worker별 subprocess 호환 경로이며 native isolation,
+  strict schema, structured cancellation, durable follow-up을 지원하지 않습니다.
+- 명시한 surface가 unavailable/incompatible이면 inline으로 암묵적 fallback하지
+  않고 실패합니다.
+- OMP todo, registry와 transcript는 실행 provenance일 뿐 awf phase/gate 상태를
+  대신하지 않습니다. approve/done HIL은 항상 parent session이 처리합니다.
 - cmux-agent는 `awf ready --repo-root . --gate workflow-run --json`이 해당 repo의
   dispatch readiness를 보고할 때만 사용합니다.
 - cmux-agent는 `cmux-agent doctor`, `cmux-agent smoke`,
