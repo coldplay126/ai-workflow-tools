@@ -153,3 +153,61 @@ token_usage: input=13,000 output=3,000 total=16,000
 cost_estimate: ~$0.0630
 === multi-agent: cross complete ===
 ```
+
+## OMP와 벤더 멀티에이전트 비교 (2026-07-29)
+
+| 항목 | OMP | Claude Code / Agent SDK | Codex | Gemini CLI / Google ADK |
+|------|-----|-------------------------|-------|-------------------------|
+| 모델 범위 | Anthropic, OpenAI, Google, 로컬/게이트웨이를 같은 registry와 role alias로 선택 | Claude 모델 및 Anthropic 실행 환경 중심 | GPT/Codex 모델 중심 | Gemini 모델 및 Google 실행 환경 중심 |
+| 작업 분할 | heterogeneous batch `task`, agent별 model/effort/schema/isolation | subagent 병렬 실행; experimental agent teams는 shared task와 peer messaging 제공 | 병렬 subagent와 inspect/steer 가능한 agent thread | CLI subagent는 specialist-as-tool; ADK는 graph/dynamic/collaborative/template workflow 제공 |
+| 에이전트 통신 | `hub` mailbox, direct/broadcast messaging, idle/parked agent revive | subagent는 parent 반환; agent teams는 teammate direct messaging | parent가 spawn/steer/collect하는 thread 중심 | CLI subagent는 parent 반환; ADK collaborative workflow는 coordinator 중심 |
+| 실행 격리 | agent별 workspace isolation, patch/branch merge, recursion/concurrency guard | permission/tool 제한과 독립 context; agent teams는 별도 Claude Code session | parent sandbox 상속, 별도 agent thread | 독립 context/tool 제한; ADK는 애플리케이션이 실행 정책 소유 |
+| 관찰성 | `agent://`, `history://`, background job lifecycle, live progress, process supervision | agent panel, transcript, hooks | client별 agent activity/thread UI | CLI agent tool result; ADK event/session 추적 |
+| 사람 협업 | E2E 암호화된 `/collab`, agent hub 제어, view-only link | lead UI와 teammate pane | app/CLI/IDE agent thread inspection | CLI 또는 ADK 애플리케이션 UI에 의존 |
+| 워크플로우 결정성 | 런타임 primitive는 강력하지만 gate/DAG는 상위 계층이 정의 | subagent는 모델 주도, agent teams task list는 experimental | 모델 또는 SDK 코드가 orchestration | ADK graph/template이 가장 명시적인 결정론적 흐름 제공 |
+
+### OMP가 우세한 지점
+
+1. **벤더 중립 라우팅**: 하나의 agent graph 안에서 provider/model을 worker별로
+   바꿀 수 있고, canonical model ID와 `@smol`/`@slow`/`@task` 같은 role로
+   구체 모델 교체 비용을 낮춥니다.
+2. **실행 substrate 완성도**: batch fan-out, per-agent structured output,
+   filesystem isolation, patch merge, background job, lifecycle revive가 한 surface에
+   결합되어 있습니다.
+3. **수평 통신**: parent-return만 제공하는 일반 subagent보다 `hub` 기반 peer
+   messaging이 긴 작업의 재조정과 교차 검증에 유리합니다.
+4. **증거 보존**: 결과, transcript, patch, nested agent artifact가 안정적인 내부
+   URI로 남아 gate evidence와 사후 분석에 연결하기 쉽습니다.
+5. **운영자 개입**: 실행 중 agent를 inspect/steer/cancel/revive할 수 있고,
+   `/collab`으로 원격 동료가 같은 세션과 subagent를 관찰하거나 제어할 수 있습니다.
+
+### awf/wf 구현 상태와 다음 우선순위
+
+| 상태 | 우선순위 | 항목 | 구현/다음 방향 |
+|------|----------|------|----------------|
+| 완료 | P0 | concrete model ID 중복 | SDK 기본값은 `model_defaults.py`에서 관리하고 CLI provider는 role alias/native auto-selection 사용 |
+| 완료 | P1 | OMP 실행 surface | `surface_preference=omp` NDJSON adapter와 OMP host-native `task`/`hub` skill 경로 분리 |
+| 완료 | P1 | OMP agent discovery | `awf agents sync-omp`가 `claude/agents`를 `.omp/agents`로 변환하고 manifest로 생성 파일 소유권 관리 |
+| 완료 | P1 | OMP dispatch provenance | CLI adapter가 session/provider/model/usage/response hash를 `.workflow/artifacts/dispatch/omp-*.json`에 저장; host-native task URI는 phase evidence에 연결 |
+| 완료 | P1 | workflow HIL 경계 | approve/done과 scope hash 승인은 parent-only, OMP runtime state는 gate evidence로만 취급 |
+| 예정 | P2 | provider 선택이 정적이고 비용/지연/쿼터 피드백이 약함 | OMP role alias와 awf usage telemetry를 결합한 capability/cost-aware routing 추가 |
+| 예정 | P2 | disagreement를 무조건 FAIL 처리해 false positive 비용이 큼 | evidence quality, confidence, reproducibility를 judge 입력에 추가하고 critical/high는 기존 fail-closed 유지 |
+| 예정 | P2 | 벤더별 실행 결과를 비교하는 회귀 corpus가 없음 | 동일 fixture를 OMP, Claude teams/subagents, Codex subagents, Gemini/ADK에서 실행하는 conformance suite 추가 |
+
+### 안전 경계
+
+- OMP의 todo/agent registry는 실행 상태이며 `.workflow/state.json`을 대체하지 않습니다.
+- `agent://`와 `history://`는 evidence/provenance이고 gate 자체가 아닙니다.
+- headless subagent가 approve/done HIL 또는 사용자 권한 승인을 대신할 수 없습니다.
+- 병렬 write는 파일 소유권 또는 isolation/merge 계약이 있을 때만 허용합니다.
+
+### 근거 문서
+
+- [OMP task runtime](https://github.com/can1357/oh-my-pi/blob/main/docs/tools/task.md)
+- [OMP model/provider configuration](https://github.com/can1357/oh-my-pi/blob/main/docs/models.md)
+- [Claude Agent SDK subagents](https://code.claude.com/docs/en/agent-sdk/subagents)
+- [Claude Code agent teams](https://code.claude.com/docs/en/agent-teams)
+- [Codex subagents](https://developers.openai.com/codex/multi-agent/)
+- [OpenAI Agents SDK orchestration](https://openai.github.io/openai-agents-python/multi_agent/)
+- [Gemini CLI subagents](https://geminicli.com/docs/core/subagents/)
+- [Google ADK workflows](https://adk.dev/workflows/)

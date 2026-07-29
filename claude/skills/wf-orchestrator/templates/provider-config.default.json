@@ -1,5 +1,5 @@
 {
-  "version": "2.0.0",
+  "version": "2.2.0",
   "phase_routing": {
     "plan":    { "mode": "inline" },
     "review":  { "mode": "dual", "primary": "inline", "secondary": "codex" },
@@ -8,6 +8,14 @@
     "verify":  { "mode": "dual", "primary": "inline", "secondary": "codex" },
     "test":    { "mode": "inline" },
     "done":    { "mode": "inline" }
+  },
+  "dispatch": {
+    "surface_preference": "auto",
+    "omp": {
+      "command": "omp",
+      "no_session": true,
+      "role_models": {}
+    }
   },
   "providers": {
     "codex": {

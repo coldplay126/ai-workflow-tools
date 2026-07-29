@@ -12,6 +12,7 @@ except ModuleNotFoundError:  # pragma: no cover
     import tomli as tomllib  # type: ignore[no-redef]
 
 from awf.core.paths import find_repo_root
+from awf.core.model_defaults import DEFAULT_CLAUDE_SDK_MODEL, DEFAULT_OPENAI_MODEL
 
 
 @dataclass
@@ -51,12 +52,12 @@ class AwfConfig:
                     },
                     "claude-sdk": {
                         "api_key_env": "ANTHROPIC_API_KEY",
-                        "model": "claude-sonnet-4-6",
+                        "model": os.environ.get("AWF_CLAUDE_SDK_MODEL", DEFAULT_CLAUDE_SDK_MODEL),
                         "max_tokens": 8192,
                     },
                     "openai": {
                         "api_key_env": "OPENAI_API_KEY",
-                        "model": "gpt-5-mini",
+                        "model": os.environ.get("AWF_OPENAI_MODEL", DEFAULT_OPENAI_MODEL),
                         "max_output_tokens": 8192,
                     },
                     "codex": {

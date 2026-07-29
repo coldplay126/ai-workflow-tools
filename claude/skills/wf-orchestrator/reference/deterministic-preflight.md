@@ -72,14 +72,22 @@ awf wf next --phase <phase> --repo-root . --dry-run --output-format json
 
 ## Dispatch Surface Policy
 
-`.workflow/state.json` and `.workflow/artifacts/*` are canonical workflow state.
-Inline, cmux-agent, and Pi are execution surfaces only.
+`.workflow/state.json`과 `.workflow/artifacts/*`가 canonical workflow state입니다.
+Inline, cmux-agent, OMP, legacy Pi는 실행 surface일 뿐입니다.
 
-- Default execution is inline or the provider selected by provider-config.
-- Use cmux-agent only when `awf ready --repo-root . --gate workflow-run --json`
-  reports dispatch readiness for this repository.
-- Prepare cmux-agent with `cmux-agent doctor`, `cmux-agent smoke`, and
-  `cmux-agent start --attach-orchestrator`; observe it with
-  `awf cmux runs/tail/failures --repo-root .`.
-- Pi is opt-in. Do not select Pi as the default surface unless fresh field-smoke
-  evidence and provider quota are available.
+- 기본 실행은 inline 또는 provider-config가 선택한 provider입니다.
+- OMP 호스트에서 `task`/`hub`가 제공되면, 독립적인 작업은 OMP의 batch task,
+  structured output, per-agent isolation을 사용하고 후속 조정은 기존 agent를
+  `hub`로 재사용합니다.
+- OMP의 todo, agent registry, `agent://`/`history://` artifact는 실행 provenance로만
+  취급합니다. awf phase/gate 상태를 대신하거나 직접 통과시키지 않습니다.
+- approve/done HIL은 항상 parent session이 처리합니다. headless subagent가 사용자
+  승인이나 gate 통과를 대행하면 안 됩니다.
+- cmux-agent는 `awf ready --repo-root . --gate workflow-run --json`이 해당 repo의
+  dispatch readiness를 보고할 때만 사용합니다.
+- cmux-agent는 `cmux-agent doctor`, `cmux-agent smoke`,
+  `cmux-agent start --attach-orchestrator`로 준비하고
+  `awf cmux runs/tail/failures --repo-root .`로 관찰합니다.
+- `dispatch.surface_preference=pi`는 기존 Pi print-mode 호환 adapter입니다.
+  OMP의 native task/hub 실행과 동일시하지 않으며, fresh field-smoke evidence와
+  provider quota가 있을 때만 opt-in으로 사용합니다.

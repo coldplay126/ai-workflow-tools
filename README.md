@@ -34,7 +34,7 @@ ai-workflow-tools/
 | `.ai-context/` | 분석 결과를 Claude Code, Codex, CLI가 함께 읽을 수 있는 tool-agnostic 계약으로 보관 | `api-spec.json`, `data-model.md`, `domain-overview.md`, `external-integration.md`, `ANALYSIS_REPORT.md` | [.ai-context 사양](docs/specs/ai-context-specification.md) |
 | `awf wf` | 기능 작업을 7-phase gated workflow로 진행 | `.workflow/state.json`, `.workflow/artifacts/*`, `.workflow/tmp/*` | [Workflow Pipeline](docs/architecture/02-wf-pipeline.md) |
 | 멀티에이전트 | review/verify, cross/critical 모드에서 독립 평가와 synthesis를 수행 | subagent 결과 envelope, judge verdict, fallback chain | [Multi-Agent Reference](docs/reference/multi-agent.md) |
-| `cmux-agent` / Pi | worker terminal surface와 dispatch runtime을 제공. Pi는 opt-in field-smoke 기반 runner | `.agent/events.jsonl`, Pi smoke result, dispatch surface preference | [cmux Quickstart](docs/manuals/cmux-agent-quickstart.md), [Pi 검증](docs/manuals/pi-field-validation.md) |
+| OMP / `cmux-agent` / legacy Pi | OMP host-native `task`/`hub` 또는 `surface_preference=omp` NDJSON adapter, cmux worker runtime, legacy Pi adapter를 실행 surface로 제공 | `.workflow/artifacts/dispatch/omp-*.json`, OMP agent/history URI, `.agent/events.jsonl`, Pi smoke result | [Multi-Agent Architecture](docs/architecture/03-multi-agent.md), [cmux Quickstart](docs/manuals/cmux-agent-quickstart.md), [Pi 검증](docs/manuals/pi-field-validation.md) |
 | `awf wiki` | 작업 중 생긴 운영 evidence와 결정 기록을 프로젝트 로컬 wiki로 누적 | `.awf-operations/events/*.jsonl`, `wiki/decisions/*`, compiled operations pages | [CLI Architecture](docs/architecture/awf-cli-architecture.md) |
 | Claude/Codex 통합 | Claude skills, Codex runner 규칙, snippets를 통해 같은 계약을 다른 agent 환경에서 사용 | `claude/skills/*`, `codex/*`, `snippets/*` | [Claude Code Setup](#claude-code-setup) |
 
@@ -49,8 +49,8 @@ workflow review/verify, critical mode 같은 고위험 구간에서 실행 품�
 
 상태의 진실 공급원은 실행 surface가 아니라 repo-local artifact입니다.
 `.workflow`는 기능 작업 상태, `.ai-context`는 분석 결과, `.awf-operations`는
-운영 evidence를 보관합니다. inline, cmux, Pi는 실행 표면이고, canonical
-state는 awf가 관리합니다.
+운영 evidence를 보관합니다. OMP host-native, inline, cmux, legacy Pi는 실행
+표면이고, canonical state는 awf가 관리합니다.
 
 ### 주요 플로우
 
@@ -60,7 +60,7 @@ state는 awf가 관리합니다.
 | 분석 문서화 | 코드 단위를 `.ai-context` 문서로 만들거나 갱신할 때 | `scan → analyze → output split → check/catalog` | `.ai-context/*`, `.analysis-state.json`, `hashes.json` |
 | 기능 작업 | 실제 변경을 gated workflow로 진행할 때 | `wf init → plan → review → approve → impl → verify → test → done` | `.workflow/artifacts/*`, gate 결과, phase state |
 | 멀티에이전트 검증 | review/verify 또는 고위험 분석을 교차 검증할 때 | `phase/run request → subagents → judge/synthesis → gate result` | result envelope, verdict, fallback decision |
-| cmux/Pi 실행 | worker terminal surface나 Pi runner를 사용할 때 | `doctor/field-smoke → dispatch preference → worker run → events 확인` | `.agent/events.jsonl`, Pi smoke evidence, dispatch diagnostics |
+| OMP/cmux/Pi 실행 | OMP native agent, worker terminal, legacy Pi runner를 사용할 때 | `ready → host task 또는 dispatch preference → worker run → evidence 확인` | `agent://`/`history://`, `.agent/events.jsonl`, Pi smoke evidence |
 | 운영 wiki | 반복 작업의 evidence와 결정을 남길 때 | `events 기록 → wiki compile → decision 작성 → wiki lint` | `.awf-operations/events/*`, `wiki/decisions/*`, operations pages |
 | Claude/Codex 통합 | CLI 계약을 agent 환경에서 재사용할 때 | `setup/snippets/skills → awf ready → awf/analyze/wf 계약 실행` | `claude/skills/*`, `codex/*`, project-local artifacts |
 
@@ -91,8 +91,8 @@ provider, skill, scan, workflow, operations wiki 상태를 한 번에 모아 현
 
 Gemini CLI를 기본 provider로 쓰려면 `provider.default = "gemini"`를 설정합니다.
 `provider.gemini.model`을 비워두면 Gemini CLI Auto가 작업에 맞는 Gemini 3
-모델을 고릅니다. 특정 모델을 고정하려면 `AWF_GEMINI_MODEL=gemini-3.1-pro`
-처럼 환경변수나 `.awf.toml`로 지정합니다.
+모델을 고릅니다. 특정 모델을 고정하려면 stable
+`AWF_GEMINI_MODEL=gemini-3.6-flash`처럼 환경변수나 `.awf.toml`로 지정합니다.
 
 ### 첫 workflow 순서
 
@@ -118,6 +118,15 @@ prompt preview를 출력합니다. `.workflow/`가 프로젝트 `.gitignore`에 
 in_progress phase에 30분 이내 fresh result가 있으면 abort + apply-result 힌트를
 보여줍니다 (`--force`로 override 가능). verify phase는 3회 째부터 경고, 6회
 째에 hard abort + replan/continue 안내가 출력됩니다.
+
+OMP adapter를 사용하려면 agent 정의를 동기화하고 model/auth probe를 통과시킨 뒤
+workflow provider config에서 surface를 명시합니다.
+
+```bash
+awf agents sync-omp --repo-root .
+awf doctor --repo-root . --probe
+# .workflow/provider-config.json: dispatch.surface_preference = "omp"
+```
 
 Pi는 기본 dispatch surface가 아니라 opt-in runner입니다. Pi를 쓰려면 먼저
 field-smoke evidence를 남기고 `ready`가 그 결과를 읽게 합니다.
@@ -161,7 +170,7 @@ uv run --project cmux-agent --group dev python -m pytest cmux-agent/tests -q
 - `.ai-context/`는 분석 결과와 resume/incremental 상태를 보관합니다.
 - `.awf-operations/`는 운영 evidence와 후속 판단 입력을 보관합니다.
 - provider adapter는 Claude, Codex, Gemini, OpenAI, subprocess, fixture 실행을 정규화합니다.
-- runner backend는 workflow state와 분리됩니다. inline/cmux/Pi는 실행 surface이고, awf state가 canonical source입니다.
+- runner backend는 workflow state와 분리됩니다. OMP host-native/NDJSON adapter, inline, cmux, legacy Pi는 실행 surface이고 awf state가 canonical source입니다.
 - 멀티에이전트는 별도 상태 저장소가 아니라 review/verify/analyze 구간에서 신뢰도를 높이는 실행 전략입니다.
 
 ## English
@@ -197,7 +206,7 @@ multi-agent review, dispatch surfaces, and local operating evidence.
 | `.ai-context/` | Tool-agnostic analysis contract shared by Claude Code, Codex, and the CLI | `api-spec.json`, `data-model.md`, `domain-overview.md`, `external-integration.md`, `ANALYSIS_REPORT.md` | [.ai-context spec](docs/specs/ai-context-specification.md) |
 | `awf wf` | Run feature work through a 7-phase gated workflow | `.workflow/state.json`, `.workflow/artifacts/*`, `.workflow/tmp/*` | [Workflow Pipeline](docs/architecture/02-wf-pipeline.md) |
 | Multi-agent | Run independent evaluation and synthesis for review/verify and cross/critical modes | subagent result envelopes, judge verdicts, fallback chains | [Multi-Agent Reference](docs/reference/multi-agent.md) |
-| `cmux-agent` / Pi | Provide worker terminal surfaces and dispatch runtimes. Pi is an opt-in runner gated by field-smoke evidence | `.agent/events.jsonl`, Pi smoke result, dispatch surface preference | [cmux Quickstart](docs/manuals/cmux-agent-quickstart.md), [Pi validation](docs/manuals/pi-field-validation.md) |
+| OMP / `cmux-agent` / legacy Pi | Use OMP host-native `task`/`hub` or the `surface_preference=omp` NDJSON adapter, the cmux worker runtime, or the legacy Pi adapter | `.workflow/artifacts/dispatch/omp-*.json`, OMP agent/history URIs, `.agent/events.jsonl`, Pi smoke results | [Multi-Agent Architecture](docs/architecture/03-multi-agent.md), [cmux Quickstart](docs/manuals/cmux-agent-quickstart.md), [Pi validation](docs/manuals/pi-field-validation.md) |
 | `awf wiki` | Capture operating evidence and decisions in a local project wiki | `.awf-operations/events/*.jsonl`, `wiki/decisions/*`, compiled operations pages | [CLI Architecture](docs/architecture/awf-cli-architecture.md) |
 | Claude/Codex integration | Reuse the same contracts from Claude skills, Codex runner rules, and snippets | `claude/skills/*`, `codex/*`, `snippets/*` | [Claude Code Setup](#claude-code-setup) |
 
@@ -211,8 +220,8 @@ synthesis layer used in higher-risk parts of analysis and workflow execution.
 
 The source of truth is repo-local state, not the terminal surface. `.workflow`
 stores feature workflow state, `.ai-context` stores analysis output, and
-`.awf-operations` stores operating evidence. Inline dispatch, cmux, and Pi are
-execution surfaces; awf owns the canonical state and provenance.
+`.awf-operations` stores operating evidence. OMP host-native execution, inline
+dispatch, cmux, and legacy Pi are execution surfaces; awf owns canonical state.
 
 ## Core Flows
 
@@ -222,7 +231,7 @@ execution surfaces; awf owns the canonical state and provenance.
 | Analysis documentation | Create or refresh `.ai-context` docs for a code unit | `scan → analyze → output split → check/catalog` | `.ai-context/*`, `.analysis-state.json`, `hashes.json` |
 | Feature workflow | Run a real change through gated phases | `wf init → plan → review → approve → impl → verify → test → done` | `.workflow/artifacts/*`, gate results, phase state |
 | Multi-agent validation | Cross-check review/verify or high-risk analysis | `phase/run request → subagents → judge/synthesis → gate result` | result envelopes, verdict, fallback decision |
-| cmux/Pi execution | Use worker terminal surfaces or the opt-in Pi runner | `doctor/field-smoke → dispatch preference → worker run → inspect events` | `.agent/events.jsonl`, Pi smoke evidence, dispatch diagnostics |
+| OMP/cmux/Pi execution | Use OMP native agents, worker terminals, or the legacy Pi runner | `ready → host task or dispatch preference → worker run → inspect evidence` | `agent://`/`history://`, `.agent/events.jsonl`, Pi smoke evidence |
 | Operations wiki | Preserve recurring evidence and decisions | `record events → wiki compile → write decision → wiki lint` | `.awf-operations/events/*`, `wiki/decisions/*`, operations pages |
 | Claude/Codex integration | Reuse the CLI contracts inside agent environments | `setup/snippets/skills → awf ready → run awf/analyze/wf contracts` | `claude/skills/*`, `codex/*`, project-local artifacts |
 
@@ -256,7 +265,7 @@ can still expose root-level units such as `collectors/`, `analyzers/`, and
 
 To use Gemini CLI as the default provider, set `provider.default = "gemini"`.
 Leave `provider.gemini.model` empty for Gemini CLI Auto, or set
-`AWF_GEMINI_MODEL=gemini-3.1-pro` / `.awf.toml` to pin a specific model.
+`AWF_GEMINI_MODEL=gemini-3.6-flash` / `.awf.toml` to pin a stable model.
 
 ### First workflow sequence
 
@@ -282,6 +291,15 @@ automation. If `.workflow/` is ignored by the target repo's `.gitignore`,
 with an apply-result hint if an in_progress phase has a fresh result file
 on disk (override with `--force`); verify gets a warning at the 3rd
 execution and a hard abort at the 6th to prevent verify fix-loop spirals.
+
+To use the OMP adapter, synchronize agent definitions, verify model/auth, and
+select the surface in the workflow provider config:
+
+```bash
+awf agents sync-omp --repo-root .
+awf doctor --repo-root . --probe
+# .workflow/provider-config.json: dispatch.surface_preference = "omp"
+```
 
 Pi remains opt-in. When using Pi dispatch, first persist field-smoke evidence
 and let `ready` incorporate the result:
@@ -414,7 +432,7 @@ Optional snippets:
 - `.ai-context/` holds generated analysis output plus resume and incremental state.
 - `.awf-operations/` holds operating evidence and follow-up decision inputs.
 - Provider adapters normalize Claude, Codex, Gemini, OpenAI, subprocess, and fixture execution.
-- Runner backends stay separate from workflow state: inline dispatch, cmux-agent, and Pi manage execution surfaces while awf remains the canonical state owner.
+- Runner backends stay separate from workflow state: OMP host-native execution, inline dispatch, cmux-agent, and legacy Pi manage execution surfaces while awf remains the canonical state owner.
 - Multi-agent mode is an execution strategy for review, verify, and analysis confidence, not a separate state store.
 - The same contracts can be driven from Claude skills, Codex runner scripts, or the `awf` CLI.
 

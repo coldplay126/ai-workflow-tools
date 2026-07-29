@@ -29,6 +29,18 @@ def _record_dispatch_complete_safe(
         elapsed = time.monotonic() - started_at
         success_count = sum(1 for a in agents if getattr(a, "ok", False))
         timed_out = sum(1 for a in agents if getattr(a, "timed_out", False))
+        provenance_path = None
+        if backend == "omp":
+            from awf.core.dispatch_provenance import write_omp_dispatch_provenance
+
+            provenance = write_omp_dispatch_provenance(
+                cwd,
+                strategy=strategy,
+                mode=mode,
+                agents=agents,
+                elapsed_sec=elapsed,
+            )
+            provenance_path = str(provenance) if provenance is not None else None
         payload = {
             "backend": backend,
             "strategy": strategy,
@@ -37,6 +49,7 @@ def _record_dispatch_complete_safe(
             "success_count": success_count,
             "timed_out_count": timed_out,
             "total_seconds": round(elapsed, 2),
+            "provenance_path": provenance_path,
         }
         record_event(cwd, "dispatch_complete", payload)
         log_event(
@@ -800,6 +813,7 @@ def _run_cross(
     from awf.core.dispatch import (
         WorkerSpec,
         resolve_cmux_options_from_config,
+        resolve_omp_options_from_config,
         select_dispatch,
     )
 
@@ -844,6 +858,7 @@ def _run_cross(
         preference=dispatch_preference,  # type: ignore[arg-type]
         cwd=cwd,
         options=resolve_cmux_options_from_config(provider_config),
+        omp_options=resolve_omp_options_from_config(provider_config),
     )
     print(
         f"mode: cross — {len(specs)} agents parallel via {dispatch.name}",
@@ -923,6 +938,7 @@ def _run_critical(
         ChainedStep,
         WorkerSpec,
         resolve_cmux_options_from_config,
+        resolve_omp_options_from_config,
         select_dispatch,
     )
 
@@ -1038,6 +1054,7 @@ def _run_critical(
         preference=dispatch_preference,  # type: ignore[arg-type]
         cwd=cwd,
         options=resolve_cmux_options_from_config(provider_config),
+        omp_options=resolve_omp_options_from_config(provider_config),
     )
     print(
         f"mode: critical — chained 3 steps via {dispatch.name}",

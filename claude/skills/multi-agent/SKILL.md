@@ -73,6 +73,21 @@ protocols:
 
 워커 간 통신은 `.workflow/team/{phase}/` 디렉토리 기반 (Blackboard 패턴).
 
+## OMP 호스트 실행
+
+OMP의 `task`/`hub`가 제공되면 Python team runner의 결정론적 gate를 유지하면서
+실행 계층만 host-native 기능으로 강화합니다.
+
+1. 서로 독립적인 worker는 한 번의 batch `task` 호출로 fan-out합니다.
+2. worker별 agent type, model/effort, output schema, isolation을 명시합니다.
+3. 후속 질문이나 수정은 새 worker를 만들지 않고 `hub`로 기존 agent에 전달합니다.
+4. `agent://` 결과와 `history://` transcript는 evidence/provenance로 보존합니다.
+5. `.workflow/state.json`과 gate 판정은 awf가 계속 소유합니다.
+6. approve/done HIL은 parent가 수행하며 subagent에 위임하지 않습니다.
+
+순차 의존 작업, 같은 파일을 동시에 수정하는 작업, 단일 파일의 짧은 변경에는
+fan-out하지 않습니다.
+
 ## 출력 형식
 
 모든 agent 결과는 4-Block JSON:

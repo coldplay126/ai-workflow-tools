@@ -20,6 +20,7 @@ class AgentResult:
     parsed: dict[str, Any] | None = None
     input_tokens: int = 0
     output_tokens: int = 0
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:

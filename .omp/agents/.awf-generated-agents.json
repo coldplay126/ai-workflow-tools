@@ -1,0 +1,64 @@
+{
+  "files": [
+    {
+      "name": "adversarial-tester.md",
+      "sha256": "81296a80db57d3aaa3231a1e0d9f2ef85d27dbaa0c66838f53c46f519752ba85",
+      "source": "claude/agents/adversarial-tester.md"
+    },
+    {
+      "name": "analyzer.md",
+      "sha256": "8f309f979b4ca70393f08838a5b30fd3793d5cc9fb368fca71d5eba6f56b486d",
+      "source": "claude/agents/analyzer.md"
+    },
+    {
+      "name": "artifact-reviewer.md",
+      "sha256": "9fde899c9ad8fde4db5ee9d363ff9736915c19eb57ac62b24533df7bc98002b8",
+      "source": "claude/agents/artifact-reviewer.md"
+    },
+    {
+      "name": "code-reviewer.md",
+      "sha256": "62ac8144b54e59fe19f3f97b62a6dc36719a76f46c205f68b7f35aea46713bd2",
+      "source": "claude/agents/code-reviewer.md"
+    },
+    {
+      "name": "happy-path-tester.md",
+      "sha256": "c3c6a00f69ba3e2c4b9ba62c0f959ba04f0dfaadbf19a180b87e875367b43691",
+      "source": "claude/agents/happy-path-tester.md"
+    },
+    {
+      "name": "implementer.md",
+      "sha256": "84b112a8e708c4bbefeb05215fe78d4e440e29fb9ce53b676c7a78b0878ace44",
+      "source": "claude/agents/implementer.md"
+    },
+    {
+      "name": "plan-validator.md",
+      "sha256": "132386c9876f770215755642f1c6e2887d7b0b3d3dfc5e50433b2dfe1e052949",
+      "source": "claude/agents/plan-validator.md"
+    },
+    {
+      "name": "project-discoverer.md",
+      "sha256": "5d2bdf68aa8e727c77c3d9f5b212e35ac94d379a78d61fa1b1956bc1d9144f31",
+      "source": "claude/agents/project-discoverer.md"
+    },
+    {
+      "name": "quality-validator.md",
+      "sha256": "259b06c3b1922d390fe81ebfb29c035212affa580e1f2996c6701ba3defba40f",
+      "source": "claude/agents/quality-validator.md"
+    },
+    {
+      "name": "spec-verifier.md",
+      "sha256": "07065fdee86101e61dad58b30540ba74c3d816bfc66d547dd5125d29115599f0",
+      "source": "claude/agents/spec-verifier.md"
+    },
+    {
+      "name": "spec-writer.md",
+      "sha256": "b40572381ddec0be4272f3c9e81c79a5df5ef355546edbbf1d6a8313b26cc043",
+      "source": "claude/agents/spec-writer.md"
+    }
+  ],
+  "generator": "awf agents sync-omp",
+  "schema_version": 1,
+  "source_roots": [
+    "claude/agents"
+  ]
+}

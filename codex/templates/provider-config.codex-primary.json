@@ -1,5 +1,5 @@
 {
-  "version": "2.1.0",
+  "version": "2.2.0",
   "host": "codex",
   "phase_routing": {
     "plan":    { "mode": "inline" },
@@ -10,6 +10,14 @@
     "test":    { "mode": "inline" },
     "done":    { "mode": "inline" }
   },
+  "dispatch": {
+    "surface_preference": "auto",
+    "omp": {
+      "command": "omp",
+      "no_session": true,
+      "role_models": {}
+    }
+  },
   "providers": {
     "codex": {
       "type": "host",
@@ -19,7 +27,7 @@
     },
     "claude:sonnet": {
       "type": "cli",
-      "command": "claude --print --bare --model claude-sonnet-4-6 --output-format json --max-budget-usd {budget}",
+      "command": "claude --print --bare --model sonnet --output-format json --max-budget-usd {budget}",
       "file_access": false,
       "timeout_seconds": 180,
       "budget_usd": 0.50

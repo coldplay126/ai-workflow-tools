@@ -4,7 +4,7 @@ import io
 import json
 from pathlib import Path
 
-from awf.core.config import resolve_analysis_context, resolve_runtime_paths
+from awf.core.config import AwfConfig, resolve_analysis_context, resolve_runtime_paths
 from awf.core.mcp import McpServerInfo
 import awf.core.mcp as mcp_module
 
@@ -13,6 +13,23 @@ def _repo_root(path: Path) -> Path:
     path.mkdir(parents=True)
     (path / ".awf.toml").write_text("", encoding="utf-8")
     return path
+
+
+def test_provider_model_defaults_are_current() -> None:
+    config = AwfConfig.defaults()
+
+    assert config.provider_settings("claude-sdk")["model"] == "claude-sonnet-5"
+    assert config.provider_settings("openai")["model"] == "gpt-5.6"
+
+
+def test_provider_model_defaults_honor_environment(monkeypatch) -> None:
+    monkeypatch.setenv("AWF_CLAUDE_SDK_MODEL", "claude-custom")
+    monkeypatch.setenv("AWF_OPENAI_MODEL", "gpt-custom")
+
+    config = AwfConfig.defaults()
+
+    assert config.provider_settings("claude-sdk")["model"] == "claude-custom"
+    assert config.provider_settings("openai")["model"] == "gpt-custom"
 
 
 def test_runtime_path_overrides_expand_user_and_win_over_env(

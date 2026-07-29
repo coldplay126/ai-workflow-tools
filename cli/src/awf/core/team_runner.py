@@ -19,9 +19,36 @@ from awf.core.blackboard import Blackboard, TeamFinding
 from awf.core.dispatch import (
     WorkerSpec,
     resolve_cmux_options_from_config,
+    resolve_omp_options_from_config,
     resolve_preference_from_config,
     select_dispatch,
 )
+
+
+def _record_omp_team_provenance(
+    cwd: str,
+    *,
+    backend: str,
+    strategy: str,
+    phase: str,
+    turn: int,
+    agents: list[AgentResult],
+    elapsed_sec: float,
+) -> None:
+    if backend != "omp":
+        return
+    try:
+        from awf.core.dispatch_provenance import write_omp_dispatch_provenance
+
+        write_omp_dispatch_provenance(
+            cwd,
+            strategy=strategy,
+            mode=f"team:{phase}:turn-{turn}",
+            agents=agents,
+            elapsed_sec=elapsed_sec,
+        )
+    except Exception as exc:
+        _log(f"  warning: OMP provenance record failed: {exc}")
 
 
 @dataclass
@@ -330,6 +357,7 @@ def _resolve_team_dispatch(
         preference=resolve_preference_from_config(provider_config),
         cwd=cwd,
         options=resolve_cmux_options_from_config(provider_config),
+        omp_options=resolve_omp_options_from_config(provider_config),
     )
 
 
@@ -396,6 +424,15 @@ def _execute_sequential(
         )
         result = dispatch.run([spec], cwd=cwd, strategy="sequential")[0]
         results.append(result)
+        _record_omp_team_provenance(
+            cwd,
+            backend=dispatch.name,
+            strategy="sequential",
+            phase=phase,
+            turn=turn,
+            agents=[result],
+            elapsed_sec=result.elapsed_sec,
+        )
 
         _emit_worker_event(processor, phase, turn, role_cfg.id, "completed", data={
             "passed": _worker_passed(result),
@@ -465,9 +502,19 @@ def _execute_parallel(
         estimated_seconds=float(timeout_sec),
         provider_config=provider_config,
     )
+    dispatch_started_at = time.monotonic()
 
     try:
         results = list(dispatch.run(specs, cwd=cwd, strategy="parallel"))
+        _record_omp_team_provenance(
+            cwd,
+            backend=dispatch.name,
+            strategy="parallel",
+            phase=phase,
+            turn=turn,
+            agents=results,
+            elapsed_sec=time.monotonic() - dispatch_started_at,
+        )
     except Exception as exc:
         # Dispatch backend failure (e.g., cmux unavailable mid-batch). Synthesize
         # failure rows so blackboard termination sees the problem rather than

@@ -36,6 +36,7 @@
 - `awf wf reset`: workflow state를 다시 `plan` phase로 초기화
 - `awf config show`: 3-level merge 결과와 resolved path 확인
 - `awf skills list`: supported search paths에서 `SKILL.md`를 탐색해 skill 목록 출력
+- `awf agents sync-omp [--dry-run] [--force] [--json]`: `claude/agents/*.md`를 OMP-native `.omp/agents/*.md`로 결정적으로 변환한다. 생성 manifest에 등록된 파일만 갱신·삭제하며, 수동 OMP agent와 이름이 충돌하면 `--force` 없이는 중단한다
 - `awf mcp list`: merged config의 MCP 서버 registry 출력
 - `awf mcp check <name>`: transport별 최소 연결 확인
   - `stdio`: 실제 `initialize` handshake + optional `tools/list`, `resources/list`
@@ -43,11 +44,11 @@
   - `sse`: event-stream 연결 확인
 - `awf mcp invoke <name> <tool> --input '{"key":"value"}'`: MCP tool 호출. 현재는 `stdio`, `http` transport 지원
 - `awf mcp read <name> <uri>`: MCP resource 읽기. 현재는 `stdio`, `http` transport 지원
-- `awf doctor [--probe] [--ci]`: provider readiness MVP. 기본은 installed/configured 상태와 default provider, session DB, MCP server count, dispatch surface preference, Pi opt-in runner readiness, `install_freshness`(글로벌 `awf` vs `cli/` source 해시 drift; stale 시 재설치 명령 안내, G-OPS-001)를 보여주고, `--probe`는 가능한 provider에 대해 lightweight subprocess probe를 추가한다. `--ci`는 default provider readiness가 충분하지 않으면 non-zero exit를 반환한다
+- `awf doctor [--probe] [--ci]`: provider readiness, dispatch runner 상태, `install_freshness`(글로벌 `awf`와 `cli/` source hash drift)를 출력한다. 기본 모드는 OMP/Pi 설치 및 버전을 확인하고, `--probe`는 OMP 실제 model/auth 호출과 가능한 provider subprocess probe를 수행한다. stale install에는 재설치 명령을 안내하며, `--ci`는 default provider readiness가 충분하지 않으면 non-zero exit를 반환한다
 - `awf ready [--probe] [--gate inspect|analysis|workflow-init|workflow-run|operations]`: repo별 자동화 준비 상태를 read-only로 요약한다. `doctor`/heuristic `scan`/skill discovery/workflow/operations 상태를 한 보고서로 모아 automation level(L0 inspect → L3 workflow)과 다음 추천 명령을 출력한다. `--gate`는 `decision: allow|dry_run_only|block`을 JSON에 포함하고 `allow` 외에는 non-zero exit로 Claude/Codex entrypoint와 내부 실행 명령을 중단시킨다. `.workflow/`가 target repo의 `.gitignore`에 있으면 workflow state가 local-only라는 경고를 함께 표시한다
 - `awf init [--repo-root <path>] [--force]`: 대상 프로젝트에 `.awf.toml`을 초기화
 - `awf dashboard [--repo-root <path>] [--interval N]`: rich Live 2-panel TUI — workflow state + cmux broker health 동시 모니터. `awf-cli[tui]` extras 필수 (미설치 시 명확한 stderr + exit 2). 키 바인딩 `q`/`Q`/Ctrl+C 종료, `r`/`R` 즉시 refresh. interval 1~60 clamp (default 5). `awf wf status --watch`(D1)는 단일 텍스트 갱신, `awf dashboard`(D2)는 panel 분할 layout
-- Gemini CLI provider: `.awf.toml`에서 `provider.default = "gemini"`로 선택한다. `provider.gemini.model = ""` 또는 `AWF_GEMINI_MODEL` 미설정은 Gemini CLI Auto를 의미하며, `gemini-3.1-pro` 같은 값을 넣으면 특정 모델로 고정한다
+- Gemini CLI provider: `.awf.toml`에서 `provider.default = "gemini"`로 선택한다. `provider.gemini.model = ""` 또는 `AWF_GEMINI_MODEL` 미설정은 Gemini CLI Auto를 의미하며, stable `gemini-3.6-flash` 같은 값을 넣으면 특정 모델로 고정한다
 - `awf scan [repo_path] [--all] [--merge] [--dry-run] [--no-ai]`: 프로젝트 구조를 휴리스틱/AI fallback으로 탐색해 analysis config 후보를 생성한다. `--no-ai` 경로는 Python marker로 `pyproject.toml`, `setup.py`, `setup.cfg`, `requirements.txt`, `Pipfile`, `poetry.lock`를 인식하며, `src/` 없는 script repo의 root-level source directory도 unit으로 잡는다
 - `awf cmux tail [path] [-f] [--run-id ...] [--event ...] [--limit N] [--json]`: cmux-agent `.agent/events.jsonl`을 구조화된 4컬럼(`ts / run_id-prefix / event / summary`)으로 출력한다. `-f/--follow`는 폴링 기반 tail이며 `Ctrl-C`로 정상 종료한다. cmux-agent 패키지를 import하지 않는 read-only consumer다
 - `awf cmux runs [path] [--json] [--limit N]`: 로그를 1회 스캔해 run_id별 `STARTED / STATUS / EVENTS / DURATION`을 요약한다. 마지막 `run.status_changed.new`가 `completed/failed/aborted`면 해당 값, 아니면 `running`으로 표시한다
@@ -107,6 +108,7 @@ uv run --project cli awf analyze sample-api quest-challenge --repo-root . --dry-
 uv run --project cli awf analyze sample-api --check --repo-root .
 uv run --project cli awf analyze sample-api --catalog --repo-root .
 uv run --project cli awf skills list --repo-root .
+uv run --project cli awf agents sync-omp --repo-root . --dry-run --json
 uv run --project cli awf mcp list --repo-root .
 uv run --project cli awf mcp check analysis-docs --repo-root .
 uv run --project cli awf mcp invoke fixture-mcp echo --input '{"text":"hello"}' --repo-root .
@@ -260,12 +262,12 @@ flags = ["--print", "--permission-mode", "default"]
 
 [provider.claude-sdk]
 api_key_env = "ANTHROPIC_API_KEY"
-model = "claude-sonnet-4-6"
+model = "claude-sonnet-5"
 max_tokens = 8192
 
 [provider.openai]
 api_key_env = "OPENAI_API_KEY"
-model = "gpt-5-mini"
+model = "gpt-5.6"
 max_output_tokens = 8192
 
 [provider.codex]

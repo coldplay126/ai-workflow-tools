@@ -92,14 +92,14 @@ class TestGeminiProvider:
         provider = GeminiProvider(
             command="gemini",
             flags=["--output-format", "text"],
-            model="gemini-3.1-pro",
+            model="gemini-3.6-flash",
         )
         completed = SimpleNamespace(returncode=0, stdout="ok", stderr="")
         with mock.patch("awf.providers.gemini.subprocess.run", return_value=completed) as run_mock:
             provider.complete("prompt")
 
         cmd = run_mock.call_args.args[0]
-        assert ["--model", "gemini-3.1-pro"] == cmd[
+        assert ["--model", "gemini-3.6-flash"] == cmd[
             cmd.index("--model"):cmd.index("--model") + 2
         ]
 

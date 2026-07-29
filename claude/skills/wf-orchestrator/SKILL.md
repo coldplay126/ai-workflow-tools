@@ -69,9 +69,28 @@ awf ready --gate workflow-run --repo-root . --json
 ## Dispatch Surface Policy
 
 `.workflow/state.json`과 `.workflow/artifacts/*`가 canonical state입니다. inline,
-cmux-agent, Pi는 모두 실행 surface일 뿐이며 workflow state를 대체하지 않습니다.
-세부 규칙은 [reference/deterministic-preflight.md](reference/deterministic-preflight.md)의
+cmux-agent, OMP, legacy Pi는 모두 실행 surface일 뿐이며 workflow state를
+대체하지 않습니다. 세부 규칙은
+[reference/deterministic-preflight.md](reference/deterministic-preflight.md)의
 Dispatch Surface Policy를 따릅니다.
+
+### OMP 실행 경로
+
+1. **OMP host-native**: 현재 호스트가 `task`와 `hub`를 제공하면 독립 역할을 한
+   번의 batch task로 실행합니다. Agent Card의 `agent.name`을 task의 `agent`로,
+   `output_schema`를 `outputSchema`로 전달하고 write 역할은 isolated workspace를
+   사용합니다. 완료된 task의 agent ID, `agent://`/`history://` URI, model, usage,
+   patch를 phase evidence에 기록합니다. 후속 피드백은 새 agent를 만들지 않고
+   `hub send`로 기존 agent를 재사용합니다.
+2. **AWF CLI OMP adapter**: `dispatch.surface_preference=omp`이면 `omp --mode json
+   --no-session -p`를 worker별로 실행하고 NDJSON의 session/model/provider/usage를
+   `.workflow/artifacts/dispatch/omp-*.json`에 저장합니다.
+3. **Fallback**: OMP 명령이 없으면 명시적인 경고 후 inline으로 전환합니다.
+   `awf doctor --probe`가 성공하지 않은 환경에서는 OMP adapter를 운영 경로로
+   간주하지 않습니다.
+
+approve/done과 scope hash 승인은 parent session만 수행합니다. OMP todo, agent
+registry, transcript는 provenance이며 gate 통과 조건이 아닙니다.
 
 ## Quick Resume (세션 컴팩션 후 우선 실행)
 
@@ -490,6 +509,17 @@ Agent Card에 `"hil": true`인 Phase는 항상 인라인 실행.
     "test":    { "mode": "inline" },
     "done":    { "mode": "inline" }
   },
+  "dispatch": {
+    "surface_preference": "auto",
+    "omp": {
+      "command": "omp",
+      "no_session": true,
+      "role_models": {
+        "plan_conformance": "slow",
+        "quality_validation": "task"
+      }
+    }
+  },
   "providers": {
     "codex": {
       "type": "mcp",
@@ -500,7 +530,7 @@ Agent Card에 `"hil": true`인 Phase는 항상 인라인 실행.
     },
     "claude:sonnet": {
       "type": "cli",
-      "command": "claude --print --bare --model claude-sonnet-4-6 --output-format json --max-budget-usd {budget}",
+      "command": "claude --print --bare --model sonnet --output-format json --max-budget-usd {budget}",
       "file_access": false,
       "timeout_seconds": 180,
       "budget_usd": 0.50

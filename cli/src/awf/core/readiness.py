@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -183,6 +184,146 @@ def _auth_env_status() -> dict[str, bool]:
     return {name: bool(os.environ.get(name, "").strip()) for name in PI_AUTH_ENV_NAMES}
 
 
+def _omp_command() -> tuple[str, str]:
+    env_command = os.environ.get("AWF_OMP_COMMAND", "").strip()
+    if env_command:
+        return env_command, "AWF_OMP_COMMAND"
+    return "omp", "default"
+
+
+def _check_omp_version(command: str, timeout_sec: int = 5) -> dict[str, Any]:
+    resolved = shutil.which(command)
+    if not resolved:
+        return readiness_item(
+            "skip",
+            "OMP version not checked because the command is unavailable",
+            command=command,
+            version=None,
+        )
+    try:
+        completed = subprocess.run(
+            [resolved, "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+        )
+    except subprocess.TimeoutExpired:
+        return readiness_item(
+            "fail",
+            f"omp --version timed out after {timeout_sec}s",
+            command=command,
+            path=resolved,
+            version=None,
+        )
+    except Exception as exc:
+        return readiness_item(
+            "fail",
+            f"omp --version failed: {exc}",
+            command=command,
+            path=resolved,
+            version=None,
+        )
+    output = (completed.stdout or completed.stderr or "").strip()
+    status = "ok" if completed.returncode == 0 else "fail"
+    return readiness_item(
+        status,
+        output or f"omp --version exited with {completed.returncode}",
+        command=command,
+        path=resolved,
+        version=output or None,
+        returncode=completed.returncode,
+    )
+
+
+def _probe_omp_runtime(command: str, timeout_sec: int = 45) -> dict[str, Any]:
+    from awf.runners.omp import OmpRunnerConfig, run_omp_print
+
+    env_config = OmpRunnerConfig.from_env()
+    probe_config = OmpRunnerConfig(
+        command=command,
+        model=env_config.model,
+        extra_args=(*env_config.extra_args, "--no-tools"),
+        timeout_sec=timeout_sec,
+        no_session=True,
+    )
+    with tempfile.TemporaryDirectory(prefix="awf-omp-probe-") as cwd:
+        result = run_omp_print(
+            "Reply with exactly AWF_OMP_OK and no other text.",
+            cwd=cwd,
+            config=probe_config,
+            timeout_sec=timeout_sec,
+        )
+    metadata = result.metadata
+    if result.returncode == 0 and result.stdout.strip() == "AWF_OMP_OK":
+        return readiness_item(
+            "ok",
+            "OMP model/auth probe succeeded",
+            provider=metadata.get("provider"),
+            model=metadata.get("model"),
+            session_id=metadata.get("session_id"),
+            usage=metadata.get("usage"),
+        )
+    return readiness_item(
+        "fail",
+        result.stderr or result.stdout or f"OMP probe exited with {result.returncode}",
+        provider=metadata.get("provider"),
+        model=metadata.get("model"),
+        returncode=result.returncode,
+    )
+
+
+def collect_omp_readiness(*, probe: bool = False) -> dict[str, Any]:
+    command, command_source = _omp_command()
+    installed = check_command_installed(command)
+    version = _check_omp_version(command)
+    auth_env_present = _auth_env_status()
+    config_paths = [
+        Path.home() / ".omp" / "agent" / "models.yml",
+        Path.home() / ".omp" / "agent" / "models.yaml",
+        Path.home() / ".omp" / "agent" / "models.json",
+    ]
+    existing_config_paths = [str(path) for path in config_paths if path.is_file()]
+    runtime_probe = (
+        _probe_omp_runtime(command)
+        if probe and installed["status"] == "ok"
+        else readiness_item(
+            "skip",
+            "run `awf doctor --probe` to verify OMP model selection and authentication",
+        )
+    )
+    if installed["status"] != "ok":
+        status = "missing"
+    elif version["status"] != "ok":
+        status = "caution"
+    elif probe and runtime_probe["status"] != "ok":
+        status = "caution"
+    else:
+        status = "ready"
+    return {
+        "status": status,
+        "command": command,
+        "command_source": command_source,
+        "path": installed.get("path"),
+        "installed": installed,
+        "version": version,
+        "auth_env_present": auth_env_present,
+        "auth_env_any": any(auth_env_present.values()),
+        "model_config_paths": existing_config_paths,
+        "requested_model": os.environ.get("AWF_OMP_MODEL", "").strip() or None,
+        "probe": runtime_probe,
+        "auth": (
+            readiness_item("ok", "OMP authentication was verified by a live model call")
+            if runtime_probe["status"] == "ok"
+            else readiness_item(
+                "skip",
+                "OMP may use stored provider credentials; only a live --probe verifies auth",
+            )
+        ),
+        "dispatch_surface": "opt_in",
+    }
+
+
 def _check_pi_version(command: str, timeout_sec: int = 5) -> dict[str, Any]:
     resolved = shutil.which(command)
     if not resolved:
@@ -298,6 +439,7 @@ def check_runner_readiness(
     runner_name: str,
     *,
     pi_readiness: dict[str, Any] | None = None,
+    omp_readiness: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if runner_name == "pi":
         pi = pi_readiness or collect_pi_readiness()
@@ -321,6 +463,22 @@ def check_runner_readiness(
             ),
             "backend": readiness_item(backend_status, backend_detail),
         }
+    if runner_name == "omp":
+        omp = omp_readiness or collect_omp_readiness()
+        installed = omp["installed"]
+        backend_status = "ok" if installed["status"] == "ok" else "skip"
+        backend_detail = (
+            "OMP dispatch adapter available; enable with dispatch.surface_preference=omp"
+            if installed["status"] == "ok"
+            else "OMP dispatch adapter registered but omp is not on PATH"
+        )
+        return {
+            "runner": runner_name,
+            "kind": "multi_agent_runtime",
+            "installed": installed,
+            "configured": omp["probe"],
+            "backend": readiness_item(backend_status, backend_detail),
+        }
     return {
         "runner": runner_name,
         "kind": "unknown",
@@ -342,6 +500,7 @@ def collect_doctor_report(config: AwfConfig, repo_root: str | None, *, probe: bo
     pi_readiness = collect_pi_readiness(resolved_repo_root)
     from awf.core.version_check import check_install_freshness
     install_freshness = check_install_freshness(resolved_repo_root)
+    omp_readiness = collect_omp_readiness(probe=probe)
     return {
         "default_provider": config.provider_name(),
         "provider_fallback": config.raw.get("provider", {}).get("fallback", []),
@@ -355,8 +514,12 @@ def collect_doctor_report(config: AwfConfig, repo_root: str | None, *, probe: bo
             "servers": [server.name for server in mcp_servers],
         },
         "providers": providers,
-        "runners": [check_runner_readiness("pi", pi_readiness=pi_readiness)],
+        "runners": [
+            check_runner_readiness("pi", pi_readiness=pi_readiness),
+            check_runner_readiness("omp", omp_readiness=omp_readiness),
+        ],
         "pi_readiness": pi_readiness,
+        "omp_readiness": omp_readiness,
         "dispatch": _collect_dispatch_status(resolved_repo_root),
         "install_freshness": install_freshness,
     }
@@ -460,6 +623,7 @@ def _dispatch_preference_readiness(
     cmux_backend_ready: bool,
     cmux_on_path: bool,
     pi_backend_ready: bool,
+    omp_backend_ready: bool,
 ) -> dict[str, Any]:
     if preference == "inline":
         return readiness_item("ok", "inline dispatch is always available")
@@ -479,6 +643,16 @@ def _dispatch_preference_readiness(
             "dispatch falls back to inline"
         )
         return readiness_item("caution", detail)
+    if preference == "omp":
+        if omp_backend_ready:
+            return readiness_item(
+                "ok",
+                "OMP command is available; use `awf doctor --probe` to verify model/auth",
+            )
+        return readiness_item(
+            "caution",
+            "OMP dispatch requested but omp is not on PATH; dispatch falls back to inline",
+        )
     if preference == "pi":
         if pi_backend_ready:
             return readiness_item(
@@ -512,26 +686,33 @@ def _collect_dispatch_status(repo_root: str | None = None) -> dict[str, Any]:
     from awf.core.dispatch import (
         SURFACE_CMUX,
         SURFACE_INLINE,
+        SURFACE_OMP,
         SURFACE_PI,
         cmux_dispatch_available,
+        omp_dispatch_available,
         pi_dispatch_available,
     )
 
     cwd = repo_root or os.getcwd()
     cmux_on_path = shutil.which("cmux-agent") is not None
     cmux_backend_ready = cmux_dispatch_available(cwd)
+    omp_backend_ready = omp_dispatch_available()
     pi_backend_ready = pi_dispatch_available()
     preference = _collect_dispatch_preference(repo_root)
     preference_name = str(preference.get("surface_preference") or "auto")
     available_surfaces = [SURFACE_INLINE]
     if cmux_backend_ready:
         available_surfaces.append(SURFACE_CMUX)
+    if omp_backend_ready:
+        available_surfaces.append(SURFACE_OMP)
     if pi_backend_ready:
         available_surfaces.append(SURFACE_PI)
     return {
         "default_surface": SURFACE_INLINE,
         "cmux_binary_on_path": cmux_on_path,
         "cmux_backend_ready": cmux_backend_ready,
+        "omp_binary_on_path": omp_backend_ready,
+        "omp_backend_ready": omp_backend_ready,
         "pi_binary_on_path": pi_backend_ready,
         "pi_backend_ready": pi_backend_ready,
         "cwd_checked": str(cwd),
@@ -541,6 +722,7 @@ def _collect_dispatch_status(repo_root: str | None = None) -> dict[str, Any]:
             preference_name,
             cmux_backend_ready=cmux_backend_ready,
             cmux_on_path=cmux_on_path,
+            omp_backend_ready=omp_backend_ready,
             pi_backend_ready=pi_backend_ready,
         ),
     }

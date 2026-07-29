@@ -29,15 +29,17 @@ from typing import Any, Callable, Literal, Protocol
 from awf.core import _cmux_bridge as bridge
 from awf.core.agent_runner import AgentResult, run_agent
 from awf.runners.pi import PiRunnerConfig, run_pi_agent
+from awf.runners.omp import OmpRunnerConfig, run_omp_agent
 
 
 Strategy = Literal["parallel", "sequential"]
-Preference = Literal["auto", "inline", "cmux", "pi"]
+Preference = Literal["auto", "inline", "cmux", "omp", "pi"]
 Lifecycle = Literal["ephemeral", "reusable"]
 
 SURFACE_INLINE = "inline"
 SURFACE_CMUX = "cmux"
 SURFACE_PI = "pi"
+SURFACE_OMP = "omp"
 
 # Heuristic thresholds for auto selection.
 _CMUX_MIN_WORKERS = 2
@@ -121,6 +123,17 @@ class PiDispatchOptions:
     """
 
     config: PiRunnerConfig = field(default_factory=PiRunnerConfig.from_env)
+
+
+@dataclass(frozen=True)
+class OmpDispatchOptions:
+    """Configuration for OMP print-mode dispatch."""
+
+    config: OmpRunnerConfig = field(default_factory=OmpRunnerConfig.from_env)
+    role_models: dict[str, str] = field(default_factory=dict)
+
+    def model_for(self, role: str) -> str | None:
+        return self.role_models.get(role) or self.config.model
 
 
 class MultiAgentDispatch(Protocol):
@@ -284,6 +297,67 @@ class PiDispatch:
             if spec is None:
                 continue
             completed.append(_run_pi_single(spec, cwd, self._options))
+        return completed
+
+
+# ---------------------------------------------------------------------------
+# OmpDispatch — OMP NDJSON print-mode backend with provenance.
+# ---------------------------------------------------------------------------
+
+
+def _run_omp_single(spec: WorkerSpec, cwd: str, options: OmpDispatchOptions) -> AgentResult:
+    return run_omp_agent(
+        spec.prompt,
+        role=spec.role,
+        cwd=cwd,
+        require_json=spec.require_json,
+        config=options.config,
+        model=options.model_for(spec.role),
+        timeout_sec=spec.timeout_sec,
+    )
+
+
+class OmpDispatch:
+    """Dispatch workers through OMP while awf retains canonical state."""
+
+    name = SURFACE_OMP
+
+    def __init__(self, options: OmpDispatchOptions | None = None) -> None:
+        self._options = options or OmpDispatchOptions()
+
+    def run(
+        self,
+        workers: list[WorkerSpec],
+        *,
+        cwd: str,
+        strategy: Strategy = "parallel",
+    ) -> list[AgentResult]:
+        if not workers:
+            return []
+        if strategy == "sequential" or len(workers) == 1:
+            return [_run_omp_single(spec, cwd, self._options) for spec in workers]
+
+        results: list[AgentResult | None] = [None] * len(workers)
+        with ThreadPoolExecutor(max_workers=len(workers)) as pool:
+            futures = {
+                pool.submit(_run_omp_single, spec, cwd, self._options): idx
+                for idx, spec in enumerate(workers)
+            }
+            for future in as_completed(futures):
+                results[futures[future]] = future.result()
+        return [result for result in results if result is not None]
+
+    def run_chained(
+        self,
+        steps: list[ChainedStep],
+        *,
+        cwd: str,
+    ) -> list[AgentResult]:
+        completed: list[AgentResult] = []
+        for step in steps:
+            spec = step.factory(list(completed))
+            if spec is not None:
+                completed.append(_run_omp_single(spec, cwd, self._options))
         return completed
 
 
@@ -671,6 +745,12 @@ def pi_dispatch_available(config: PiRunnerConfig | None = None) -> bool:
     return shutil.which(cfg.command) is not None
 
 
+def omp_dispatch_available(config: OmpRunnerConfig | None = None) -> bool:
+    """True when the configured OMP command is executable on this host."""
+    cfg = config or OmpRunnerConfig.from_env()
+    return shutil.which(cfg.command) is not None
+
+
 def _dispatch_readiness_hint(cwd: str | os.PathLike[str]) -> str:
     repo_root = shlex.quote(os.fspath(cwd))
     return (
@@ -705,6 +785,7 @@ def select_dispatch(
     preference: Preference = "auto",
     options: CmuxDispatchOptions | None = None,
     pi_options: PiDispatchOptions | None = None,
+    omp_options: OmpDispatchOptions | None = None,
 ) -> MultiAgentDispatch:
     """Pick a dispatch backend.
 
@@ -712,6 +793,8 @@ def select_dispatch(
     - ``"cmux"`` → CmuxDispatch if available, otherwise InlineDispatch with a
       stderr warning so operators see the fallback
     - ``"pi"`` → PiDispatch if the Pi command is available, otherwise
+      InlineDispatch with a stderr warning
+    - ``"omp"`` → OmpDispatch if the OMP command is available, otherwise
       InlineDispatch with a stderr warning
     - ``"auto"`` → CmuxDispatch only when worker_count is 2-5 AND each call
       is expected to take ≥60s AND the backend is available; otherwise
@@ -731,6 +814,19 @@ def select_dispatch(
                     "hint: ensure `cmux-agent` is on PATH and this repo has "
                     "an active cmux run"
                 ),
+            ),
+        )
+        return InlineDispatch()
+    if preference == SURFACE_OMP:
+        effective_omp_options = omp_options or OmpDispatchOptions()
+        if omp_dispatch_available(effective_omp_options.config):
+            return OmpDispatch(effective_omp_options)
+        _print_dispatch_fallback_warning(
+            surface=SURFACE_OMP,
+            detail="OMP backend is unavailable",
+            cwd=cwd,
+            extra_hints=(
+                "hint: install `omp` or set AWF_OMP_COMMAND, then run `awf doctor --probe`",
             ),
         )
         return InlineDispatch()
@@ -769,7 +865,7 @@ def resolve_preference_from_config(provider_config: dict | None) -> Preference:
     if not isinstance(section, dict):
         return "auto"
     value = str(section.get("surface_preference", "auto")).strip().lower()
-    if value in (SURFACE_INLINE, SURFACE_CMUX, SURFACE_PI, "auto"):
+    if value in (SURFACE_INLINE, SURFACE_CMUX, SURFACE_OMP, SURFACE_PI, "auto"):
         return value  # type: ignore[return-value]
     return "auto"
 
@@ -798,4 +894,55 @@ def resolve_cmux_options_from_config(
                 }
     return CmuxDispatchOptions(
         lifecycle=lifecycle, role_to_worker=role_to_worker
+    )
+
+
+def resolve_omp_options_from_config(
+    provider_config: dict | None,
+) -> OmpDispatchOptions:
+    """Read ``dispatch.omp`` command, model, session, and role-model policy."""
+    section = (provider_config or {}).get("dispatch", {})
+    if not isinstance(section, dict):
+        return OmpDispatchOptions()
+    omp_section = section.get("omp", {})
+    if not isinstance(omp_section, dict):
+        return OmpDispatchOptions()
+
+    env_config = OmpRunnerConfig.from_env()
+    command = str(omp_section.get("command") or env_config.command).strip() or env_config.command
+    model = str(omp_section.get("model") or env_config.model or "").strip() or None
+    timeout_value = omp_section.get("timeout_sec", env_config.timeout_sec)
+    try:
+        timeout_sec = int(timeout_value)
+    except (TypeError, ValueError):
+        timeout_sec = env_config.timeout_sec
+    no_session_value = omp_section.get("no_session", env_config.no_session)
+    no_session = no_session_value if isinstance(no_session_value, bool) else env_config.no_session
+    extra_args_value = omp_section.get("extra_args", env_config.extra_args)
+    if isinstance(extra_args_value, list):
+        extra_args = tuple(str(value) for value in extra_args_value)
+    elif isinstance(extra_args_value, str):
+        extra_args = tuple(shlex.split(extra_args_value))
+    else:
+        extra_args = env_config.extra_args
+
+    role_models_raw = omp_section.get("role_models", {})
+    role_models = (
+        {
+            str(role): str(role_model)
+            for role, role_model in role_models_raw.items()
+            if str(role).strip() and str(role_model).strip()
+        }
+        if isinstance(role_models_raw, dict)
+        else {}
+    )
+    return OmpDispatchOptions(
+        config=OmpRunnerConfig(
+            command=command,
+            model=model,
+            extra_args=extra_args,
+            timeout_sec=timeout_sec,
+            no_session=no_session,
+        ),
+        role_models=role_models,
     )

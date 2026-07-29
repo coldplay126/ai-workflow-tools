@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 from awf.core.permissions import PermissionDeniedError, PermissionRuleset, check_permission, sdk_tool_permission_name
+from awf.core.model_defaults import DEFAULT_OPENAI_MODEL
 from awf.providers.base import ProviderCapability, ProviderResult, TokenUsage
 from awf.tools.file_ops import FileOpsToolset
 from awf.tools.git_ops import GitOpsToolset
@@ -28,7 +29,7 @@ class OpenAiProvider:
         permission_ruleset: Optional[PermissionRuleset] = None,
     ) -> None:
         self.api_key_env = api_key_env or "OPENAI_API_KEY"
-        self.model = model or os.environ.get("AWF_OPENAI_MODEL", "gpt-5-mini")
+        self.model = model or os.environ.get("AWF_OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
         self.max_output_tokens = max_output_tokens or int(os.environ.get("AWF_OPENAI_MAX_OUTPUT_TOKENS", "8192"))
         self.max_tool_rounds = int(os.environ.get("AWF_OPENAI_MAX_TOOL_ROUNDS", "8"))
         self.permission_ruleset = permission_ruleset

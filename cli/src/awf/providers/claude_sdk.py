@@ -6,6 +6,7 @@ from typing import Optional
 
 from awf.core.permissions import PermissionDeniedError, PermissionRuleset, check_permission, sdk_tool_permission_name
 from awf.providers.base import ProviderCapability, ProviderResult, TokenUsage
+from awf.core.model_defaults import DEFAULT_CLAUDE_SDK_MODEL
 from awf.tools.file_ops import FileOpsToolset
 from awf.tools.git_ops import GitOpsToolset
 from awf.tools.mcp_ops import McpOpsToolset
@@ -27,7 +28,7 @@ class ClaudeSdkProvider:
         permission_ruleset: Optional[PermissionRuleset] = None,
     ) -> None:
         self.api_key_env = api_key_env or "ANTHROPIC_API_KEY"
-        self.model = model or os.environ.get("AWF_CLAUDE_SDK_MODEL", "claude-sonnet-4-6")
+        self.model = model or os.environ.get("AWF_CLAUDE_SDK_MODEL", DEFAULT_CLAUDE_SDK_MODEL)
         self.max_tokens = max_tokens or int(os.environ.get("AWF_CLAUDE_SDK_MAX_TOKENS", "8192"))
         self.max_tool_rounds = int(os.environ.get("AWF_CLAUDE_SDK_MAX_TOOL_ROUNDS", "8"))
         self.permission_ruleset = permission_ruleset
