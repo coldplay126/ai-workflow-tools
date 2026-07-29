@@ -234,11 +234,18 @@ def render_review_report(
     else:
         lines.extend(["", "| ID | Category | Severity | Location | Summary | Recommendation |", "|----|----------|----------|----------|---------|----------------|"])
         for finding in findings:
-            locations = "<br>".join(_as_list(finding.get("locations"))) or "-"
+            locations = "<br>".join(_as_list(finding.get("locations")))
+            if not locations:
+                locations = str(finding.get("location", "-") or "-")
+            summary = str(
+                finding.get("summary", "")
+                or finding.get("description", "")
+                or "-"
+            )
             lines.append(
                 f"| {finding.get('id', '-')} | {finding.get('category', '-')} | "
                 f"{finding.get('severity', '-')} | {locations} | "
-                f"{finding.get('summary', '-')} | {_recommendation_text(finding)} |"
+                f"{summary} | {_recommendation_text(finding)} |"
             )
 
     lines.extend(
@@ -257,15 +264,39 @@ def render_review_report(
 
     lines.extend(["", "## Evidence"])
     evidence = _as_list(data.get("evidence"))
-    lines.append("\n".join(f"- {item.get('id', 'evidence')}: {item.get('detail', item)}" for item in evidence) or "- None")
+    lines.append(
+        "\n".join(
+            f"- {item.get('id', 'evidence')}: {item.get('detail', item)}"
+            if isinstance(item, dict)
+            else f"- evidence: {item}"
+            for item in evidence
+        )
+        or "- None"
+    )
 
     lines.extend(["", "## Risks"])
     risks = _as_list(data.get("risks"))
-    lines.append("\n".join(f"- {item.get('id', 'risk')} [{item.get('severity', 'N/A')}]: {item.get('detail', item)}" for item in risks) or "- None")
+    lines.append(
+        "\n".join(
+            f"- {item.get('id', 'risk')} [{item.get('severity', 'N/A')}]: {item.get('detail', item)}"
+            if isinstance(item, dict)
+            else f"- risk: {item}"
+            for item in risks
+        )
+        or "- None"
+    )
 
     lines.extend(["", "## Action Items"])
     actions = _as_list(data.get("action_items"))
-    lines.append("\n".join(f"- {item.get('id', 'action')}: {item.get('action', item)}" for item in actions) or "- None")
+    lines.append(
+        "\n".join(
+            f"- {item.get('id', 'action')}: {item.get('action', item)}"
+            if isinstance(item, dict)
+            else f"- action: {item}"
+            for item in actions
+        )
+        or "- None"
+    )
     lines.append("")
     return "\n".join(lines), gate_passed
 
@@ -325,15 +356,39 @@ def render_verify_report(
 
     lines.extend(["", "## Evidence"])
     evidence = _as_list(data.get("evidence"))
-    lines.append("\n".join(f"- {item.get('id', 'evidence')}: {item.get('detail', item)}" for item in evidence) or "- None")
+    lines.append(
+        "\n".join(
+            f"- {item.get('id', 'evidence')}: {item.get('detail', item)}"
+            if isinstance(item, dict)
+            else f"- evidence: {item}"
+            for item in evidence
+        )
+        or "- None"
+    )
 
     lines.extend(["", "## Risks"])
     risks = _as_list(data.get("risks"))
-    lines.append("\n".join(f"- {item.get('id', 'risk')} [{item.get('severity', 'N/A')}]: {item.get('detail', item)}" for item in risks) or "- None")
+    lines.append(
+        "\n".join(
+            f"- {item.get('id', 'risk')} [{item.get('severity', 'N/A')}]: {item.get('detail', item)}"
+            if isinstance(item, dict)
+            else f"- risk: {item}"
+            for item in risks
+        )
+        or "- None"
+    )
 
     lines.extend(["", "## Action Items"])
     actions = _as_list(data.get("action_items"))
-    lines.append("\n".join(f"- {item.get('id', 'action')}: {item.get('action', item)}" for item in actions) or "- None")
+    lines.append(
+        "\n".join(
+            f"- {item.get('id', 'action')}: {item.get('action', item)}"
+            if isinstance(item, dict)
+            else f"- action: {item}"
+            for item in actions
+        )
+        or "- None"
+    )
     lines.append("")
     return "\n".join(lines), gate_passed
 
@@ -510,6 +565,14 @@ def apply_workflow_result(
             raise ValueError(f"worker_result_status:{status}")
 
         data = dict(envelope.get("result", {}))
+        # Team/OMP worker schemas group gate metrics under `phase_metrics`,
+        # while provider-direct schemas expose them at the result root.
+        # Accept both at this boundary so either execution surface feeds the
+        # same deterministic gate evaluator.
+        phase_metrics = data.get("phase_metrics")
+        if isinstance(phase_metrics, dict):
+            for key, value in phase_metrics.items():
+                data.setdefault(key, value)
         gate_passed, gate_checks = evaluate_gate(explicit_root, phase, data, change_class=change_class)
 
         # --- Build failure context for on_fail routing ---

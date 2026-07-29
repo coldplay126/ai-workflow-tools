@@ -75,3 +75,31 @@ def test_workflow_prompt_includes_redacted_omp_followup_evidence(tmp_path: Path)
     assert "task-successor" in prompt
     assert "registry_unavailable" in prompt
     assert "sensitive response body" not in prompt
+
+
+def test_workflow_prompt_keeps_review_provider_read_only(tmp_path: Path):
+    workflow = tmp_path / ".workflow"
+    cards = workflow / "agent-cards"
+    cards.mkdir(parents=True)
+    (cards / "review.json").write_text(
+        json.dumps(
+            {
+                "description": "Review",
+                "capabilities": {},
+                "input": {"required_artifacts": []},
+                "output": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    prompt = build_workflow_prompt(
+        str(tmp_path),
+        {"repo": "fixture", "branch": "main"},
+        {},
+        "review",
+    )
+
+    assert "Return the required structured result only." in prompt
+    assert "Do not write workflow artifacts" in prompt
+    assert "write any required outputs to the documented paths" not in prompt

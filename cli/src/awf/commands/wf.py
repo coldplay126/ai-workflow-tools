@@ -78,7 +78,7 @@ def _run_provider_with_heartbeat(provider, prompt: str, cwd: str, label: str, *,
     )
 
 
-_CODEX_READ_ONLY_PHASES = {"plan", "review", "verify", "test"}
+_CODEX_READ_ONLY_PHASES = {"review", "verify"}
 
 
 def _apply_provider_permission_mode(provider, *, yolo: bool) -> None:
@@ -93,13 +93,11 @@ def _apply_phase_sandbox(provider, phase: str) -> None:
 
 
 def _apply_workflow_output_schema(provider, phase: str) -> str | None:
-    if hasattr(provider, "output_schema_path") and not getattr(provider, "output_schema_path", None):
-        path = write_temp_schema_file(
-            workflow_result_envelope_schema(phase),
-            prefix=f"awf-wf-{phase}-schema-",
-        )
-        provider.output_schema_path = path
-        return path
+    # Codex strict Structured Outputs reject the workflow envelope's dynamic
+    # phase result object. Keep prompt-level JSON instructions and validate the
+    # returned envelope locally instead of sending an invalid server schema.
+    if hasattr(provider, "output_schema_path"):
+        return None
     if hasattr(provider, "json_schema") and not getattr(provider, "json_schema", None):
         provider.json_schema = workflow_result_envelope_schema_json(phase)
     return None
@@ -1019,16 +1017,20 @@ def run_wf_next(args: argparse.Namespace) -> int:
         # Pattern-specific post-processing: finding-based feedback (subagent only)
         # Team results use their own iterative turn loop for feedback; skip here
         if not is_team and synthesis_pattern in ("generate_then_validate", "implement_then_review"):
+            # The primary provider may update workflow state while executing
+            # plan/approve/done. Reload before adding feedback so the
+            # pre-execution snapshot cannot clobber those transitions.
+            feedback_state = load_workflow_state(args.repo_root)
             _run_finding_feedback_loop(
                 multi_result=multi_result,
                 phase=phase,
                 pattern=synthesis_pattern,
-                state=state,
+                state=feedback_state,
                 processor=processor,
             )
-            # Persist audit trail added by _run_finding_feedback_loop
+            # Persist the provider's current state plus any feedback audit entry.
             from awf.core.state import save_workflow_state_snapshot
-            save_workflow_state_snapshot(args.repo_root, state)
+            save_workflow_state_snapshot(args.repo_root, feedback_state)
 
         # Save judge verdict
         verdict_file = ma_dir / "judge-verdict.json"

@@ -191,6 +191,13 @@ def build_workflow_prompt(explicit_root: Optional[str], state: dict, provider_co
     rules_files = [root / "AGENTS.md", root / "CLAUDE.md", root / "codex" / "AGENTS.md"]
 
     from awf.core.spec_loader import load_prompt_optional
+    artifact_instruction = (
+        "Return the required structured result only. Do not write workflow artifacts; "
+        "the orchestrator will materialize the documented outputs."
+        if phase in {"review", "verify"}
+        else "Use the workflow artifacts below as the source of truth and write any "
+        "required outputs to the documented paths."
+    )
 
     # Load base prompt from external template (falls back to inline)
     base_prompt = load_prompt_optional("wf-orchestrator", "base",
@@ -200,6 +207,7 @@ def build_workflow_prompt(explicit_root: Optional[str], state: dict, provider_co
         phase_mode=routing.get("mode", provider_config.get("defaults", {}).get("mode", "inline")),
         recommended_protocol=agent_card.get("capabilities", {}).get("protocol_hint", {}).get("recommended_mode", "solo"),
         task_description=agent_card.get("description", ""),
+        artifact_instruction=artifact_instruction,
     )
     if not base_prompt:
         base_prompt = load_prompt_optional("wf-orchestrator", "phase-fallback",

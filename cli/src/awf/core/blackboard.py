@@ -148,6 +148,15 @@ class Blackboard:
             _write_scopes=write_scopes,
         )
 
+    def begin_run(self) -> None:
+        """Clear transient turn output before starting a fresh team run."""
+        if self.discussion_dir.exists():
+            shutil.rmtree(self.discussion_dir)
+        self.discussion_dir.mkdir(parents=True, exist_ok=True)
+        if self.mission_path.exists():
+            self.mission_path.unlink()
+        self._update_meta(last_turn=0)
+
     @staticmethod
     def load(cwd: str, phase: str) -> Blackboard:
         """Load an existing workspace. Raises FileNotFoundError if not present."""

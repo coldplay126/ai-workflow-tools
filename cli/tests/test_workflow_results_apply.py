@@ -11,6 +11,7 @@ from awf.core.workflow_results import (
     apply_workflow_result,
     render_impl_report,
     render_test_report,
+    render_verify_report,
 )
 
 
@@ -62,6 +63,25 @@ def test_render_test_report_smoke() -> None:
     assert "passed=100" in markdown
     assert "Coverage %: 85" in markdown
     assert "G6: PASS" in markdown
+
+
+def test_render_verify_report_accepts_string_evidence_entries() -> None:
+    data = {
+        "conclusion": "PASS",
+        "scope": {"changed_files": 3, "planned_files": 5, "violations": 0},
+        "compliance": {"pass": 3, "fail": 0, "total_requirements": 3, "percentage": 100},
+        "quality": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+        "evidence": ["OMP verifier passed"],
+        "risks": ["Scope base is current HEAD"],
+        "action_items": ["Use parent-to-commit diff"],
+    }
+
+    markdown, passed = render_verify_report(data, True, [])
+
+    assert passed
+    assert "- evidence: OMP verifier passed" in markdown
+    assert "- risk: Scope base is current HEAD" in markdown
+    assert "- action: Use parent-to-commit diff" in markdown
 
 
 def test_apply_workflow_result_impl_writes_artifact(tmp_path: Path) -> None:
@@ -125,6 +145,38 @@ def test_apply_workflow_result_test_writes_artifact(tmp_path: Path) -> None:
     state = json.loads((repo / ".workflow" / "state.json").read_text(encoding="utf-8"))
     # G6 is the test phase gate
     assert state["gates"].get("G6", {}).get("passed") is True
+
+
+def test_apply_workflow_result_accepts_nested_phase_metrics(tmp_path: Path) -> None:
+    repo = _make_workflow_root(tmp_path)
+    result_payload = {
+        "status": "completed",
+        "phase": "review",
+        "provider": "omp",
+        "result": {
+            "conclusion": "PASS",
+            "findings": [],
+            "phase_metrics": {
+                "coverage": {
+                    "total_requirements": 3,
+                    "mapped_requirements": 3,
+                    "percentage": 100,
+                    "gaps": [],
+                }
+            },
+        },
+    }
+    result_file = tmp_path / "review-result.json"
+    result_file.write_text(json.dumps(result_payload), encoding="utf-8")
+
+    output_path, passed = apply_workflow_result(
+        str(repo),
+        "review",
+        str(result_file),
+    )
+
+    assert passed is True
+    assert "Coverage: 100%" in output_path.read_text(encoding="utf-8")
 
 
 def test_apply_workflow_result_rejects_unknown_phase(tmp_path: Path) -> None:

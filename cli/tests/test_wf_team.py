@@ -394,6 +394,24 @@ def test_bb_write_scope_permissive_default():
         assert bb.validate_write_scope("any_role", bb.board_dir / "anything.md")
 
 
+def test_bb_begin_run_clears_stale_turn_outputs():
+    with tempfile.TemporaryDirectory() as tmp:
+        bb = _make_bb(Path(tmp), "verify")
+        _write_findings_json(
+            bb,
+            1,
+            "stale_role",
+            [_finding("CRITICAL", "stale", "old.py:1", "old run")],
+        )
+        bb.write_mission("old mission", turn=1)
+
+        bb.begin_run()
+
+        assert bb.collect_findings(1) == []
+        assert not bb.mission_path.exists()
+        assert json.loads(bb.meta_path.read_text(encoding="utf-8"))["last_turn"] == 0
+
+
 def test_team_combined_output_supplies_review_gate_coverage():
     with tempfile.TemporaryDirectory() as tmp:
         bb = _make_bb(Path(tmp), "review")

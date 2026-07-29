@@ -35,8 +35,8 @@ class TestClaudeCodeProviderEffort:
 
     def test_set_model_replaces_existing_flag(self):
         provider = ClaudeCodeProvider(command="echo", flags=["--print", "--model", "opus"])
-        provider.set_model("claude-sonnet-4-6")
-        assert provider.flags == ["--print", "--model", "claude-sonnet-4-6"]
+        provider.set_model("claude-sonnet-5")
+        assert provider.flags == ["--print", "--model", "claude-sonnet-5"]
 
 
 class TestCodexProviderEffort:
@@ -180,11 +180,11 @@ class TestPhaseEffort:
 
         provider = ClaudeCodeProvider(command="echo", flags=["--print", "--model", "opus"])
         provider_config = {
-            "phase_models": {"impl": {"inline_model": "claude-sonnet-4-6"}}
+            "phase_models": {"impl": {"inline_model": "claude-sonnet-5"}}
         }
 
         _apply_phase_effort(provider, provider_config, "impl")
-        assert provider.flags == ["--print", "--model", "claude-sonnet-4-6"]
+        assert provider.flags == ["--print", "--model", "claude-sonnet-5"]
 
     def test_apply_phase_sandbox_codex_read_only(self):
         from awf.commands.wf import _apply_phase_sandbox
@@ -193,12 +193,27 @@ class TestPhaseEffort:
         _apply_phase_sandbox(provider, "review")
         assert provider.flags == ["exec", "--sandbox", "read-only"]
 
+    def test_apply_phase_sandbox_plan_write(self):
+        from awf.commands.wf import _apply_phase_sandbox
+
+        provider = CodexProvider(command="echo", flags=["exec", "--sandbox", "read-only"])
+        _apply_phase_sandbox(provider, "plan")
+        assert provider.flags == ["exec", "--sandbox", "workspace-write"]
+
     def test_apply_phase_sandbox_impl_write(self):
         from awf.commands.wf import _apply_phase_sandbox
 
         provider = CodexProvider(command="echo", flags=["exec", "--sandbox", "read-only"])
         _apply_phase_sandbox(provider, "impl")
         assert provider.flags == ["exec", "--sandbox", "workspace-write"]
+
+    def test_apply_workflow_output_schema_codex_uses_local_validation(self):
+        from awf.commands.wf import _apply_workflow_output_schema
+
+        provider = CodexProvider(command="echo", flags=["exec"])
+        cleanup_path = _apply_workflow_output_schema(provider, "plan")
+        assert cleanup_path is None
+        assert provider.output_schema_path is None
 
     def test_apply_workflow_output_schema_claude(self):
         from awf.commands.wf import _apply_workflow_output_schema

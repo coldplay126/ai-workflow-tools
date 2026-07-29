@@ -139,6 +139,7 @@ def run_team(
         )
 
     bb = Blackboard.create(cwd, phase, team_config=team_config)
+    bb.begin_run()
 
     all_agents: list[AgentResult] = []
     started = time.monotonic()

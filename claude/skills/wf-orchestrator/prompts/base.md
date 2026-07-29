@@ -9,4 +9,4 @@ recommended_protocol: {recommended_protocol}
 
 === TASK ===
 {task_description}
-Use the workflow artifacts below as the source of truth and write any required outputs to the documented paths.
+{artifact_instruction}
