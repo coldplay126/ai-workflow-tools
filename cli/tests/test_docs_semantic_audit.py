@@ -445,9 +445,11 @@ def test_core_skill_command_templates_are_current() -> None:
     assert invalid == []
 
 
-def test_skill_docs_do_not_use_removed_wf_slash_aliases() -> None:
+def test_only_umbrella_skill_uses_wf_slash_aliases() -> None:
     stale: list[str] = []
     for path in _skill_files():
+        if path.parent.name == "wf":
+            continue
         text = path.read_text(encoding="utf-8")
         for line_no, line in enumerate(text.splitlines(), 1):
             if STALE_WF_ALIAS_RE.search(line):

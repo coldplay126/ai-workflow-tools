@@ -933,24 +933,26 @@ def run_wf_next(args: argparse.Namespace) -> int:
         print("error: no supported provider available for wf next.", file=sys.stderr)
         return 2
 
-    # Multi-agent execution for non-solo modes. Phase 4: auto-promote
-    # solo → cross for review/verify when the user did not pass --mode,
-    # because synthesize_workflow_multi_provider_results is already tuned
-    # to combine those two phases' results meaningfully.
-    user_mode = getattr(args, "mode", None)
-    exec_mode, _dual_strategy_promoted = _maybe_auto_promote_dual_strategy(
-        user_mode=user_mode,
-        phase=phase,
-        provider_config=provider_config,
-        repo_root=repo_root,
+    # The primary provider has completed. Opt-in team selection consumes only
+    # the persisted changeClass and creates a secondary-only routing config.
+    # Configs without the opt-in retain the legacy dual-strategy behavior.
+    exec_mode, secondary_provider_config, _dual_strategy_promoted, secondary_selection = (
+        _resolve_secondary_execution(
+            user_mode=getattr(args, "mode", None),
+            phase=phase,
+            change_class=state.get("changeClass"),
+            provider_config=provider_config,
+            repo_root=repo_root,
+        )
     )
+
     if exec_mode and exec_mode != "solo" and last_returncode == 0:
-        from awf.core.multi_agent import run_phase, auto_promote
+        from awf.core.multi_agent import run_phase
         from awf.core.team_config import get_phase_pattern
 
         # Select synthesis pattern based on phase (SKILL.md §5C Dual Execution)
         synthesis_pattern = _select_synthesis_pattern(phase, exec_mode)
-        phase_pattern = get_phase_pattern(provider_config, phase)
+        phase_pattern = get_phase_pattern(secondary_provider_config, phase)
         print(f"=== multi-agent: {exec_mode} mode, pattern: {synthesis_pattern}, routing: {phase_pattern} ===", file=sys.stderr)
         processor.emit(
             event_type=EventType.STAGE_STARTED,
@@ -962,6 +964,7 @@ def run_wf_next(args: argparse.Namespace) -> int:
                 "mode": exec_mode,
                 "pattern": synthesis_pattern,
                 "phase_pattern": phase_pattern,
+                "team_selection_source": secondary_selection.source,
             },
         )
         primary = registry.get(selected_provider)
@@ -971,7 +974,7 @@ def run_wf_next(args: argparse.Namespace) -> int:
             prompt=prompt,
             primary_provider=primary,
             registry=registry,
-            provider_config=provider_config,
+            provider_config=secondary_provider_config,
             cwd=repo_root,
             phase=phase,
             processor=processor,
@@ -1041,6 +1044,7 @@ def run_wf_next(args: argparse.Namespace) -> int:
             "selected_agent": multi_result.selected_agent,
             "pattern": synthesis_pattern,
             "phase_pattern": phase_pattern,
+            "team_selection_source": secondary_selection.source,
             "agents": [{"provider": a.provider_name, "role": a.role, "ok": a.ok, "elapsed_sec": round(a.elapsed_sec, 1)} for a in multi_result.agents],
         }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         print(f"multi_agent_judge: {multi_result.judge_verdict} ({multi_result.judge_reason})", file=sys.stderr)
@@ -1280,6 +1284,37 @@ def _maybe_auto_promote_dual_strategy(
         # Telemetry is best-effort: never block phase execution.
         pass
     return "cross", True
+
+
+def _resolve_secondary_execution(
+    *,
+    user_mode: str | None,
+    phase: str,
+    change_class: str | None,
+    provider_config: dict,
+    repo_root: str,
+):
+    """Resolve opt-in secondary routing or delegate to unchanged legacy mode."""
+    from awf.core.team_config import select_secondary_team
+
+    selection = select_secondary_team(
+        provider_config,
+        phase,
+        change_class,
+        mode=user_mode,
+    )
+    if selection.managed:
+        mode = "secondary-team" if selection.has_secondary_work else None
+        routing_config = selection.provider_config or provider_config
+        return mode, routing_config, False, selection
+
+    mode, promoted = _maybe_auto_promote_dual_strategy(
+        user_mode=user_mode,
+        phase=phase,
+        provider_config=provider_config,
+        repo_root=repo_root,
+    )
+    return mode, provider_config, promoted, selection
 
 
 def _select_synthesis_pattern(phase: str, exec_mode: str) -> str:

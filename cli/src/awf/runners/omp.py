@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -10,7 +11,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Sequence
+from typing import Any, Literal, Protocol, Sequence
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
@@ -18,6 +19,7 @@ from jsonschema.exceptions import SchemaError
 from awf.core.agent_runner import AgentResult, _try_parse_json
 SchemaMode = Literal["permissive", "strict"]
 CoordinationSurface = Literal["native", "print"]
+OmpExecutionMode = Literal["external_host", "current_host"]
 JsonSchema = dict[str, Any] | bool | str | None
 
 
@@ -31,6 +33,7 @@ class OmpRunnerConfig:
     coordination_surface: CoordinationSurface = "native"
     capacity: int = 8
     termination_grace_sec: float = 1.0
+    execution_mode: OmpExecutionMode = "external_host"
 
     @classmethod
     def from_env(cls) -> "OmpRunnerConfig":
@@ -45,6 +48,14 @@ class OmpRunnerConfig:
         }
         surface = os.environ.get("AWF_OMP_COORDINATION_SURFACE", "native").strip().lower()
         coordination_surface: CoordinationSurface = "print" if surface == "print" else "native"
+        execution_mode_value = os.environ.get(
+            "AWF_OMP_EXECUTION_MODE", "external_host"
+        ).strip().lower()
+        execution_mode: OmpExecutionMode = (
+            "current_host"
+            if execution_mode_value in {"current_host", "same_host"}
+            else "external_host"
+        )
         capacity = _positive_int(os.environ.get("AWF_OMP_CAPACITY"), 8)
         try:
             grace = max(
@@ -60,6 +71,7 @@ class OmpRunnerConfig:
             timeout_sec=timeout_sec,
             no_session=no_session,
             coordination_surface=coordination_surface,
+            execution_mode=execution_mode,
             capacity=capacity,
             termination_grace_sec=grace,
         )
@@ -75,6 +87,20 @@ class OmpExecutionResult:
     metadata: dict[str, Any] = field(default_factory=dict)
     input_tokens: int = 0
     output_tokens: int = 0
+
+class OmpCurrentHostBridge(Protocol):
+    """Injected access to the task/hub tools of the already-running OMP host."""
+
+    def __call__(
+        self,
+        *,
+        prompt: str,
+        workers: Sequence["OmpWorkerTask"],
+        cwd: str | None,
+        config: OmpRunnerConfig,
+        model: str | None,
+        timeout_sec: int,
+    ) -> OmpExecutionResult: ...
 
 
 @dataclass(frozen=True)
@@ -138,7 +164,7 @@ def build_omp_coordinator_prompt(
     *,
     capacity: int,
 ) -> str:
-    """Serialize one exact native ``task`` batch and host envelope contract."""
+    """Serialize one exact native ``task`` batch and bounded steering contract."""
     descriptors = [
         {
             "name": worker.name,
@@ -160,13 +186,47 @@ def build_omp_coordinator_prompt(
         separators=(",", ":"),
     )
     names = json.dumps([worker.name for worker in workers], separators=(",", ":"))
+    wait_limit = max(1, min(capacity, 4))
     return f"""You are the OMP host coordinator for one AWF worker batch.
 Call `task` exactly once using the native tool. Its `tasks` array MUST preserve the order and exact `name`, `agent`, `task`, `outputSchema`, and `schemaMode` values in COORDINATOR_INPUT. Include `isolated` only when it is not null. Do not rename tasks, invent task IDs, replace agent types, split the batch, or use another execution backend.
 The configured capacity is {capacity}; this input has {len(workers)} workers and has already been capacity-checked.
-Wait for every task to settle using native async delivery or `hub wait`; do not start successor tasks.
-Respond with JSON only: {{"awf_omp_batch":1,"workers":[{{"name":"<stable input name>","status":"completed","result":<exact yielded data>}},{{"name":"<stable input name>","status":"failed","error":"<explicit error>"}}]}}
-Return exactly one entry for each name, in any completion order: {names}. Never put task IDs in the envelope; AWF obtains authentic IDs from native task events.
+Run a bounded, event-driven coordination loop after that one task call:
+1. Track unsettled workers from native async task delivery. Only when delivery has not supplied the next event may you call `hub wait`; call it at most {wait_limit} times total. Never busy-poll `hub jobs`, sleep, or repeatedly snapshot status.
+2. After each completed delivery, inspect that worker's exact output before waiting again.
+3. If a concrete finding from a completed worker corrects or unblocks a still-running sibling, you may send at most one `hub send` message in the entire batch, only to that relevant sibling. Never message a completed worker.
+4. Never call `task` again, start a successor, spawn a replacement, or invent identity. If the wait bound ends with unsettled workers, report them failed explicitly.
+Respond with JSON only: {{"awf_omp_batch":1,"workers":[{{"name":"<stable input name>","status":"completed","result":<exact yielded data>}},{{"name":"<stable input name>","status":"failed","error":"<explicit error>"}}],"steering":{{"wait_calls":<0..{wait_limit}>,"inspected_completed":["<stable input name>"],"message":null|{{"target":"<stable input name>","kind":"corrective"|"blocker"}}}}}}
+Return exactly one entry for each name, in any completion order: {names}. Never put task IDs, prompts, result excerpts, or message content in `steering`; AWF obtains authentic IDs from native task events.
 COORDINATOR_INPUT={payload}
+"""
+
+
+def _build_omp_recovery_prompt(
+    workers: Sequence[OmpWorkerTask],
+    persisted_workers: Sequence[dict[str, Any]],
+    *,
+    capacity: int,
+) -> str:
+    """Resume existing native tasks without replaying their assignments."""
+    identities = [
+        {
+            "name": worker.name,
+            "task_id": persisted["task_id"],
+            "agent_uri": persisted["agent_uri"],
+            "history_uri": persisted["history_uri"],
+        }
+        for worker, persisted in zip(workers, persisted_workers, strict=True)
+    ]
+    payload = json.dumps(identities, ensure_ascii=False, separators=(",", ":"))
+    names = json.dumps([worker.name for worker in workers], separators=(",", ":"))
+    wait_limit = max(1, min(capacity, 4))
+    return f"""Resume the exact interrupted AWF OMP batch in this persisted coordinator session.
+The original native `task` batch already ran. Calling `task` is prohibited. Do not spawn replacements, successors, or any new agent, even when a handle is missing or unavailable.
+Use only native async delivery, `hub wait`, `hub send`, and the exact persisted agent/history handles in RECOVERY_IDENTITIES. Wait is event-driven and bounded: call `hub wait` at most {wait_limit} times total; never busy-poll `hub jobs`, sleep, or repeatedly snapshot status.
+Inspect each newly completed output. You may send at most one corrective or blocker `hub send` message in the entire resumed batch, and only to a relevant still-running persisted sibling. Never message a completed worker.
+Respond with JSON only: {{"awf_omp_batch":1,"workers":[{{"name":"<stable input name>","status":"completed","result":<exact yielded data>}},{{"name":"<stable input name>","status":"failed","error":"<explicit error>"}}],"steering":{{"wait_calls":<0..{wait_limit}>,"inspected_completed":["<stable input name>"],"message":null|{{"target":"<stable input name>","kind":"corrective"|"blocker"}}}}}}
+Return exactly one entry for each persisted name, in any completion order: {names}. Never include prompts, result excerpts, or message content in `steering`.
+RECOVERY_IDENTITIES={payload}
 """
 
 
@@ -223,6 +283,32 @@ def _isolated_patch_path(candidate: dict[str, Any]) -> str | None:
         result_text,
     )
     return match.group(1) if match else None
+
+
+def _authentic_uri(
+    candidate: dict[str, Any],
+    *,
+    snake_name: str,
+    camel_name: str,
+    scheme: str,
+) -> str | None:
+    value = candidate.get(camel_name) or candidate.get(snake_name)
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value if value.startswith(f"{scheme}://") else None
+
+
+def _native_task_batch_calls(text: str) -> int:
+    call_ids: set[str] = set()
+    for index, event in enumerate(_json_events(text)):
+        if (
+            event.get("toolName") == "task"
+            and event.get("type")
+            in {"tool_execution_update", "tool_execution_end"}
+        ):
+            call_ids.add(str(event.get("toolCallId") or f"event-{index}"))
+    return len(call_ids)
 
 
 def parse_omp_task_events(text: str) -> list[dict[str, Any]]:
@@ -295,6 +381,18 @@ def parse_omp_task_events(text: str) -> list[dict[str, Any]]:
             updates: dict[str, Any] = {
                 "index": index,
                 "task_id": task_id,
+                "agent_uri": _authentic_uri(
+                    candidate,
+                    snake_name="agent_uri",
+                    camel_name="agentUri",
+                    scheme="agent",
+                ),
+                "history_uri": _authentic_uri(
+                    candidate,
+                    snake_name="history_uri",
+                    camel_name="historyUri",
+                    scheme="history",
+                ),
                 "agent_name": (
                     str(
                         candidate.get("agentName")
@@ -399,7 +497,7 @@ def parse_omp_json_stream(
     metadata: dict[str, Any] = {
         "backend": "omp",
         "session_id": session_id,
-        "session_persisted": session_persisted,
+        "session_persisted": bool(session_persisted and session_id),
         "agent_uri": None,
         "history_uri": None,
         "provider": provider or None,
@@ -417,6 +515,7 @@ def parse_omp_json_stream(
             "cost": usage.get("cost") if isinstance(usage.get("cost"), dict) else {},
         },
         "task_progress": parse_omp_task_events(text),
+        "task_batch_calls": _native_task_batch_calls(text),
     }
     return output, metadata, input_tokens, output_tokens
 
@@ -430,6 +529,21 @@ def run_omp_print(
     timeout_sec: int | None = None,
 ) -> OmpExecutionResult:
     cfg = config or OmpRunnerConfig.from_env()
+    if cfg.execution_mode == "current_host":
+        return OmpExecutionResult(
+            returncode=2,
+            stdout="",
+            stderr=(
+                "omp_same_host_capability_mismatch: print execution cannot use "
+                "an external subprocess in execution_mode=current_host"
+            ),
+            elapsed_sec=0.0,
+            metadata={
+                "backend": "omp",
+                "coordination_surface": "print",
+                "execution_mode": "current_host",
+            },
+        )
     effective_timeout = timeout_sec if timeout_sec is not None else cfg.timeout_sec
     cmd = build_omp_print_command(prompt, cfg, model=model)
     env = os.environ.copy()
@@ -457,6 +571,7 @@ def run_omp_print(
                 "backend": "omp",
                 "command": cfg.command,
                 "coordination_surface": "print",
+                "execution_mode": "external_host",
             },
         )
     except subprocess.TimeoutExpired:
@@ -469,6 +584,7 @@ def run_omp_print(
                 "backend": "omp",
                 "command": cfg.command,
                 "coordination_surface": "print",
+                "execution_mode": "external_host",
             },
         )
 
@@ -479,6 +595,7 @@ def run_omp_print(
     metadata["command"] = cfg.command
     metadata["requested_model"] = model or cfg.model
     metadata["coordination_surface"] = "print"
+    metadata["execution_mode"] = "external_host"
     if not output and completed.stdout.strip():
         output = completed.stdout.strip()
     return OmpExecutionResult(
@@ -534,6 +651,7 @@ def _run_omp_native_host(
     model: str | None,
     timeout_sec: int,
     isolate_tasks: bool = False,
+    resume_session_id: str | None = None,
 ) -> OmpExecutionResult:
     started = time.monotonic()
     prompt_path: Path | None = None
@@ -552,6 +670,8 @@ def _run_omp_native_host(
             prompt_path = Path(handle.name)
         os.chmod(prompt_path, 0o600)
         command = build_omp_native_command(prompt_path, config, model=model)
+        if resume_session_id is not None:
+            command[-2:-2] = ["-r", resume_session_id]
         if isolate_tasks:
             with tempfile.NamedTemporaryFile(
                 prefix="awf-omp-settings-",
@@ -613,6 +733,8 @@ def _run_omp_native_host(
                 "backend": "omp",
                 "command": config.command,
                 "coordination_surface": "native",
+                "execution_mode": "external_host",
+                "resumed_session_id": resume_session_id,
             },
         )
     except BaseException:
@@ -639,6 +761,8 @@ def _run_omp_native_host(
         command=config.command,
         requested_model=model or config.model,
         coordination_surface="native",
+        execution_mode="external_host",
+        resumed_session_id=resume_session_id,
     )
     stderr = stderr.strip()
     if timed_out:
@@ -696,6 +820,64 @@ def parse_omp_native_envelope(
         indexed[name] = item
     return indexed, None
 
+def parse_omp_steering_evidence(
+    text: str,
+    *,
+    worker_names: Sequence[str] = (),
+) -> dict[str, Any]:
+    """Return only bounded, non-content steering provenance from an envelope."""
+    value = _parse_json_value(text)
+    steering = value.get("steering") if isinstance(value, dict) else None
+    if not isinstance(steering, dict):
+        return {
+            "reported": False,
+            "wait_calls": 0,
+            "inspected_completed": [],
+            "message_sent": False,
+            "message_target": None,
+            "message_kind": None,
+        }
+    allowed = set(worker_names)
+    raw_inspected = steering.get("inspected_completed")
+    inspected: list[str] = []
+    if isinstance(raw_inspected, list):
+        for name in raw_inspected:
+            if (
+                isinstance(name, str)
+                and name in allowed
+                and name not in inspected
+            ):
+                inspected.append(name)
+    raw_wait_calls = steering.get("wait_calls")
+    wait_calls = (
+        raw_wait_calls
+        if isinstance(raw_wait_calls, int)
+        and not isinstance(raw_wait_calls, bool)
+        and raw_wait_calls >= 0
+        else 0
+    )
+    message = steering.get("message")
+    message_target: str | None = None
+    message_kind: str | None = None
+    if isinstance(message, dict):
+        target = message.get("target")
+        kind = message.get("kind")
+        if (
+            isinstance(target, str)
+            and target in allowed
+            and kind in {"corrective", "blocker"}
+        ):
+            message_target = target
+            message_kind = str(kind)
+    return {
+        "reported": True,
+        "wait_calls": wait_calls,
+        "inspected_completed": inspected,
+        "message_sent": message_target is not None,
+        "message_target": message_target,
+        "message_kind": message_kind,
+    }
+
 
 def _schema_value(
     schema: JsonSchema,
@@ -738,6 +920,418 @@ def validate_json_schema(value: Any, schema: JsonSchema) -> list[str]:
         errors.append(f"{path}: {error.message}")
     return errors
 
+
+_CHECKPOINT_VERSION = 1
+_TERMINAL_TASK_STATUSES = {
+    "completed",
+    "success",
+    "ok",
+    "failed",
+    "error",
+    "cancelled",
+    "canceled",
+}
+
+
+def _sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _sha256_json(value: Any) -> str:
+    return _sha256_bytes(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+
+
+def _worker_descriptor_hash(worker: OmpWorkerTask) -> str:
+    return _sha256_json(
+        {
+            "name": worker.name,
+            "role": worker.role,
+            "agent_type": worker.agent_type,
+            "prompt_sha256": _sha256_bytes(worker.prompt.encode("utf-8")),
+            "output_schema_sha256": _sha256_json(worker.output_schema),
+            "schema_mode": worker.schema_mode,
+            "isolated": worker.isolated,
+            "require_json": worker.require_json,
+        }
+    )
+
+
+def _native_batch_identity(
+    workers: Sequence[OmpWorkerTask],
+    config: OmpRunnerConfig,
+    model: str | None,
+) -> tuple[str, list[str]]:
+    descriptor_hashes = [_worker_descriptor_hash(worker) for worker in workers]
+    fingerprint = _sha256_json(
+        {
+            "version": _CHECKPOINT_VERSION,
+            "descriptor_hashes": descriptor_hashes,
+            "command_sha256": _sha256_bytes(config.command.encode("utf-8")),
+            "extra_args_sha256": _sha256_json(config.extra_args),
+            "model_sha256": _sha256_bytes(
+                (model or config.model or "").encode("utf-8")
+            ),
+            "session_persistence_requested": not config.no_session,
+            "execution_mode": config.execution_mode,
+        }
+    )
+    return fingerprint, descriptor_hashes
+
+
+def _native_checkpoint_path(cwd: str | None, fingerprint: str) -> Path:
+    root = Path(cwd).resolve() if cwd is not None else Path.cwd().resolve()
+    return (
+        root
+        / ".workflow"
+        / "artifacts"
+        / "dispatch"
+        / f"omp-native-{fingerprint}.json"
+    )
+
+
+def _atomic_write_checkpoint(path: Path, checkpoint: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            delete=False,
+        ) as handle:
+            json.dump(
+                checkpoint,
+                handle,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+            temporary = Path(handle.name)
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+
+
+def _load_checkpoint(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, None
+    except (OSError, json.JSONDecodeError):
+        return None, "omp_checkpoint_identity_ambiguous: unreadable checkpoint"
+    if not isinstance(value, dict):
+        return None, "omp_checkpoint_identity_ambiguous: checkpoint is not an object"
+    return value, None
+
+
+def _checkpoint_worker_rows(
+    workers: Sequence[OmpWorkerTask],
+    descriptor_hashes: Sequence[str],
+    progress: Sequence[dict[str, Any]] = (),
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    progress_list = list(progress)
+    for index, (worker, descriptor_hash) in enumerate(
+        zip(workers, descriptor_hashes, strict=True)
+    ):
+        record = _task_record(progress_list, index, worker.name)
+        task_id = str(record.get("task_id") or "").strip() if record else ""
+        agent_uri = (
+            str(record.get("agent_uri") or "").strip() if record else ""
+        )
+        history_uri = (
+            str(record.get("history_uri") or "").strip() if record else ""
+        )
+        if task_id:
+            agent_uri = agent_uri or f"agent://{task_id}"
+            history_uri = history_uri or f"history://{task_id}"
+        rows.append(
+            {
+                "index": index,
+                "name": worker.name,
+                "descriptor_sha256": descriptor_hash,
+                "task_id": task_id or None,
+                "agent_uri": agent_uri or None,
+                "history_uri": history_uri or None,
+                "status": (
+                    str(record.get("status") or "").lower() or None
+                    if record
+                    else None
+                ),
+            }
+        )
+    return rows
+
+
+def _prepared_checkpoint(
+    workers: Sequence[OmpWorkerTask],
+    descriptor_hashes: Sequence[str],
+    fingerprint: str,
+    config: OmpRunnerConfig,
+    previous: dict[str, Any] | None,
+    recovery_rows: Sequence[dict[str, Any]] | None,
+    recovery_session_id: str | None,
+) -> dict[str, Any]:
+    prior_attempt = previous.get("attempt") if isinstance(previous, dict) else 0
+    attempt = (
+        prior_attempt + 1
+        if isinstance(prior_attempt, int) and not isinstance(prior_attempt, bool)
+        else 1
+    )
+    rows = (
+        [dict(row) for row in recovery_rows]
+        if recovery_rows is not None
+        else _checkpoint_worker_rows(workers, descriptor_hashes)
+    )
+    return {
+        "version": _CHECKPOINT_VERSION,
+        "kind": "omp_native_batch",
+        "batch_fingerprint": fingerprint,
+        "descriptor_hashes": list(descriptor_hashes),
+        "worker_names": [worker.name for worker in workers],
+        "state": "resuming" if recovery_rows is not None else "prepared",
+        "attempt": attempt,
+        "session_persistence_requested": not config.no_session,
+        "session_persisted": recovery_session_id is not None,
+        "resumable": recovery_session_id is not None,
+        "coordinator_session_id": recovery_session_id,
+        "workers": rows,
+        "steering_evidence": None,
+    }
+
+
+def _recovery_identity(
+    checkpoint: dict[str, Any],
+    workers: Sequence[OmpWorkerTask],
+    descriptor_hashes: Sequence[str],
+    fingerprint: str,
+) -> tuple[str | None, list[dict[str, Any]] | None, str | None]:
+    if checkpoint.get("version") != _CHECKPOINT_VERSION:
+        return None, None, "omp_checkpoint_identity_ambiguous: unsupported version"
+    if checkpoint.get("batch_fingerprint") != fingerprint:
+        return None, None, "omp_checkpoint_identity_ambiguous: fingerprint mismatch"
+    if checkpoint.get("descriptor_hashes") != list(descriptor_hashes):
+        return None, None, "omp_checkpoint_identity_ambiguous: descriptor mismatch"
+    if checkpoint.get("state") not in {"interrupted", "resuming"}:
+        return None, None, "omp_checkpoint_identity_ambiguous: interrupted state missing"
+    if (
+        checkpoint.get("session_persistence_requested") is not True
+        or checkpoint.get("session_persisted") is not True
+        or checkpoint.get("resumable") is not True
+    ):
+        return None, None, "omp_checkpoint_handles_missing: session is not resumable"
+    session_id = checkpoint.get("coordinator_session_id")
+    if not isinstance(session_id, str) or not session_id.strip():
+        return None, None, "omp_checkpoint_handles_missing: coordinator session"
+    raw_rows = checkpoint.get("workers")
+    if not isinstance(raw_rows, list) or len(raw_rows) != len(workers):
+        return None, None, "omp_checkpoint_handles_missing: worker identities"
+    rows: list[dict[str, Any]] = []
+    task_ids: set[str] = set()
+    for index, (worker, descriptor_hash, raw_row) in enumerate(
+        zip(workers, descriptor_hashes, raw_rows, strict=True)
+    ):
+        if not isinstance(raw_row, dict):
+            return None, None, "omp_checkpoint_handles_missing: worker identity"
+        task_id = raw_row.get("task_id")
+        agent_uri = raw_row.get("agent_uri")
+        history_uri = raw_row.get("history_uri")
+        if (
+            raw_row.get("index") != index
+            or raw_row.get("name") != worker.name
+            or raw_row.get("descriptor_sha256") != descriptor_hash
+        ):
+            return None, None, "omp_checkpoint_identity_ambiguous: worker mapping"
+        if (
+            not isinstance(task_id, str)
+            or not task_id
+            or task_id in task_ids
+            or not isinstance(agent_uri, str)
+            or not agent_uri.startswith("agent://")
+            or not isinstance(history_uri, str)
+            or not history_uri.startswith("history://")
+        ):
+            return None, None, "omp_checkpoint_handles_missing: authentic worker handles"
+        task_ids.add(task_id)
+        rows.append(dict(raw_row))
+    return session_id.strip(), rows, None
+
+
+def _merge_recovery_progress(
+    current: Sequence[dict[str, Any]],
+    persisted_rows: Sequence[dict[str, Any]],
+    workers: Sequence[OmpWorkerTask],
+) -> tuple[list[dict[str, Any]], str | None]:
+    current_list = list(current)
+    merged: list[dict[str, Any]] = []
+    for index, (worker, persisted) in enumerate(
+        zip(workers, persisted_rows, strict=True)
+    ):
+        live = _task_record(current_list, index, worker.name)
+        persisted_task_id = str(persisted["task_id"])
+        if live is not None:
+            live_task_id = str(live.get("task_id") or "")
+            if live_task_id and live_task_id != persisted_task_id:
+                return [], (
+                    "omp_checkpoint_identity_ambiguous: resumed task ID changed "
+                    f"for {worker.name}"
+                )
+        merged_record = {
+            "index": index,
+            "task_id": persisted_task_id,
+            "task_name": worker.name,
+            "agent_uri": persisted["agent_uri"],
+            "history_uri": persisted["history_uri"],
+            "status": persisted.get("status"),
+        }
+        if live is not None:
+            merged_record.update(
+                {
+                    key: value
+                    for key, value in live.items()
+                    if value is not None and key not in {"task_id", "index"}
+                }
+            )
+        merged.append(merged_record)
+    return merged, None
+
+
+def _with_execution_metadata(
+    execution: OmpExecutionResult,
+    **updates: Any,
+) -> OmpExecutionResult:
+    metadata = dict(execution.metadata)
+    metadata.update(updates)
+    return OmpExecutionResult(
+        returncode=execution.returncode,
+        stdout=execution.stdout,
+        stderr=execution.stderr,
+        elapsed_sec=execution.elapsed_sec,
+        timed_out=execution.timed_out,
+        metadata=metadata,
+        input_tokens=execution.input_tokens,
+        output_tokens=execution.output_tokens,
+    )
+
+
+def _finalize_checkpoint(
+    checkpoint: dict[str, Any],
+    workers: Sequence[OmpWorkerTask],
+    descriptor_hashes: Sequence[str],
+    execution: OmpExecutionResult,
+    indexed: dict[str, dict[str, Any]] | None,
+    envelope_error: str | None,
+    steering_evidence: dict[str, Any],
+    duplicate_task_error: str | None,
+) -> dict[str, Any]:
+    progress = execution.metadata.get("task_progress")
+    progress_list = progress if isinstance(progress, list) else []
+    rows = _checkpoint_worker_rows(workers, descriptor_hashes, progress_list)
+    coordinator_session_id = (
+        execution.metadata.get("session_id")
+        or checkpoint.get("coordinator_session_id")
+    )
+    session_persisted = bool(
+        checkpoint.get("session_persistence_requested")
+        and isinstance(coordinator_session_id, str)
+        and coordinator_session_id
+    )
+    all_terminal = all(
+        row.get("task_id")
+        and row.get("status") in _TERMINAL_TASK_STATUSES
+        for row in rows
+    )
+    complete_envelope = (
+        indexed is not None
+        and envelope_error is None
+        and all(worker.name in indexed for worker in workers)
+    )
+    handles_complete = all(
+        row.get("task_id")
+        and row.get("agent_uri")
+        and row.get("history_uri")
+        for row in rows
+    )
+    if duplicate_task_error:
+        state = "ambiguous"
+    elif all_terminal and complete_envelope:
+        state = "completed"
+    elif session_persisted and handles_complete:
+        state = "interrupted"
+    elif checkpoint.get("session_persistence_requested"):
+        state = "ambiguous"
+    else:
+        state = "interrupted"
+    finalized = dict(checkpoint)
+    finalized.update(
+        state=state,
+        session_persisted=session_persisted,
+        resumable=bool(
+            state == "interrupted" and session_persisted and handles_complete
+        ),
+        coordinator_session_id=(
+            coordinator_session_id if session_persisted else None
+        ),
+        workers=rows,
+        steering_evidence=steering_evidence,
+    )
+    return finalized
+
+
+def _native_failures(
+    workers: Sequence[OmpWorkerTask],
+    message: str,
+    *,
+    execution_mode: OmpExecutionMode,
+    checkpoint_path: Path | None = None,
+) -> list[AgentResult]:
+    return [
+        AgentResult(
+            provider_name="omp",
+            role=worker.role,
+            stdout="",
+            stderr=message,
+            returncode=2,
+            elapsed_sec=0.0,
+            parse_error=True,
+            metadata={
+                "backend": "omp",
+                "coordination_surface": "native",
+                "execution_mode": execution_mode,
+                "task_id": None,
+                "agent_uri": None,
+                "history_uri": None,
+                "checkpoint_path": (
+                    str(checkpoint_path) if checkpoint_path is not None else None
+                ),
+                "schema_validation": {
+                    "mode": worker.schema_mode,
+                    "valid": False,
+                    "errors": [message],
+                },
+            },
+        )
+        for worker in workers
+    ]
 
 def _task_record(
     progress: list[dict[str, Any]],
@@ -782,8 +1376,16 @@ def _worker_metadata(
         task_status=record.get("status") if record else None,
         patch_path=record.get("patch_path") if record else None,
         status=record.get("status") if record else None,
-        agent_uri=f"agent://{task_id}" if task_id else None,
-        history_uri=f"history://{task_id}" if task_id else None,
+        agent_uri=(
+            record.get("agent_uri") or f"agent://{task_id}"
+            if task_id and record
+            else None
+        ),
+        history_uri=(
+            record.get("history_uri") or f"history://{task_id}"
+            if task_id and record
+            else None
+        ),
         resolved_model=resolved_model,
         resolved_model_is_fallback=(
             record.get("resolved_model_is_fallback") if record else None
@@ -835,22 +1437,206 @@ def run_omp_native_batch(
     config: OmpRunnerConfig | None = None,
     model: str | None = None,
     timeout_sec: int | None = None,
+    host_bridge: OmpCurrentHostBridge | None = None,
 ) -> list[AgentResult]:
-    """Run a native OMP task batch in one host process and preserve input order."""
+    """Run one native OMP batch with fail-closed durable recovery."""
     if not workers:
         return []
     cfg = config or OmpRunnerConfig.from_env()
     if len(workers) > cfg.capacity:
         return _capacity_failures(workers, cfg.capacity)
-    execution = _run_omp_native_host(
-        build_omp_coordinator_prompt(workers, capacity=cfg.capacity),
-        cwd=cwd,
-        config=cfg,
-        model=model,
-        timeout_sec=timeout_sec if timeout_sec is not None else cfg.timeout_sec,
-        isolate_tasks=any(worker.isolated is True for worker in workers),
+    effective_timeout = timeout_sec if timeout_sec is not None else cfg.timeout_sec
+    prompt = build_omp_coordinator_prompt(workers, capacity=cfg.capacity)
+    checkpoint_path: Path | None = None
+    checkpoint: dict[str, Any] | None = None
+    descriptor_hashes: list[str] = []
+    recovery_rows: list[dict[str, Any]] | None = None
+    recovery_session_id: str | None = None
+
+    if cfg.execution_mode == "current_host":
+        if host_bridge is None:
+            return _native_failures(
+                workers,
+                (
+                    "omp_same_host_capability_mismatch: execution_mode=current_host "
+                    "requires an injected current OMP task/hub bridge"
+                ),
+                execution_mode=cfg.execution_mode,
+            )
+        try:
+            execution = host_bridge(
+                prompt=prompt,
+                workers=workers,
+                cwd=cwd,
+                config=cfg,
+                model=model,
+                timeout_sec=effective_timeout,
+            )
+        except Exception as exc:
+            return _native_failures(
+                workers,
+                f"omp_same_host_bridge_failed: {type(exc).__name__}: {exc}",
+                execution_mode=cfg.execution_mode,
+            )
+        if not isinstance(execution, OmpExecutionResult):
+            return _native_failures(
+                workers,
+                "omp_same_host_bridge_invalid: bridge returned no OmpExecutionResult",
+                execution_mode=cfg.execution_mode,
+            )
+        execution = _with_execution_metadata(
+            execution,
+            execution_mode="current_host",
+            coordination_surface="native",
+        )
+    else:
+        fingerprint, descriptor_hashes = _native_batch_identity(
+            workers,
+            cfg,
+            model,
+        )
+        checkpoint_path = _native_checkpoint_path(cwd, fingerprint)
+        previous, checkpoint_error = _load_checkpoint(checkpoint_path)
+        if checkpoint_error is not None and not cfg.no_session:
+            return _native_failures(
+                workers,
+                checkpoint_error,
+                execution_mode=cfg.execution_mode,
+                checkpoint_path=checkpoint_path,
+            )
+        if (
+            previous is not None
+            and not cfg.no_session
+            and previous.get("state") != "completed"
+        ):
+            (
+                recovery_session_id,
+                recovery_rows,
+                checkpoint_error,
+            ) = _recovery_identity(
+                previous,
+                workers,
+                descriptor_hashes,
+                fingerprint,
+            )
+            if checkpoint_error is not None:
+                return _native_failures(
+                    workers,
+                    checkpoint_error,
+                    execution_mode=cfg.execution_mode,
+                    checkpoint_path=checkpoint_path,
+                )
+        checkpoint = _prepared_checkpoint(
+            workers,
+            descriptor_hashes,
+            fingerprint,
+            cfg,
+            previous,
+            recovery_rows,
+            recovery_session_id,
+        )
+        try:
+            _atomic_write_checkpoint(checkpoint_path, checkpoint)
+        except OSError as exc:
+            return _native_failures(
+                workers,
+                f"omp_checkpoint_write_failed: {type(exc).__name__}: {exc}",
+                execution_mode=cfg.execution_mode,
+                checkpoint_path=checkpoint_path,
+            )
+        if recovery_rows is not None:
+            prompt = _build_omp_recovery_prompt(
+                workers,
+                recovery_rows,
+                capacity=cfg.capacity,
+            )
+        execution = _run_omp_native_host(
+            prompt,
+            cwd=cwd,
+            config=cfg,
+            model=model,
+            timeout_sec=effective_timeout,
+            isolate_tasks=any(worker.isolated is True for worker in workers),
+            resume_session_id=recovery_session_id,
+        )
+
+    progress = execution.metadata.get("task_progress", [])
+    if not isinstance(progress, list):
+        progress = []
+    batch_error: str | None = None
+    if recovery_rows is not None:
+        progress, batch_error = _merge_recovery_progress(
+            progress,
+            recovery_rows,
+            workers,
+        )
+        execution = _with_execution_metadata(
+            execution,
+            task_progress=progress,
+            session_id=execution.metadata.get("session_id")
+            or recovery_session_id,
+            session_persisted=True,
+            recovery_resumed=True,
+        )
+    else:
+        execution = _with_execution_metadata(execution, recovery_resumed=False)
+
+    raw_task_batch_calls = execution.metadata.get("task_batch_calls")
+    task_batch_calls = (
+        raw_task_batch_calls
+        if isinstance(raw_task_batch_calls, int)
+        and not isinstance(raw_task_batch_calls, bool)
+        and raw_task_batch_calls >= 0
+        else 0
     )
+    duplicate_task_error: str | None = None
+    if recovery_rows is not None and task_batch_calls:
+        duplicate_task_error = (
+            "omp_recovery_duplicate_task_batch: resumed coordinator called task"
+        )
+    elif recovery_rows is None and task_batch_calls > 1:
+        duplicate_task_error = (
+            "omp_native_duplicate_task_batch: coordinator called task more than once"
+        )
+    batch_error = batch_error or duplicate_task_error
+
     indexed, envelope_error = parse_omp_native_envelope(execution.stdout)
+    steering_evidence = parse_omp_steering_evidence(
+        execution.stdout,
+        worker_names=[worker.name for worker in workers],
+    )
+    if checkpoint is not None and checkpoint_path is not None:
+        finalized = _finalize_checkpoint(
+            checkpoint,
+            workers,
+            descriptor_hashes,
+            execution,
+            indexed,
+            envelope_error,
+            steering_evidence,
+            duplicate_task_error,
+        )
+        try:
+            _atomic_write_checkpoint(checkpoint_path, finalized)
+        except OSError as exc:
+            batch_error = batch_error or (
+                f"omp_checkpoint_finalize_failed: {type(exc).__name__}: {exc}"
+            )
+        execution = _with_execution_metadata(
+            execution,
+            checkpoint_path=str(checkpoint_path),
+            checkpoint_state=finalized["state"],
+            batch_fingerprint=finalized["batch_fingerprint"],
+            steering_evidence=steering_evidence,
+            native_batch_error=batch_error,
+        )
+    else:
+        execution = _with_execution_metadata(
+            execution,
+            steering_evidence=steering_evidence,
+            native_batch_error=batch_error,
+        )
+
     progress = execution.metadata.get("task_progress", [])
     if not isinstance(progress, list):
         progress = []
@@ -862,7 +1648,7 @@ def run_omp_native_batch(
         metadata = _worker_metadata(execution, record)
         item = indexed.get(worker.name) if indexed is not None else None
         if item is None:
-            reason = envelope_error or (
+            reason = batch_error or envelope_error or (
                 f"native host envelope missing worker {worker.name!r}"
             )
             timed_out = execution.timed_out
@@ -931,7 +1717,7 @@ def run_omp_native_batch(
             execution.timed_out
             and lifecycle_status in {"completed", "success", "ok"}
         )
-        host_failure = (
+        host_failure = batch_error or (
             f"native coordinator exited {execution.returncode}"
             if execution.returncode != 0 and not completed_before_timeout
             else ""

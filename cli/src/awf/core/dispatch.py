@@ -30,6 +30,7 @@ from awf.core.agent_runner import AgentResult, run_agent
 from awf.core.output_schemas import multi_agent_result_schema
 from awf.core.spec_loader import resolve_agent_for_role
 from awf.runners.omp import (
+    OmpCurrentHostBridge,
     OmpRunnerConfig,
     OmpWorkerTask,
     omp_worker_name,
@@ -125,6 +126,11 @@ def backend_capabilities(
     options = omp_options or OmpDispatchOptions()
     if options.config.coordination_surface != "native":
         return base
+    if (
+        options.config.execution_mode == "current_host"
+        and options.host_bridge is None
+    ):
+        return base
 
     native = set(base.capabilities)
     native.update(
@@ -141,7 +147,15 @@ def backend_capabilities(
             "strict_schema",
         }
     )
-    if not options.config.no_session:
+    native.add(
+        "same_host"
+        if options.config.execution_mode == "current_host"
+        else "external_host"
+    )
+    if (
+        options.config.execution_mode == "external_host"
+        and not options.config.no_session
+    ):
         native.update({"durable_followup", "follow_up", "session"})
     return BackendCapabilities(surface=SURFACE_OMP, capabilities=frozenset(native))
 
@@ -337,6 +351,11 @@ class OmpDispatchOptions:
     """Configuration for OMP native coordination or print compatibility."""
 
     config: OmpRunnerConfig = field(default_factory=OmpRunnerConfig.from_env)
+    host_bridge: OmpCurrentHostBridge | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
     role_models: dict[str, str] = field(default_factory=dict)
 
     def model_for(self, role: str) -> str | None:
@@ -585,6 +604,27 @@ class OmpDispatch:
         if not workers:
             return []
         if strategy == "sequential":
+            if (
+                self._options.config.coordination_surface == "native"
+                and self._options.config.execution_mode == "current_host"
+            ):
+                completed: list[AgentResult] = []
+                for spec, task in zip(
+                    workers,
+                    _omp_native_tasks(workers),
+                    strict=True,
+                ):
+                    completed.extend(
+                        run_omp_native_batch(
+                            [task],
+                            cwd=cwd,
+                            config=self._options.config,
+                            model=self._options.model_for(spec.role),
+                            timeout_sec=spec.timeout_sec,
+                            host_bridge=self._options.host_bridge,
+                        )
+                    )
+                return completed
             return [_run_omp_single(spec, cwd, self._options) for spec in workers]
         if self._options.config.coordination_surface == "native":
             return run_omp_native_batch(
@@ -593,6 +633,7 @@ class OmpDispatch:
                 config=self._options.config,
                 model=self._options.config.model,
                 timeout_sec=max(spec.timeout_sec for spec in workers),
+                host_bridge=self._options.host_bridge,
             )
 
         results: list[AgentResult | None] = [None] * len(workers)
@@ -1391,7 +1432,7 @@ def resolve_cmux_options_from_config(
 def resolve_omp_options_from_config(
     provider_config: dict | None,
 ) -> OmpDispatchOptions:
-    """Read ``dispatch.omp`` command, model, session, and role-model policy."""
+    """Read ``dispatch.omp`` host mode, model, session, and role-model policy."""
     section = (provider_config or {}).get("dispatch", {})
     if not isinstance(section, dict):
         return OmpDispatchOptions()
@@ -1425,6 +1466,14 @@ def resolve_omp_options_from_config(
     coordination_surface: Literal["native", "print"] = (
         "print" if surface_value == "print" else "native"
     )
+    execution_mode_value = str(
+        omp_section.get("execution_mode", env_config.execution_mode)
+    ).strip().lower()
+    execution_mode: Literal["external_host", "current_host"] = (
+        "current_host"
+        if execution_mode_value in {"current_host", "same_host"}
+        else "external_host"
+    )
     capacity_value = omp_section.get("capacity", env_config.capacity)
     try:
         capacity = max(1, int(capacity_value))
@@ -1457,6 +1506,7 @@ def resolve_omp_options_from_config(
             timeout_sec=timeout_sec,
             no_session=no_session,
             coordination_surface=coordination_surface,
+            execution_mode=execution_mode,
             capacity=capacity,
             termination_grace_sec=termination_grace_sec,
         ),

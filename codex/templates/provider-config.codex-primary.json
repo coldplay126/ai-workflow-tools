@@ -22,6 +22,7 @@
       "command": "omp",
       "no_session": false,
       "coordination_surface": "native",
+      "execution_mode": "external_host",
       "capacity": 8,
       "role_models": {}
     }

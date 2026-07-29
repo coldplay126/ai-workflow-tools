@@ -42,6 +42,35 @@ def _safe_schema_validation(value: Any) -> Any:
     return str(value)
 
 
+def _safe_steering_evidence(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    inspected = value.get("inspected_completed")
+    raw_wait_calls = value.get("wait_calls")
+    return {
+        "reported": value.get("reported") is True,
+        "wait_calls": (
+            raw_wait_calls
+            if isinstance(raw_wait_calls, int)
+            and not isinstance(raw_wait_calls, bool)
+            and raw_wait_calls >= 0
+            else 0
+        ),
+        "inspected_completed": (
+            [str(name) for name in inspected if isinstance(name, str)]
+            if isinstance(inspected, list)
+            else []
+        ),
+        "message_sent": value.get("message_sent") is True,
+        "message_target": _text(value, "message_target"),
+        "message_kind": (
+            value.get("message_kind")
+            if value.get("message_kind") in {"corrective", "blocker"}
+            else None
+        ),
+    }
+
+
 def _declared_status(value: str | None) -> str | None:
     if value is None:
         return None
@@ -117,6 +146,9 @@ def _record_for_agent(agent: Any) -> dict[str, Any]:
         ),
         "lineage": lineage,
         "followup_evidence": _json_safe(metadata.get("followup_evidence")),
+        "steering_evidence": _safe_steering_evidence(
+            metadata.get("steering_evidence")
+        ),
         "declared_status": declared_status,
         "declared_status_matches_evidence": (
             normalized_declared_status == status
@@ -126,6 +158,7 @@ def _record_for_agent(agent: Any) -> dict[str, Any]:
         "metadata": {
             "backend": _text(metadata, "backend"),
             "session_id": session_id,
+            "execution_mode": _text(metadata, "execution_mode"),
             "session_persisted": bool(metadata.get("session_persisted", False)),
             "task_id": task_id,
             "agent_uri": _text(metadata, "agent_uri"),

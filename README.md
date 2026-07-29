@@ -105,6 +105,21 @@ Gemini CLI를 기본 provider로 쓰려면 `provider.default = "gemini"`를 설�
 
 처음에는 작은 gated loop로 시작합니다.
 
+아래 `bash` 블록은 로컬 셸에서 실행하는 **AWF CLI** 예시입니다. `setup.sh`로
+Claude Code 스킬을 설치한 뒤에는 별도의 **slash-skill** 진입점도 사용할 수
+있으며, 두 문법을 섞지 않습니다:
+
+```text
+/wf init small scoped improvement
+/wf resume
+/wf status
+/wf reset archive
+```
+
+인자 없는 `/wf`는 활성 `.workflow/state.json`이 있을 때만 재개하고, 없으면
+concept 입력을 요청합니다. `/wf reset archive`는 `wf-reset` 스킬 동작이며
+`awf wf reset archive`라는 CLI 명령을 뜻하지 않습니다.
+
 ```bash
 awf ready --repo-root .
 awf scan <repo-or-subproject> --no-ai
@@ -304,6 +319,21 @@ Leave `provider.gemini.model` empty for Gemini CLI Auto, or set
 ### First workflow sequence
 
 Start new repositories with a small, gated loop:
+
+The `bash` block below uses the **AWF CLI** from a local shell. After
+`setup.sh` installs the Claude Code skills, the separate **slash-skill**
+entrypoint is also available; do not mix the two syntaxes:
+
+```text
+/wf init small scoped improvement
+/wf resume
+/wf status
+/wf reset archive
+```
+
+Bare `/wf` resumes only when an active `.workflow/state.json` exists; otherwise
+it asks for a concept. `/wf reset archive` is `wf-reset` skill behavior, not an
+`awf wf reset archive` CLI command.
 
 ```bash
 awf ready --repo-root .

@@ -5,7 +5,174 @@ backward-compatible access for v2.0.0 configs (pattern defaults to "subagent").
 """
 from __future__ import annotations
 
-from typing import Any
+from copy import deepcopy
+from dataclasses import dataclass
+from typing import Any, Callable
+
+
+_AUTOMATIC_SECONDARY_ROLES: dict[str, dict[str, tuple[str, ...]]] = {
+    "small": {},
+    "standard": {
+        "plan": ("constitution_reviewer",),
+        "review": ("code_reviewer",),
+        "verify": ("code_reviewer",),
+        "test": ("adversarial",),
+    },
+    "high_risk": {
+        "plan": ("constitution_reviewer",),
+        "impl": ("code_reviewer",),
+        "review": ("code_reviewer", "analyzer"),
+        "verify": ("code_reviewer", "analyzer"),
+        "test": ("adversarial", "quality_validation"),
+    },
+}
+
+
+@dataclass(frozen=True)
+class SecondaryTeamSelection:
+    """Immutable routing decision for work that follows the primary provider."""
+
+    managed: bool
+    source: str
+    team_config: dict[str, Any] | None = None
+    provider_config: dict[str, Any] | None = None
+
+    @property
+    def has_secondary_work(self) -> bool:
+        return self.team_config is not None
+
+
+def select_secondary_team(
+    provider_config: dict[str, Any],
+    phase: str,
+    change_class: str | None,
+    *,
+    mode: str | None = None,
+    resolve_agent: Callable[[str], str | None] | None = None,
+    load_agent: Callable[[str], dict[str, Any]] | None = None,
+) -> SecondaryTeamSelection:
+    """Select a secondary-only team without mutating config or workflow state.
+
+    Automatic selection is owned only when ``team_selection.enabled`` is
+    explicitly true. The persisted ``change_class`` value is consumed as-is;
+    unknown values fail closed instead of being reclassified or coerced.
+    """
+    if mode == "solo":
+        return SecondaryTeamSelection(managed=True, source="explicit-solo")
+
+    selection_cfg = provider_config.get("team_selection")
+    if not isinstance(selection_cfg, dict) or selection_cfg.get("enabled") is not True:
+        return SecondaryTeamSelection(managed=False, source="legacy")
+
+    explicit_team = _explicit_phase_team(provider_config, phase)
+    if explicit_team is not None:
+        if not explicit_team["roles"]:
+            return SecondaryTeamSelection(managed=True, source="explicit-config-none")
+        team = deepcopy(explicit_team)
+        return SecondaryTeamSelection(
+            managed=True,
+            source="explicit-config",
+            team_config=team,
+            provider_config=_secondary_only_provider_config(provider_config, phase, team),
+        )
+
+    class_roles = _AUTOMATIC_SECONDARY_ROLES.get(change_class)
+    role_ids = class_roles.get(phase, ()) if class_roles is not None else ()
+    if not role_ids:
+        return SecondaryTeamSelection(managed=True, source="automatic-none")
+
+    if resolve_agent is None or load_agent is None:
+        from awf.core.spec_loader import load_agent_definition, resolve_agent_for_role
+
+        resolve_agent = resolve_agent or resolve_agent_for_role
+        load_agent = load_agent or load_agent_definition
+
+    roles: list[dict[str, Any]] = []
+    seen_agents: set[str] = set()
+    for role_id in role_ids[:2]:
+        try:
+            agent_name = resolve_agent(role_id)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(agent_name, str) or not agent_name or agent_name in seen_agents:
+            continue
+        try:
+            definition = load_agent(agent_name)
+        except (FileNotFoundError, OSError, ValueError):
+            continue
+        if not isinstance(definition, dict):
+            continue
+        meta = definition.get("meta")
+        if not isinstance(meta, dict):
+            continue
+        resolved_name = meta.get("name", agent_name)
+        if not isinstance(resolved_name, str) or resolved_name != agent_name:
+            continue
+        provider_hint = meta.get("provider_hint")
+        if not isinstance(provider_hint, str) or not provider_hint:
+            continue
+        seen_agents.add(agent_name)
+        roles.append(
+            {
+                "id": role_id,
+                "protocol": role_id,
+                "provider": provider_hint,
+            }
+        )
+
+    if not roles:
+        return SecondaryTeamSelection(managed=True, source="automatic-unresolved")
+
+    defaults = provider_config.get("defaults")
+    configured_timeout = defaults.get("timeout_seconds") if isinstance(defaults, dict) else None
+    timeout_sec = (
+        configured_timeout
+        if isinstance(configured_timeout, int)
+        and not isinstance(configured_timeout, bool)
+        and configured_timeout >= 10
+        else 300
+    )
+    team = {
+        "name": f"{change_class}-{phase}-secondary",
+        "roles": roles,
+        "execution": "parallel" if len(roles) > 1 else "sequential",
+        "max_turns": 1,
+        "timeout_sec": timeout_sec,
+    }
+    return SecondaryTeamSelection(
+        managed=True,
+        source="automatic",
+        team_config=team,
+        provider_config=_secondary_only_provider_config(provider_config, phase, team),
+    )
+
+
+def _explicit_phase_team(
+    provider_config: dict[str, Any],
+    phase: str,
+) -> dict[str, Any] | None:
+    routing = provider_config.get("phase_routing")
+    phase_config = routing.get(phase) if isinstance(routing, dict) else None
+    team = phase_config.get("team") if isinstance(phase_config, dict) else None
+    roles = team.get("roles") if isinstance(team, dict) else None
+    return team if isinstance(roles, list) else None
+
+
+def _secondary_only_provider_config(
+    provider_config: dict[str, Any],
+    phase: str,
+    team_config: dict[str, Any],
+) -> dict[str, Any]:
+    routing_config = deepcopy(provider_config)
+    routing = routing_config.get("phase_routing")
+    if not isinstance(routing, dict):
+        routing = {}
+        routing_config["phase_routing"] = routing
+    routing[phase] = {
+        "pattern": "team",
+        "team": deepcopy(team_config),
+    }
+    return routing_config
 
 
 def get_phase_pattern(provider_config: dict[str, Any], phase: str) -> str:

@@ -25,6 +25,7 @@ from awf.runners.omp import (
     build_omp_print_command,
     parse_omp_json_stream,
     parse_omp_task_events,
+    parse_omp_steering_evidence,
     run_omp_native_batch,
     validate_json_schema,
 )
@@ -293,6 +294,7 @@ def test_resolve_omp_options_reads_native_runtime_options():
                     "no_session": False,
                     "timeout_sec": 42,
                     "coordination_surface": "print",
+                    "execution_mode": "current_host",
                     "capacity": 3,
                     "termination_grace_sec": 0.25,
                 }
@@ -305,6 +307,7 @@ def test_resolve_omp_options_reads_native_runtime_options():
     assert options.config.no_session is False
     assert options.config.timeout_sec == 42
     assert options.config.coordination_surface == "print"
+    assert options.config.execution_mode == "current_host"
     assert options.config.capacity == 3
     assert options.config.termination_grace_sec == 0.25
     assert options.model_for("reviewer") == "slow"
@@ -403,6 +406,12 @@ def test_json_schema_validation_enforces_draft_2020_object_contract():
 def test_coordinator_prompt_serializes_one_exact_native_task_batch(tmp_path: Path):
     prompt = build_omp_coordinator_prompt(_native_workers(), capacity=4)
     assert "Call `task` exactly once" in prompt
+    assert "bounded, event-driven coordination loop" in prompt
+    assert "call it at most 4 times total" in prompt
+    assert "at most one `hub send` message" in prompt
+    assert "Never call `task` again" in prompt
+    assert "Never busy-poll `hub jobs`" in prompt
+    assert '"steering":' in prompt
     assert '"name":"Awf000Reviewer"' in prompt
     assert '"agent":"code-reviewer"' in prompt
     assert '"schemaMode":"strict"' in prompt
@@ -857,3 +866,357 @@ def test_native_timeout_reaps_descendant_processes(tmp_path: Path):
         time.sleep(0.01)
     with pytest.raises(ProcessLookupError):
         os.kill(child_pid, 0)
+
+
+def _write_recovering_native_omp(
+    path: Path,
+    *,
+    count_path: Path,
+    argv_capture_path: Path,
+) -> Path:
+    script = f'''#!/usr/bin/env python3
+import json
+import sys
+from pathlib import Path
+
+count_path = Path({str(count_path)!r})
+count = int(count_path.read_text()) + 1 if count_path.exists() else 1
+count_path.write_text(str(count), encoding="utf-8")
+with Path({str(argv_capture_path)!r}).open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(sys.argv[1:]) + "\\n")
+prompt_arg = sys.argv[sys.argv.index("-p") + 1]
+prompt = Path(prompt_arg[1:]).read_text(encoding="utf-8")
+
+def emit(envelope):
+    message = {{
+        "role": "assistant",
+        "content": [{{"type": "text", "text": json.dumps(envelope, separators=(",", ":"))}}],
+        "provider": "fixture-provider",
+        "model": "coordinator-model",
+        "usage": {{"input": 3, "output": 2, "totalTokens": 5}},
+    }}
+    print(json.dumps({{"type": "message_end", "message": message}}))
+    print(json.dumps({{"type": "agent_end", "messages": [message]}}))
+
+if count == 1:
+    assert "-r" not in sys.argv
+    running = {{
+        "index": 0,
+        "id": "01RECOVER",
+        "agent": "code-reviewer",
+        "agentUri": "agent://01RECOVER",
+        "historyUri": "history://01RECOVER",
+        "status": "running",
+    }}
+    print(json.dumps({{"type": "session", "id": "coordinator-session"}}))
+    print(json.dumps({{
+        "type": "tool_execution_update",
+        "toolCallId": "initial-task-call",
+        "toolName": "task",
+        "partialResult": {{"details": {{"progress": [running]}}}},
+    }}))
+    raise SystemExit(9)
+
+if count == 2:
+    resume_index = sys.argv.index("-r")
+    assert sys.argv[resume_index + 1] == "coordinator-session"
+    assert "Calling `task` is prohibited" in prompt
+    completed = {{
+        "index": 0,
+        "id": "01RECOVER",
+        "agent": "code-reviewer",
+        "agentUri": "agent://01RECOVER",
+        "historyUri": "history://01RECOVER",
+        "status": "completed",
+    }}
+    print(json.dumps({{"type": "session", "id": "coordinator-session"}}))
+    print(json.dumps({{
+        "type": "tool_execution_end",
+        "toolCallId": "recovery-hub-wait",
+        "toolName": "hub",
+        "result": {{"details": {{"jobs": [completed]}}}},
+    }}))
+    emit({{
+        "awf_omp_batch": 1,
+        "workers": [{{"name": "Awf000Reviewer", "status": "completed", "result": {{"conclusion": "PASS", "findings": [], "evidence": [], "risks": [], "action_items": []}}}}],
+        "steering": {{
+            "wait_calls": 1,
+            "inspected_completed": ["Awf000Reviewer"],
+            "message": {{
+                "target": "Awf000Reviewer",
+                "kind": "corrective",
+                "content": "SECRET_STEERING",
+            }},
+            "result_excerpt": "SECRET_RESULT",
+        }},
+    }})
+    raise SystemExit(0)
+
+assert "-r" not in sys.argv
+fresh = {{
+    "index": 0,
+    "id": "01FRESH",
+    "agent": "code-reviewer",
+    "agentUri": "agent://01FRESH",
+    "historyUri": "history://01FRESH",
+    "status": "completed",
+}}
+print(json.dumps({{"type": "session", "id": "fresh-session"}}))
+print(json.dumps({{
+    "type": "tool_execution_update",
+    "toolCallId": "fresh-task-call",
+    "toolName": "task",
+    "partialResult": {{"details": {{"progress": [fresh]}}}},
+}}))
+emit({{
+    "awf_omp_batch": 1,
+    "workers": [{{"name": "Awf000Reviewer", "status": "completed", "result": {{"conclusion": "PASS", "findings": [], "evidence": [], "risks": [], "action_items": []}}}}],
+    "steering": {{
+        "wait_calls": 0,
+        "inspected_completed": ["Awf000Reviewer"],
+        "message": None,
+    }},
+}})
+'''
+    path.write_text(script, encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def test_native_checkpoint_exists_before_launch_and_contains_only_hashes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    secret_prompt = "SECRET_WORKER_PROMPT"
+    fake = _write_fake_native_omp(
+        tmp_path / "omp",
+        envelope={
+            "awf_omp_batch": 1,
+            "workers": [
+                {
+                    "name": "CheckpointWorker",
+                    "status": "completed",
+                    "result": {"secret_result": "SECRET_WORKER_RESULT"},
+                }
+            ],
+        },
+        agents=[
+            {
+                "index": 0,
+                "id": "01CHECKPOINT",
+                "agent": "code-reviewer",
+                "status": "completed",
+            }
+        ],
+    )
+    worker = OmpWorkerTask(
+        name="CheckpointWorker",
+        role="reviewer",
+        prompt=secret_prompt,
+        agent_type="code-reviewer",
+    )
+    import awf.runners.omp as omp_runner
+
+    real_popen = omp_runner.subprocess.Popen
+    observed: list[dict] = []
+
+    def observing_popen(*args, **kwargs):
+        checkpoint_paths = list(
+            (
+                tmp_path / ".workflow" / "artifacts" / "dispatch"
+            ).glob("omp-native-*.json")
+        )
+        assert len(checkpoint_paths) == 1
+        observed.append(
+            json.loads(checkpoint_paths[0].read_text(encoding="utf-8"))
+        )
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(omp_runner.subprocess, "Popen", observing_popen)
+    [result] = run_omp_native_batch(
+        [worker],
+        cwd=str(tmp_path),
+        config=OmpRunnerConfig(command=str(fake), no_session=False),
+    )
+    assert result.returncode == 0
+    assert observed[0]["state"] == "prepared"
+    assert observed[0]["session_persistence_requested"] is True
+    assert observed[0]["resumable"] is False
+    prepared_text = json.dumps(observed[0], sort_keys=True)
+    assert secret_prompt not in prepared_text
+    assert "SECRET_WORKER_RESULT" not in prepared_text
+    assert len(observed[0]["descriptor_hashes"][0]) == 64
+    checkpoint_path = Path(result.metadata["checkpoint_path"])
+    finalized_text = checkpoint_path.read_text(encoding="utf-8")
+    assert secret_prompt not in finalized_text
+    assert "SECRET_WORKER_RESULT" not in finalized_text
+    assert json.loads(finalized_text)["state"] == "completed"
+
+
+def test_interrupted_batch_resumes_same_session_once_and_completed_is_fresh(
+    tmp_path: Path,
+):
+    count_path = tmp_path / "count"
+    argv_path = tmp_path / "argv.jsonl"
+    fake = _write_recovering_native_omp(
+        tmp_path / "omp",
+        count_path=count_path,
+        argv_capture_path=argv_path,
+    )
+    workers = _native_workers()[:1]
+    config = OmpRunnerConfig(command=str(fake), no_session=False)
+    [interrupted] = run_omp_native_batch(
+        workers,
+        cwd=str(tmp_path),
+        config=config,
+    )
+    assert interrupted.returncode != 0
+    checkpoint_path = Path(interrupted.metadata["checkpoint_path"])
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    assert checkpoint["state"] == "interrupted"
+    assert checkpoint["resumable"] is True
+    assert checkpoint["coordinator_session_id"] == "coordinator-session"
+
+    [resumed] = run_omp_native_batch(
+        workers,
+        cwd=str(tmp_path),
+        config=config,
+    )
+    assert resumed.returncode == 0
+    assert resumed.metadata["recovery_resumed"] is True
+    assert resumed.metadata["task_batch_calls"] == 0
+    argv_rows = [
+        json.loads(line)
+        for line in argv_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert "-r" not in argv_rows[0]
+    resume_index = argv_rows[1].index("-r")
+    assert argv_rows[1][resume_index + 1] == "coordinator-session"
+    assert json.loads(checkpoint_path.read_text(encoding="utf-8"))["state"] == "completed"
+
+    [fresh] = run_omp_native_batch(
+        workers,
+        cwd=str(tmp_path),
+        config=config,
+    )
+    assert fresh.returncode == 0
+    assert fresh.metadata["recovery_resumed"] is False
+    argv_rows = [
+        json.loads(line)
+        for line in argv_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(argv_rows) == 3
+    assert "-r" not in argv_rows[2]
+
+
+def test_interrupted_checkpoint_with_missing_handles_fails_before_relaunch(
+    tmp_path: Path,
+):
+    count_path = tmp_path / "count"
+    argv_path = tmp_path / "argv.jsonl"
+    fake = _write_recovering_native_omp(
+        tmp_path / "omp",
+        count_path=count_path,
+        argv_capture_path=argv_path,
+    )
+    workers = _native_workers()[:1]
+    config = OmpRunnerConfig(command=str(fake), no_session=False)
+    [interrupted] = run_omp_native_batch(
+        workers,
+        cwd=str(tmp_path),
+        config=config,
+    )
+    checkpoint_path = Path(interrupted.metadata["checkpoint_path"])
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    checkpoint["workers"][0]["history_uri"] = None
+    checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+    [failed] = run_omp_native_batch(
+        workers,
+        cwd=str(tmp_path),
+        config=config,
+    )
+    assert failed.returncode != 0
+    assert "omp_checkpoint_handles_missing" in failed.stderr
+    assert count_path.read_text(encoding="utf-8") == "1"
+
+
+def test_current_host_capability_mismatch_launches_no_subprocess(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import awf.runners.omp as omp_runner
+
+    def forbidden_popen(*args, **kwargs):
+        raise AssertionError("Popen must not run in current_host mode")
+
+    monkeypatch.setattr(omp_runner.subprocess, "Popen", forbidden_popen)
+    [result] = run_omp_native_batch(
+        _native_workers()[:1],
+        cwd=str(tmp_path),
+        config=OmpRunnerConfig(
+            command=str(tmp_path / "must-not-run"),
+            execution_mode="current_host",
+        ),
+    )
+    assert result.returncode != 0
+    assert "omp_same_host_capability_mismatch" in result.stderr
+
+
+def test_steering_evidence_is_parsed_and_redacted_from_provenance(
+    tmp_path: Path,
+):
+    envelope = json.dumps(
+        {
+            "awf_omp_batch": 1,
+            "workers": [
+                {"name": "WorkerA", "status": "completed", "result": {"ok": True}}
+            ],
+            "steering": {
+                "wait_calls": 2,
+                "inspected_completed": ["WorkerA", "UnknownWorker"],
+                "message": {
+                    "target": "WorkerA",
+                    "kind": "blocker",
+                    "content": "SECRET_MESSAGE",
+                },
+                "result_excerpt": "SECRET_RESULT",
+            },
+        }
+    )
+    evidence = parse_omp_steering_evidence(
+        envelope,
+        worker_names=["WorkerA"],
+    )
+    assert evidence == {
+        "reported": True,
+        "wait_calls": 2,
+        "inspected_completed": ["WorkerA"],
+        "message_sent": True,
+        "message_target": "WorkerA",
+        "message_kind": "blocker",
+    }
+    assert "SECRET_MESSAGE" not in json.dumps(evidence)
+    assert "SECRET_RESULT" not in json.dumps(evidence)
+    agent = AgentResult(
+        provider_name="omp",
+        role="reviewer",
+        stdout="SECRET_RESULT_BODY",
+        stderr="",
+        returncode=0,
+        elapsed_sec=0.1,
+        metadata={"steering_evidence": evidence},
+    )
+    (tmp_path / ".workflow").mkdir()
+    path = write_omp_dispatch_provenance(
+        tmp_path,
+        strategy="parallel",
+        mode="cross",
+        agents=[agent],
+        elapsed_sec=0.1,
+    )
+    assert path is not None
+    persisted = path.read_text(encoding="utf-8")
+    assert "SECRET_MESSAGE" not in persisted
+    assert "SECRET_RESULT_BODY" not in persisted
+    assert json.loads(persisted)["agents"][0]["steering_evidence"] == evidence

@@ -1,5 +1,8 @@
 {
   "version": "2.3.0",
+  "team_selection": {
+    "enabled": true
+  },
   "phase_routing": {
     "plan":    { "mode": "inline" },
     "review":  { "mode": "dual", "primary": "inline", "secondary": "codex" },
@@ -21,6 +24,7 @@
       "command": "omp",
       "no_session": false,
       "coordination_surface": "native",
+      "execution_mode": "external_host",
       "capacity": 8,
       "role_models": {}
     }

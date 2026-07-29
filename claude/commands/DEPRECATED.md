@@ -8,7 +8,7 @@ Claude Code에서 commands는 deprecated되었으며, skills가 권장 대체입
 | Command | Skill |
 |---------|-------|
 | `analysis.md` | `skills/analysis/` |
-| `wf.md` | `skills/wf-orchestrator/` |
+| `wf.md` | `skills/wf/` |
 | `wf.approve.md` | `skills/phase-approve/` |
 | `wf.discover.md` | `skills/wf-discovery/` |
 | `wf.done.md` | `skills/phase-done/` |

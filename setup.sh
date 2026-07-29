@@ -33,7 +33,7 @@ mkdir -p "$CLAUDE_DIR/skills"
 
 SKILLS=(
   analysis
-  wf-orchestrator phase-plan phase-review phase-approve phase-impl
+  wf wf-orchestrator phase-plan phase-review phase-approve phase-impl
   phase-verify phase-test phase-done
   wf-discovery wf-status wf-reset multi-agent
 )
