@@ -59,6 +59,11 @@ def _record_for_agent(agent: Any) -> dict[str, Any]:
     task_id = _text(metadata, "task_id")
     parent_task_id = _text(metadata, "parent_task_id")
     successor_task_id = _text(metadata, "successor_task_id")
+    worker_usage = metadata.get("worker_usage")
+    has_worker_usage = isinstance(worker_usage, Mapping) and any(
+        value is not None for value in worker_usage.values()
+    )
+    runtime_usage = worker_usage if has_worker_usage else metadata.get("usage")
     lineage = {
         "parent_run_id": _text(metadata, "parent_run_id"),
         "parent_task_id": parent_task_id,
@@ -101,7 +106,9 @@ def _record_for_agent(agent: Any) -> dict[str, Any]:
         "runtime": {
             "provider": _text(metadata, "provider"),
             "model": _text(metadata, "model"),
-            "usage": _json_safe(metadata.get("usage")),
+            "cost": _json_safe(metadata.get("cost")),
+            "usage": _json_safe(runtime_usage),
+            "coordinator_usage": _json_safe(metadata.get("usage")),
         },
     }
 

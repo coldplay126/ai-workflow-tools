@@ -9,9 +9,12 @@ Python evaluates termination deterministically from discussion JSON.
 """
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from awf.core.agent_runner import AgentResult, MultiAgentResult, run_agent
@@ -208,7 +211,13 @@ def run_team(
         judge_verdict=verdict,
         judge_reason=verdict_reason,
         selected_agent=config.name,
-        combined_output=_build_combined_output(bb, all_findings),
+        combined_output=_build_combined_output(
+            bb,
+            latest_findings,
+            phase=phase,
+            turn=final_turn,
+            verdict=verdict,
+        ),
     )
 
     # Emit events matching existing consumers (state_updater.py, progress.py)
@@ -416,6 +425,7 @@ def _execute_sequential(
             timeout_sec=actual_timeout,
             require_json=True,
             add_dirs=tuple(add_dirs or ()),
+            isolated=True if role_cfg.write_scope else None,
         )
         dispatch = _resolve_team_dispatch(
             cwd=cwd,
@@ -425,6 +435,7 @@ def _execute_sequential(
             workers=[spec],
         )
         result = dispatch.run([spec], cwd=cwd, strategy="sequential")[0]
+        _enforce_worker_write_scope(bb, role_cfg, result, cwd)
         results.append(result)
         _record_omp_team_provenance(
             cwd,
@@ -495,6 +506,7 @@ def _execute_parallel(
             timeout_sec=timeout_sec,
             require_json=True,
             add_dirs=tuple(add_dirs or ()),
+            isolated=True if role_cfg.write_scope else None,
         )
         for role_cfg, provider, prompt in available
     ]
@@ -509,15 +521,6 @@ def _execute_parallel(
 
     try:
         results = list(dispatch.run(specs, cwd=cwd, strategy="parallel"))
-        _record_omp_team_provenance(
-            cwd,
-            backend=dispatch.name,
-            strategy="parallel",
-            phase=phase,
-            turn=turn,
-            agents=results,
-            elapsed_sec=time.monotonic() - dispatch_started_at,
-        )
     except Exception as exc:
         # Dispatch backend failure (e.g., cmux unavailable mid-batch). Synthesize
         # failure rows so blackboard termination sees the problem rather than
@@ -534,6 +537,18 @@ def _execute_parallel(
             )
             for role_cfg, _, _ in available
         ]
+
+    for (role_cfg, _, _), result in zip(available, results):
+        _enforce_worker_write_scope(bb, role_cfg, result, cwd)
+    _record_omp_team_provenance(
+        cwd,
+        backend=dispatch.name,
+        strategy="parallel",
+        phase=phase,
+        turn=turn,
+        agents=results,
+        elapsed_sec=time.monotonic() - dispatch_started_at,
+    )
 
     for (role_cfg, _, _), result in zip(available, results):
         _save_worker_output(bb, turn, role_cfg.id, result)
@@ -559,6 +574,16 @@ def _build_worker_prompt(bb: Blackboard, turn: int, role_cfg: RoleConfig) -> str
     mission = bb.read_mission()
     if mission:
         parts.append(mission)
+    if role_cfg.write_scope:
+        allowed = "\n".join(f"- `{scope}`" for scope in role_cfg.write_scope)
+        parts.append(
+            "## Enforced Write Scope\n\n"
+            "This worker runs in an isolated workspace. Only these repo-relative "
+            "paths or glob patterns may change:\n"
+            f"{allowed}\n\n"
+            "Changes outside this scope are rejected before merge. Do not edit "
+            "other files."
+        )
 
     # Previous discussion context (for sequential: include earlier workers' output this turn)
     prev_discussion = _gather_discussion_context(bb, turn, role_cfg.id)
@@ -590,6 +615,123 @@ def _save_skipped_worker(bb: Blackboard, turn: int, role_cfg: RoleConfig) -> Non
 def _worker_passed(result: AgentResult) -> bool:
     """Strict success check: process ok AND valid JSON output produced."""
     return result.ok and not result.parse_error and bool(result.stdout.strip())
+
+def _patch_changed_paths(cwd: str, patch_path: Path) -> list[Path]:
+    """Return both source and destination paths touched by a git patch."""
+    preview = subprocess.run(
+        ["git", "apply", "--numstat", "-z", str(patch_path)],
+        cwd=cwd,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    if preview.returncode != 0:
+        detail = preview.stderr.decode("utf-8", errors="replace").strip()
+        raise ValueError(f"cannot inspect isolated patch: {detail or 'git apply failed'}")
+
+    chunks = preview.stdout.split(b"\0")
+    paths: list[Path] = []
+    index = 0
+    while index < len(chunks):
+        chunk = chunks[index]
+        index += 1
+        if not chunk:
+            continue
+        fields = chunk.split(b"\t", 2)
+        if len(fields) != 3:
+            raise ValueError("cannot inspect isolated patch: invalid numstat output")
+        if fields[2]:
+            paths.append(Path(fields[2].decode("utf-8", errors="strict")))
+            continue
+        if index + 1 >= len(chunks):
+            raise ValueError("cannot inspect isolated patch: incomplete rename paths")
+        paths.extend(
+            (
+                Path(chunks[index].decode("utf-8", errors="strict")),
+                Path(chunks[index + 1].decode("utf-8", errors="strict")),
+            )
+        )
+        index += 2
+    if not paths:
+        raise ValueError("cannot inspect isolated patch: no changed paths")
+    return paths
+
+
+def _enforce_worker_write_scope(
+    bb: Blackboard,
+    role_cfg: RoleConfig,
+    result: AgentResult,
+    cwd: str,
+) -> None:
+    """Validate and apply an isolated OMP patch only within the role's scope."""
+    if not role_cfg.write_scope or not result.ok:
+        return
+    patch_value = result.metadata.get("patch_path")
+    if not patch_value:
+        result.metadata["write_scope_validation"] = {
+            "valid": True,
+            "applied": False,
+            "changed_paths": [],
+            "reason": "worker produced no patch",
+        }
+        return
+
+    try:
+        patch_path = Path(str(patch_value)).expanduser()
+        if not patch_path.is_absolute():
+            patch_path = Path(cwd) / patch_path
+        patch_path = patch_path.resolve(strict=True)
+        changed_paths = _patch_changed_paths(cwd, patch_path)
+        violations = [
+            str(path)
+            for path in changed_paths
+            if not bb.validate_write_scope(role_cfg.id, Path(cwd) / path)
+        ]
+        if violations:
+            raise ValueError(
+                "isolated patch exceeds write_scope: " + ", ".join(violations)
+            )
+        check = subprocess.run(
+            ["git", "apply", "--check", str(patch_path)],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if check.returncode != 0:
+            raise ValueError(
+                "isolated patch does not apply cleanly: "
+                + (check.stderr.strip() or "git apply --check failed")
+            )
+        applied = subprocess.run(
+            ["git", "apply", str(patch_path)],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if applied.returncode != 0:
+            raise ValueError(
+                "isolated patch apply failed: "
+                + (applied.stderr.strip() or "git apply failed")
+            )
+        result.metadata["write_scope_validation"] = {
+            "valid": True,
+            "applied": True,
+            "changed_paths": [str(path) for path in changed_paths],
+        }
+    except (OSError, subprocess.SubprocessError, UnicodeError, ValueError) as exc:
+        result.returncode = 2
+        result.stderr = (
+            f"{result.stderr}\nwrite_scope_validation_failed: {exc}".strip()
+        )
+        result.metadata["write_scope_validation"] = {
+            "valid": False,
+            "applied": False,
+            "error": str(exc),
+        }
 
 
 def _save_worker_output(bb: Blackboard, turn: int, role: str, result: AgentResult) -> None:
@@ -768,15 +910,173 @@ def _compute_verdict(
     return "PASS", f"clean after {final_turn} turn(s) ({stop_reason})"
 
 
-def _build_combined_output(bb: Blackboard, findings: list[TeamFinding]) -> str:
-    """Build human-readable combined output from team execution."""
-    import json
+def _latest_worker_payloads(bb: Blackboard, turn: int) -> list[dict[str, Any]]:
+    if turn <= 0:
+        return []
+    payloads: list[dict[str, Any]] = []
+    for path in sorted(bb.discussion_dir.glob(f"turn-{turn}-*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    return payloads
 
-    summary = bb.summary()
-    output = {
-        "team_summary": summary,
-        "findings": [f.to_dict() for f in findings],
+
+def _metric(payload: dict[str, Any], key: str) -> dict[str, Any] | None:
+    value = payload.get(key)
+    if isinstance(value, dict):
+        return value
+    phase_metrics = payload.get("phase_metrics")
+    if isinstance(phase_metrics, dict):
+        value = phase_metrics.get(key)
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def _number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _collect_strings(
+    payloads: list[dict[str, Any]],
+    key: str,
+) -> list[str]:
+    values: list[str] = []
+    for payload in payloads:
+        raw = payload.get(key)
+        if not isinstance(raw, list):
+            continue
+        for item in raw:
+            text = str(item).strip()
+            if text and text not in values:
+                values.append(text)
+    return values
+
+
+def _review_coverage(
+    payloads: list[dict[str, Any]],
+) -> tuple[dict[str, Any], bool]:
+    metrics = [metric for payload in payloads if (metric := _metric(payload, "coverage"))]
+    percentages = [
+        value
+        for metric in metrics
+        if (value := _number(metric.get("percentage"))) is not None
+    ]
+    totals = [
+        int(value)
+        for metric in metrics
+        if (value := _number(metric.get("total_requirements"))) is not None
+    ]
+    mapped = [
+        int(value)
+        for metric in metrics
+        if (value := _number(metric.get("mapped_requirements"))) is not None
+    ]
+    gaps: list[str] = []
+    for metric in metrics:
+        for item in metric.get("gaps", []) if isinstance(metric.get("gaps"), list) else []:
+            text = str(item).strip()
+            if text and text not in gaps:
+                gaps.append(text)
+    complete = bool(metrics) and len(percentages) == len(metrics)
+    if not complete:
+        gaps.append("one or more team workers did not report review coverage")
+    return (
+        {
+            "total_requirements": max(totals, default=0),
+            "mapped_requirements": min(mapped, default=0),
+            "percentage": min(percentages, default=0.0) if complete else 0.0,
+            "gaps": gaps,
+            "complete": complete,
+        },
+        complete,
+    )
+
+
+def _verify_metrics(
+    payloads: list[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], bool]:
+    scopes = [metric for payload in payloads if (metric := _metric(payload, "scope"))]
+    compliances = [
+        metric for payload in payloads if (metric := _metric(payload, "compliance"))
+    ]
+    qualities = [metric for payload in payloads if (metric := _metric(payload, "quality"))]
+    violations = [
+        int(value)
+        for metric in scopes
+        if (value := _number(metric.get("violations"))) is not None
+    ]
+    failures = [
+        int(value)
+        for metric in compliances
+        if (value := _number(metric.get("fail"))) is not None
+    ]
+    percentages = [
+        value
+        for metric in compliances
+        if (value := _number(metric.get("percentage"))) is not None
+    ]
+    critical = [
+        int(value)
+        for metric in qualities
+        if (value := _number(metric.get("critical"))) is not None
+    ]
+    complete = (
+        bool(payloads)
+        and len(scopes) == len(payloads)
+        and len(compliances) == len(payloads)
+        and len(qualities) == len(payloads)
+        and len(violations) == len(scopes)
+        and len(failures) == len(compliances)
+        and len(percentages) == len(compliances)
+        and len(critical) == len(qualities)
+    )
+    return (
+        {"violations": max(violations, default=0), "complete": complete},
+        {
+            "fail": max(failures, default=0),
+            "percentage": min(percentages, default=0.0) if complete else 0.0,
+            "complete": complete,
+        },
+        {"critical": max(critical, default=0), "complete": complete},
+        complete,
+    )
+
+
+def _build_combined_output(
+    bb: Blackboard,
+    findings: list[TeamFinding],
+    *,
+    phase: str,
+    turn: int,
+    verdict: str,
+) -> str:
+    """Build a gate-compatible structured result from the latest team turn."""
+    payloads = _latest_worker_payloads(bb, turn)
+    risks = _collect_strings(payloads, "risks")
+    output: dict[str, Any] = {
+        "conclusion": verdict,
+        "findings": [finding.to_dict() for finding in findings],
+        "evidence": _collect_strings(payloads, "evidence"),
+        "risks": risks,
+        "action_items": _collect_strings(payloads, "action_items"),
+        "team_summary": bb.summary(),
     }
+    if phase == "review":
+        coverage, complete = _review_coverage(payloads)
+        output["coverage"] = coverage
+        if not complete:
+            risks.append("review coverage is incomplete; the gate must fail closed")
+    elif phase == "verify":
+        scope, compliance, quality, complete = _verify_metrics(payloads)
+        output.update(scope=scope, compliance=compliance, quality=quality)
+        if not complete:
+            risks.append("verify metrics are incomplete; the gate must fail closed")
     return json.dumps(output, ensure_ascii=False, indent=2)
 
 

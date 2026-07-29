@@ -78,9 +78,10 @@ Dispatch Surface Policy를 따릅니다.
 
 1. **OMP host-native**: 현재 호스트가 `task`와 `hub`를 제공하면 독립 역할을 한
    번의 batch task로 실행합니다. Agent Card의 `agent.name`을 task의 `agent`로,
-   `output_schema`를 `outputSchema`로 전달하고 write 역할은 isolated workspace를
-   사용합니다. 완료된 task의 실제 ID, `agent://`/`history://` URI, resolved model,
-   usage를 phase evidence에 기록합니다.
+   `output_schema`를 `outputSchema`로 전달하고 write 역할은 auto-isolated workspace에서
+   실행합니다. AWF는 patch의 모든 경로를 team role `write_scope`와 대조한 뒤에만
+   parent checkout에 적용합니다. 완료된 task의 실제 ID, `agent://`/`history://`
+   URI, resolved model, worker usage를 phase evidence에 기록합니다.
 2. **AWF CLI OMP native coordinator**: `dispatch.surface_preference=omp`와
    `dispatch.omp.coordination_surface=native`이면 하나의 persisted OMP host가 한 번의
    `task` batch를 실행합니다. capacity, strict/permissive schema, isolation, structured
@@ -115,7 +116,7 @@ registry, transcript는 provenance이며 gate 통과 조건이 아닙니다.
 ## 역할
 
 `.workflow/state.json`과 `.workflow/agent-cards/{phase}.json`을 읽고, provider-config에 따라 Phase를 **라우팅**합니다.
-인라인 실행(SKILL.md)이 기본이며, 위임 모드(외부 LLM)도 지원합니다.
+Primary phase는 provider-direct로 실행하고, 독립 secondary/team worker는 provider-config의 dispatch surface로 라우팅합니다.
 
 ## Work History (K5)
 
@@ -248,21 +249,23 @@ Schema:
 
 **[Step B2: 디스패치]**
 
-**Dispatch 경로 선택 (우선순위, 2026-05-13 §12.5)**
+**Dispatch 경로 선택**
 
-Codex 워커 호출 전에 cmux-agent 활성 여부를 먼저 확인한다. 활성이면 broker, 미활성이면 MCP fallback. broker 경로는 본 세션을 점유하지 않으므로 평균 3-5배 빠르다.
+수동으로 provider CLI나 cmux 명령을 조합하지 말고 `awf wf next`를 실행합니다.
+Primary phase는 provider-direct이며 `dispatch.surface_preference`는 독립
+secondary/team worker에만 적용됩니다.
 
-| 활성 상태 | Codex 호출 방식 |
-|---|---|
-| cmux-agent 활성 (`.agent/control-plane.sqlite3` 존재 또는 `cmux-agent agents --json` 반환) | **권장** — `cmux-agent send <worker-name> "<prompt>"` (예: `worker-impl`, `worker-review`, `worker-verify`) |
-| cmux-agent 미활성 | `mcp__codex__codex(prompt, sandbox:"read-only", cwd)` |
+| 설정 | worker 실행 경로 | 실패 정책 |
+|---|---|---|
+| `surface_preference: "omp"` + `coordination_surface: "native"` | 하나의 persisted OMP host가 native `task` batch 실행 | unavailable/incompatible이면 명시적 실패 |
+| `surface_preference: "cmux"` | cmux broker worker 실행 | unavailable이면 명시적 실패 |
+| `surface_preference: "inline"` | provider subprocess/API 직접 실행 | provider 실패를 그대로 반환 |
+| `surface_preference: "auto"` | capability, cost, priority를 만족하는 첫 surface | eligible surface가 없으면 실패 |
+| `surface_preference: "pi"` | legacy Pi compatibility adapter | field-smoke evidence 없으면 실패 |
 
-| 프로바이더 | 호출 방식 (broker 활성) | 호출 방식 (MCP fallback) | 추가 폴백 |
-|-----------|----------|----------|------|
-| `codex` | `cmux-agent send worker-<role> "prompt"` | `mcp__codex__codex(prompt, sandbox:"read-only", cwd)` | `codex exec -s read-only "prompt"` (Bash) |
-| `claude:<model>` | `cmux-agent send worker-<role> "prompt"` (worker가 claude 모델로 실행) 또는 inline `claude --print --bare --model <model> --output-format json --max-budget-usd <budget> "prompt"` | inline (위와 동일) | fallback_chain 다음 |
-
-**모든 호출은 동기. `run_in_background: true` 사용 금지.** broker 경로의 경우 result artifact가 inbox에 도착할 때까지 대기한다.
+OMP native coordinator는 내부 task를 병렬 실행할 수 있지만 parent AWF phase는
+모든 task가 settle될 때까지 기다린 뒤 result envelope, judge, gate 순서로
+결정론적으로 처리합니다.
 
 **[Step B3: 응답 수신 + 파싱 + Format Retry]**
 

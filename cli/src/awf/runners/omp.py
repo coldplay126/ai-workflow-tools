@@ -68,6 +68,7 @@ class OmpExecutionResult:
     stdout: str
     stderr: str
     elapsed_sec: float
+    timed_out: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
     input_tokens: int = 0
     output_tokens: int = 0
@@ -207,12 +208,26 @@ def _sanitized_usage(value: Any) -> dict[str, int | float]:
     }
 
 
+def _isolated_patch_path(candidate: dict[str, Any]) -> str | None:
+    direct = candidate.get("patchPath") or candidate.get("patch_path")
+    if direct:
+        return str(direct)
+    result_text = candidate.get("resultText") or candidate.get("result_text")
+    if not isinstance(result_text, str):
+        return None
+    match = re.search(
+        r"Isolation: changes captured at `([^`]+[.]patch)`",
+        result_text,
+    )
+    return match.group(1) if match else None
+
+
 def parse_omp_task_events(text: str) -> list[dict[str, Any]]:
     """Collect authentic task handles without retaining assignments or results."""
     records: dict[tuple[str, int | str], dict[str, Any]] = {}
     next_order = 0
     for event in _json_events(text):
-        if event.get("toolName") != "task" or event.get("type") not in {
+        if event.get("toolName") not in {"task", "hub"} or event.get("type") not in {
             "tool_execution_update",
             "tool_execution_end",
         }:
@@ -256,6 +271,21 @@ def parse_omp_task_events(text: str) -> list[dict[str, Any]]:
             )
             task_id = str(raw_task_id)
             key = ("index", index) if index is not None else ("id", task_id)
+            if index is None:
+                matching_key = next(
+                    (
+                        existing_key
+                        for existing_key, existing in records.items()
+                        if task_id
+                        in {
+                            existing.get("task_id"),
+                            existing.get("task_name"),
+                        }
+                    ),
+                    None,
+                )
+                if matching_key is not None:
+                    key = matching_key
             record = records.get(key, {"_order": next_order})
             if key not in records:
                 next_order += 1
@@ -302,12 +332,14 @@ def parse_omp_task_events(text: str) -> list[dict[str, Any]]:
                 "tokens": _nonnegative_number(candidate.get("tokens")),
                 "cost": _nonnegative_number(candidate.get("cost")),
                 "usage": _sanitized_usage(candidate.get("usage")),
+                "patch_path": _isolated_patch_path(candidate),
             }
             record.update(
                 {
                     name: value
                     for name, value in updates.items()
-                    if value is not None or name == "index"
+                    if value is not None
+                    or (name == "index" and "index" not in record)
                 }
             )
             records[key] = record
@@ -498,9 +530,11 @@ def _run_omp_native_host(
     config: OmpRunnerConfig,
     model: str | None,
     timeout_sec: int,
+    isolate_tasks: bool = False,
 ) -> OmpExecutionResult:
     started = time.monotonic()
     prompt_path: Path | None = None
+    settings_path: Path | None = None
     process: subprocess.Popen[str] | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -514,8 +548,33 @@ def _run_omp_native_host(
             handle.write("\n")
             prompt_path = Path(handle.name)
         os.chmod(prompt_path, 0o600)
+        command = build_omp_native_command(prompt_path, config, model=model)
+        if isolate_tasks:
+            with tempfile.NamedTemporaryFile(
+                prefix="awf-omp-settings-",
+                suffix=".json",
+                mode="w",
+                encoding="utf-8",
+                delete=False,
+            ) as settings_handle:
+                json.dump(
+                    {
+                        "task": {
+                            "isolation": {
+                                "mode": "auto",
+                                "apply": False,
+                                "merge": "patch",
+                            }
+                        }
+                    },
+                    settings_handle,
+                )
+                settings_handle.write("\n")
+                settings_path = Path(settings_handle.name)
+            os.chmod(settings_path, 0o600)
+            command[1:1] = ["--config", str(settings_path)]
         process = subprocess.Popen(
-            build_omp_native_command(prompt_path, config, model=model),
+            command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
@@ -563,6 +622,11 @@ def _run_omp_native_host(
                 prompt_path.unlink()
             except FileNotFoundError:
                 pass
+        if settings_path is not None:
+            try:
+                settings_path.unlink()
+            except FileNotFoundError:
+                pass
 
     output, metadata, input_tokens, output_tokens = parse_omp_json_stream(
         stdout,
@@ -584,6 +648,7 @@ def _run_omp_native_host(
         stdout=output,
         stderr=stderr,
         elapsed_sec=time.monotonic() - started,
+        timed_out=timed_out,
         metadata=metadata,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
@@ -771,6 +836,7 @@ def _worker_metadata(
         task_id=task_id,
         agent_name=record.get("agent_name") if record else None,
         task_status=record.get("status") if record else None,
+        patch_path=record.get("patch_path") if record else None,
         status=record.get("status") if record else None,
         agent_uri=f"agent://{task_id}" if task_id else None,
         history_uri=f"history://{task_id}" if task_id else None,
@@ -838,6 +904,7 @@ def run_omp_native_batch(
         config=cfg,
         model=model,
         timeout_sec=timeout_sec if timeout_sec is not None else cfg.timeout_sec,
+        isolate_tasks=any(worker.isolated is True for worker in workers),
     )
     indexed, envelope_error = parse_omp_native_envelope(execution.stdout)
     progress = execution.metadata.get("task_progress", [])
@@ -854,7 +921,7 @@ def run_omp_native_batch(
             reason = envelope_error or (
                 f"native host envelope missing worker {worker.name!r}"
             )
-            timed_out = execution.returncode == 124
+            timed_out = execution.timed_out
             metadata["schema_validation"] = {
                 "mode": worker.schema_mode,
                 "valid": False,
@@ -917,7 +984,7 @@ def run_omp_native_batch(
             "errors": validation_errors,
         }
         completed_before_timeout = (
-            execution.returncode == 124
+            execution.timed_out
             and lifecycle_status in {"completed", "success", "ok"}
         )
         host_failure = (
@@ -981,7 +1048,7 @@ def run_omp_native_batch(
                 stderr=error_text,
                 returncode=returncode,
                 elapsed_sec=elapsed_sec,
-                timed_out=returncode == 124,
+                timed_out=execution.timed_out and not completed_before_timeout,
                 parse_error=parse_error,
                 parsed=parsed,
                 metadata=metadata,

@@ -11,14 +11,24 @@ Reference: docs/tests/workflow-and-multi-agent.md § WF-TEST-005, MA-TEST-001
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from awf.core.agent_runner import AgentResult
 from awf.core.blackboard import Blackboard, TeamFinding
-from awf.core.team_runner import _compute_verdict, _build_mission, TeamConfig, RoleConfig, run_team
+from awf.core.team_runner import (
+    RoleConfig,
+    TeamConfig,
+    _build_combined_output,
+    _build_mission,
+    _compute_verdict,
+    _enforce_worker_write_scope,
+    run_team,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -382,6 +392,142 @@ def test_bb_write_scope_permissive_default():
     with tempfile.TemporaryDirectory() as tmp:
         bb = _make_bb(Path(tmp))
         assert bb.validate_write_scope("any_role", bb.board_dir / "anything.md")
+
+
+def test_team_combined_output_supplies_review_gate_coverage():
+    with tempfile.TemporaryDirectory() as tmp:
+        bb = _make_bb(Path(tmp), "review")
+        bb.write_findings(1, "reviewer-a", {
+            "conclusion": "PASS",
+            "findings": [],
+            "coverage": {
+                "total_requirements": 5,
+                "mapped_requirements": 5,
+                "percentage": 100,
+                "gaps": [],
+            },
+        })
+        bb.write_findings(1, "reviewer-b", {
+            "conclusion": "PASS",
+            "findings": [],
+            "coverage": {
+                "total_requirements": 5,
+                "mapped_requirements": 4,
+                "percentage": 80,
+                "gaps": ["REQ-5"],
+            },
+        })
+
+        payload = json.loads(_build_combined_output(
+            bb,
+            bb.collect_findings(1),
+            phase="review",
+            turn=1,
+            verdict="PASS",
+        ))
+        assert payload["coverage"] == {
+            "total_requirements": 5,
+            "mapped_requirements": 4,
+            "percentage": 80.0,
+            "gaps": ["REQ-5"],
+            "complete": True,
+        }
+
+
+def test_team_combined_output_fails_closed_on_missing_gate_metrics():
+    with tempfile.TemporaryDirectory() as tmp:
+        bb = _make_bb(Path(tmp), "verify")
+        bb.write_findings(1, "verifier-a", {
+            "conclusion": "PASS",
+            "findings": [],
+            "scope": {"violations": 0},
+            "compliance": {"fail": 0, "percentage": 100},
+            "quality": {"critical": 0},
+        })
+        bb.write_findings(1, "verifier-b", {
+            "conclusion": "PASS",
+            "findings": [],
+        })
+
+        payload = json.loads(_build_combined_output(
+            bb,
+            bb.collect_findings(1),
+            phase="verify",
+            turn=1,
+            verdict="PASS",
+        ))
+        assert payload["scope"]["complete"] is False
+        assert payload["compliance"]["percentage"] == 0.0
+        assert payload["quality"]["complete"] is False
+        assert any("fail closed" in risk for risk in payload["risks"])
+
+
+def _git_patch(repo: Path, relative_path: str, replacement: str) -> Path:
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    target = repo / relative_path
+    target.write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "add", relative_path], cwd=repo, check=True)
+    target.write_text(replacement, encoding="utf-8")
+    diff = subprocess.run(
+        ["git", "diff", "--", relative_path],
+        cwd=repo,
+        capture_output=True,
+        check=True,
+    ).stdout
+    target.write_text("before\n", encoding="utf-8")
+    patch = repo / "worker.patch"
+    patch.write_bytes(diff)
+    return patch
+
+
+def test_isolated_worker_patch_applies_only_within_write_scope():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+        patch = _git_patch(repo, "allowed.txt", "after\n")
+        team_config = {
+            "roles": [{"id": "writer", "write_scope": ["allowed.txt"]}],
+        }
+        bb = Blackboard.create(str(repo), "impl", team_config=team_config)
+        role = RoleConfig("writer", "omp", write_scope=["allowed.txt"])
+        result = AgentResult(
+            provider_name="omp",
+            role="writer",
+            stdout='{"conclusion":"PASS","findings":[]}',
+            stderr="",
+            returncode=0,
+            elapsed_sec=0,
+            metadata={"patch_path": str(patch)},
+        )
+
+        _enforce_worker_write_scope(bb, role, result, str(repo))
+        assert result.ok
+        assert (repo / "allowed.txt").read_text(encoding="utf-8") == "after\n"
+        assert result.metadata["write_scope_validation"]["applied"] is True
+
+
+def test_isolated_worker_patch_rejects_out_of_scope_path():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+        patch = _git_patch(repo, "outside.txt", "after\n")
+        team_config = {
+            "roles": [{"id": "writer", "write_scope": ["allowed.txt"]}],
+        }
+        bb = Blackboard.create(str(repo), "impl", team_config=team_config)
+        role = RoleConfig("writer", "omp", write_scope=["allowed.txt"])
+        result = AgentResult(
+            provider_name="omp",
+            role="writer",
+            stdout='{"conclusion":"PASS","findings":[]}',
+            stderr="",
+            returncode=0,
+            elapsed_sec=0,
+            metadata={"patch_path": str(patch)},
+        )
+
+        _enforce_worker_write_scope(bb, role, result, str(repo))
+        assert not result.ok
+        assert (repo / "outside.txt").read_text(encoding="utf-8") == "before\n"
+        assert "exceeds write_scope" in result.stderr
 
 
 def test_bb_has_critical_findings():

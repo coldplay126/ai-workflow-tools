@@ -130,8 +130,8 @@ class Blackboard:
             write_scopes: dict[str, list[str]] = {}
             for role_cfg in team_config.get("roles", []):
                 role_id = role_cfg.get("id", "")
-                if role_id:
-                    write_scopes[role_id] = role_cfg.get("write_scope", [])
+                if role_id and role_cfg.get("write_scope"):
+                    write_scopes[role_id] = list(role_cfg["write_scope"])
             meta["write_scopes"] = write_scopes
         else:
             write_scopes = meta.get("write_scopes", {})

@@ -3,12 +3,32 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CLAUDE_DIR="$HOME/.claude"
+OMP_AGENT_DIR="${OMP_AGENT_DIR:-$HOME/.omp/agent/agents}"
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "error: uv가 필요합니다: https://docs.astral.sh/uv/getting-started/installation/" >&2
+  exit 1
+fi
+
 
 echo "=== ai-workflow-tools 설치 ==="
 echo ""
 
 # 1. Skills 심링크
-echo "[1/3] Skills 설치 중..."
+echo "[1/4] AWF CLI 설치 중..."
+uv tool install --force --editable "$SCRIPT_DIR/cli"
+AWF_BIN="$(uv tool dir --bin)/awf"
+if [ ! -x "$AWF_BIN" ]; then
+  echo "error: awf 실행 파일을 찾을 수 없습니다: $AWF_BIN" >&2
+  exit 1
+fi
+echo "  ✓ $AWF_BIN"
+if ! command -v awf >/dev/null 2>&1; then
+  echo "  ! PATH 추가 필요: export PATH=\"$(uv tool dir --bin):\$PATH\""
+fi
+
+echo ""
+echo "[2/4] Claude Skills 설치 중..."
 mkdir -p "$CLAUDE_DIR/skills"
 
 SKILLS=(
@@ -46,7 +66,7 @@ done
 
 # 1b. Agents 심링크
 echo ""
-echo "[1b/3] Agents 설치 중..."
+echo "[3a/4] Claude Agents 설치 중..."
 mkdir -p "$CLAUDE_DIR/agents"
 
 for agent_file in "$SCRIPT_DIR/claude/agents"/*.md; do
@@ -71,9 +91,36 @@ for agent_file in "$SCRIPT_DIR/claude/agents"/*.md; do
   echo "  ✓ $agent_name"
 done
 
+# 1c. OMP task agents 설치
+echo ""
+echo "[3b/4] OMP Agents 설치 중..."
+"$AWF_BIN" agents sync-omp --repo-root "$SCRIPT_DIR" --force >/dev/null
+mkdir -p "$OMP_AGENT_DIR"
+
+for agent_file in "$SCRIPT_DIR/.omp/agents"/*.md; do
+  [ -f "$agent_file" ] || continue
+  agent_name=$(basename "$agent_file")
+  target="$OMP_AGENT_DIR/$agent_name"
+
+  if [ -L "$target" ]; then
+    current=$(readlink "$target")
+    if [ "$current" = "$agent_file" ]; then
+      echo "  ✓ $agent_name (이미 설치됨)"
+      continue
+    fi
+    rm "$target"
+  elif [ -f "$target" ]; then
+    echo "  ⚠ $agent_name: 기존 파일을 보존하고 건너뜁니다."
+    continue
+  fi
+
+  ln -sf "$agent_file" "$target"
+  echo "  ✓ $agent_name"
+done
+
 # 2. Commands → Skills 마이그레이션 안내
 echo ""
-echo "[2/3] Commands 확인 중..."
+echo "[4/4] 기존 Commands 확인 중..."
 if [ -d "$CLAUDE_DIR/commands" ] && ls "$CLAUDE_DIR/commands"/wf*.md "$CLAUDE_DIR/commands"/analysis.md 2>/dev/null | head -1 > /dev/null 2>&1; then
   echo "  ⚠ ~/.claude/commands/ 에 기존 command 파일이 있습니다."
   echo "    Commands는 deprecated되었습니다. Skills로 마이그레이션되었으므로"
@@ -85,7 +132,7 @@ fi
 
 # 3. 안내
 echo ""
-echo "[3/3] 추가 설정 안내"
+echo "추가 설정 안내"
 echo ""
 echo "  ── CLAUDE.md 섹션 추가 (선택) ──"
 echo "  아래 파일의 내용을 ~/.claude/CLAUDE.md에 추가하세요:"
@@ -98,4 +145,5 @@ echo "    claude mcp add --scope user codex -- codex mcp-server"
 echo ""
 echo "=== 설치 완료 ==="
 echo ""
-echo "검증: Claude Code에서 /wf-status 또는 /analysis 를 실행해 보세요."
+echo "검증: $AWF_BIN --help"
+echo "시작: 프로젝트에서 $AWF_BIN ready --repo-root ."

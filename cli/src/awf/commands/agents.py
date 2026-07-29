@@ -105,10 +105,14 @@ def _find_followup_target(
 
     if not task_id:
         raise ValueError("one of --run/--role or --task-id is required")
-    matches: list[tuple[Path, dict[str, Any], dict[str, Any]]] = []
+    exact_matches: list[tuple[Path, dict[str, Any], dict[str, Any]]] = []
+    lineage_matches: list[tuple[Path, dict[str, Any], dict[str, Any]]] = []
     for path, payload in _provenance_records(repo_root):
         for record in payload.get("agents", []):
             if not isinstance(record, dict):
+                continue
+            if record.get("task_id") == task_id:
+                exact_matches.append((path, payload, record))
                 continue
             lineage = record.get("lineage")
             successor_id = (
@@ -116,18 +120,21 @@ def _find_followup_target(
                 if isinstance(lineage, Mapping)
                 else None
             )
-            if record.get("task_id") == task_id or successor_id == task_id:
-                matches.append((path, payload, record))
-    if not matches:
+            if successor_id == task_id:
+                lineage_matches.append((path, payload, record))
+    if exact_matches:
+        if len(exact_matches) > 1:
+            raise ValueError(
+                f"OMP task ID is ambiguous across provenance records: {task_id}"
+            )
+        return exact_matches[0]
+    if not lineage_matches:
         raise FileNotFoundError(f"OMP task ID not found in provenance: {task_id}")
-    matches.sort(
-        key=lambda item: (
-            str(item[1].get("created_at") or ""),
-            str(item[1].get("run_id") or ""),
-            str(item[0]),
+    if len(lineage_matches) > 1:
+        raise ValueError(
+            f"OMP successor task ID is ambiguous across provenance records: {task_id}"
         )
-    )
-    return matches[-1]
+    return lineage_matches[0]
 
 
 def _require_actionable_target(

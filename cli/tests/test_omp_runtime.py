@@ -62,6 +62,7 @@ def _write_fake_native_omp(
     agents: list[dict] | None = None,
     count_path: Path | None = None,
     prompt_capture_path: Path | None = None,
+    config_capture_path: Path | None = None,
     child_pid_path: Path | None = None,
     exit_code: int = 0,
 ) -> Path:
@@ -79,6 +80,16 @@ count_path.write_text(str(count + 1))
 prompt_capture.write_text(Path(prompt_arg[1:]).read_text(encoding="utf-8"), encoding="utf-8")
 '''
         if prompt_capture_path
+        else ""
+    )
+    config_capture = (
+        f'''config_arg = sys.argv[sys.argv.index("--config") + 1]
+Path({str(config_capture_path)!r}).write_text(
+    Path(config_arg).read_text(encoding="utf-8"),
+    encoding="utf-8",
+)
+'''
+        if config_capture_path
         else ""
     )
     child_setup = (
@@ -110,6 +121,7 @@ from pathlib import Path
 prompt_arg = sys.argv[sys.argv.index("-p") + 1]
 assert prompt_arg.startswith("@")
 {prompt_capture}
+{config_capture}
 {child_setup}
 agents = {agent_rows!r}
 tasks = [
@@ -308,7 +320,14 @@ def test_write_omp_dispatch_provenance_redacts_response_body(tmp_path: Path):
         returncode=0,
         elapsed_sec=1.25,
         parsed={"conclusion": "PASS", "findings": []},
-        metadata={"backend": "omp", "session_id": "session-1", "model": "slow"},
+        metadata={
+            "backend": "omp",
+            "session_id": "session-1",
+            "model": "slow",
+            "usage": {"totalTokens": 99},
+            "worker_usage": {"tokens": 7, "cost": 0.02, "duration_ms": 1250},
+            "cost": 0.02,
+        },
     )
     path = write_omp_dispatch_provenance(
         tmp_path,
@@ -322,6 +341,9 @@ def test_write_omp_dispatch_provenance_redacts_response_body(tmp_path: Path):
     assert payload["backend"] == "omp"
     assert payload["agents"][0]["metadata"]["session_id"] == "session-1"
     assert payload["agents"][0]["conclusion"] == "PASS"
+    assert payload["agents"][0]["runtime"]["usage"]["tokens"] == 7
+    assert payload["agents"][0]["runtime"]["cost"] == 0.02
+    assert payload["agents"][0]["runtime"]["coordinator_usage"]["totalTokens"] == 99
     assert "sensitive response" not in path.read_text(encoding="utf-8")
     assert len(payload["agents"][0]["output_sha256"]) == 64
 
@@ -396,6 +418,29 @@ def test_parse_native_task_events_uses_authentic_progress_ids():
                     "result": {"details": {"results": completed}},
                 }
             ),
+            json.dumps(
+                {
+                    "type": "tool_execution_end",
+                    "toolCallId": "hub-call",
+                    "toolName": "hub",
+                    "result": {
+                        "details": {
+                            "jobs": [
+                                {
+                                    "id": "01NATIVE-B",
+                                    "status": "completed",
+                                    "resolvedModel": "model-b-final",
+                                    "durationMs": 1300,
+                                    "resultText": (
+                                        "Isolation: changes captured at "
+                                        "`/tmp/worker-b.patch` (apply=false)."
+                                    ),
+                                }
+                            ]
+                        }
+                    },
+                }
+            ),
         ]
     )
     records = parse_omp_task_events(stream)
@@ -405,9 +450,10 @@ def test_parse_native_task_events_uses_authentic_progress_ids():
     ]
     assert records[0]["status"] == "completed"
     assert records[1]["agent_name"] == "agent-sdk-verifier-py"
-    assert records[1]["resolved_model"] == "model-b"
-    assert records[1]["duration_ms"] == 1250
+    assert records[1]["resolved_model"] == "model-b-final"
+    assert records[1]["duration_ms"] == 1300
     assert records[1]["cost"] == 0.02
+    assert records[1]["patch_path"] == "/tmp/worker-b.patch"
 
 
 def test_native_parallel_dispatch_invokes_omp_once_and_preserves_input_order(
@@ -415,6 +461,7 @@ def test_native_parallel_dispatch_invokes_omp_once_and_preserves_input_order(
 ):
     count_path = tmp_path / "count"
     prompt_path = tmp_path / "prompt"
+    config_path = tmp_path / "config"
     agents = [
         {
             "index": 0,
@@ -449,6 +496,7 @@ def test_native_parallel_dispatch_invokes_omp_once_and_preserves_input_order(
         agents=agents,
         count_path=count_path,
         prompt_capture_path=prompt_path,
+        config_capture_path=config_path,
     )
     options = OmpDispatchOptions(
         config=OmpRunnerConfig(
@@ -495,6 +543,15 @@ def test_native_parallel_dispatch_invokes_omp_once_and_preserves_input_order(
     assert results[0].metadata["model"] == "worker-a"
     assert results[0].metadata["worker_usage"]["tokens"] == 12
     assert '"agent":"code-reviewer"' in prompt_path.read_text(encoding="utf-8")
+    assert json.loads(config_path.read_text(encoding="utf-8")) == {
+        "task": {
+            "isolation": {
+                "mode": "auto",
+                "apply": False,
+                "merge": "patch",
+            }
+        }
+    }
 
 
 def test_native_strict_schema_failure_and_permissive_metadata(tmp_path: Path):
@@ -667,6 +724,37 @@ def test_native_rejects_nonzero_coordinator_exit_after_success_events(
     assert result.returncode == 7
     assert result.metadata["task_id"] == "01DONE"
     assert "native coordinator exited 7" in result.stderr
+
+
+def test_native_process_exit_124_is_not_misclassified_as_timeout(
+    tmp_path: Path,
+):
+    fake = _write_fake_native_omp(
+        tmp_path / "omp",
+        envelope={
+            "awf_omp_batch": 1,
+            "workers": [
+                {"name": "Awf000Reviewer", "result": {"conclusion": "PASS"}},
+            ],
+        },
+        agents=[
+            {
+                "index": 0,
+                "id": "01EXIT124",
+                "agent": "code-reviewer",
+                "status": "completed",
+            }
+        ],
+        exit_code=124,
+    )
+    [result] = run_omp_native_batch(
+        _native_workers()[:1],
+        cwd=str(tmp_path),
+        config=OmpRunnerConfig(command=str(fake)),
+    )
+    assert result.returncode == 124
+    assert result.timed_out is False
+    assert "native coordinator exited 124" in result.stderr
 
 
 def test_native_capacity_fails_before_launching_subprocess(tmp_path: Path):

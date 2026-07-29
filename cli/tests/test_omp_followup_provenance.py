@@ -182,6 +182,19 @@ def test_lookup_omp_provenance_reports_not_found_and_duplicate_run_id(tmp_path: 
     with pytest.raises(ValueError, match="ambiguous"):
         lookup_omp_provenance(tmp_path, payload["run_id"])
 
+def test_followup_task_id_rejects_ambiguous_exact_provenance(tmp_path: Path):
+    _write_parent(tmp_path)
+    _write_parent(tmp_path)
+
+    with pytest.raises(ValueError, match="ambiguous"):
+        agents_command._find_followup_target(
+            tmp_path,
+            run_reference=None,
+            role=None,
+            task_id="task-1",
+        )
+
+
 
 def test_build_omp_resume_command_is_exact():
     config = OmpRunnerConfig(command="omp-bin", extra_args=("--quiet",))

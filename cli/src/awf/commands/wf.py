@@ -672,25 +672,23 @@ def run_wf_next(args: argparse.Namespace) -> int:
         selected_provider = candidate
         timeout_sec = getattr(provider, "timeout_sec", None)
         schema_cleanup_path = _apply_workflow_output_schema(provider, phase)
-        # §12.5 routing log — surface the dispatch path so operators can see whether
-        # the worker ran inline (subprocess), via cmux-agent broker, or fell back.
-        # The multi-agent code emits its own per-mode line for cross/critical/precise;
-        # this covers the default single-agent path.
-        dispatch_pref = "inline"
+        # Primary phase execution is provider-direct. The configured dispatch
+        # preference governs secondary/team workers only.
+        secondary_dispatch_pref = "inline"
         try:
             from awf.core.dispatch import resolve_preference_from_config
 
-            dispatch_pref = resolve_preference_from_config(provider_config)
+            secondary_dispatch_pref = resolve_preference_from_config(provider_config)
         except Exception:
             pass
         if timeout_sec is not None:
             print(
-                f"provider_running: {candidate} surface={dispatch_pref} (timeout: {timeout_sec}s)",
+                f"provider_running: {candidate} surface=provider-direct secondary_dispatch={secondary_dispatch_pref} (timeout: {timeout_sec}s)",
                 file=sys.stderr,
             )
         else:
             print(
-                f"provider_running: {candidate} surface={dispatch_pref}",
+                f"provider_running: {candidate} surface=provider-direct secondary_dispatch={secondary_dispatch_pref}",
                 file=sys.stderr,
             )
         native_task = TaskDefinition(

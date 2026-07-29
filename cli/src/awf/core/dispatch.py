@@ -513,6 +513,14 @@ class PiDispatch:
 
 
 def _run_omp_single(spec: WorkerSpec, cwd: str, options: OmpDispatchOptions) -> AgentResult:
+    if options.config.coordination_surface == "native":
+        return run_omp_native_batch(
+            _omp_native_tasks([spec]),
+            cwd=cwd,
+            config=options.config,
+            model=options.model_for(spec.role),
+            timeout_sec=spec.timeout_sec,
+        )[0]
     return run_omp_agent(
         spec.prompt,
         role=spec.role,

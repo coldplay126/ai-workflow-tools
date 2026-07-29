@@ -19,7 +19,7 @@ ai-workflow-tools/
 ├── docs/           # Architecture, specs, and operating guides
 ├── snippets/       # CLAUDE.md snippets
 ├── templates/      # cmux protocol templates
-└── setup.sh        # Claude Code skill/agent symlink installer
+└── setup.sh        # awf CLI + Claude skills/agents + OMP agents installer
 ```
 
 ### 기능 지도
@@ -64,14 +64,17 @@ workflow review/verify, critical mode 같은 고위험 구간에서 실행 품�
 | 운영 wiki | 반복 작업의 evidence와 결정을 남길 때 | `events 기록 → wiki compile → decision 작성 → wiki lint` | `.awf-operations/events/*`, `wiki/decisions/*`, operations pages |
 | Claude/Codex 통합 | CLI 계약을 agent 환경에서 재사용할 때 | `setup/snippets/skills → awf ready → awf/analyze/wf 계약 실행` | `claude/skills/*`, `codex/*`, project-local artifacts |
 
-### CLI
+### 설치와 CLI
 
 ```bash
-uv run --project cli awf --help
-uv run --project cli awf ready --repo-root .
-uv run --project cli awf doctor --repo-root . --json --ci
-uv run --project cli awf wf status --repo-root .
-uv run --project cli awf analyze sample-api health --repo-root . --dry-run
+git clone https://github.com/coldplay126/ai-workflow-tools.git
+cd ai-workflow-tools
+./setup.sh
+
+# setup.sh가 안내한 ~/.local/bin이 PATH에 없다면 한 번만 추가
+export PATH="$HOME/.local/bin:$PATH"
+awf --help
+awf ready --repo-root /path/to/your-project
 ```
 
 패키지 wheel 자체를 검증할 때만 editable checkout 대신 재설치된 wheel을 사용합니다:
@@ -79,6 +82,10 @@ uv run --project cli awf analyze sample-api health --repo-root . --dry-run
 ```bash
 uv run --project cli --no-editable --reinstall-package awf-cli awf --help
 ```
+
+`setup.sh`는 `awf`를 `uv tool`로 설치하고 Claude skills/agents와 AWF용 OMP
+task agents를 사용자 설정에 연결합니다. 이후 일반 사용자는 이 저장소 안에서
+`uv run`을 사용할 필요가 없습니다.
 
 `awf ready`는 프로젝트에서 가장 먼저 실행하는 read-only 점검입니다. 설정,
 provider, skill, scan, workflow, operations wiki 상태를 한 번에 모아 현재
@@ -119,16 +126,24 @@ in_progress phase에 30분 이내 fresh result가 있으면 abort + apply-result
 보여줍니다 (`--force`로 override 가능). verify phase는 3회 째부터 경고, 6회
 째에 hard abort + replan/continue 안내가 출력됩니다.
 
-OMP adapter를 사용하려면 agent 정의를 동기화하고 model/auth probe를 통과시킨 뒤
-workflow provider config에서 surface를 명시합니다.
+OMP는 사용자가 별도 workflow 명령을 입력하는 제품이 아니라 AWF가 내부적으로
+선택하는 secondary/team worker 실행 surface입니다. Primary phase provider는
+`provider-direct`로 실행되고, 기본 생성되는
+`.workflow/provider-config.json`은 review/verify의 독립 worker를 OMP native
+`task`/`hub`로 실행합니다. 따라서 프로젝트 shell에서 다음처럼 AWF만 실행하면
+됩니다:
+
+```bash
+awf doctor --repo-root . --probe
+awf wf next --repo-root . --mode cross
+```
+
+`setup.sh`가 AWF용 OMP agent 정의를 사용자 영역에 이미 설치합니다. 프로젝트가
+자체 `.claude/agents/*.md`를 추가한 경우에만 다음 명령으로 project-local OMP
+agent를 다시 생성합니다:
 
 ```bash
 awf agents sync-omp --repo-root .
-awf doctor --repo-root . --probe
-# .workflow/provider-config.json: dispatch.surface_preference = "omp"
-# .workflow/provider-config.json: dispatch.omp.coordination_surface = "native"
-# .workflow/provider-config.json: dispatch.omp.no_session = false
-# .workflow/provider-config.json: dispatch.omp.capacity = 8
 ```
 
 OMP native dispatch writes redacted schema-v2 records under
