@@ -181,6 +181,65 @@ cost_estimate: ~$0.0630
 5. **운영자 개입**: 실행 중 agent를 inspect/steer/cancel/revive할 수 있고,
    `/collab`으로 원격 동료가 같은 세션과 subagent를 관찰하거나 제어할 수 있습니다.
 
+### OMP 내부 런타임과 awf 전용 오케스트레이터 비교
+
+2026-07-29에 로컬 설치된 OMP 17.1.8의 실제 구현을 기준으로 비교했다.
+OMP는 범용 **멀티에이전트 실행 커널**, awf는 개발 수명주기를 통제하는
+**결정론적 workflow/gate 계층**이다. 따라서 둘은 대체재보다 상하위 계층에 가깝다.
+
+| 축 | OMP 내부 멀티에이전트 | awf 멀티에이전트 | 판정 |
+|----|----------------------|-------------------|------|
+| 상태의 기준 | process-global agent registry, session JSONL, `task`/`hub` job state | `.workflow/state.json`, phase artifacts, scope hash | 장기 workflow 진실은 awf가 우세 |
+| fan-out | batch `task`, session 단위 semaphore, async job, recursion/concurrency 제한, all-settled 결과 | `WorkerSpec` + inline thread pool/cmux/OMP/Pi dispatch, phase별 parallel/sequential | 범용 실행 안정성은 OMP가 우세 |
+| 수평 협업 | `hub` direct/broadcast, reply wait, inbox, idle wake, parked revive | file blackboard로 turn 간 공유; sequential team은 같은 turn의 이전 결과를 읽음 | 실시간 재조정은 OMP가 우세 |
+| 수명주기 | keep-alive, idle → park → revive, transcript를 보존한 follow-up turn | 기본 worker는 one-shot `AgentResult`; cmux만 reusable worker 지원 | OMP가 우세 |
+| 격리/병합 | spawn별 worktree, patch/branch 모드, nested repo patch, 실패 artifact 보존, owner job reap | impl phase worktree와 cmux 격리는 있으나 모든 dispatch worker의 공통 계약은 아님 | OMP가 우세 |
+| 출력 계약 | spawn별 JSON Schema, permissive/strict mode, output artifact, usage/cost | `require_json`과 4-Block 관례, `AgentResult` parser | schema 강제력은 OMP가 우세 |
+| 모델 라우팅 | registry/role alias, agent별 override, auth·retry fallback, provider service tier | phase/provider/role config와 cross-vendor 고정 모드, readiness fallback | OMP는 동적 실행, awf는 재현 가능한 정책에 강점 |
+| 판단/종료 | runtime은 결과를 보존하며 최종 판단은 parent에 위임 | severity dedup, fail-closed judge, team turn/timeout 종료 규칙 | workflow 판정은 awf가 우세 |
+| 승인 경계 | headless child는 parent task 승인을 권한 경계로 사용하고 approval policy를 상속 | approve/done과 scope hash를 parent-only gate로 강제 | HIL과 변경 통제는 awf가 우세 |
+| 운영 증거 | live event, `agent://`, `history://`, job snapshot, `/collab` | readiness gate, dispatch provenance, operations event/wiki, phase result | 서로 보완적 |
+
+#### OMP가 awf보다 나은 점
+
+1. **structured concurrency**: cancellation 시 새 작업을 막고 시작된 worker를 정리하며,
+   child가 남긴 background process도 owner 기준으로 reap한 뒤 isolation을 정리한다.
+2. **상태를 가진 협업**: agent가 결과 문자열만 반환하는 것이 아니라 살아 있는 peer로
+   남아 message, follow-up, park/revive를 지원한다.
+3. **실행 계약의 세밀함**: agent별 model/effort/schema/isolation/tool/spawn 정책을
+   하나의 task 호출에서 다르게 지정할 수 있다.
+4. **안전한 병렬 쓰기 기반**: 격리 worktree에서 변경을 수집하고 merge 실패 시 patch를
+   보존하므로 병렬 구현의 실패가 곧 작업 유실로 이어지지 않는다.
+5. **런타임 관찰성**: request/token/cost, resolved fallback model, 최근 tool/output,
+   agent/job 상태가 실행 중에도 노출된다.
+
+#### awf가 OMP보다 나은 점
+
+1. **결정론적 개발 수명주기**: plan → review → approve → impl → verify → test → done의
+   전이, gate, retry 한도를 Python이 통제한다.
+2. **fail-closed 품질 정책**: provider가 달라도 동일한 severity/judge 규칙과 team
+   termination 규칙을 적용한다. OMP 자체에는 domain-specific judge가 없다.
+3. **canonical artifact와 HIL**: scope hash, phase result, 승인 이력이 agent session과
+   분리되어 있어 runtime 교체나 재실행에도 workflow 의미가 유지된다.
+4. **명시적 cross-vendor 검증**: Codex/Claude/Gemini/OpenAI를 역할별로 고정해 독립
+   관점을 만들 수 있고, provider 부재와 fallback을 readiness 단계에서 진단한다.
+5. **운영 집계**: 개별 agent transcript보다 상위인 dispatch/phase 단위 성공률,
+   timeout, provenance를 repo-local operations 기록으로 합성한다.
+
+#### 현재 통합의 핵심 한계
+
+`OmpDispatch`는 worker마다 `omp --mode json --no-session -p ...`를 실행하는
+**NDJSON print adapter**다. 따라서 model/provider/usage/provenance는 얻지만, 그 N개
+worker가 하나의 OMP host session 아래서 `task` batch와 `hub`를 공유하지는 않는다.
+OMP-native `task`/`hub` 경로는 OMP 안에서 wf skill을 실행할 때만 활성화된다. 현재
+구현은 OMP의 모델 실행기를 연결한 P1이며, OMP의 멀티에이전트 커널 전체를 awf
+dispatch backend로 연결한 상태는 아니다.
+
+정성 평가(10점 만점, 위 소스 계약 기준)는 실행 커널 OMP 9.5 / awf 6.5,
+workflow 결정성 OMP 5.0 / awf 9.0, 실시간 agent 협업 OMP 9.5 / awf 5.0,
+gate·HIL OMP 4.5 / awf 9.5다. 합산 순위는 의미가 없다. 최적 구조는
+**awf가 state/gate/judge를 소유하고 OMP가 fan-out/session/isolation을 소유하는 것**이다.
+
 ### awf/wf 구현 상태와 다음 우선순위
 
 | 상태 | 우선순위 | 항목 | 구현/다음 방향 |
@@ -190,9 +249,13 @@ cost_estimate: ~$0.0630
 | 완료 | P1 | OMP agent discovery | `awf agents sync-omp`가 `claude/agents`를 `.omp/agents`로 변환하고 manifest로 생성 파일 소유권 관리 |
 | 완료 | P1 | OMP dispatch provenance | CLI adapter가 session/provider/model/usage/response hash를 `.workflow/artifacts/dispatch/omp-*.json`에 저장; host-native task URI는 phase evidence에 연결 |
 | 완료 | P1 | workflow HIL 경계 | approve/done과 scope hash 승인은 parent-only, OMP runtime state는 gate evidence로만 취급 |
-| 예정 | P2 | provider 선택이 정적이고 비용/지연/쿼터 피드백이 약함 | OMP role alias와 awf usage telemetry를 결합한 capability/cost-aware routing 추가 |
-| 예정 | P2 | disagreement를 무조건 FAIL 처리해 false positive 비용이 큼 | evidence quality, confidence, reproducibility를 judge 입력에 추가하고 critical/high는 기존 fail-closed 유지 |
-| 예정 | P2 | 벤더별 실행 결과를 비교하는 회귀 corpus가 없음 | 동일 fixture를 OMP, Claude teams/subagents, Codex subagents, Gemini/ADK에서 실행하는 conformance suite 추가 |
+| 예정 | P2 | OMP native coordinator bridge | worker별 subprocess 대신 단일 OMP host session이 `.omp/agents`를 `task` batch로 실행하고 task ID, `agent://`/`history://`, hub transcript를 정규화해 반환 |
+| 예정 | P2 | dispatch contract parity | `WorkerSpec`에 output schema/mode, isolation, agent type을 추가하고 OMP strict schema 결과를 `AgentResult`에 보존 |
+| 예정 | P2 | structured cancellation/capacity | inline/OMP backend에 전역 concurrency cap, cancellation propagation, partial-result 보존, child process reap 계약 추가 |
+| 예정 | P2 | capability/cost-aware routing | OMP role alias와 awf usage/latency/quota telemetry를 결합하되 선택 근거와 resolved model을 provenance에 고정 |
+| 예정 | P2 | evidence-aware judge v2 | disagreement 자체는 재검증 대상으로 보내고 evidence quality, confidence, reproducibility를 판정에 추가; critical/high는 기존 fail-closed 유지 |
+| 예정 | P2 | cross-runtime conformance | 동일 fixture를 OMP native, OMP print adapter, Claude teams/subagents, Codex subagents, Gemini/ADK에서 실행해 결과·취소·격리·provenance 계약 비교 |
+| 예정 | P3 | durable agent follow-up | workflow phase evidence에 OMP agent handle을 연결해 inspect/steer/revive를 허용하되 approve/done 권한은 parent에만 유지 |
 
 ### 안전 경계
 
@@ -203,6 +266,12 @@ cost_estimate: ~$0.0630
 
 ### 근거 문서
 
+- [OMP task implementation](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/task/index.ts)
+- [OMP subagent lifecycle and structured cleanup](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/task/executor.ts)
+- [OMP hub implementation](https://github.com/can1357/oh-my-pi/tree/main/packages/coding-agent/src/tools/hub)
+- [awf dispatch contract](../../cli/src/awf/core/dispatch.py)
+- [awf deterministic judge](../../cli/src/awf/core/multi_agent.py)
+- [awf team runner](../../cli/src/awf/core/team_runner.py)
 - [OMP task runtime](https://github.com/can1357/oh-my-pi/blob/main/docs/tools/task.md)
 - [OMP model/provider configuration](https://github.com/can1357/oh-my-pi/blob/main/docs/models.md)
 - [Claude Agent SDK subagents](https://code.claude.com/docs/en/agent-sdk/subagents)
