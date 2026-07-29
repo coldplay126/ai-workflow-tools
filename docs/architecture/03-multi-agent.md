@@ -77,25 +77,28 @@ Codex → Primary 순차. Codex 분석 → Primary 검증 + 보완.
 Codex only. read-only, 45초 timeout.
 ```
 
-## Judge Rules
+## Judge Rules v2
 
-```mermaid
-flowchart TD
-    START["Agent 결과 수집"]
-    R1{"Rule 1:<br/>CRITICAL finding?"}
-    R2{"Rule 2:<br/>MAJOR ≥ 2건?"}
-    R3{"Rule 3:<br/>결론 불일치?<br/>(PASS vs FAIL)"}
-    PASS["✓ PASS"]
-    FAIL["✗ FAIL"]
+판정은 입력 순서와 아래 우선순위만 사용하므로 동일한 `AgentResult` 목록은 항상
+동일한 verdict를 만든다.
 
-    START --> R1
-    R1 -->|Yes| FAIL
-    R1 -->|No| R2
-    R2 -->|Yes| FAIL
-    R2 -->|No| R3
-    R3 -->|불일치| FAIL
-    R3 -->|일치| PASS
-```
+1. 결과가 없으면 `FAIL`.
+2. 실행 성공 여부와 무관하게 `CRITICAL`/`HIGH` finding이 하나라도 있으면 `FAIL`.
+3. `category:location`으로 중복 제거한 `MAJOR`/`MEDIUM` finding이 2개 이상이면 `FAIL`.
+4. `PASS`/`FAIL` 불일치일 때만 실패 측 evidence score(0–5)를 적용한다. 유효 실행
+   +1, high/`>=0.8` confidence +2 또는 medium/`>=0.5` +1, 실제 evidence/location
+   +1, 재현 가능한 file:line·command·test/result +1이다. `FAIL`을 확정하려면 실패
+   agent가 유효하고 score가 3 이상이며 실제 evidence 또는 재현 정보가 있어야 한다.
+   confidence만으로는 grounded failure가 되지 않으며, 나머지는
+   `ESCALATE`와 `revalidation_required:` reason을 반환한다.
+5. 모든 명시적 결론이 `FAIL`이면 `FAIL`. `PASS`와 invalid/missing conclusion이
+   섞이면 `ESCALATE`; 결론이 전혀 없고 실행도 invalid면 `FAIL`.
+6. 그 뒤 기존 detailed-agent 우선 규칙을 적용하고, unanimous `PASS` 또는 유효한
+   legacy unstructured success는 `PASS`.
+
+여러 실패 agent 중에서는 유효 실행을 먼저, 그 안에서 evidence score가 높은 결과를
+먼저 사용하며 동점은 입력 순서를 보존한다. `precise`/`cross`/`critical`은 이 verdict를
+변환하지 않고 `MultiAgentResult`에 그대로 보존한다.
 
 ## 자동 승격/다운그레이드
 
@@ -154,6 +157,28 @@ cost_estimate: ~$0.0630
 === multi-agent: cross complete ===
 ```
 
+## 런타임 계약 근거 행렬
+
+`measured/local`은 이 저장소의 실제 adapter를 동일한 offline fixture corpus와 fake
+외부 경계로 실행한다는 뜻이다. `mapped/external`은 공개 런타임 계약을 awf 용어로
+대응시킨 것일 뿐, 이 suite가 해당 벤더 런타임을 실행했다는 뜻이 아니다.
+
+| 로컬 surface | 근거 | 정렬·부분 결과 | 취소/timeout | strict schema | isolation | durable follow-up | provenance |
+|--------------|------|----------------|--------------|---------------|-----------|-------------------|------------|
+| inline | measured/local fake provider | 입력 순서, 명시 실패 보존 | 완료 후 timeout 판정; active cancel 없음 | 미지원 (`require_json`만) | 미지원 | 미지원 | dispatch 기록 없음 |
+| cmux adapter | measured/local fake bridge | 입력 순서; 명시 실패 채널 없이 timeout만 | deadline 만료, active cancel 없음 | 미지원 (`require_json`만) | `WorkerSpec.isolated` 미지원 | durable handle 미지원 | OMP 기록 없음 |
+| OMP print adapter | measured/local fake NDJSON | 입력 순서, subprocess 실패 보존 | worker별 subprocess timeout | 미지원 (`require_json`만) | 미지원 | 미지원 | schema v2 hash/실행 metadata |
+| OMP native coordinator | measured/local fake host `task` batch | 입력 순서, 완료 partial 보존 | structured batch cancel, host/child reap | strict/permissive 지원 | worker별 지원 | session + `agent://`/`history://` | schema v2 handle/lineage/hash |
+| legacy Pi adapter | measured/local fake print process | 입력 순서, subprocess 실패 보존 | worker별 subprocess timeout | 미지원 (`require_json`만) | 미지원 | 미지원 | dispatch 기록 없음 |
+
+| 외부 runtime | 근거 상태 | awf 계약 매핑 | 이 저장소의 실행 주장 |
+|--------------|-----------|---------------|-------------------------|
+| Claude Code agent teams | mapped/external | shared task + teammate message → batch/peer coordination | 없음 |
+| Claude subagents / Agent SDK | mapped/external | parent invoke/collect → ordered `AgentResult` | 없음 |
+| Codex subagents | mapped/external | spawn/steer/collect thread → coordinator mapping | 없음 |
+| Gemini CLI subagents | mapped/external | specialist-as-tool → parent result mapping | 없음 |
+| Google ADK | mapped/external | application workflow graph/event/session → orchestration mapping | 없음 |
+
 ## OMP와 벤더 멀티에이전트 비교 (2026-07-29)
 
 | 항목 | OMP | Claude Code / Agent SDK | Codex | Gemini CLI / Google ADK |
@@ -192,11 +217,11 @@ OMP는 범용 **멀티에이전트 실행 커널**, awf는 개발 수명주기�
 | 상태의 기준 | process-global agent registry, session JSONL, `task`/`hub` job state | `.workflow/state.json`, phase artifacts, scope hash | 장기 workflow 진실은 awf가 우세 |
 | fan-out | batch `task`, session 단위 semaphore, async job, recursion/concurrency 제한, all-settled 결과 | `WorkerSpec` + inline thread pool/cmux/OMP/Pi dispatch, phase별 parallel/sequential | 범용 실행 안정성은 OMP가 우세 |
 | 수평 협업 | `hub` direct/broadcast, reply wait, inbox, idle wake, parked revive | file blackboard로 turn 간 공유; sequential team은 같은 turn의 이전 결과를 읽음 | 실시간 재조정은 OMP가 우세 |
-| 수명주기 | keep-alive, idle → park → revive, transcript를 보존한 follow-up turn | 기본 worker는 one-shot `AgentResult`; cmux만 reusable worker 지원 | OMP가 우세 |
+| 수명주기 | keep-alive, idle → park → revive, transcript를 보존한 follow-up turn | 기본 worker는 one-shot; OMP native는 session/agent handle follow-up, cmux는 reusable worker 지원 | durable 협업은 OMP가 우세 |
 | 격리/병합 | spawn별 worktree, patch/branch 모드, nested repo patch, 실패 artifact 보존, owner job reap | impl phase worktree와 cmux 격리는 있으나 모든 dispatch worker의 공통 계약은 아님 | OMP가 우세 |
-| 출력 계약 | spawn별 JSON Schema, permissive/strict mode, output artifact, usage/cost | `require_json`과 4-Block 관례, `AgentResult` parser | schema 강제력은 OMP가 우세 |
-| 모델 라우팅 | registry/role alias, agent별 override, auth·retry fallback, provider service tier | phase/provider/role config와 cross-vendor 고정 모드, readiness fallback | OMP는 동적 실행, awf는 재현 가능한 정책에 강점 |
-| 판단/종료 | runtime은 결과를 보존하며 최종 판단은 parent에 위임 | severity dedup, fail-closed judge, team turn/timeout 종료 규칙 | workflow 판정은 awf가 우세 |
+| 출력 계약 | spawn별 JSON Schema, permissive/strict mode, output artifact, usage/cost | `WorkerSpec` schema/mode를 native surface가 강제하고 legacy surface는 `require_json` parser만 사용 | native는 동등, legacy는 OMP가 우세 |
+| 모델 라우팅 | registry/role alias, agent별 override, auth·retry fallback, provider service tier | phase/provider/role policy 뒤 capability와 cost/budget으로 후보를 filter | OMP는 동적 실행, awf는 재현 가능한 정책에 강점 |
+| 판단/종료 | runtime은 결과를 보존하며 최종 판단은 parent에 위임 | severity dedup + evidence-aware judge v2 + team turn/timeout 종료 규칙 | workflow 판정은 awf가 우세 |
 | 승인 경계 | headless child는 parent task 승인을 권한 경계로 사용하고 approval policy를 상속 | approve/done과 scope hash를 parent-only gate로 강제 | HIL과 변경 통제는 awf가 우세 |
 | 운영 증거 | live event, `agent://`, `history://`, job snapshot, `/collab` | readiness gate, dispatch provenance, operations event/wiki, phase result | 서로 보완적 |
 
@@ -217,8 +242,8 @@ OMP는 범용 **멀티에이전트 실행 커널**, awf는 개발 수명주기�
 
 1. **결정론적 개발 수명주기**: plan → review → approve → impl → verify → test → done의
    전이, gate, retry 한도를 Python이 통제한다.
-2. **fail-closed 품질 정책**: provider가 달라도 동일한 severity/judge 규칙과 team
-   termination 규칙을 적용한다. OMP 자체에는 domain-specific judge가 없다.
+2. **결정론적 품질 정책**: critical/high와 중복 제거된 다중 major는 fail closed,
+   grounded disagreement는 `FAIL`, 약하거나 재현 불가한 disagreement는 재검증으로 보낸다.
 3. **canonical artifact와 HIL**: scope hash, phase result, 승인 이력이 agent session과
    분리되어 있어 runtime 교체나 재실행에도 workflow 의미가 유지된다.
 4. **명시적 cross-vendor 검증**: Codex/Claude/Gemini/OpenAI를 역할별로 고정해 독립
@@ -226,18 +251,17 @@ OMP는 범용 **멀티에이전트 실행 커널**, awf는 개발 수명주기�
 5. **운영 집계**: 개별 agent transcript보다 상위인 dispatch/phase 단위 성공률,
    timeout, provenance를 repo-local operations 기록으로 합성한다.
 
-#### 현재 통합의 핵심 한계
+#### 현재 통합 경계
 
-`OmpDispatch`는 worker마다 `omp --mode json --no-session -p ...`를 실행하는
-**NDJSON print adapter**다. 따라서 model/provider/usage/provenance는 얻지만, 그 N개
-worker가 하나의 OMP host session 아래서 `task` batch와 `hub`를 공유하지는 않는다.
-OMP-native `task`/`hub` 경로는 OMP 안에서 wf skill을 실행할 때만 활성화된다. 현재
-구현은 OMP의 모델 실행기를 연결한 P1이며, OMP의 멀티에이전트 커널 전체를 awf
-dispatch backend로 연결한 상태는 아니다.
+`OmpDispatch`는 worker마다 독립 `omp --mode json -p ...`를 실행하는 **print adapter**로
+남는다. 별도의 OMP native coordinator는 병렬 batch마다 단일 host session을 열고 그
+host가 한 번의 `task` batch를 호출하게 한다. 두 경로 모두 `AgentResult`로 정규화하지만,
+strict schema, worker isolation, structured batch cancellation, `task_id`,
+`agent://`/`history://`, durable follow-up은 native surface에만 있다.
 
-정성 평가(10점 만점, 위 소스 계약 기준)는 실행 커널 OMP 9.5 / awf 6.5,
-workflow 결정성 OMP 5.0 / awf 9.0, 실시간 agent 협업 OMP 9.5 / awf 5.0,
-gate·HIL OMP 4.5 / awf 9.5다. 합산 순위는 의미가 없다. 최적 구조는
+awf는 계속 `.workflow/state.json`, phase transition, scope hash, approve/done gate와
+최종 judge를 소유한다. OMP session/registry와 follow-up handle은 provenance/evidence일
+뿐 canonical workflow state나 parent-only 승인 권한을 대체하지 않는다. 최적 구조는
 **awf가 state/gate/judge를 소유하고 OMP가 fan-out/session/isolation을 소유하는 것**이다.
 
 ### awf/wf 구현 상태와 다음 우선순위
@@ -249,13 +273,13 @@ gate·HIL OMP 4.5 / awf 9.5다. 합산 순위는 의미가 없다. 최적 구조
 | 완료 | P1 | OMP agent discovery | `awf agents sync-omp`가 `claude/agents`를 `.omp/agents`로 변환하고 manifest로 생성 파일 소유권 관리 |
 | 완료 | P1 | OMP dispatch provenance | CLI adapter가 session/provider/model/usage/response hash를 `.workflow/artifacts/dispatch/omp-*.json`에 저장; host-native task URI는 phase evidence에 연결 |
 | 완료 | P1 | workflow HIL 경계 | approve/done과 scope hash 승인은 parent-only, OMP runtime state는 gate evidence로만 취급 |
-| 예정 | P2 | OMP native coordinator bridge | worker별 subprocess 대신 단일 OMP host session이 `.omp/agents`를 `task` batch로 실행하고 task ID, `agent://`/`history://`, hub transcript를 정규화해 반환 |
-| 예정 | P2 | dispatch contract parity | `WorkerSpec`에 output schema/mode, isolation, agent type을 추가하고 OMP strict schema 결과를 `AgentResult`에 보존 |
-| 예정 | P2 | structured cancellation/capacity | inline/OMP backend에 전역 concurrency cap, cancellation propagation, partial-result 보존, child process reap 계약 추가 |
-| 예정 | P2 | capability/cost-aware routing | OMP role alias와 awf usage/latency/quota telemetry를 결합하되 선택 근거와 resolved model을 provenance에 고정 |
-| 예정 | P2 | evidence-aware judge v2 | disagreement 자체는 재검증 대상으로 보내고 evidence quality, confidence, reproducibility를 판정에 추가; critical/high는 기존 fail-closed 유지 |
-| 예정 | P2 | cross-runtime conformance | 동일 fixture를 OMP native, OMP print adapter, Claude teams/subagents, Codex subagents, Gemini/ADK에서 실행해 결과·취소·격리·provenance 계약 비교 |
-| 예정 | P3 | durable agent follow-up | workflow phase evidence에 OMP agent handle을 연결해 inspect/steer/revive를 허용하되 approve/done 권한은 parent에만 유지 |
+| 완료 | P2 | OMP native coordinator bridge | 단일 OMP host session이 한 번의 `task` batch를 실행하고 task ID, `agent://`/`history://`, provider/model/usage를 입력 순서대로 정규화 |
+| 완료 | P2 | dispatch contract parity | `WorkerSpec`이 agent type, output schema/mode, isolation을 표현하고 strict invalid output은 non-zero `AgentResult`로 fail closed |
+| 완료 | P2 | structured cancellation/capacity | native coordinator capacity를 제한하고 timeout/cancel 때 완료 partial을 보존하며 host/child를 reap; 다른 surface의 제한은 위 행렬에 명시 |
+| 완료 | P2 | capability/cost-aware routing | 선언 capability와 추정 비용/budget으로 후보를 먼저 거른 뒤 기존 heuristic을 적용하고 선택 근거를 metadata에 보존 |
+| 완료 | P2 | evidence-aware judge v2 | critical/high와 다중 major는 fail closed, grounded disagreement는 FAIL, 약하거나 재현 불가한 disagreement는 `revalidation_required` ESCALATE |
+| 완료 | P2 | cross-runtime conformance | 하나의 offline corpus로 모든 로컬 surface를 fake 실행하고 Claude/Codex/Gemini/ADK는 mapped/external로만 기록 |
+| 완료 | P3 | durable agent follow-up | provenance v2 handle/lineage로 OMP host session을 resume하고 steer/revive하되 approve/done은 parent-only로 유지 |
 
 ### 안전 경계
 

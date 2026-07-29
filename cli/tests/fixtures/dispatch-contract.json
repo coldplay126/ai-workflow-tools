@@ -1,0 +1,142 @@
+{
+  "schema_version": 1,
+  "scenarios": {
+    "ordered_success": {
+      "workers": [
+        {
+          "role": "first",
+          "prompt_id": "ordered-first",
+          "outcome": "success",
+          "response": {
+            "conclusion": "PASS",
+            "findings": [],
+            "evidence": ["fixture:first"]
+          },
+          "input_tokens": 11,
+          "output_tokens": 5
+        },
+        {
+          "role": "second",
+          "prompt_id": "ordered-second",
+          "outcome": "success",
+          "response": {
+            "conclusion": "PASS",
+            "findings": [],
+            "evidence": ["fixture:second"]
+          },
+          "input_tokens": 7,
+          "output_tokens": 3
+        }
+      ],
+      "expected": {
+        "roles": ["first", "second"],
+        "returncodes": [0, 0],
+        "conclusions": ["PASS", "PASS"]
+      }
+    },
+    "malformed_strict_output": {
+      "schema": {
+        "type": "object",
+        "required": ["conclusion", "findings"],
+        "properties": {
+          "conclusion": {"type": "string", "enum": ["PASS", "FAIL"]},
+          "findings": {"type": "array"}
+        },
+        "additionalProperties": false
+      },
+      "worker": {
+        "role": "strict-reviewer",
+        "prompt_id": "strict-malformed",
+        "outcome": "success",
+        "response_text": "not-json"
+      },
+      "expected": {
+        "parse_error": true,
+        "returncode_nonzero_when_strict_supported": true
+      }
+    },
+    "timeout_cancel": {
+      "workers": [
+        {
+          "role": "completed-before-cancel",
+          "prompt_id": "cancel-completed",
+          "outcome": "success",
+          "response": {"conclusion": "PASS", "findings": []}
+        },
+        {
+          "role": "cancelled-worker",
+          "prompt_id": "cancel-timeout",
+          "outcome": "timeout",
+          "response_text": ""
+        }
+      ],
+      "expected": {
+        "roles": ["completed-before-cancel", "cancelled-worker"],
+        "completed_returncode": 0,
+        "timeout_returncode": 124,
+        "partial_results_preserved": true
+      }
+    },
+    "partial_failure": {
+      "workers": [
+        {
+          "role": "successful-worker",
+          "prompt_id": "partial-success",
+          "outcome": "success",
+          "response": {"conclusion": "PASS", "findings": []}
+        },
+        {
+          "role": "failed-worker",
+          "prompt_id": "partial-failure",
+          "outcome": "failure",
+          "response_text": "",
+          "stderr": "fixture worker failed",
+          "returncode": 7
+        }
+      ],
+      "expected": {
+        "roles": ["successful-worker", "failed-worker"],
+        "returncodes": [0, 7]
+      }
+    },
+    "provenance_redaction": {
+      "prompt": "PRIVATE-PROMPT-dispatch-corpus",
+      "response": "PRIVATE-RESPONSE-dispatch-corpus",
+      "expected": {
+        "schema_version": 2,
+        "hash_algorithm": "sha256",
+        "raw_content_absent": true
+      }
+    },
+    "deterministic_verdict": {
+      "agents": [
+        {
+          "provider_name": "provider-a",
+          "role": "plan-conformance",
+          "conclusion": "PASS",
+          "findings": []
+        },
+        {
+          "provider_name": "provider-b",
+          "role": "quality-validation",
+          "conclusion": "FAIL",
+          "findings": [
+            {
+              "severity": "LOW",
+              "category": "style",
+              "location": "",
+              "message": "weak disagreement",
+              "grounded": false,
+              "reproducible": false,
+              "confidence": 0.2
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "verdict": "ESCALATE",
+        "reason_contains": "revalidation_required"
+      }
+    }
+  }
+}

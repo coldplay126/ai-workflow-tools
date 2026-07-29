@@ -1,6 +1,7 @@
 """Multi-agent orchestrator — 5 subagent modes + team pattern routing."""
 from __future__ import annotations
 
+import re
 import sys
 import time
 from typing import Any
@@ -446,78 +447,254 @@ def auto_downgrade(mode: str, agent_results: list[AgentResult]) -> str | None:
     return None
 
 
-def judge(agents: list[AgentResult]) -> tuple[str, str]:
-    """Apply deterministic Judge Rules. Returns (verdict, reason).
+_EVIDENCE_SCORE_THRESHOLD = 3
+_CONFIDENCE_POINTS = {"high": 2, "medium": 1}
+_EMPTY_EVIDENCE = {"", "?", "-", "[]", "{}", "n/a", "na", "none", "null", "unknown"}
+_REPRODUCIBILITY_RE = re.compile(
+    r"(?:\b[\w./\\-]+:\d+\b|"
+    r"\b(?:pytest|unittest|npm\s+test|cargo\s+test|go\s+test)\b|"
+    r"\b\d+\s+(?:passed|failed)\b|"
+    r"\b(?:returncode|exit(?:\s+code)?)\s*[:=]?\s*-?\d+\b)",
+    re.IGNORECASE,
+)
+_REPRODUCIBILITY_KEYS = {
+    "command", "exit_code", "returncode", "test", "test_result",
+}
 
-    Rules (in order):
-      1. Any CRITICAL/HIGH finding → FAIL
-      2. Total MAJOR/MEDIUM findings >= 2 → FAIL
-      3. Conclusion disagreement (PASS vs FAIL) → FAIL
-      4. Single agent with zero findings vs agent with findings → trust the one with findings
-      5. All agree → PASS
-    """
+
+def _agent_findings(agent: AgentResult) -> list[dict[str, Any]]:
+    parsed = agent.parsed
+    if not isinstance(parsed, dict):
+        return []
+    findings = parsed.get("findings", [])
+    if not isinstance(findings, list):
+        return []
+    return [finding for finding in findings if isinstance(finding, dict)]
+
+
+def _agent_conclusion(agent: AgentResult) -> str:
+    parsed = agent.parsed
+    if not isinstance(parsed, dict):
+        return ""
+    return str(parsed.get("conclusion", "")).upper()
+
+
+def _evidence_text(value: Any) -> str:
+    """Flatten evidence-bearing values while ignoring envelope identifiers."""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        return " ".join(
+            _evidence_text(item)
+            for key, item in value.items()
+            if str(key).lower() not in {"id", "kind", "severity", "category", "confidence"}
+        ).strip()
+    if isinstance(value, (list, tuple)):
+        return " ".join(_evidence_text(item) for item in value).strip()
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _has_evidence(*values: Any) -> bool:
+    return any(
+        text.lower() not in _EMPTY_EVIDENCE
+        for value in values
+        if (text := _evidence_text(value))
+    )
+
+
+def _has_reproducibility(value: Any) -> bool:
+    if isinstance(value, dict):
+        if any(
+            str(key).lower() in _REPRODUCIBILITY_KEYS and _has_evidence(item)
+            for key, item in value.items()
+        ):
+            return True
+        return any(_has_reproducibility(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_has_reproducibility(item) for item in value)
+    return bool(_REPRODUCIBILITY_RE.search(_evidence_text(value)))
+
+
+def _confidence_points(value: Any) -> int:
+    if isinstance(value, bool) or value is None:
+        return 0
+    if isinstance(value, (int, float)):
+        confidence = float(value)
+        if confidence > 1:
+            confidence /= 100
+        return 2 if confidence >= 0.8 else 1 if confidence >= 0.5 else 0
+    normalized = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+    return _CONFIDENCE_POINTS.get(normalized, 0)
+
+
+def _failing_evidence_score(agent: AgentResult) -> tuple[int, bool, bool, str]:
+    """Return score, execution validity, grounding, and a transparent breakdown."""
+    parsed = agent.parsed if isinstance(agent.parsed, dict) else {}
+    top_evidence = parsed.get("evidence")
+    top_confidence = parsed.get("confidence")
+    valid = agent.ok and not agent.parse_error
+    best = (1 if valid else 0, 0, 0, 0)
+
+    candidates = _agent_findings(agent) or [{}]
+    for finding in candidates:
+        confidence = max(
+            _confidence_points(finding.get("confidence")),
+            _confidence_points(top_confidence),
+        )
+        evidence_values = (
+            finding.get("location"),
+            finding.get("locations"),
+            finding.get("evidence"),
+            top_evidence,
+        )
+        has_evidence = _has_evidence(*evidence_values)
+        reproducible = _has_reproducibility(
+            (
+                *evidence_values,
+                finding.get("description"),
+                finding.get("summary"),
+            )
+        )
+        candidate = (
+            1 if valid else 0,
+            confidence,
+            1 if has_evidence else 0,
+            1 if reproducible else 0,
+        )
+        if sum(candidate) > sum(best):
+            best = candidate
+
+    score = sum(best)
+    grounded = bool(best[2] or best[3])
+    breakdown = (
+        f"valid={best[0]},confidence={best[1]},"
+        f"evidence={best[2]},reproducible={best[3]}"
+    )
+    return score, valid, grounded, breakdown
+
+
+def judge(agents: list[AgentResult]) -> tuple[str, str]:
+    """Apply deterministic evidence-aware Judge Rules v2."""
     if not agents:
         return "FAIL", "no agent results"
 
-    # Rule 1: Any critical finding → FAIL
-    for a in agents:
-        if a.has_critical:
-            return "FAIL", f"critical finding from {a.provider_name} ({a.role})"
+    # Rule 1: CRITICAL/HIGH is fail-closed, independent of execution validity.
+    for agent in agents:
+        if any(
+            str(finding.get("severity", "")).upper() in {"CRITICAL", "HIGH"}
+            for finding in _agent_findings(agent)
+        ):
+            return "FAIL", f"critical finding from {agent.provider_name} ({agent.role})"
 
-    # Rule 2: Major findings >= 2 total → FAIL
-    # Deduplicate same-category findings across providers to avoid double-counting
-    _severity_rank = {"CRITICAL": 4, "HIGH": 3, "MAJOR": 2, "MEDIUM": 1, "LOW": 0}
-    seen_findings: dict[str, str] = {}  # (category, location) → highest severity
-    for a in agents:
-        for f in a.findings:
-            sev = str(f.get("severity", "")).upper()
-            cat = str(f.get("category", ""))
-            loc = str(f.get("location", ""))
-            key = f"{cat}:{loc}"
+    # Rule 2: Two distinct MAJOR/MEDIUM findings are fail-closed.
+    severity_rank = {"CRITICAL": 4, "HIGH": 3, "MAJOR": 2, "MEDIUM": 1, "LOW": 0}
+    seen_findings: dict[str, str] = {}
+    for agent in agents:
+        for finding in _agent_findings(agent):
+            severity = str(finding.get("severity", "")).upper()
+            category = str(finding.get("category", ""))
+            location = str(finding.get("location", ""))
+            key = f"{category}:{location}"
             existing = seen_findings.get(key)
-            if existing is None or _severity_rank.get(sev, 0) > _severity_rank.get(existing, 0):
-                seen_findings[key] = sev
+            if existing is None or severity_rank.get(severity, 0) > severity_rank.get(existing, 0):
+                seen_findings[key] = severity
     total_major = sum(
-        1 for sev in seen_findings.values()
-        if sev in {"MAJOR", "MEDIUM"}
+        1 for severity in seen_findings.values()
+        if severity in {"MAJOR", "MEDIUM"}
     )
     if total_major >= 2:
         return "FAIL", f"major findings total {total_major} >= 2 (after dedup)"
 
-    # Rule 3: Conclusion disagreement → FAIL (conservative)
-    conclusions: dict[str, list[str]] = {}  # "PASS"/"FAIL" → [provider names]
-    for a in agents:
-        c = a.conclusion.upper()
-        if "PASS" in c:
-            conclusions.setdefault("PASS", []).append(a.provider_name)
-        elif "FAIL" in c:
-            conclusions.setdefault("FAIL", []).append(a.provider_name)
+    # Rule 3: Resolve PASS/FAIL disagreement from the strongest FAIL evidence.
+    conclusions: dict[str, list[str]] = {}
+    failing_agents: list[AgentResult] = []
+    for agent in agents:
+        conclusion = _agent_conclusion(agent)
+        if "PASS" in conclusion:
+            conclusions.setdefault("PASS", []).append(agent.provider_name)
+        elif "FAIL" in conclusion:
+            conclusions.setdefault("FAIL", []).append(agent.provider_name)
+            failing_agents.append(agent)
     if len(conclusions) > 1:
-        return "FAIL", (
-            f"agents disagree: "
+        strongest_agent = failing_agents[0]
+        (
+            strongest_score,
+            strongest_valid,
+            strongest_grounded,
+            strongest_breakdown,
+        ) = _failing_evidence_score(strongest_agent)
+        for agent in failing_agents[1:]:
+            score, valid, grounded, breakdown = _failing_evidence_score(agent)
+            if (valid, grounded, score) > (
+                strongest_valid,
+                strongest_grounded,
+                strongest_score,
+            ):
+                strongest_agent = agent
+                strongest_score = score
+                strongest_valid = valid
+                strongest_grounded = grounded
+                strongest_breakdown = breakdown
+
+        disagreement = (
             f"PASS={conclusions.get('PASS', [])}, "
             f"FAIL={conclusions.get('FAIL', [])}"
         )
+        if (
+            strongest_valid
+            and strongest_grounded
+            and strongest_score >= _EVIDENCE_SCORE_THRESHOLD
+        ):
+            return "FAIL", (
+                f"grounded disagreement: {strongest_agent.provider_name} "
+                f"FAIL evidence score {strongest_score}/5 "
+                f"({strongest_breakdown}); {disagreement}"
+            )
+        return "ESCALATE", (
+            f"revalidation_required: weak or invalid FAIL evidence from "
+            f"{strongest_agent.provider_name} scored {strongest_score}/5 "
+            f"({strongest_breakdown}; threshold={_EVIDENCE_SCORE_THRESHOLD}); "
+            f"{disagreement}"
+        )
 
-    # Rule 4: If one agent found nothing and another found findings,
-    # trust the more thorough agent's conclusion (more findings = more thorough)
+    # Rule 4: An explicit unanimous FAIL is still a failure. The legacy judge
+    # accidentally fell through to PASS when no finding crossed a severity gate.
+    if failing_agents and "PASS" not in conclusions:
+        return "FAIL", "all failing agents agree"
+
+    invalid_agents = [
+        agent
+        for agent in agents
+        if not agent.ok or agent.parse_error or not _agent_conclusion(agent)
+    ]
+    if "PASS" in conclusions and invalid_agents:
+        invalid_names = [agent.provider_name for agent in invalid_agents]
+        return "ESCALATE", (
+            "revalidation_required: incomplete validation from "
+            f"{invalid_names}"
+        )
+    if not conclusions and invalid_agents:
+        return "FAIL", "no valid agent conclusion"
+
+    # Rule 5: Preserve the existing detailed-agent preference.
     if len(agents) > 1:
-        agents_with_findings = [a for a in agents if a.findings]
-        agents_without = [a for a in agents if not a.findings]
+        agents_with_findings = [agent for agent in agents if _agent_findings(agent)]
+        agents_without = [agent for agent in agents if not _agent_findings(agent)]
         if agents_with_findings and agents_without:
             detailed = agents_with_findings[0]
-            detailed_conclusion = detailed.conclusion.upper()
-            if "FAIL" in detailed_conclusion:
+            if "FAIL" in _agent_conclusion(detailed):
                 return "FAIL", (
                     f"detailed agent {detailed.provider_name} concluded FAIL "
-                    f"with {len(detailed.findings)} finding(s)"
+                    f"with {len(_agent_findings(detailed))} finding(s)"
                 )
             return "PASS", (
                 f"detailed agent {detailed.provider_name} found "
-                f"{len(detailed.findings)} minor issue(s) but concluded PASS"
+                f"{len(_agent_findings(detailed))} minor issue(s) but concluded PASS"
             )
 
-    # Rule 5: All pass → PASS
+    # Rule 6: Preserve unanimous explicit PASS and legacy unstructured success.
     return "PASS", "all agents agree"
 
 
@@ -858,6 +1035,8 @@ def _run_cross(
         preference=dispatch_preference,  # type: ignore[arg-type]
         cwd=cwd,
         options=resolve_cmux_options_from_config(provider_config),
+        workers=specs,
+        provider_config=provider_config,
         omp_options=resolve_omp_options_from_config(provider_config),
     )
     print(
@@ -1054,6 +1233,7 @@ def _run_critical(
         preference=dispatch_preference,  # type: ignore[arg-type]
         cwd=cwd,
         options=resolve_cmux_options_from_config(provider_config),
+        provider_config=provider_config,
         omp_options=resolve_omp_options_from_config(provider_config),
     )
     print(

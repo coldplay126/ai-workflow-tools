@@ -2,57 +2,57 @@
   "files": [
     {
       "name": "adversarial-tester.md",
-      "sha256": "81296a80db57d3aaa3231a1e0d9f2ef85d27dbaa0c66838f53c46f519752ba85",
+      "sha256": "beffc72c48eccf3497bd478b357fad72e093aefc5ef376e28f1cd64f50c0bc3f",
       "source": "claude/agents/adversarial-tester.md"
     },
     {
       "name": "analyzer.md",
-      "sha256": "8f309f979b4ca70393f08838a5b30fd3793d5cc9fb368fca71d5eba6f56b486d",
+      "sha256": "b051cd8b558dd546b88c9deac025109ead96d41e3d86fc52604628ba363e5b4c",
       "source": "claude/agents/analyzer.md"
     },
     {
       "name": "artifact-reviewer.md",
-      "sha256": "9fde899c9ad8fde4db5ee9d363ff9736915c19eb57ac62b24533df7bc98002b8",
+      "sha256": "6d03ed8eaa99504275dea2cf1dfe771a7f75c2c2c1046b5e678d149636b42b3c",
       "source": "claude/agents/artifact-reviewer.md"
     },
     {
       "name": "code-reviewer.md",
-      "sha256": "62ac8144b54e59fe19f3f97b62a6dc36719a76f46c205f68b7f35aea46713bd2",
+      "sha256": "782c25deaaff3205fef12e399c11baae4e3848355cb7396d7e128143e2d77280",
       "source": "claude/agents/code-reviewer.md"
     },
     {
       "name": "happy-path-tester.md",
-      "sha256": "c3c6a00f69ba3e2c4b9ba62c0f959ba04f0dfaadbf19a180b87e875367b43691",
+      "sha256": "a90a502efcf8f068499e53a7a99ce0728048f1ca274360f1fd1cf5ecd1246e3b",
       "source": "claude/agents/happy-path-tester.md"
     },
     {
       "name": "implementer.md",
-      "sha256": "84b112a8e708c4bbefeb05215fe78d4e440e29fb9ce53b676c7a78b0878ace44",
+      "sha256": "d7a76d302fc1b2bfad7a06021bf8761ab07719c5bb9948f3df15414b05dad7d1",
       "source": "claude/agents/implementer.md"
     },
     {
       "name": "plan-validator.md",
-      "sha256": "132386c9876f770215755642f1c6e2887d7b0b3d3dfc5e50433b2dfe1e052949",
+      "sha256": "aea3784369a9c3fa913e7376a3b9a78da605ee63edc1fdb2b0df1221609cb59f",
       "source": "claude/agents/plan-validator.md"
     },
     {
       "name": "project-discoverer.md",
-      "sha256": "5d2bdf68aa8e727c77c3d9f5b212e35ac94d379a78d61fa1b1956bc1d9144f31",
+      "sha256": "6a3a4eaea73e66b18c69114b63f0951483622ac340b2173a88f36ab140940223",
       "source": "claude/agents/project-discoverer.md"
     },
     {
       "name": "quality-validator.md",
-      "sha256": "259b06c3b1922d390fe81ebfb29c035212affa580e1f2996c6701ba3defba40f",
+      "sha256": "d0f4337a0146d52cc558d47fdf2810e09a4ab4b31f42ba74c33be3a2cfb85962",
       "source": "claude/agents/quality-validator.md"
     },
     {
       "name": "spec-verifier.md",
-      "sha256": "07065fdee86101e61dad58b30540ba74c3d816bfc66d547dd5125d29115599f0",
+      "sha256": "e9ffd8763fc74e1f9d788252ff8d10515d6342de3015fdceffd92448114e2a6b",
       "source": "claude/agents/spec-verifier.md"
     },
     {
       "name": "spec-writer.md",
-      "sha256": "b40572381ddec0be4272f3c9e81c79a5df5ef355546edbbf1d6a8313b26cc043",
+      "sha256": "e937d9a53b82e76f621865f789dda5e19e3f501b9f41c17fda8475b9bc3a6ee7",
       "source": "claude/agents/spec-writer.md"
     }
   ],

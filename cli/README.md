@@ -37,6 +37,7 @@
 - `awf config show`: 3-level merge 결과와 resolved path 확인
 - `awf skills list`: supported search paths에서 `SKILL.md`를 탐색해 skill 목록 출력
 - `awf agents sync-omp [--dry-run] [--force] [--json]`: `claude/agents/*.md`를 OMP-native `.omp/agents/*.md`로 결정적으로 변환한다. 생성 manifest에 등록된 파일만 갱신·삭제하며, 수동 OMP agent와 이름이 충돌하면 `--force` 없이는 중단한다
+- `awf agents followup-omp (--run <run-id-or-json> --role <role> | --task-id <id>) (--message <text> | --message-file <path>) [--json]`: persisted OMP host session을 resume해 exact task를 먼저 steer/revive한다. original registry agent가 없을 때만 exact history에서 lineage-linked successor 한 개를 만들 수 있으며 successor는 original agent가 아니다. provenance inspect는 read-only이고 worker/follow-up은 `.workflow/state.json`, gate, scope hash, approve/done을 갱신하지 않는다(모두 parent-only)
 - `awf mcp list`: merged config의 MCP 서버 registry 출력
 - `awf mcp check <name>`: transport별 최소 연결 확인
   - `stdio`: 실제 `initialize` handshake + optional `tools/list`, `resources/list`
@@ -109,6 +110,8 @@ uv run --project cli awf analyze sample-api --check --repo-root .
 uv run --project cli awf analyze sample-api --catalog --repo-root .
 uv run --project cli awf skills list --repo-root .
 uv run --project cli awf agents sync-omp --repo-root . --dry-run --json
+uv run --project cli awf agents followup-omp --run <run-id-or-json> --role <role> --message "review this edge case"
+uv run --project cli awf agents followup-omp --task-id <task-id> --message-file followup.txt --json
 uv run --project cli awf mcp list --repo-root .
 uv run --project cli awf mcp check analysis-docs --repo-root .
 uv run --project cli awf mcp invoke fixture-mcp echo --input '{"text":"hello"}' --repo-root .

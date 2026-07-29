@@ -6,6 +6,24 @@ from pathlib import Path
 from typing import Any
 
 
+def multi_agent_result_schema() -> dict[str, Any]:
+    """Schema shared by AWF review, verification, and team worker results."""
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "AWF multi-agent result",
+        "type": "object",
+        "additionalProperties": True,
+        "required": ["conclusion", "findings", "evidence", "risks", "action_items"],
+        "properties": {
+            "conclusion": {"type": "string"},
+            "findings": {"type": "array"},
+            "evidence": {"type": "array"},
+            "risks": {"type": "array"},
+            "action_items": {"type": "array"},
+        },
+    }
+
+
 def workflow_result_envelope_schema(phase: str) -> dict[str, Any]:
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

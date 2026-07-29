@@ -208,8 +208,11 @@ def test_sequential_team_passes_per_worker_timeout_to_spec():
 def test_team_dispatch_resolution_reads_surface_preference_from_config():
     captured: dict = {}
 
-    def fake_resolve(*, cwd, worker_count, estimated_seconds, provider_config):
+    def fake_resolve(
+        *, cwd, worker_count, estimated_seconds, provider_config, workers=None
+    ):
         captured["provider_config"] = provider_config
+        captured["workers"] = workers
         return _SpyDispatch()
 
     cfg = {
@@ -228,6 +231,10 @@ def test_team_dispatch_resolution_reads_surface_preference_from_config():
         )
     # Provider config including the surface_preference reaches the resolver.
     assert captured["provider_config"] is cfg
+    assert [worker.role for worker in captured["workers"]] == [
+        "happy_path",
+        "adversarial",
+    ]
 
 
 def test_team_dispatch_failure_synthesizes_failure_rows_for_blackboard():

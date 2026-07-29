@@ -15,21 +15,28 @@ state machine).
 """
 from __future__ import annotations
 
+import math
 import os
 import shlex
 import shutil
-import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Callable, Literal, Protocol
+from typing import Any, Callable, Iterable, Literal, Mapping, Protocol, Sequence
 
 from awf.core import _cmux_bridge as bridge
 from awf.core.agent_runner import AgentResult, run_agent
+from awf.core.output_schemas import multi_agent_result_schema
+from awf.core.spec_loader import resolve_agent_for_role
+from awf.runners.omp import (
+    OmpRunnerConfig,
+    OmpWorkerTask,
+    omp_worker_name,
+    run_omp_agent,
+    run_omp_native_batch,
+)
 from awf.runners.pi import PiRunnerConfig, run_pi_agent
-from awf.runners.omp import OmpRunnerConfig, run_omp_agent
 
 
 Strategy = Literal["parallel", "sequential"]
@@ -40,6 +47,202 @@ SURFACE_INLINE = "inline"
 SURFACE_CMUX = "cmux"
 SURFACE_PI = "pi"
 SURFACE_OMP = "omp"
+
+
+@dataclass(frozen=True)
+class BackendCapabilities:
+    """Deterministic capability declaration for one dispatch surface."""
+
+    surface: str
+    capabilities: frozenset[str]
+
+    def supports(self, required: Iterable[str]) -> bool:
+        return frozenset(required).issubset(self.capabilities)
+
+
+BACKEND_CAPABILITIES: dict[str, BackendCapabilities] = {
+    SURFACE_INLINE: BackendCapabilities(
+        surface=SURFACE_INLINE,
+        capabilities=frozenset(
+            {
+                "add_dirs",
+                "chained",
+                "parallel",
+                "progress",
+                "provider_selection",
+                "sequential",
+                "structured_output",
+            }
+        ),
+    ),
+    SURFACE_CMUX: BackendCapabilities(
+        surface=SURFACE_CMUX,
+        capabilities=frozenset(
+            {
+                "chained",
+                "parallel",
+                "persistent_workers",
+                "sequential",
+                "structured_output",
+            }
+        ),
+    ),
+    SURFACE_OMP: BackendCapabilities(
+        surface=SURFACE_OMP,
+        capabilities=frozenset(
+            {
+                "chained",
+                "parallel",
+                "sequential",
+                "structured_output",
+            }
+        ),
+    ),
+    SURFACE_PI: BackendCapabilities(
+        surface=SURFACE_PI,
+        capabilities=frozenset(
+            {
+                "chained",
+                "parallel",
+                "sequential",
+                "session",
+                "structured_output",
+            }
+        ),
+    ),
+}
+
+
+def backend_capabilities(
+    surface: str,
+    omp_options: OmpDispatchOptions | None = None,
+) -> BackendCapabilities:
+    """Resolve mode-sensitive capabilities without overstating OMP print mode."""
+    base = BACKEND_CAPABILITIES[surface]
+    if surface != SURFACE_OMP:
+        return base
+
+    options = omp_options or OmpDispatchOptions()
+    if options.config.coordination_surface != "native":
+        return base
+
+    native = set(base.capabilities)
+    native.update(
+        {
+            "agent_type",
+            "cancellation",
+            "capacity",
+            "isolated",
+            "isolation",
+            "messaging",
+            "native_coordination",
+            "output_schema",
+            "schema_mode",
+            "strict_schema",
+        }
+    )
+    if not options.config.no_session:
+        native.update({"durable_followup", "follow_up", "session"})
+    return BackendCapabilities(surface=SURFACE_OMP, capabilities=frozenset(native))
+
+
+@dataclass(frozen=True)
+class RoutingRequirements:
+    """Capabilities a worker batch requires from its dispatch backend."""
+
+    required_capabilities: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        normalized = frozenset(
+            str(value).strip().lower()
+            for value in self.required_capabilities
+            if str(value).strip()
+        )
+        object.__setattr__(self, "required_capabilities", normalized)
+
+
+RoutingRequirement = RoutingRequirements
+
+
+@dataclass(frozen=True)
+class DispatchRoutingConfig:
+    """Cost and ordering policy for capability-aware auto selection."""
+
+    required_capabilities: frozenset[str] = frozenset()
+    estimated_cost: Mapping[str, float] = field(default_factory=dict)
+    max_cost_budget: float | None = None
+    priority: tuple[str, ...] = ()
+    configured: bool = False
+
+    def __post_init__(self) -> None:
+        required = frozenset(
+            str(value).strip().lower()
+            for value in self.required_capabilities
+            if str(value).strip()
+        )
+        costs = {
+            str(surface).strip().lower(): float(cost)
+            for surface, cost in self.estimated_cost.items()
+            if str(surface).strip().lower() in BACKEND_CAPABILITIES
+            and isinstance(cost, (int, float))
+            and not isinstance(cost, bool)
+            and math.isfinite(float(cost))
+            and float(cost) >= 0
+        }
+        budget = (
+            float(self.max_cost_budget)
+            if isinstance(self.max_cost_budget, (int, float))
+            and not isinstance(self.max_cost_budget, bool)
+            and math.isfinite(float(self.max_cost_budget))
+            and float(self.max_cost_budget) >= 0
+            else None
+        )
+        priority = tuple(
+            surface
+            for surface in (
+                str(value).strip().lower() for value in self.priority
+            )
+            if surface in BACKEND_CAPABILITIES
+        )
+        object.__setattr__(self, "required_capabilities", required)
+        object.__setattr__(self, "estimated_cost", costs)
+        object.__setattr__(self, "max_cost_budget", budget)
+        object.__setattr__(self, "priority", tuple(dict.fromkeys(priority)))
+
+
+RoutingConfig = DispatchRoutingConfig
+
+
+@dataclass(frozen=True)
+class DispatchSelection:
+    """Inspectable explanation of a dispatch routing decision."""
+
+    selected: str | None
+    reason: str
+    score: float
+    required_capabilities: tuple[str, ...] = ()
+    eligible_candidates: tuple[str, ...] = ()
+    excluded_candidates: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    estimated_cost: float | None = None
+
+
+class DispatchSelectionError(RuntimeError):
+    """Raised when an explicit or auto selection cannot satisfy its contract."""
+
+    def __init__(
+        self,
+        *,
+        preference: str,
+        status: Literal["unavailable", "incompatible"],
+        diagnostics: DispatchSelection,
+    ) -> None:
+        self.preference = preference
+        self.status = status
+        self.diagnostics = diagnostics
+        super().__init__(
+            f"dispatch surface_preference={preference} is {status}: "
+            f"{diagnostics.reason}"
+        )
 
 # Heuristic thresholds for auto selection.
 _CMUX_MIN_WORKERS = 2
@@ -69,6 +272,10 @@ class WorkerSpec:
     on_progress: Callable[[float, str | None], None] | None = field(
         default=None, compare=False
     )
+    agent_type: str | None = None
+    output_schema: dict[str, Any] | bool | str | None = None
+    schema_mode: Literal["permissive", "strict"] = "permissive"
+    isolated: bool | None = None
 
     def expected_seconds(self) -> float:
         return float(self.timeout_sec)
@@ -127,7 +334,7 @@ class PiDispatchOptions:
 
 @dataclass(frozen=True)
 class OmpDispatchOptions:
-    """Configuration for OMP print-mode dispatch."""
+    """Configuration for OMP native coordination or print compatibility."""
 
     config: OmpRunnerConfig = field(default_factory=OmpRunnerConfig.from_env)
     role_models: dict[str, str] = field(default_factory=dict)
@@ -301,7 +508,7 @@ class PiDispatch:
 
 
 # ---------------------------------------------------------------------------
-# OmpDispatch — OMP NDJSON print-mode backend with provenance.
+# OmpDispatch — native task coordination with print-mode compatibility.
 # ---------------------------------------------------------------------------
 
 
@@ -317,8 +524,43 @@ def _run_omp_single(spec: WorkerSpec, cwd: str, options: OmpDispatchOptions) -> 
     )
 
 
+def _resolve_omp_agent_type(spec: WorkerSpec) -> str:
+    if spec.agent_type:
+        return spec.agent_type
+    try:
+        resolved = resolve_agent_for_role(spec.role)
+    except (OSError, ValueError):
+        resolved = None
+    if resolved:
+        return resolved
+    return spec.role.strip().lower().replace("_", "-") or "task"
+
+
+def _omp_native_tasks(workers: list[WorkerSpec]) -> list[OmpWorkerTask]:
+    tasks: list[OmpWorkerTask] = []
+    for index, spec in enumerate(workers):
+        output_schema = spec.output_schema
+        schema_mode = spec.schema_mode
+        if spec.require_json and output_schema is None:
+            output_schema = multi_agent_result_schema()
+            schema_mode = "strict"
+        tasks.append(
+            OmpWorkerTask(
+                name=omp_worker_name(index, spec.role),
+                role=spec.role,
+                prompt=spec.prompt,
+                agent_type=_resolve_omp_agent_type(spec),
+                output_schema=output_schema,
+                schema_mode=schema_mode,
+                isolated=spec.isolated,
+                require_json=spec.require_json,
+            )
+        )
+    return tasks
+
+
 class OmpDispatch:
-    """Dispatch workers through OMP while awf retains canonical state."""
+    """Dispatch workers through one native OMP host or the print adapter."""
 
     name = SURFACE_OMP
 
@@ -334,11 +576,20 @@ class OmpDispatch:
     ) -> list[AgentResult]:
         if not workers:
             return []
-        if strategy == "sequential" or len(workers) == 1:
+        if strategy == "sequential":
             return [_run_omp_single(spec, cwd, self._options) for spec in workers]
+        if self._options.config.coordination_surface == "native":
+            return run_omp_native_batch(
+                _omp_native_tasks(workers),
+                cwd=cwd,
+                config=self._options.config,
+                model=self._options.config.model,
+                timeout_sec=max(spec.timeout_sec for spec in workers),
+            )
 
         results: list[AgentResult | None] = [None] * len(workers)
-        with ThreadPoolExecutor(max_workers=len(workers)) as pool:
+        max_workers = min(len(workers), self._options.config.capacity)
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {
                 pool.submit(_run_omp_single, spec, cwd, self._options): idx
                 for idx, spec in enumerate(workers)
@@ -751,30 +1002,182 @@ def omp_dispatch_available(config: OmpRunnerConfig | None = None) -> bool:
     return shutil.which(cfg.command) is not None
 
 
-def _dispatch_readiness_hint(cwd: str | os.PathLike[str]) -> str:
-    repo_root = shlex.quote(os.fspath(cwd))
-    return (
-        f"hint: run `awf doctor --repo-root {repo_root} --json` "
-        "to inspect dispatch readiness"
+def infer_routing_requirements(
+    workers: Sequence[WorkerSpec] | None,
+    base: RoutingRequirements | None = None,
+) -> RoutingRequirements:
+    """Infer backend requirements from fields that affect execution semantics."""
+    required = set((base or RoutingRequirements()).required_capabilities)
+    for spec in workers or ():
+        if spec.require_json:
+            required.add("structured_output")
+        if getattr(spec, "agent_type", None):
+            required.add("agent_type")
+        if getattr(spec, "output_schema", None) is not None:
+            required.update(("output_schema", "structured_output"))
+        if getattr(spec, "schema_mode", "permissive") == "strict":
+            required.update(("schema_mode", "strict_schema", "structured_output"))
+        if getattr(spec, "isolated", None) is True:
+            required.add("isolated")
+    return RoutingRequirements(frozenset(required))
+
+
+def resolve_routing_config_from_config(
+    provider_config: dict | None,
+) -> DispatchRoutingConfig:
+    """Parse optional ``dispatch.routing`` capability, cost, and priority policy."""
+    dispatch_section = (provider_config or {}).get("dispatch", {})
+    if not isinstance(dispatch_section, dict):
+        return DispatchRoutingConfig()
+    section = dispatch_section.get("routing")
+    if not isinstance(section, dict):
+        return DispatchRoutingConfig()
+
+    requirements_section = section.get("requirements", {})
+    nested_required = (
+        requirements_section.get("required_capabilities", ())
+        if isinstance(requirements_section, dict)
+        else ()
+    )
+    required_raw = section.get("required_capabilities", nested_required)
+    required = (
+        frozenset(str(value) for value in required_raw)
+        if isinstance(required_raw, (list, tuple, set, frozenset))
+        else frozenset()
+    )
+
+    costs_raw = section.get("estimated_cost", section.get("estimated_costs", {}))
+    costs: dict[str, float] = {}
+    if isinstance(costs_raw, dict):
+        for surface, value in costs_raw.items():
+            if (
+                str(surface).strip().lower() in BACKEND_CAPABILITIES
+                and isinstance(value, (int, float))
+                and not isinstance(value, bool)
+            ):
+                costs[str(surface).strip().lower()] = float(value)
+    backends_raw = section.get("backends", {})
+    if isinstance(backends_raw, dict):
+        for surface, backend_policy in backends_raw.items():
+            if not isinstance(backend_policy, dict):
+                continue
+            value = backend_policy.get("estimated_cost")
+            if (
+                str(surface).strip().lower() in BACKEND_CAPABILITIES
+                and isinstance(value, (int, float))
+                and not isinstance(value, bool)
+            ):
+                costs[str(surface).strip().lower()] = float(value)
+
+    budget_raw = section.get("max_cost_budget", section.get("max_cost"))
+    budget = (
+        float(budget_raw)
+        if isinstance(budget_raw, (int, float))
+        and not isinstance(budget_raw, bool)
+        and math.isfinite(float(budget_raw))
+        and float(budget_raw) >= 0
+        else None
+    )
+
+    priority_raw = section.get("priority", ())
+    if isinstance(priority_raw, dict):
+        canonical_order = tuple(BACKEND_CAPABILITIES)
+        normalized_priority = {
+            str(surface).strip().lower(): value
+            for surface, value in priority_raw.items()
+            if str(surface).strip().lower() in BACKEND_CAPABILITIES
+        }
+        priority = tuple(
+            sorted(
+                normalized_priority,
+                key=lambda surface: (
+                    -float(normalized_priority[surface])
+                    if isinstance(normalized_priority[surface], (int, float))
+                    and not isinstance(normalized_priority[surface], bool)
+                    else 0.0,
+                    canonical_order.index(surface),
+                ),
+            )
+        )
+    elif isinstance(priority_raw, (list, tuple)):
+        priority = tuple(str(value) for value in priority_raw)
+    else:
+        priority = ()
+
+    return DispatchRoutingConfig(
+        required_capabilities=required,
+        estimated_cost=costs,
+        max_cost_budget=budget,
+        priority=priority,
+        configured=True,
     )
 
 
-def _print_dispatch_fallback_warning(
-    *,
+def _surface_available(
     surface: str,
-    detail: str,
+    *,
     cwd: str | os.PathLike[str],
-    extra_hints: tuple[str, ...] = (),
+    pi_options: PiDispatchOptions | None,
+    omp_options: OmpDispatchOptions | None,
+) -> bool:
+    if surface == SURFACE_INLINE:
+        return True
+    if surface == SURFACE_CMUX:
+        return cmux_dispatch_available(cwd)
+    if surface == SURFACE_OMP:
+        return omp_dispatch_available((omp_options or OmpDispatchOptions()).config)
+    if surface == SURFACE_PI:
+        return pi_dispatch_available((pi_options or PiDispatchOptions()).config)
+    return False
+
+
+def _make_dispatch(
+    surface: str,
+    *,
+    options: CmuxDispatchOptions | None,
+    pi_options: PiDispatchOptions | None,
+    omp_options: OmpDispatchOptions | None,
+) -> MultiAgentDispatch:
+    if surface == SURFACE_CMUX:
+        return CmuxDispatch(options)
+    if surface == SURFACE_OMP:
+        return OmpDispatch(omp_options or OmpDispatchOptions())
+    if surface == SURFACE_PI:
+        return PiDispatch(pi_options)
+    return InlineDispatch()
+
+
+def _annotate_selection(
+    dispatch: MultiAgentDispatch,
+    diagnostics: DispatchSelection,
+) -> MultiAgentDispatch:
+    setattr(dispatch, "selection", diagnostics)
+    setattr(dispatch, "selection_diagnostics", diagnostics)
+    setattr(dispatch, "selection_reason", diagnostics.reason)
+    setattr(dispatch, "selection_score", diagnostics.score)
+    return dispatch
+
+
+def _raise_selection_error(
+    *,
+    preference: str,
+    required: frozenset[str],
+    excluded: Mapping[str, tuple[str, ...]],
+    status: Literal["unavailable", "incompatible"],
 ) -> None:
-    lines = [
-        (
-            f"warning: dispatch surface_preference={surface} requested but "
-            f"{detail}; falling back to inline"
+    reasons = excluded.get(preference, ())
+    reason = "; ".join(reasons) or "no dispatch backend satisfied the routing policy"
+    raise DispatchSelectionError(
+        preference=preference,
+        status=status,
+        diagnostics=DispatchSelection(
+            selected=None,
+            reason=reason,
+            score=0.0,
+            required_capabilities=tuple(sorted(required)),
+            excluded_candidates=dict(excluded),
         ),
-        _dispatch_readiness_hint(cwd),
-        *extra_hints,
-    ]
-    print("\n".join(lines), file=sys.stderr)
+    )
 
 
 def select_dispatch(
@@ -786,74 +1189,154 @@ def select_dispatch(
     options: CmuxDispatchOptions | None = None,
     pi_options: PiDispatchOptions | None = None,
     omp_options: OmpDispatchOptions | None = None,
+    workers: Sequence[WorkerSpec] | None = None,
+    requirements: RoutingRequirements | None = None,
+    routing: DispatchRoutingConfig | None = None,
+    provider_config: dict | None = None,
 ) -> MultiAgentDispatch:
-    """Pick a dispatch backend.
+    """Select a compatible, available backend and preserve legacy auto routing.
 
-    - ``"inline"`` → always InlineDispatch
-    - ``"cmux"`` → CmuxDispatch if available, otherwise InlineDispatch with a
-      stderr warning so operators see the fallback
-    - ``"pi"`` → PiDispatch if the Pi command is available, otherwise
-      InlineDispatch with a stderr warning
-    - ``"omp"`` → OmpDispatch if the OMP command is available, otherwise
-      InlineDispatch with a stderr warning
-    - ``"auto"`` → CmuxDispatch only when worker_count is 2-5 AND each call
-      is expected to take ≥60s AND the backend is available; otherwise
-      InlineDispatch
+    Capability and budget policy is evaluated before the existing cmux workload
+    heuristic. Explicit preferences fail clearly rather than changing surfaces.
+    Passing no routing policy or worker details retains the historical
+    ``cmux``-for-long-2-to-5-worker-batches, otherwise-``inline`` behavior.
     """
-    if preference == SURFACE_INLINE:
-        return InlineDispatch()
-    if preference == SURFACE_CMUX:
-        if cmux_dispatch_available(cwd):
-            return CmuxDispatch(options)
-        _print_dispatch_fallback_warning(
-            surface=SURFACE_CMUX,
-            detail="cmux backend is unavailable",
-            cwd=cwd,
-            extra_hints=(
-                (
-                    "hint: ensure `cmux-agent` is on PATH and this repo has "
-                    "an active cmux run"
-                ),
-            ),
-        )
-        return InlineDispatch()
-    if preference == SURFACE_OMP:
-        effective_omp_options = omp_options or OmpDispatchOptions()
-        if omp_dispatch_available(effective_omp_options.config):
-            return OmpDispatch(effective_omp_options)
-        _print_dispatch_fallback_warning(
-            surface=SURFACE_OMP,
-            detail="OMP backend is unavailable",
-            cwd=cwd,
-            extra_hints=(
-                "hint: install `omp` or set AWF_OMP_COMMAND, then run `awf doctor --probe`",
-            ),
-        )
-        return InlineDispatch()
-    if preference == SURFACE_PI:
-        if pi_dispatch_available((pi_options or PiDispatchOptions()).config):
-            return PiDispatch(pi_options)
-        _print_dispatch_fallback_warning(
-            surface=SURFACE_PI,
-            detail="pi backend is unavailable",
-            cwd=cwd,
-            extra_hints=(
-                (
-                    "hint: run `python3 cli/tests/run_pi_field_smoke.py --json` "
-                    "for Pi install/auth/quota diagnostics"
-                ),
-            ),
-        )
-        return InlineDispatch()
+    policy = routing or resolve_routing_config_from_config(provider_config)
+    inferred = infer_routing_requirements(workers, requirements)
+    required = frozenset(
+        inferred.required_capabilities | policy.required_capabilities
+    )
 
-    # auto
-    if (
+    def exclusion_reasons(surface: str) -> tuple[str, ...]:
+        reasons: list[str] = []
+        missing = required - backend_capabilities(surface, omp_options).capabilities
+        if missing:
+            reasons.append(
+                "missing required capabilities: " + ", ".join(sorted(missing))
+            )
+        if policy.max_cost_budget is not None:
+            cost = policy.estimated_cost.get(surface)
+            if cost is None:
+                reasons.append(
+                    "estimated cost is not configured for the active cost budget"
+                )
+            elif cost > policy.max_cost_budget:
+                reasons.append(
+                    f"estimated cost {cost:g} exceeds budget "
+                    f"{policy.max_cost_budget:g}"
+                )
+        if not reasons and not _surface_available(
+            surface,
+            cwd=cwd,
+            pi_options=pi_options,
+            omp_options=omp_options,
+        ):
+            reasons.append("backend is unavailable")
+        return tuple(reasons)
+
+    if preference != "auto":
+        explicit_reasons = exclusion_reasons(preference)
+        if explicit_reasons:
+            status: Literal["unavailable", "incompatible"] = (
+                "unavailable"
+                if explicit_reasons == ("backend is unavailable",)
+                else "incompatible"
+            )
+            _raise_selection_error(
+                preference=preference,
+                required=required,
+                excluded={preference: explicit_reasons},
+                status=status,
+            )
+        cost = policy.estimated_cost.get(preference)
+        diagnostics = DispatchSelection(
+            selected=preference,
+            reason=f"explicit preference {preference!r} is compatible and available",
+            score=1.0,
+            required_capabilities=tuple(sorted(required)),
+            eligible_candidates=(preference,),
+            estimated_cost=cost,
+        )
+        return _annotate_selection(
+            _make_dispatch(
+                preference,
+                options=options,
+                pi_options=pi_options,
+                omp_options=omp_options,
+            ),
+            diagnostics,
+        )
+
+    if policy.priority:
+        candidate_order = policy.priority + tuple(
+            surface
+            for surface in BACKEND_CAPABILITIES
+            if surface not in policy.priority
+        )
+    elif required - BACKEND_CAPABILITIES[SURFACE_INLINE].capabilities:
+        candidate_order = (
+            SURFACE_CMUX,
+            SURFACE_INLINE,
+            SURFACE_OMP,
+            SURFACE_PI,
+        )
+    else:
+        candidate_order = (SURFACE_CMUX, SURFACE_INLINE)
+
+    excluded: dict[str, tuple[str, ...]] = {}
+    eligible: list[str] = []
+    for surface in candidate_order:
+        reasons = exclusion_reasons(surface)
+        if reasons:
+            excluded[surface] = reasons
+        else:
+            eligible.append(surface)
+
+    workload_matches_cmux = (
         _CMUX_MIN_WORKERS <= worker_count <= _CMUX_MAX_WORKERS
         and estimated_seconds >= _CMUX_MIN_DURATION_SEC
-        and cmux_dispatch_available(cwd)
-    ):
-        return CmuxDispatch(options)
-    return InlineDispatch()
+    )
+    if SURFACE_CMUX in eligible and not workload_matches_cmux:
+        eligible.remove(SURFACE_CMUX)
+        excluded[SURFACE_CMUX] = (
+            "workload does not match the cmux 2-5 worker and 60s minimum heuristic",
+        )
+
+    if not eligible:
+        _raise_selection_error(
+            preference="auto",
+            required=required,
+            excluded=excluded,
+            status="incompatible",
+        )
+
+    selected = eligible[0]
+    selected_index = candidate_order.index(selected)
+    score = float(len(candidate_order) - selected_index)
+    if selected == SURFACE_CMUX:
+        reason = "cmux is compatible, available, and matches the workload heuristic"
+    elif policy.priority:
+        reason = f"{selected} is the highest-priority eligible backend"
+    else:
+        reason = "inline is the legacy-compatible auto fallback"
+    diagnostics = DispatchSelection(
+        selected=selected,
+        reason=reason,
+        score=score,
+        required_capabilities=tuple(sorted(required)),
+        eligible_candidates=tuple(eligible),
+        excluded_candidates=excluded,
+        estimated_cost=policy.estimated_cost.get(selected),
+    )
+    return _annotate_selection(
+        _make_dispatch(
+            selected,
+            options=options,
+            pi_options=pi_options,
+            omp_options=omp_options,
+        ),
+        diagnostics,
+    )
 
 
 def resolve_preference_from_config(provider_config: dict | None) -> Preference:
@@ -925,6 +1408,28 @@ def resolve_omp_options_from_config(
         extra_args = tuple(shlex.split(extra_args_value))
     else:
         extra_args = env_config.extra_args
+    surface_value = str(
+        omp_section.get(
+            "coordination_surface",
+            omp_section.get("mode", env_config.coordination_surface),
+        )
+    ).strip().lower()
+    coordination_surface: Literal["native", "print"] = (
+        "print" if surface_value == "print" else "native"
+    )
+    capacity_value = omp_section.get("capacity", env_config.capacity)
+    try:
+        capacity = max(1, int(capacity_value))
+    except (TypeError, ValueError):
+        capacity = env_config.capacity
+    grace_value = omp_section.get(
+        "termination_grace_sec",
+        env_config.termination_grace_sec,
+    )
+    try:
+        termination_grace_sec = max(0.0, float(grace_value))
+    except (TypeError, ValueError):
+        termination_grace_sec = env_config.termination_grace_sec
 
     role_models_raw = omp_section.get("role_models", {})
     role_models = (
@@ -943,6 +1448,9 @@ def resolve_omp_options_from_config(
             extra_args=extra_args,
             timeout_sec=timeout_sec,
             no_session=no_session,
+            coordination_surface=coordination_surface,
+            capacity=capacity,
+            termination_grace_sec=termination_grace_sec,
         ),
         role_models=role_models,
     )

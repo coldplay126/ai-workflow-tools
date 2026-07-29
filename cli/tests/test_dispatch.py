@@ -7,27 +7,40 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from awf.core.dispatch import (
+    BACKEND_CAPABILITIES,
     ChainedStep,
     CmuxDispatch,
     CmuxDispatchError,
+    DispatchRoutingConfig,
+    DispatchSelectionError,
     InlineDispatch,
     MultiAgentDispatch,
+    OmpDispatch,
+    OmpDispatchOptions,
     PiDispatch,
     PiDispatchOptions,
     SURFACE_CMUX,
     SURFACE_INLINE,
     SURFACE_PI,
+    SURFACE_OMP,
+    RoutingRequirements,
     WorkerSpec,
+    backend_capabilities,
     cmux_dispatch_available,
+    infer_routing_requirements,
     pi_dispatch_available,
     resolve_cmux_options_from_config,
     resolve_preference_from_config,
+    resolve_routing_config_from_config,
     select_dispatch,
 )
 from awf.runners.pi import PiRunnerConfig
+from awf.runners.omp import OmpRunnerConfig
 
 
 # --------------------------------------------------------------------------
@@ -83,6 +96,29 @@ def test_worker_spec_is_hashable_when_callbacks_omitted():
     spec = _spec("r", _FakeProvider("p", "{}"))
     # Frozen + no callable in compare fields → hashable.
     assert {spec}  # set() raises if not hashable
+
+
+def test_routing_requirements_are_inferred_from_worker_contract_fields():
+    spec = _spec(
+        "reviewer",
+        _FakeProvider("p", "{}"),
+        require_json=True,
+        agent_type="reviewer",
+        output_schema={"type": "object"},
+        schema_mode="strict",
+        isolated=True,
+    )
+
+    required = infer_routing_requirements([spec]).required_capabilities
+
+    assert {
+        "structured_output",
+        "agent_type",
+        "output_schema",
+        "schema_mode",
+        "strict_schema",
+        "isolated",
+    }.issubset(required)
 
 
 # --------------------------------------------------------------------------
@@ -345,16 +381,18 @@ def test_select_dispatch_inline_preference_always_inline(tmp_path):
     assert isinstance(selected, InlineDispatch)
 
 
-def test_select_dispatch_cmux_preference_falls_back_when_unavailable(capsys, tmp_path):
-    selected = select_dispatch(
-        worker_count=3, estimated_seconds=300,
-        preference="cmux", cwd=str(tmp_path),
-    )
-    assert isinstance(selected, InlineDispatch)
-    err = capsys.readouterr().err
-    assert "cmux" in err and "inline" in err
-    assert "awf doctor --repo-root" in err
-    assert "cmux-agent" in err
+def test_select_dispatch_cmux_preference_reports_unavailable(tmp_path):
+    with pytest.raises(DispatchSelectionError) as excinfo:
+        select_dispatch(
+            worker_count=3,
+            estimated_seconds=300,
+            preference="cmux",
+            cwd=str(tmp_path),
+        )
+
+    assert excinfo.value.preference == "cmux"
+    assert excinfo.value.status == "unavailable"
+    assert "backend is unavailable" in str(excinfo.value)
 
 
 def test_select_dispatch_pi_preference_uses_pi_when_available(tmp_path):
@@ -371,39 +409,37 @@ def test_select_dispatch_pi_preference_uses_pi_when_available(tmp_path):
     assert isinstance(selected, PiDispatch)
 
 
-def test_select_dispatch_pi_preference_falls_back_when_unavailable(capsys, tmp_path):
-    selected = select_dispatch(
-        worker_count=2,
-        estimated_seconds=300,
-        preference="pi",
-        cwd=str(tmp_path),
-        pi_options=PiDispatchOptions(
-            config=PiRunnerConfig(command=str(tmp_path / "missing"))
-        ),
-    )
+def test_select_dispatch_pi_preference_reports_unavailable(tmp_path):
+    with pytest.raises(DispatchSelectionError) as excinfo:
+        select_dispatch(
+            worker_count=2,
+            estimated_seconds=300,
+            preference="pi",
+            cwd=str(tmp_path),
+            pi_options=PiDispatchOptions(
+                config=PiRunnerConfig(command=str(tmp_path / "missing"))
+            ),
+        )
 
-    assert isinstance(selected, InlineDispatch)
-    err = capsys.readouterr().err
-    assert "pi" in err and "inline" in err
-    assert "awf doctor --repo-root" in err
-    assert "run_pi_field_smoke.py" in err
+    assert excinfo.value.preference == "pi"
+    assert excinfo.value.status == "unavailable"
+    assert "backend is unavailable" in str(excinfo.value)
 
 
-def test_select_dispatch_fallback_warning_quotes_repo_root_with_spaces(capsys, tmp_path):
-    repo_root = tmp_path / "repo with spaces"
-    selected = select_dispatch(
-        worker_count=2,
-        estimated_seconds=300,
-        preference="pi",
-        cwd=repo_root,
-        pi_options=PiDispatchOptions(
-            config=PiRunnerConfig(command=str(tmp_path / "missing"))
-        ),
-    )
+def test_select_dispatch_explicit_incompatible_preference_fails_closed(tmp_path):
+    with pytest.raises(DispatchSelectionError) as excinfo:
+        select_dispatch(
+            worker_count=2,
+            estimated_seconds=300,
+            preference="inline",
+            cwd=tmp_path,
+            requirements=RoutingRequirements(
+                frozenset({"native_coordination"})
+            ),
+        )
 
-    assert isinstance(selected, InlineDispatch)
-    err = capsys.readouterr().err
-    assert f"awf doctor --repo-root '{repo_root}' --json" in err
+    assert excinfo.value.status == "incompatible"
+    assert "native_coordination" in str(excinfo.value)
 
 
 def test_select_dispatch_auto_picks_inline_when_cmux_unavailable(tmp_path):
@@ -438,6 +474,183 @@ def test_select_dispatch_auto_picks_inline_for_large_worker_pool(tmp_path):
     assert isinstance(selected, InlineDispatch)
 
 
+def test_backend_capability_descriptors_have_stable_surface_order():
+    assert tuple(BACKEND_CAPABILITIES) == ("inline", "cmux", "omp", "pi")
+    assert not BACKEND_CAPABILITIES[SURFACE_INLINE].supports(
+        {"native_coordination"}
+    )
+
+
+def test_omp_capabilities_are_mode_and_session_sensitive():
+    print_caps = backend_capabilities(
+        SURFACE_OMP,
+        OmpDispatchOptions(
+            config=OmpRunnerConfig(
+                coordination_surface="print",
+                no_session=False,
+            )
+        ),
+    )
+    native_ephemeral_caps = backend_capabilities(
+        SURFACE_OMP,
+        OmpDispatchOptions(
+            config=OmpRunnerConfig(
+                coordination_surface="native",
+                no_session=True,
+            )
+        ),
+    )
+    native_persisted_caps = backend_capabilities(
+        SURFACE_OMP,
+        OmpDispatchOptions(
+            config=OmpRunnerConfig(
+                coordination_surface="native",
+                no_session=False,
+            )
+        ),
+    )
+
+    assert not print_caps.supports(
+        {"messaging", "isolation", "durable_followup"}
+    )
+    assert native_ephemeral_caps.supports(
+        {"messaging", "isolation", "cancellation"}
+    )
+    assert "durable_followup" not in native_ephemeral_caps.capabilities
+    assert native_persisted_caps.supports({"durable_followup"})
+
+
+def test_select_dispatch_infers_native_omp_requirement_from_workers(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        "awf.core.dispatch.cmux_dispatch_available", lambda _cwd: False
+    )
+    monkeypatch.setattr(
+        "awf.core.dispatch.omp_dispatch_available", lambda _config: True
+    )
+    monkeypatch.setattr(
+        "awf.core.dispatch.pi_dispatch_available", lambda _config: False
+    )
+    worker = _spec(
+        "reviewer",
+        _FakeProvider("p", "{}"),
+        output_schema={"type": "object"},
+        schema_mode="strict",
+    )
+
+    selected = select_dispatch(
+        worker_count=1,
+        estimated_seconds=30,
+        preference="auto",
+        cwd=tmp_path,
+        workers=[worker],
+        omp_options=OmpDispatchOptions(
+            config=OmpRunnerConfig(coordination_surface="native")
+        ),
+    )
+
+    assert isinstance(selected, OmpDispatch)
+    assert {"output_schema", "schema_mode"}.issubset(
+        selected.selection.required_capabilities
+    )
+
+
+def test_select_dispatch_filters_capabilities_before_workload_heuristic(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        "awf.core.dispatch.cmux_dispatch_available", lambda _cwd: True
+    )
+    selected = select_dispatch(
+        worker_count=3,
+        estimated_seconds=300,
+        preference="auto",
+        cwd=tmp_path,
+        requirements=RoutingRequirements(frozenset({"add_dirs"})),
+        routing=DispatchRoutingConfig(priority=("cmux", "inline"), configured=True),
+    )
+
+    assert isinstance(selected, InlineDispatch)
+    assert "add_dirs" in selected.selection.excluded_candidates["cmux"][0]
+    assert selected.selection_reason == "inline is the highest-priority eligible backend"
+
+
+def test_select_dispatch_filters_estimated_cost_above_budget(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        "awf.core.dispatch.cmux_dispatch_available", lambda _cwd: True
+    )
+    selected = select_dispatch(
+        worker_count=3,
+        estimated_seconds=300,
+        preference="auto",
+        cwd=tmp_path,
+        routing=DispatchRoutingConfig(
+            estimated_cost={"cmux": 2.0, "inline": 0.5},
+            max_cost_budget=1.0,
+            priority=("cmux", "inline"),
+            configured=True,
+        ),
+    )
+
+    assert isinstance(selected, InlineDispatch)
+    assert "exceeds budget" in selected.selection.excluded_candidates["cmux"][0]
+    assert selected.selection.estimated_cost == 0.5
+
+
+def test_select_dispatch_uses_explicit_priority_for_equal_costs(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        "awf.core.dispatch.cmux_dispatch_available", lambda _cwd: True
+    )
+    policy = DispatchRoutingConfig(
+        estimated_cost={"inline": 1.0, "cmux": 1.0},
+        max_cost_budget=1.0,
+        priority=("inline", "cmux"),
+        configured=True,
+    )
+
+    selected_names = [
+        select_dispatch(
+            worker_count=3,
+            estimated_seconds=300,
+            preference="auto",
+            cwd=tmp_path,
+            routing=policy,
+        ).name
+        for _ in range(3)
+    ]
+
+    assert selected_names == ["inline", "inline", "inline"]
+
+
+def test_select_dispatch_without_routing_config_preserves_legacy_heuristic(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        "awf.core.dispatch.cmux_dispatch_available", lambda _cwd: True
+    )
+
+    long_batch = select_dispatch(
+        worker_count=3,
+        estimated_seconds=120,
+        preference="auto",
+        cwd=tmp_path,
+    )
+    short_batch = select_dispatch(
+        worker_count=3,
+        estimated_seconds=30,
+        preference="auto",
+        cwd=tmp_path,
+    )
+
+    assert isinstance(long_batch, CmuxDispatch)
+    assert isinstance(short_batch, InlineDispatch)
+
+
 # --------------------------------------------------------------------------
 # resolve_cmux_options_from_config
 # --------------------------------------------------------------------------
@@ -468,6 +681,56 @@ def test_resolve_cmux_options_reads_lifecycle_and_role_map():
 def test_resolve_cmux_options_falls_back_on_unknown_lifecycle():
     cfg = {"dispatch": {"worker_lifecycle": "sideways"}}
     assert resolve_cmux_options_from_config(cfg).lifecycle == "reusable"
+
+
+# --------------------------------------------------------------------------
+# dispatch.routing config resolution
+# --------------------------------------------------------------------------
+
+
+def test_resolve_routing_config_defaults_to_legacy_compatible_policy():
+    policy = resolve_routing_config_from_config(None)
+
+    assert policy.configured is False
+    assert policy.required_capabilities == frozenset()
+    assert policy.estimated_cost == {}
+    assert policy.max_cost_budget is None
+    assert policy.priority == ()
+
+
+def test_resolve_routing_config_reads_capability_cost_budget_and_priority():
+    policy = resolve_routing_config_from_config(
+        {
+            "dispatch": {
+                "routing": {
+                    "required_capabilities": ["structured_output"],
+                    "estimated_cost": {"inline": 0.25, "cmux": 1.5},
+                    "max_cost_budget": 1.0,
+                    "priority": ["inline", "cmux"],
+                }
+            }
+        }
+    )
+
+    assert policy.configured is True
+    assert policy.required_capabilities == frozenset({"structured_output"})
+    assert policy.estimated_cost == {"inline": 0.25, "cmux": 1.5}
+    assert policy.max_cost_budget == 1.0
+    assert policy.priority == ("inline", "cmux")
+
+
+def test_resolve_routing_config_breaks_equal_priority_ties_canonically():
+    policy = resolve_routing_config_from_config(
+        {
+            "dispatch": {
+                "routing": {
+                    "priority": {"pi": 10, "omp": 10, "inline": 1},
+                }
+            }
+        }
+    )
+
+    assert policy.priority == ("omp", "pi", "inline")
 
 
 # --------------------------------------------------------------------------

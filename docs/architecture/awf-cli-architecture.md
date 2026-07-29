@@ -530,7 +530,7 @@ awf wf next --mode critical                    # Codex → Sonnet → Primary �
 - `run(workers, *, cwd, strategy)` — 고정 리스트의 워커를 parallel/sequential 로 실행. cross / agent team (Phase 5) 가 사용.
 - `run_chained(steps, *, cwd)` — 각 step의 prompt 가 이전 `AgentResult` 리스트에 의존하는 체인. critical 이 사용. agent team 은 prior threading 이 blackboard 기반(파일 side-effect)이라 `run` 으로 회귀.
 
-백엔드는 `InlineDispatch` (ThreadPoolExecutor), `CmuxDispatch` (cmux-agent `.agent/` artifact 프로토콜), `OmpDispatch` (OMP NDJSON print adapter), `PiDispatch` (legacy Pi print-mode harness)이며 `provider-config.json`의 `dispatch.surface_preference`로 선택한다 (`auto`/`inline`/`cmux`/`omp`/`pi`). `auto`는 inline/cmux만 선택하고 OMP/Pi는 명시적 opt-in이다. OMP adapter는 role별 model override를 지원하고 session/provider/model/usage와 응답 hash를 `.workflow/artifacts/dispatch/omp-*.json`에 기록한다. OMP host-native skill 경로는 별도로 batch `task`, `hub`, isolation을 사용하되 동일한 awf gate/state를 유지한다. cmux `run_chained`는 step별 worker를 role로 고정해 같은 터미널 컨텍스트를 chain 동안 누적한다.
+백엔드는 `InlineDispatch` (ThreadPoolExecutor), `CmuxDispatch` (cmux-agent `.agent/` artifact 프로토콜), `OmpDispatch` (OMP NDJSON print adapter), `PiDispatch` (legacy Pi print-mode harness)이며 `provider-config.json`의 `dispatch.surface_preference`로 선택한다 (`auto`/`inline`/`cmux`/`omp`/`pi`). `auto`는 inline/cmux만 선택하고 OMP/Pi는 명시적 opt-in이다. OMP adapter는 role별 model override를 지원하고 session/provider/model/usage, native task/history handles, follow-up lineage, 응답 hash를 body 없이 schema-v2 `.workflow/artifacts/dispatch/omp-*.json`에 원자적으로 기록한다. OMP host-native skill 경로는 batch `task`, `hub`, isolation을 사용하되 awf state/gate는 parent가 단독 소유한다. cmux `run_chained`는 step별 worker를 role로 고정해 같은 터미널 컨텍스트를 chain 동안 누적한다.
 
 Judge Rules (결정론적):
 1. `CRITICAL` finding 1건 이상 → FAIL
@@ -751,6 +751,7 @@ Phase 5 첫 범위 권장:
 - `awf doctor --json`은 `omp_readiness`로 OMP command/version/model config와 probe 결과를, `pi_readiness`로 legacy Pi command/path/version과 field-smoke 상태를 노출한다
 - `awf doctor --json`의 `dispatch.surface_preference`는 `.workflow/provider-config.json` 요청과 inline/cmux/omp/pi surface readiness를 노출한다
 - `awf agents sync-omp`는 Claude agent frontmatter를 OMP contract로 변환해 `.omp/agents`와 생성 manifest를 갱신한다
+- `awf agents followup-omp`는 provenance inspect와 실행 경계를 분리한다. JSON inspect는 read-only이며, 실행 시 persisted OMP host session을 resume해 exact task ID에 `hub send`로 먼저 steer/revive한다. registry agent가 unavailable일 때만 exact `history://` handle에서 새 successor task 한 개를 만들고 parent run/task lineage를 기록한다. successor는 original agent와 동일시하지 않으며 worker/follow-up은 `.workflow/state.json`, scope hash, gate, approve/done을 수정하지 않는다
 - provider 실행 실패 시에는 `hint: run awf doctor`를 통해 readiness 진단 경로를 안내한다
 - top-level 자연어 라우팅은 안전한 조회 의도(`wf status`/`config show`/`skills list`/`mcp list`/session list-show)를 직접 보낸다
 - 명시적인 `service + domain + 분석` 의도와 `review`/`verify` 의도는 기본적으로 `analyze --dry-run`, `wf next --phase ... --dry-run`으로 보낸다

@@ -128,6 +128,22 @@ awf doctor --repo-root . --probe
 # .workflow/provider-config.json: dispatch.surface_preference = "omp"
 ```
 
+OMP native dispatch writes redacted schema-v2 records under
+`.workflow/artifacts/dispatch/`. Inspecting those JSON files is read-only.
+To steer or revive an exact persisted worker, resume its host session by run and
+role (or task ID):
+
+```bash
+awf agents followup-omp --run <run-id-or-json> --role <role> --message "..."
+awf agents followup-omp --task-id <task-id> --message-file followup.txt
+```
+
+The command first addresses the exact registry task. Only when that task is
+unavailable may it read the exact history handle and create one explicitly
+lineage-linked successor; that successor is not the original agent. Worker and
+follow-up sessions never own `.workflow/state.json`, scope hashes, gates, or
+`approve`/`done`: those remain parent-only.
+
 Pi는 기본 dispatch surface가 아니라 opt-in runner입니다. Pi를 쓰려면 먼저
 field-smoke evidence를 남기고 `ready`가 그 결과를 읽게 합니다.
 
@@ -300,6 +316,21 @@ awf agents sync-omp --repo-root .
 awf doctor --repo-root . --probe
 # .workflow/provider-config.json: dispatch.surface_preference = "omp"
 ```
+
+OMP native dispatch stores redacted schema-v2 records in
+`.workflow/artifacts/dispatch/`; inspecting them is read-only. Resume the
+persisted host to steer/revive one exact registry task by run plus role, or by
+task ID:
+
+```bash
+awf agents followup-omp --run <run-id-or-json> --role <role> --message "..."
+awf agents followup-omp --task-id <task-id> --message-file followup.txt
+```
+
+Only an unavailable original task permits a history-based, explicitly
+lineage-linked successor, which is always a new agent. Workers and follow-ups
+must not modify `.workflow/state.json`, scope hashes, gates, or `approve`/`done`;
+those controls remain parent-only.
 
 Pi remains opt-in. When using Pi dispatch, first persist field-smoke evidence
 and let `ready` incorporate the result:

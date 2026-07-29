@@ -38,7 +38,7 @@ def test_sync_omp_agents_compiles_supported_frontmatter(tmp_path: Path):
     target = tmp_path / ".omp" / "agents" / "implementer.md"
     generated = target.read_text(encoding="utf-8")
     assert "tools: read, grep, glob, edit, write, bash" in generated
-    assert "model: opus" in generated
+    assert "model:" not in generated
     assert "isolation:" not in generated
     assert "provider_hint:" not in generated
     assert "roles:" not in generated
@@ -51,6 +51,24 @@ def test_sync_omp_agents_compiles_supported_frontmatter(tmp_path: Path):
     )
     assert manifest["files"][0]["name"] == "implementer.md"
     assert len(manifest["files"][0]["sha256"]) == 64
+
+
+def test_sync_omp_agents_preserves_explicit_cross_runtime_model(tmp_path: Path):
+    source = _write_claude_agent(
+        tmp_path / "claude" / "agents" / "implementer.md"
+    )
+    source.write_text(
+        source.read_text(encoding="utf-8").replace(
+            "model: opus", "model: openai-codex/gpt-5.6-sol"
+        ),
+        encoding="utf-8",
+    )
+    sync_omp_agents(tmp_path)
+    generated = (
+        tmp_path / ".omp" / "agents" / "implementer.md"
+    ).read_text(encoding="utf-8")
+    assert "model: openai-codex/gpt-5.6-sol" in generated
+
 
 
 def test_sync_omp_agents_is_idempotent_and_removes_only_tracked_stale_files(tmp_path: Path):

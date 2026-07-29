@@ -55,7 +55,11 @@ def compile_claude_agent(source: Path) -> tuple[str, str]:
     if tools:
         lines.append(f"tools: {', '.join(tools)}")
     model = str(meta.get("model") or "").strip()
-    if model:
+    # Claude Code role aliases are not portable model IDs. OMP currently
+    # resolves names such as "sonnet" through its own registry, which can
+    # select a stale provider model. Omit them so the native task inherits
+    # the coordinator's already-resolved current model.
+    if model and model.lower() not in {"sonnet", "opus", "haiku", "inherit"}:
         lines.append(f"model: {model}")
     if "task" in tools:
         lines.append("spawns: *")

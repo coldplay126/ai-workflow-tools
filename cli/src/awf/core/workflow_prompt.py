@@ -50,6 +50,54 @@ def _read_runtime_optional_context(root: Path, item: dict) -> Optional[str]:
     )
 
 
+def _omp_followup_context(root: Path) -> list[dict]:
+    dispatch_dir = root / ".workflow" / "artifacts" / "dispatch"
+    if not dispatch_dir.is_dir():
+        return []
+    context: list[dict] = []
+    for path in sorted(dispatch_dir.glob("*.json"))[-20:]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (
+            not isinstance(payload, dict)
+            or payload.get("backend") != "omp"
+            or payload.get("mode") != "agents:followup-omp"
+        ):
+            continue
+        agents: list[dict] = []
+        for raw_agent in payload.get("agents", []):
+            if not isinstance(raw_agent, dict):
+                continue
+            agents.append(
+                {
+                    key: raw_agent.get(key)
+                    for key in (
+                        "status",
+                        "task_id",
+                        "agent_uri",
+                        "history_uri",
+                        "output_sha256",
+                        "lineage",
+                        "followup_evidence",
+                    )
+                }
+            )
+        context.append(
+            {
+                "run_id": payload.get("run_id"),
+                "created_at": payload.get("created_at"),
+                "status": payload.get("status"),
+                "parent_run_id": payload.get("parent_run_id"),
+                "parent_task_id": payload.get("parent_task_id"),
+                "message_sha256": payload.get("message_sha256"),
+                "agents": agents,
+            }
+        )
+    return context
+
+
 def _structured_result_envelope(phase: str, structured_result: dict) -> dict:
     envelope: dict = {
         "conclusion": "PASS|FAIL + short summary",
@@ -221,6 +269,19 @@ def build_workflow_prompt(explicit_root: Optional[str], state: dict, provider_co
             parts.append(f"--- {item.get('key', rel_path)} ({rel_path}) ---")
             parts.append(content)
             parts.append("")
+
+    omp_followups = _omp_followup_context(root)
+    if omp_followups:
+        parts.extend(
+            [
+                "=== OMP FOLLOW-UP EVIDENCE ===",
+                "Redacted event-proven lineage from prior OMP follow-ups. "
+                "Use status, handles, and hashes as phase evidence; response bodies "
+                "are intentionally excluded.",
+                json.dumps(omp_followups, ensure_ascii=False, indent=2),
+                "",
+            ]
+        )
 
     existing_rules = [path for path in rules_files if path.exists()]
     if existing_rules:

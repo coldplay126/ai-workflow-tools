@@ -5,7 +5,7 @@ import os
 import sys
 from typing import Optional
 
-from awf.commands.agents import run_agents_sync_omp
+from awf.commands.agents import run_agents_followup_omp, run_agents_sync_omp
 from awf.commands.analyze import run_analyze
 from awf.commands.chat import run_chat
 from awf.commands.cmux import run_cmux_failures, run_cmux_runs, run_cmux_tail
@@ -332,6 +332,42 @@ def build_parser() -> argparse.ArgumentParser:
     )
     agents_sync_parser.add_argument("--json", action="store_true", help="Print raw JSON.")
     agents_sync_parser.set_defaults(handler=run_agents_sync_omp)
+    agents_followup_parser = agents_subparsers.add_parser(
+        "followup-omp",
+        help=(
+            "Resume an OMP coordinator session to steer/revive one exact task, "
+            "or create a lineage-linked successor when that registry agent is unavailable."
+        ),
+    )
+    agents_followup_parser.add_argument(
+        "--repo-root",
+        help="Repository containing .workflow provenance. Defaults to current directory.",
+    )
+    followup_target = agents_followup_parser.add_mutually_exclusive_group(required=True)
+    followup_target.add_argument(
+        "--run",
+        help="Exact OMP provenance run ID or provenance JSON file; requires --role.",
+    )
+    followup_target.add_argument(
+        "--task-id",
+        help="Exact persisted OMP task ID to steer/revive.",
+    )
+    agents_followup_parser.add_argument(
+        "--role",
+        help="Exact agent role within --run. Invalid without --run.",
+    )
+    followup_message = agents_followup_parser.add_mutually_exclusive_group(required=True)
+    followup_message.add_argument("--message", help="Follow-up message text.")
+    followup_message.add_argument(
+        "--message-file",
+        help="UTF-8 file containing the follow-up message.",
+    )
+    agents_followup_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print redacted follow-up status and provenance path as JSON.",
+    )
+    agents_followup_parser.set_defaults(handler=run_agents_followup_omp)
 
 
     mcp_parser = subparsers.add_parser("mcp", help="MCP registry helpers.")

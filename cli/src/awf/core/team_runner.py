@@ -343,13 +343,12 @@ def _resolve_team_dispatch(
     worker_count: int,
     estimated_seconds: float,
     provider_config: dict[str, Any] | None,
+    workers: list[WorkerSpec] | None = None,
 ):
     """Pick a dispatch backend honoring ``provider-config.json::dispatch``.
 
-    Single-call helper so both parallel and sequential paths agree on
-    surface preference and cmux options. Uses the same heuristic as the
-    rest of awf — auto picks cmux only when the project has it ready and
-    the workload shape fits.
+    Single-call helper so both parallel and sequential paths apply the same
+    surface preference, capability/cost policy, and legacy workload heuristic.
     """
     return select_dispatch(
         worker_count=max(worker_count, 1),
@@ -357,6 +356,8 @@ def _resolve_team_dispatch(
         preference=resolve_preference_from_config(provider_config),
         cwd=cwd,
         options=resolve_cmux_options_from_config(provider_config),
+        workers=workers,
+        provider_config=provider_config,
         omp_options=resolve_omp_options_from_config(provider_config),
     )
 
@@ -421,6 +422,7 @@ def _execute_sequential(
             worker_count=1,
             estimated_seconds=float(actual_timeout),
             provider_config=provider_config,
+            workers=[spec],
         )
         result = dispatch.run([spec], cwd=cwd, strategy="sequential")[0]
         results.append(result)
@@ -501,6 +503,7 @@ def _execute_parallel(
         worker_count=len(specs),
         estimated_seconds=float(timeout_sec),
         provider_config=provider_config,
+        workers=specs,
     )
     dispatch_started_at = time.monotonic()
 

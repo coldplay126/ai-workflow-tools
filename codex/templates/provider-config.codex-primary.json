@@ -1,5 +1,5 @@
 {
-  "version": "2.2.0",
+  "version": "2.3.0",
   "host": "codex",
   "phase_routing": {
     "plan":    { "mode": "inline" },
@@ -11,10 +11,18 @@
     "done":    { "mode": "inline" }
   },
   "dispatch": {
-    "surface_preference": "auto",
+    "surface_preference": "omp",
+    "routing": {
+      "required_capabilities": [],
+      "estimated_cost": {},
+      "max_cost_budget": null,
+      "priority": ["omp", "inline", "cmux", "pi"]
+    },
     "omp": {
       "command": "omp",
-      "no_session": true,
+      "no_session": false,
+      "coordination_surface": "native",
+      "capacity": 8,
       "role_models": {}
     }
   },
