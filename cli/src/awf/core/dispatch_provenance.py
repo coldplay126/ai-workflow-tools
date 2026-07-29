@@ -42,13 +42,34 @@ def _safe_schema_validation(value: Any) -> Any:
     return str(value)
 
 
+def _declared_status(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"completed", "complete", "success", "succeeded", "ok"}:
+        return "completed"
+    if normalized in {"timed_out", "timeout", "timed-out"}:
+        return "timed_out"
+    return "failed"
+
+
+def _validation_failed(metadata: Mapping[str, Any], key: str) -> bool:
+    value = metadata.get(key)
+    return isinstance(value, Mapping) and value.get("valid") is False
+
+
 def _status(agent: Any, metadata: Mapping[str, Any]) -> str:
-    declared = _text(metadata, "status")
-    if declared:
-        return declared
     if bool(getattr(agent, "timed_out", False)):
         return "timed_out"
-    return "completed" if int(getattr(agent, "returncode", 1)) == 0 else "failed"
+    if (
+        int(getattr(agent, "returncode", 1)) != 0
+        or bool(getattr(agent, "parse_error", False))
+        or _validation_failed(metadata, "schema_validation")
+        or _validation_failed(metadata, "write_scope_validation")
+    ):
+        return "failed"
+    declared = _declared_status(_text(metadata, "status"))
+    return declared or "completed"
 
 
 def _record_for_agent(agent: Any) -> dict[str, Any]:
@@ -71,10 +92,13 @@ def _record_for_agent(agent: Any) -> dict[str, Any]:
         "successor_task_id": successor_task_id,
         "followup_kind": _text(metadata, "followup_kind", "delivery"),
     }
+    status = _status(agent, metadata)
+    declared_status = _text(metadata, "status")
+    normalized_declared_status = _declared_status(declared_status)
     return {
         "role": str(getattr(agent, "role", "")),
         "provider": str(getattr(agent, "provider_name", "")),
-        "status": _status(agent, metadata),
+        "status": status,
         "returncode": int(getattr(agent, "returncode", 1)),
         "timed_out": bool(getattr(agent, "timed_out", False)),
         "parse_error": bool(getattr(agent, "parse_error", False)),
@@ -88,10 +112,16 @@ def _record_for_agent(agent: Any) -> dict[str, Any]:
         "agent_uri": _text(metadata, "agent_uri"),
         "history_uri": _text(metadata, "history_uri"),
         "schema_validation": _safe_schema_validation(metadata.get("schema_validation")),
+        "write_scope_validation": _safe_schema_validation(
+            metadata.get("write_scope_validation")
+        ),
         "lineage": lineage,
         "followup_evidence": _json_safe(metadata.get("followup_evidence")),
-        "declared_status_matches_evidence": metadata.get(
-            "declared_status_matches_evidence"
+        "declared_status": declared_status,
+        "declared_status_matches_evidence": (
+            normalized_declared_status == status
+            if normalized_declared_status is not None
+            else None
         ),
         "metadata": {
             "backend": _text(metadata, "backend"),

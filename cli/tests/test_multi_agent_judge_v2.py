@@ -3,7 +3,7 @@
 import pytest
 
 from awf.core.agent_runner import AgentResult
-from awf.core.multi_agent import judge
+from awf.core.multi_agent import _record_dispatch_complete_safe, judge
 
 
 def _result(
@@ -35,6 +35,19 @@ def _result(
         parse_error=parse_error,
         parsed=parsed,
     )
+
+
+def test_omp_dispatch_provenance_failure_is_not_swallowed(tmp_path):
+    with pytest.raises(RuntimeError, match="initialized .workflow"):
+        _record_dispatch_complete_safe(
+            str(tmp_path),
+            backend="omp",
+            strategy="parallel",
+            mode="cross",
+            worker_count=0,
+            agents=[],
+            started_at=0.0,
+        )
 
 
 @pytest.mark.parametrize("severity", ["CRITICAL", "HIGH"])

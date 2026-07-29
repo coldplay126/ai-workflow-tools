@@ -16,6 +16,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from awf.core.agent_runner import AgentResult
@@ -27,6 +29,7 @@ from awf.core.team_runner import (
     _build_mission,
     _compute_verdict,
     _enforce_worker_write_scope,
+    _record_omp_team_provenance,
     run_team,
 )
 
@@ -394,6 +397,20 @@ def test_bb_write_scope_permissive_default():
         assert bb.validate_write_scope("any_role", bb.board_dir / "anything.md")
 
 
+def test_omp_team_provenance_failure_is_not_swallowed():
+    with tempfile.TemporaryDirectory() as tmp:
+        with pytest.raises(RuntimeError, match="initialized .workflow"):
+            _record_omp_team_provenance(
+                tmp,
+                backend="omp",
+                strategy="parallel",
+                phase="review",
+                turn=1,
+                agents=[],
+                elapsed_sec=0.1,
+            )
+
+
 def test_bb_begin_run_clears_stale_turn_outputs():
     with tempfile.TemporaryDirectory() as tmp:
         bb = _make_bb(Path(tmp), "verify")
@@ -404,11 +421,13 @@ def test_bb_begin_run_clears_stale_turn_outputs():
             [_finding("CRITICAL", "stale", "old.py:1", "old run")],
         )
         bb.write_mission("old mission", turn=1)
+        (bb.board_dir / "stale.md").write_text("old board content", encoding="utf-8")
 
         bb.begin_run()
 
         assert bb.collect_findings(1) == []
         assert not bb.mission_path.exists()
+        assert bb.list_board_artifacts() == []
         assert json.loads(bb.meta_path.read_text(encoding="utf-8"))["last_turn"] == 0
 
 

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from awf.core.judge import synthesize_workflow_multi_provider_results
 from awf.core.workflow_results import (
     apply_workflow_result,
     render_impl_report,
@@ -177,6 +178,84 @@ def test_apply_workflow_result_accepts_nested_phase_metrics(tmp_path: Path) -> N
 
     assert passed is True
     assert "Coverage: 100%" in output_path.read_text(encoding="utf-8")
+
+
+def test_apply_escaped_result_accepts_scalar_evidence(tmp_path: Path) -> None:
+    repo = _make_workflow_root(tmp_path)
+    result_file = tmp_path / "escaped-result.json"
+    result_file.write_text(
+        json.dumps(
+            {
+                "status": "escaped",
+                "phase": "review",
+                "result": {},
+                "provider": "omp",
+                "escape": {
+                    "reason": "provider_unavailable",
+                    "severity": "HIGH",
+                    "summary": "Native worker could not start",
+                    "recommended_action": "configure_provider",
+                    "evidence": ["provider unavailable"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    output_path, passed = apply_workflow_result(
+        str(repo),
+        "review",
+        str(result_file),
+    )
+
+    assert passed is False
+    content = output_path.read_text(encoding="utf-8")
+    assert "Worker Escaped" in content
+    assert "- [note] provider unavailable" in content
+
+
+def test_synthesis_normalizes_nested_phase_metrics_before_judging(
+    tmp_path: Path,
+) -> None:
+    repo = _make_workflow_root(tmp_path)
+    coverage = {
+        "total_requirements": 3,
+        "mapped_requirements": 3,
+        "percentage": 100,
+        "gaps": [],
+    }
+    primary = tmp_path / "primary.json"
+    secondary = tmp_path / "secondary.json"
+    primary.write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "phase": "review",
+                "provider": "omp",
+                "result": {
+                    "conclusion": "PASS",
+                    "findings": [],
+                    "phase_metrics": {"coverage": coverage},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    secondary.write_text(
+        json.dumps({"conclusion": "PASS", "findings": [], "coverage": coverage}),
+        encoding="utf-8",
+    )
+
+    synthesis = synthesize_workflow_multi_provider_results(
+        str(repo),
+        "review",
+        str(primary),
+        str(secondary),
+    )
+
+    assert synthesis["primary_gate_passed"] is True
+    assert synthesis["secondary_gate_passed"] is True
+    assert synthesis["judge_passed"] is True
 
 
 def test_apply_workflow_result_rejects_unknown_phase(tmp_path: Path) -> None:

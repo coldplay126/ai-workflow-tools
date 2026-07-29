@@ -26,6 +26,7 @@ from awf.runners.omp import (
     parse_omp_json_stream,
     parse_omp_task_events,
     run_omp_native_batch,
+    validate_json_schema,
 )
 
 
@@ -321,6 +322,7 @@ def test_write_omp_dispatch_provenance_redacts_response_body(tmp_path: Path):
         elapsed_sec=1.25,
         parsed={"conclusion": "PASS", "findings": []},
         metadata={
+            "status": "ok",
             "backend": "omp",
             "session_id": "session-1",
             "model": "slow",
@@ -343,9 +345,59 @@ def test_write_omp_dispatch_provenance_redacts_response_body(tmp_path: Path):
     assert payload["agents"][0]["conclusion"] == "PASS"
     assert payload["agents"][0]["runtime"]["usage"]["tokens"] == 7
     assert payload["agents"][0]["runtime"]["cost"] == 0.02
+    assert payload["agents"][0]["status"] == "completed"
+    assert payload["agents"][0]["declared_status_matches_evidence"] is True
     assert payload["agents"][0]["runtime"]["coordinator_usage"]["totalTokens"] == 99
     assert "sensitive response" not in path.read_text(encoding="utf-8")
     assert len(payload["agents"][0]["output_sha256"]) == 64
+
+
+def test_provenance_rejects_declared_completion_after_local_validation_failure(
+    tmp_path: Path,
+):
+    (tmp_path / ".workflow").mkdir()
+    agent = AgentResult(
+        provider_name="omp:fixture",
+        role="reviewer",
+        stdout="{}",
+        stderr="schema_validation_failed",
+        returncode=2,
+        elapsed_sec=0.1,
+        parse_error=True,
+        metadata={
+            "status": "completed",
+            "schema_validation": {"mode": "strict", "valid": False},
+        },
+    )
+
+    path = write_omp_dispatch_provenance(
+        tmp_path,
+        strategy="parallel",
+        mode="cross",
+        agents=[agent],
+        elapsed_sec=0.1,
+    )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["status"] == "failed"
+    assert payload["agents"][0]["status"] == "failed"
+    assert payload["agents"][0]["declared_status"] == "completed"
+    assert payload["agents"][0]["declared_status_matches_evidence"] is False
+
+
+def test_json_schema_validation_enforces_draft_2020_object_contract():
+    schema = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {"value": {"type": "string", "const": "valid"}},
+        "required": ["value"],
+        "additionalProperties": False,
+    }
+
+    assert validate_json_schema({"value": "valid"}, schema) == []
+    errors = validate_json_schema({"value": "wrong", "extra": True}, schema)
+    assert any("was expected" in error for error in errors)
+    assert any("Additional properties are not allowed" in error for error in errors)
 
 
 def test_coordinator_prompt_serializes_one_exact_native_task_batch(tmp_path: Path):

@@ -12,6 +12,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Sequence
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
+
 from awf.core.agent_runner import AgentResult, _try_parse_json
 SchemaMode = Literal["permissive", "strict"]
 CoordinationSurface = Literal["native", "print"]
@@ -708,91 +711,32 @@ def _schema_value(
 
 
 def validate_json_schema(value: Any, schema: JsonSchema) -> list[str]:
-    """Validate the object/array/type/required/properties/items/enum AWF subset."""
+    """Validate a value against the complete JSON Schema Draft 2020-12 contract."""
     normalized, schema_error = _schema_value(schema)
     if schema_error:
         return [schema_error]
     if normalized is None or normalized is True:
         return []
+    try:
+        Draft202012Validator.check_schema(normalized)
+    except SchemaError as exc:
+        return [f"invalid schema: {exc.message}"]
+
+    validator = Draft202012Validator(normalized)
+    validation_errors = sorted(
+        validator.iter_errors(value),
+        key=lambda error: (
+            tuple(str(part) for part in error.absolute_path),
+            tuple(str(part) for part in error.absolute_schema_path),
+        ),
+    )
     errors: list[str] = []
-    _validate_schema_node(value, normalized, "$", errors)
+    for error in validation_errors:
+        path = "$"
+        for part in error.absolute_path:
+            path += f"[{part}]" if isinstance(part, int) else f".{part}"
+        errors.append(f"{path}: {error.message}")
     return errors
-
-
-def _validate_schema_node(
-    value: Any,
-    schema: dict[str, Any] | bool,
-    path: str,
-    errors: list[str],
-) -> None:
-    if schema is True:
-        return
-    if schema is False:
-        errors.append(f"{path}: schema rejects every value")
-        return
-    enum = schema.get("enum")
-    if isinstance(enum, list) and value not in enum:
-        errors.append(f"{path}: value is not in enum")
-    expected = schema.get("type")
-    if isinstance(expected, str) and not _matches_json_type(value, expected):
-        errors.append(f"{path}: expected {expected}, got {_json_type(value)}")
-        return
-    if isinstance(value, dict):
-        required = schema.get("required")
-        if isinstance(required, list):
-            for name in required:
-                if isinstance(name, str) and name not in value:
-                    errors.append(f"{path}: missing required property {name!r}")
-        properties = schema.get("properties")
-        if isinstance(properties, dict):
-            for name, child_schema in properties.items():
-                if name in value and isinstance(child_schema, (dict, bool)):
-                    _validate_schema_node(
-                        value[name],
-                        child_schema,
-                        f"{path}.{name}",
-                        errors,
-                    )
-    items = schema.get("items")
-    if isinstance(value, list) and isinstance(items, (dict, bool)):
-        for index, item in enumerate(value):
-            _validate_schema_node(item, items, f"{path}[{index}]", errors)
-
-
-def _matches_json_type(value: Any, expected: str) -> bool:
-    if expected == "object":
-        return isinstance(value, dict)
-    if expected == "array":
-        return isinstance(value, list)
-    if expected == "string":
-        return isinstance(value, str)
-    if expected == "boolean":
-        return isinstance(value, bool)
-    if expected == "integer":
-        return isinstance(value, int) and not isinstance(value, bool)
-    if expected == "number":
-        return isinstance(value, (int, float)) and not isinstance(value, bool)
-    if expected == "null":
-        return value is None
-    return True
-
-
-def _json_type(value: Any) -> str:
-    if value is None:
-        return "null"
-    if isinstance(value, bool):
-        return "boolean"
-    if isinstance(value, dict):
-        return "object"
-    if isinstance(value, list):
-        return "array"
-    if isinstance(value, str):
-        return "string"
-    if isinstance(value, int):
-        return "integer"
-    if isinstance(value, float):
-        return "number"
-    return type(value).__name__
 
 
 def _task_record(

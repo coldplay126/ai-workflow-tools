@@ -19,29 +19,31 @@ def _record_dispatch_complete_safe(
     agents: list,
     started_at: float,
 ) -> None:
-    """Persist a dispatch_complete summary keyed off ``cwd`` (project root).
+    """Persist required OMP provenance, then best-effort operational telemetry."""
+    elapsed = time.monotonic() - started_at
+    provenance_path = None
+    if backend == "omp":
+        from awf.core.dispatch_provenance import write_omp_dispatch_provenance
 
-    Failures are swallowed: telemetry must not block multi-agent flows.
-    """
+        provenance = write_omp_dispatch_provenance(
+            cwd,
+            strategy=strategy,
+            mode=mode,
+            agents=agents,
+            elapsed_sec=elapsed,
+        )
+        if provenance is None:
+            raise RuntimeError(
+                "OMP provenance requires an initialized .workflow directory"
+            )
+        provenance_path = str(provenance)
+
     try:
         from awf.core.operational_metrics import record_event
         from awf.core.wiki import log_event
 
-        elapsed = time.monotonic() - started_at
         success_count = sum(1 for a in agents if getattr(a, "ok", False))
         timed_out = sum(1 for a in agents if getattr(a, "timed_out", False))
-        provenance_path = None
-        if backend == "omp":
-            from awf.core.dispatch_provenance import write_omp_dispatch_provenance
-
-            provenance = write_omp_dispatch_provenance(
-                cwd,
-                strategy=strategy,
-                mode=mode,
-                agents=agents,
-                elapsed_sec=elapsed,
-            )
-            provenance_path = str(provenance) if provenance is not None else None
         payload = {
             "backend": backend,
             "strategy": strategy,

@@ -40,18 +40,17 @@ def _record_omp_team_provenance(
 ) -> None:
     if backend != "omp":
         return
-    try:
-        from awf.core.dispatch_provenance import write_omp_dispatch_provenance
+    from awf.core.dispatch_provenance import write_omp_dispatch_provenance
 
-        write_omp_dispatch_provenance(
-            cwd,
-            strategy=strategy,
-            mode=f"team:{phase}:turn-{turn}",
-            agents=agents,
-            elapsed_sec=elapsed_sec,
-        )
-    except Exception as exc:
-        _log(f"  warning: OMP provenance record failed: {exc}")
+    provenance = write_omp_dispatch_provenance(
+        cwd,
+        strategy=strategy,
+        mode=f"team:{phase}:turn-{turn}",
+        agents=agents,
+        elapsed_sec=elapsed_sec,
+    )
+    if provenance is None:
+        raise RuntimeError("OMP provenance requires an initialized .workflow directory")
 
 
 @dataclass

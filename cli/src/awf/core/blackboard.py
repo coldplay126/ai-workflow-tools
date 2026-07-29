@@ -149,7 +149,10 @@ class Blackboard:
         )
 
     def begin_run(self) -> None:
-        """Clear transient turn output before starting a fresh team run."""
+        """Clear all prior run state before starting a fresh team run."""
+        if self.board_dir.exists():
+            shutil.rmtree(self.board_dir)
+        self.board_dir.mkdir(parents=True, exist_ok=True)
         if self.discussion_dir.exists():
             shutil.rmtree(self.discussion_dir)
         self.discussion_dir.mkdir(parents=True, exist_ok=True)

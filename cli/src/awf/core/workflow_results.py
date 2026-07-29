@@ -113,7 +113,21 @@ def _parse_result_json(path: str) -> dict[str, Any]:
 
 
 def load_result_envelope(path: str, *, phase: str, provider: str) -> dict[str, Any]:
-    return normalize_worker_result(_parse_result_json(path), phase=phase, provider=provider)
+    return normalize_worker_result(
+        _parse_result_json(path),
+        phase=phase,
+        provider=provider,
+    )
+
+
+def normalize_phase_result(data: dict[str, Any]) -> dict[str, Any]:
+    """Flatten shared team/OMP phase metrics into the canonical result shape."""
+    normalized = dict(data)
+    phase_metrics = normalized.get("phase_metrics")
+    if isinstance(phase_metrics, dict):
+        for key, value in phase_metrics.items():
+            normalized.setdefault(key, value)
+    return normalized
 
 
 def load_result_json(path: str) -> dict[str, Any]:
@@ -124,8 +138,8 @@ def load_result_json(path: str) -> dict[str, Any]:
             phase=str(payload.get("phase", "unknown") or "unknown"),
             provider=str(payload.get("provider", "unknown") or "unknown"),
         )
-        return dict(normalized.get("result", {}))
-    return payload
+        return normalize_phase_result(dict(normalized.get("result", {})))
+    return normalize_phase_result(payload)
 
 
 def _raw_result_text(path: str) -> str:
@@ -158,8 +172,14 @@ def _render_escape_report(
         lines.extend(["## Affected Files"] + [f"- {f}" for f in affected] + [""])
     if evidence:
         lines.extend(["## Evidence"])
-        for e in evidence:
-            lines.append(f"- [{e.get('kind', 'note')}] {e.get('value', str(e))}")
+        for item in evidence:
+            if isinstance(item, dict):
+                lines.append(
+                    f"- [{item.get('kind', 'note')}] "
+                    f"{item.get('value', item.get('detail', str(item)))}"
+                )
+            else:
+                lines.append(f"- [note] {item}")
         lines.append("")
     raw_excerpt = raw_text[:8000]
     lines.extend(["## Raw Result Excerpt", "```text", raw_excerpt.rstrip(), "```", ""])
@@ -564,15 +584,7 @@ def apply_workflow_result(
         if status != "completed":
             raise ValueError(f"worker_result_status:{status}")
 
-        data = dict(envelope.get("result", {}))
-        # Team/OMP worker schemas group gate metrics under `phase_metrics`,
-        # while provider-direct schemas expose them at the result root.
-        # Accept both at this boundary so either execution surface feeds the
-        # same deterministic gate evaluator.
-        phase_metrics = data.get("phase_metrics")
-        if isinstance(phase_metrics, dict):
-            for key, value in phase_metrics.items():
-                data.setdefault(key, value)
+        data = normalize_phase_result(dict(envelope.get("result", {})))
         gate_passed, gate_checks = evaluate_gate(explicit_root, phase, data, change_class=change_class)
 
         # --- Build failure context for on_fail routing ---
