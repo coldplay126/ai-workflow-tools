@@ -2529,3 +2529,89 @@ def test_gc_is_preview_by_default_and_rechecks_each_candidate(
     assert applied.decision == "removed"
     assert not safe.worktree_path.exists()
     assert dirty.worktree_path.exists()
+
+
+def test_finish_forced_deployment_probe_blocks_a_regressed_promotion(
+    promotion_harness: PromotionHarness,
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+    probes: list[list[str]] = []
+
+    def regressed_probe(
+        command: list[str], **_: object
+    ) -> subprocess.CompletedProcess[str]:
+        probes.append(command)
+        return subprocess.CompletedProcess(command, 1, "", "deployment regressed")
+
+    promotion_harness.service.deployment_runner = regressed_probe
+
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.status == "blocked"
+    assert "deployment_not_healthy" in {item["code"] for item in result.blockers}
+    assert probes == [[sys.executable, "-c", "pass"]]
+    assert lease.worktree_path.exists()
+    current = promotion_harness.registry.get_lease(lease.id)
+    assert current is not None
+    assert current.deployment_state is DeploymentState.FAILED
+
+
+def test_finish_preserves_promotion_when_forced_deployment_probe_errors(
+    promotion_harness: PromotionHarness,
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+
+    def failed_probe(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(command, 30)
+
+    promotion_harness.service.deployment_runner = failed_probe
+
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.status == "blocked"
+    assert "deployment_not_healthy" in {item["code"] for item in result.blockers}
+    assert lease.worktree_path.exists()
+
+
+def test_finish_requires_a_fresh_healthy_deployment_probe(
+    promotion_harness: PromotionHarness,
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+    probes: list[list[str]] = []
+
+    def healthy_probe(
+        command: list[str], **_: object
+    ) -> subprocess.CompletedProcess[str]:
+        probes.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    promotion_harness.service.deployment_runner = healthy_probe
+
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.decision == "removed"
+    assert probes == [[sys.executable, "-c", "pass"]]
+    assert not lease.worktree_path.exists()
+
+
+def test_finish_preserves_promotion_when_forced_probe_cannot_be_recorded(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+    original_transition = promotion_harness.registry.transition
+
+    def transition(*args: object, **kwargs: object) -> Lease:
+        if kwargs.get("event_type") == "cleanup_deployment_probe":
+            raise RuntimeError("database unavailable")
+        return original_transition(*args, **kwargs)
+
+    monkeypatch.setattr(promotion_harness.registry, "transition", transition)
+
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.status == "blocked"
+    assert "deployment_not_healthy" in {item["code"] for item in result.blockers}
+    assert "deployment_probe_record_failed" in {
+        item["code"] for item in result.warnings
+    }
+    assert lease.worktree_path.exists()

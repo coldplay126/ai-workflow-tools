@@ -695,6 +695,39 @@ class WorktreeService:
                     lease=current,
                     warnings=tuple(warnings),
                 )
+            forced = self._force_cleanup_deployment_probe(
+                current, pull_request, warnings
+            )
+            if forced is None:
+                recorded = self.registry.get_lease(current.id) or current
+                return self._cleanup_blocked(
+                    "wt.finish",
+                    "deployment_not_healthy",
+                    f"Promotion lease {current.id} has no freshly proven deployment.",
+                    lease=recorded,
+                    warnings=warnings,
+                )
+            current = forced
+            try:
+                pull_request = (self.github or GhClient(current.repository_root)).view_pr(
+                    current.target_pr
+                )
+            except (ExternalServiceError, KeyError, OSError, ValueError) as error:
+                return self._cleanup_blocked(
+                    "wt.finish",
+                    "github_refresh_failed",
+                    f"Unable to revalidate pull request state: {error}",
+                    lease=current,
+                    warnings=warnings,
+                )
+            blockers = self._cleanup_blockers(current, pull_request)
+            if blockers:
+                return CommandResult.blocked(
+                    "wt.finish",
+                    blockers=blockers,
+                    lease=current,
+                    warnings=tuple(warnings),
+                )
             try:
                 self.git.remove_worktree(current.worktree_path)
             except (GitError, OSError) as error:
@@ -738,6 +771,120 @@ class WorktreeService:
                 actions=tuple(actions),
                 warnings=tuple(warnings),
             )
+
+    def _force_cleanup_deployment_probe(
+        self,
+        lease: Lease,
+        pull_request: PullRequest,
+        warnings: list[dict[str, str]],
+    ) -> Lease | None:
+        if lease.purpose is not Purpose.PROMOTE:
+            return lease
+        command = self.config.deployment_status_command
+        if not command:
+            return self._record_cleanup_deployment_probe(
+                lease,
+                pull_request,
+                state=LeaseState.BLOCKED,
+                deployment_state=DeploymentState.UNKNOWN,
+                summary="Fresh deployment status probe is not configured",
+                warnings=warnings,
+            )
+        try:
+            completed = self.deployment_runner(
+                list(command),
+                cwd=lease.repository_root,
+                check=False,
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=_DEPLOYMENT_STATUS_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            warnings.append(
+                {
+                    "code": "deployment_probe_failed",
+                    "message": (
+                        f"Unable to run a fresh deployment status probe for lease {lease.id}."
+                    ),
+                }
+            )
+            return self._record_cleanup_deployment_probe(
+                lease,
+                pull_request,
+                state=LeaseState.BLOCKED,
+                deployment_state=DeploymentState.UNKNOWN,
+                summary="Fresh deployment status probe could not be completed",
+                warnings=warnings,
+            )
+        if completed.returncode != 0:
+            return self._record_cleanup_deployment_probe(
+                lease,
+                pull_request,
+                state=LeaseState.BLOCKED,
+                deployment_state=DeploymentState.FAILED,
+                summary="Fresh deployment status probe reported failure",
+                warnings=warnings,
+            )
+        return self._record_cleanup_deployment_probe(
+            lease,
+            pull_request,
+            state=LeaseState.CLEANABLE,
+            deployment_state=DeploymentState.HEALTHY,
+            summary="Fresh deployment status probe is healthy",
+            warnings=warnings,
+        )
+
+    def _record_cleanup_deployment_probe(
+        self,
+        lease: Lease,
+        pull_request: PullRequest,
+        *,
+        state: LeaseState,
+        deployment_state: DeploymentState,
+        summary: str,
+        warnings: list[dict[str, str]],
+    ) -> Lease | None:
+        try:
+            updated = self.registry.transition(
+                lease.id,
+                state,
+                expected_version=lease.version,
+                event_type="cleanup_deployment_probe",
+                summary=summary,
+                observed_head_sha=pull_request.head_sha,
+                pr_number=pull_request.number,
+                deployment_state=deployment_state,
+            )
+        except (RuntimeError, sqlite3.Error):
+            warnings.append(
+                {
+                    "code": "deployment_probe_record_failed",
+                    "message": (
+                        f"Unable to record a fresh deployment status probe for lease {lease.id}."
+                    ),
+                }
+            )
+            return None
+        current = self.registry.get_lease(lease.id)
+        if (
+            current is None
+            or current.version != updated.version
+            or current.target_pr != pull_request.number
+            or current.state is not state
+            or current.deployment_state is not deployment_state
+        ):
+            warnings.append(
+                {
+                    "code": "deployment_probe_record_failed",
+                    "message": (
+                        f"Unable to revalidate a fresh deployment status probe for lease "
+                        f"{lease.id}."
+                    ),
+                }
+            )
+            return None
+        return current
 
     def _cleanup_blockers(
         self, lease: Lease, pull_request: PullRequest
