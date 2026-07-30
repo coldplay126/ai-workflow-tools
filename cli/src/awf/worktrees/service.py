@@ -124,6 +124,7 @@ class WorktreeService:
                     f"branch {expected_branch!r} is already checked out at {branch_conflict}",
                 )
 
+            creation_sha = base_sha
             try:
                 self.git.add_worktree(lease.worktree_path, lease.branch, base_sha)
             except GitError as error:
@@ -135,7 +136,7 @@ class WorktreeService:
                 )
                 lease = self.registry.create_lease(lease)
             except (GitError, OSError, RuntimeError, ValueError, sqlite3.Error) as error:
-                return self._handle_creation_failure(lease, error)
+                return self._handle_creation_failure(lease, error, creation_sha)
 
             prepare_error = self._prepare(lease, force=True)
             if prepare_error is not None:
@@ -352,7 +353,23 @@ class WorktreeService:
         key = payload.get("key") if isinstance(payload, dict) else None
         return key if isinstance(key, str) else None
 
-    def _handle_creation_failure(self, lease: Lease, error: Exception) -> CommandResult:
+    def _handle_creation_failure(
+        self, lease: Lease, error: Exception, creation_sha: str
+    ) -> CommandResult:
+        try:
+            current_head = self.git.head_sha(lease.worktree_path)
+        except (GitError, OSError) as head_error:
+            return self._blocked(
+                "registry_recovery_failed",
+                f"could not confirm worktree head after registry failure: {head_error}",
+                lease=lease,
+            )
+        if current_head != creation_sha:
+            return self._blocked(
+                "registry_recovery_failed",
+                "worktree head changed after creation; preserving worktree and branch",
+                lease=lease,
+            )
         try:
             clean = not self.git.status_porcelain(lease.worktree_path)
         except (GitError, OSError):
@@ -368,7 +385,7 @@ class WorktreeService:
                 lease=lease,
             )
         try:
-            self.git.delete_local_branch(lease.branch, force=True)
+            self.git.delete_branch_if_at(lease.branch, creation_sha)
         except (GitError, OSError) as cleanup_error:
             return self._blocked(
                 "registry_recovery_failed",

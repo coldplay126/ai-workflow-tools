@@ -139,7 +139,9 @@ def test_git_client_deletes_local_and_remote_branches(tmp_path: Path) -> None:
     assert git(repo, "ls-remote", "--heads", "origin", "awf/remote-delete") == ""
 
 
-def test_git_client_force_deletes_an_unmerged_local_branch(tmp_path: Path) -> None:
+def test_git_client_safe_delete_preserves_an_unmerged_local_branch(
+    tmp_path: Path,
+) -> None:
     repo = make_repository(tmp_path)
     client = GitClient(repo)
     git(repo, "checkout", "-q", "-b", "awf/unmerged-delete")
@@ -151,11 +153,45 @@ def test_git_client_force_deletes_an_unmerged_local_branch(tmp_path: Path) -> No
     with pytest.raises(GitError):
         client.delete_local_branch("awf/unmerged-delete")
 
-    client.delete_local_branch("awf/unmerged-delete", force=True)
-
-    assert "awf/unmerged-delete" not in git(
+    assert "awf/unmerged-delete" in git(
         repo, "branch", "--format=%(refname:short)"
     ).splitlines()
+
+
+def test_git_client_cas_deletes_a_branch_at_the_expected_head(
+    tmp_path: Path,
+) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    git(repo, "branch", "awf/cas-delete")
+    expected_head = git(repo, "rev-parse", "awf/cas-delete")
+
+    client.delete_branch_if_at("awf/cas-delete", expected_head)
+
+    assert "awf/cas-delete" not in git(
+        repo, "branch", "--format=%(refname:short)"
+    ).splitlines()
+
+
+def test_git_client_cas_delete_preserves_a_branch_after_a_race(
+    tmp_path: Path,
+) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    git(repo, "branch", "awf/cas-race")
+    expected_head = git(repo, "rev-parse", "awf/cas-race")
+    git(repo, "checkout", "-q", "-b", "upstream-change")
+    (repo / "changed.txt").write_text("changed\n", encoding="utf-8")
+    git(repo, "add", "changed.txt")
+    git(repo, "commit", "-q", "-m", "changed")
+    changed_head = git(repo, "rev-parse", "HEAD")
+    git(repo, "checkout", "-q", "staging")
+    git(repo, "branch", "-f", "awf/cas-race", changed_head)
+
+    with pytest.raises(GitError):
+        client.delete_branch_if_at("awf/cas-race", expected_head)
+
+    assert git(repo, "rev-parse", "awf/cas-race") == changed_head
 
 
 def test_git_client_applies_binary_diff_and_commits_from_a_worktree(tmp_path: Path) -> None:

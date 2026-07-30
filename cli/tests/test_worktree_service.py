@@ -361,7 +361,7 @@ def test_acquire_reports_branch_cleanup_failure_after_registry_insert_failure(
             raise sqlite3.IntegrityError("registry is unavailable")
 
     class BranchDeleteFailingGit(GitClient):
-        def delete_local_branch(self, branch: str, *, force: bool = False) -> None:
+        def delete_branch_if_at(self, branch: str, expected_sha: str) -> None:
             raise GitError(f"could not delete {branch}")
 
     repo = make_repository(tmp_path)
@@ -473,3 +473,98 @@ def test_acquire_retry_succeeds_after_divergent_base_registry_recovery(
     assert failed.status == "blocked"
     assert recovered.decision == "ready"
     assert len(git.list_worktrees()) == 2
+
+
+def test_acquire_preserves_a_clean_worktree_with_a_new_commit_after_registry_failure(
+    tmp_path: Path,
+) -> None:
+    class CommittingRegistry(WorktreeRegistry):
+        def create_lease(self, lease: Lease) -> Lease:
+            (lease.worktree_path / "recovery.txt").write_text(
+                "retain this commit\n",
+                encoding="utf-8",
+            )
+            git_command(lease.worktree_path, "add", "recovery.txt")
+            git_command(lease.worktree_path, "commit", "-q", "-m", "recovery")
+            raise sqlite3.IntegrityError("registry is unavailable")
+
+    repo = make_repository(tmp_path)
+    git = GitClient(repo)
+    service = WorktreeService(
+        CommittingRegistry(tmp_path / "state" / "worktrees.sqlite3"),
+        git,
+        config=WorktreeConfig(default_base="staging"),
+        cache_dir=tmp_path / "cache",
+        state_dir=tmp_path / "state",
+        lock_dir=tmp_path / "locks",
+    )
+
+    result = service.acquire(
+        initiative="reward-widget",
+        purpose=Purpose.FEATURE,
+        base=None,
+        branch=None,
+        owner_id="session-1",
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "registry_recovery_failed"
+    assert "head changed" in result.blockers[0]["message"]
+    assert result.lease is not None
+    assert result.lease.worktree_path.is_dir()
+    assert git_command(repo, "rev-parse", result.lease.branch) == git_command(
+        result.lease.worktree_path, "rev-parse", "HEAD"
+    )
+
+
+def test_acquire_preserves_branch_when_rollback_cas_detects_a_race(
+    tmp_path: Path,
+) -> None:
+    class FailingRegistry(WorktreeRegistry):
+        def create_lease(self, lease: Lease) -> Lease:
+            raise sqlite3.IntegrityError("registry is unavailable")
+
+    class RacingGit(GitClient):
+        def delete_branch_if_at(self, branch: str, expected_sha: str) -> None:
+            git_command(
+                self.cwd,
+                "update-ref",
+                f"refs/heads/{branch}",
+                self.head_sha(),
+            )
+            super().delete_branch_if_at(branch, expected_sha)
+
+    repo = make_repository(tmp_path)
+    git_command(repo, "checkout", "-q", "-b", "release")
+    (repo / "release.txt").write_text("release\n", encoding="utf-8")
+    git_command(repo, "add", "release.txt")
+    git_command(repo, "commit", "-q", "-m", "release")
+    git_command(repo, "push", "-q", "-u", "origin", "release")
+    git_command(repo, "checkout", "-q", "staging")
+    git = RacingGit(repo)
+    service = WorktreeService(
+        FailingRegistry(tmp_path / "state" / "worktrees.sqlite3"),
+        git,
+        config=WorktreeConfig(default_base="staging"),
+        cache_dir=tmp_path / "cache",
+        state_dir=tmp_path / "state",
+        lock_dir=tmp_path / "locks",
+    )
+
+    result = service.acquire(
+        initiative="reward-widget",
+        purpose=Purpose.FEATURE,
+        base="release",
+        branch=None,
+        owner_id="session-1",
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "registry_recovery_failed"
+    assert "branch cleanup failed" in result.blockers[0]["message"]
+    assert len(git.list_worktrees()) == 1
+    assert git_command(repo, "rev-parse", "awf/reward-widget/feature") == git_command(
+        repo, "rev-parse", "staging"
+    )
