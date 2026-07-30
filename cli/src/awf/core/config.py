@@ -80,6 +80,13 @@ class AwfConfig:
                     "stage2_token_threshold": 12000,
                     "stage2_line_threshold": 400,
                 },
+                "supervisor": {
+                    "api_url": "",
+                    "region": "ap-northeast-2",
+                    "profile": "",
+                    "poll_interval_seconds": 2,
+                    "request_timeout_seconds": 30,
+                },
                 "mcp_defaults": {},
                 "permissions": {
                     "allowed_tools": [
