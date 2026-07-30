@@ -35,6 +35,11 @@ def _emit(result: CommandResult, *, as_json: bool) -> int:
                 f"blocked: {blocker['code']}: {blocker['message']}",
                 file=sys.stderr,
             )
+        for warning in result.warnings:
+            print(
+                f"warning: {warning['code']}: {warning['message']}",
+                file=sys.stderr,
+            )
     return result.exit_code
 
 
@@ -85,7 +90,10 @@ def run_wt_status(args: argparse.Namespace) -> int:
     return _run(
         args,
         "wt.status",
-        lambda service: service.status(initiative=args.initiative),
+        lambda service: service.status(
+            initiative=args.initiative,
+            refresh=args.refresh,
+        ),
     )
 
 

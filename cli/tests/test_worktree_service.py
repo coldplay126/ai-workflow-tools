@@ -1,20 +1,74 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sqlite3
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
 
 from awf.worktrees.config import WorktreeConfig
 from awf.worktrees.git import GitClient, GitError, GitWorktree
-from awf.worktrees.models import Lease, LeaseState, Purpose
+from awf.worktrees.github import ExternalServiceError, PullRequest
+from awf.worktrees.models import DeploymentState, Lease, LeaseState, Purpose
 from awf.worktrees.registry import WorktreeRegistry
 from awf.worktrees.service import WorktreeService
 from worktree_fixtures import git as git_command
 from worktree_fixtures import make_repository
+
+
+@dataclass
+class FakeGitHub:
+    prs: dict[int, PullRequest] = field(default_factory=dict)
+    error: ExternalServiceError | None = None
+    view_calls: list[int] = field(default_factory=list)
+    create_calls: list[tuple[str, str, str, str]] = field(default_factory=list)
+
+    def view_pr(self, number: int) -> PullRequest:
+        self.view_calls.append(number)
+        if self.error is not None:
+            raise self.error
+        return self.prs[number]
+
+    def create_pr(
+        self, *, base: str, head: str, title: str, body: str
+    ) -> PullRequest:
+        self.create_calls.append((base, head, title, body))
+        return self.view_pr(next(iter(self.prs)))
+
+
+def pull_request(
+    *,
+    number: int,
+    state: str,
+    head_sha: str,
+    merge_commit_sha: str | None = None,
+    base: str = "staging",
+    changed_paths: tuple[str, ...] = (),
+) -> PullRequest:
+    return PullRequest(
+        number=number,
+        state=state,
+        base_ref=base,
+        base_sha="base-sha",
+        head_ref="awf/reward-widget/feature",
+        head_sha=head_sha,
+        merge_commit_sha=merge_commit_sha,
+        review_decision="APPROVED",
+        checks_passed=True,
+        changed_paths=changed_paths,
+        url=f"https://github.example/acme/repo/pull/{number}",
+    )
+
+
+def merged_pr(**kwargs: object) -> PullRequest:
+    return pull_request(state="MERGED", merge_commit_sha="merge-sha", **kwargs)
+
+
+def closed_pr(**kwargs: object) -> PullRequest:
+    return pull_request(state="CLOSED", **kwargs)
 
 
 @dataclass
@@ -25,6 +79,7 @@ class Harness:
     cache_dir: Path
     state_dir: Path
     lock_dir: Path
+    github: FakeGitHub
     service: WorktreeService
 
     @classmethod
@@ -35,6 +90,7 @@ class Harness:
         cache_dir = tmp_path / "cache"
         state_dir = tmp_path / "state"
         lock_dir = tmp_path / "locks"
+        github = FakeGitHub()
         return cls(
             repo=repo,
             git=git,
@@ -42,10 +98,12 @@ class Harness:
             cache_dir=cache_dir,
             state_dir=state_dir,
             lock_dir=lock_dir,
+            github=github,
             service=WorktreeService(
                 registry,
                 git,
                 config=WorktreeConfig(default_base="staging"),
+                github=github,
                 cache_dir=cache_dir,
                 state_dir=state_dir,
                 lock_dir=lock_dir,
@@ -60,6 +118,14 @@ class Harness:
             branch=None,
             owner_id="session-1",
             apply=True,
+        )
+
+    def attach_pr(self, lease: Lease, number: int) -> Lease:
+        return self.registry.transition(
+            lease.id,
+            LeaseState.PR_OPEN,
+            expected_version=lease.version,
+            pr_number=number,
         )
 
     def enable_prepare_command(self, log: Path, message: str = "prepared") -> None:
@@ -97,6 +163,252 @@ class Harness:
         external = self.make_external_worktree(branch)
         result = self.service.import_root(self.repo.parent, apply=True)
         return next(lease for lease in result.leases if lease.worktree_path == external)
+def test_github_client_marks_checks_passed_only_for_completed_successes(
+    harness: Harness,
+) -> None:
+    from awf.worktrees.github import GhClient
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+
+    def runner(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            json.dumps(
+                {
+                    "number": 42,
+                    "state": "OPEN",
+                    "baseRefName": "staging",
+                    "baseRefOid": "base-sha",
+                    "headRefName": "awf/reward-widget/feature",
+                    "headRefOid": "head-sha",
+                    "mergeCommit": None,
+                    "reviewDecision": "APPROVED",
+                    "statusCheckRollup": [
+                        {"status": "COMPLETED", "conclusion": "SUCCESS"},
+                        {"status": "COMPLETED", "conclusion": "SKIPPED"},
+                        {"status": "COMPLETED", "conclusion": "NEUTRAL"},
+                    ],
+                    "files": [{"path": "README.txt"}],
+                    "url": "https://github.example/acme/repo/pull/42",
+                }
+            ),
+            "",
+        )
+
+    pr = GhClient(harness.repo, command_runner=runner).view_pr(42)
+
+    assert calls == [
+        (
+            [
+                "gh",
+                "pr",
+                "view",
+                "42",
+                "--json",
+                (
+                    "number,state,baseRefName,baseRefOid,headRefName,headRefOid,"
+                    "mergeCommit,reviewDecision,statusCheckRollup,files,url"
+                ),
+            ],
+            {
+                "cwd": str(harness.repo.resolve()),
+                "check": False,
+                "shell": False,
+                "capture_output": True,
+                "text": True,
+                "timeout": 30.0,
+            },
+        )
+    ]
+    assert pr.checks_passed is True
+    assert pr.changed_paths == ("README.txt",)
+
+
+@pytest.mark.parametrize(
+    "check",
+    (
+        {"status": "IN_PROGRESS", "conclusion": None},
+        {"status": "COMPLETED", "conclusion": None},
+        {"conclusion": "SUCCESS"},
+    ),
+)
+def test_github_client_rejects_pending_or_incomplete_checks(
+    harness: Harness, check: dict[str, str | None]
+) -> None:
+    from awf.worktrees.github import GhClient
+
+    def runner(
+        command: list[str], **_: object
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            json.dumps(
+                {
+                    "number": 42,
+                    "state": "OPEN",
+                    "baseRefName": "staging",
+                    "baseRefOid": "base-sha",
+                    "headRefName": "awf/reward-widget/feature",
+                    "headRefOid": "head-sha",
+                    "mergeCommit": None,
+                    "reviewDecision": "APPROVED",
+                    "statusCheckRollup": [check],
+                    "files": [],
+                    "url": "https://github.example/acme/repo/pull/42",
+                }
+            ),
+            "",
+        )
+
+    assert GhClient(harness.repo, command_runner=runner).view_pr(42).checks_passed is False
+
+
+def test_refresh_marks_merged_feature_cleanable(harness: Harness) -> None:
+    acquired = harness.acquire("reward-widget")
+    assert acquired.lease is not None
+    lease = harness.attach_pr(acquired.lease, 42)
+    harness.github.prs[42] = merged_pr(
+        number=42,
+        base="staging",
+        head_sha=lease.head_sha,
+        changed_paths=("README.txt",),
+    )
+
+    result = harness.service.status(initiative="reward-widget", refresh=True)
+
+    refreshed = result.leases[0]
+    assert refreshed.state is LeaseState.CLEANABLE
+    assert refreshed.deployment_state is DeploymentState.NOT_REQUIRED
+
+
+def test_refresh_marks_closed_unmerged_without_deleting(harness: Harness) -> None:
+    acquired = harness.acquire("reward-widget")
+    assert acquired.lease is not None
+    lease = harness.attach_pr(acquired.lease, 42)
+    harness.github.prs[42] = closed_pr(number=42, head_sha=lease.head_sha)
+
+    result = harness.service.status(initiative="reward-widget", refresh=True)
+
+    assert result.leases[0].state is LeaseState.CLOSED_UNMERGED
+    assert lease.worktree_path.exists()
+
+
+def test_refresh_external_failure_keeps_previous_state_and_warns(
+    harness: Harness,
+) -> None:
+    acquired = harness.acquire("reward-widget")
+    assert acquired.lease is not None
+    lease = harness.attach_pr(acquired.lease, 42)
+    harness.github.error = ExternalServiceError("gh auth required")
+
+    result = harness.service.status(initiative="reward-widget", refresh=True)
+
+    assert result.leases[0].state is lease.state
+    assert result.warnings[0]["code"] == "github_refresh_failed"
+
+
+def test_refresh_promoted_lease_cleanable_after_healthy_deployment(
+    harness: Harness,
+) -> None:
+    acquired = harness.service.acquire(
+        initiative="reward-widget",
+        purpose=Purpose.PROMOTE,
+        base=None,
+        branch=None,
+        owner_id="session-1",
+        apply=True,
+    )
+    assert acquired.lease is not None
+    lease = harness.attach_pr(acquired.lease, 42)
+    harness.github.prs[42] = merged_pr(number=42, head_sha=lease.head_sha)
+
+    def deployment_runner(
+        command: tuple[str, ...], **_: object
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    harness.service = WorktreeService(
+        harness.registry,
+        harness.git,
+        config=WorktreeConfig(
+            default_base="staging", deployment_status_command=("deploy", "status")
+        ),
+        github=harness.github,
+        deployment_runner=deployment_runner,
+        cache_dir=harness.cache_dir,
+        state_dir=harness.state_dir,
+        lock_dir=harness.lock_dir,
+    )
+
+    result = harness.service.status(initiative="reward-widget", refresh=True)
+
+    assert result.leases[0].state is LeaseState.CLEANABLE
+    assert result.leases[0].deployment_state is DeploymentState.HEALTHY
+
+
+def test_refresh_blocks_promoted_lease_when_deployment_fails(
+    harness: Harness,
+) -> None:
+    acquired = harness.service.acquire(
+        initiative="reward-widget",
+        purpose=Purpose.PROMOTE,
+        base=None,
+        branch=None,
+        owner_id="session-1",
+        apply=True,
+    )
+    assert acquired.lease is not None
+    lease = harness.attach_pr(acquired.lease, 42)
+    harness.github.prs[42] = merged_pr(number=42, head_sha=lease.head_sha)
+
+    def deployment_runner(
+        command: tuple[str, ...], **_: object
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 1, "", "deployment failed")
+
+    harness.service = WorktreeService(
+        harness.registry,
+        harness.git,
+        config=WorktreeConfig(
+            default_base="staging", deployment_status_command=("deploy", "status")
+        ),
+        github=harness.github,
+        deployment_runner=deployment_runner,
+        cache_dir=harness.cache_dir,
+        state_dir=harness.state_dir,
+        lock_dir=harness.lock_dir,
+    )
+
+    result = harness.service.status(initiative="reward-widget", refresh=True)
+
+    assert result.leases[0].state is LeaseState.BLOCKED
+    assert result.leases[0].deployment_state is DeploymentState.FAILED
+
+
+def test_refresh_keeps_promoted_lease_deploying_without_status_command(
+    harness: Harness,
+) -> None:
+    acquired = harness.service.acquire(
+        initiative="reward-widget",
+        purpose=Purpose.PROMOTE,
+        base=None,
+        branch=None,
+        owner_id="session-1",
+        apply=True,
+    )
+    assert acquired.lease is not None
+    lease = harness.attach_pr(acquired.lease, 42)
+    harness.github.prs[42] = merged_pr(number=42, head_sha=lease.head_sha)
+
+    result = harness.service.status(initiative="reward-widget", refresh=True)
+
+    assert result.leases[0].state is LeaseState.DEPLOYING
+    assert result.leases[0].deployment_state is DeploymentState.UNKNOWN
 
 @pytest.fixture
 def harness(tmp_path: Path) -> Harness:

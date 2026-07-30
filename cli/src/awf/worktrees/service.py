@@ -13,8 +13,16 @@ from pathlib import Path
 
 from .config import ConfigError, WorktreeConfig, load_worktree_config
 from .git import GitClient, GitError, GitWorktree
+from .github import ExternalServiceError, GhClient, PullRequest
 from .locking import repository_lock
-from .models import CommandResult, Lease, LeaseState, Purpose, now_iso
+from .models import (
+    CommandResult,
+    DeploymentState,
+    Lease,
+    LeaseState,
+    Purpose,
+    now_iso,
+)
 from .registry import WorktreeRegistry
 
 
@@ -57,6 +65,8 @@ class WorktreeService:
         *,
         config: WorktreeConfig | None = None,
         command_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+        github: GhClient | None = None,
+        deployment_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
         cache_dir: Path | None = None,
         state_dir: Path | None = None,
         lock_dir: Path | None = None,
@@ -70,6 +80,8 @@ class WorktreeService:
             load_worktree_config(git.repository_root()) if git is not None else WorktreeConfig()
         )
         self.command_runner = command_runner or subprocess.run
+        self.github = github
+        self.deployment_runner = deployment_runner or self.command_runner
         self.cache_dir = (cache_dir or cache_root()).expanduser().resolve()
         self.state_dir = (state_dir or state_db_path().parent).expanduser().resolve()
         self.lock_dir = (lock_dir or self.state_dir / "locks").expanduser().resolve()
@@ -161,7 +173,9 @@ class WorktreeService:
                 return self._block_prepare_failure(lease, prepare_error)
             return CommandResult.ok("wt.acquire", decision="ready", lease=lease)
 
-    def status(self, *, initiative: str | None = None) -> CommandResult:
+    def status(
+        self, *, initiative: str | None = None, refresh: bool = False
+    ) -> CommandResult:
         filters: dict[str, str] = {"repository_id": self.git.repository_id()}
         if initiative is not None:
             filters["initiative"] = initiative
@@ -171,10 +185,193 @@ class WorktreeService:
                 **filters,
             )
         )
+        if not refresh:
+            return CommandResult.ok(
+                "wt.status",
+                decision="no_op" if not leases else "ready",
+                leases=leases,
+            )
+
+        warnings: list[dict[str, str]] = []
+        for lease in leases:
+            self._refresh_lease(lease, warnings)
+        refreshed_leases = tuple(
+            self.registry.list_leases_read_only(
+                include_removed=False,
+                **filters,
+            )
+        )
         return CommandResult.ok(
             "wt.status",
-            decision="no_op" if not leases else "ready",
-            leases=leases,
+            decision="no_op" if not refreshed_leases else "ready",
+            leases=refreshed_leases,
+            warnings=tuple(warnings),
+        )
+
+    def _refresh_lease(self, lease: Lease, warnings: list[dict[str, str]]) -> None:
+        if lease.target_pr is None:
+            return
+        try:
+            github = self.github or GhClient(lease.repository_root)
+            pull_request = github.view_pr(lease.target_pr)
+        except Exception:
+            warnings.append(
+                {
+                    "code": "github_refresh_failed",
+                    "message": f"Unable to refresh pull request state for lease {lease.id}.",
+                }
+            )
+            return
+
+        try:
+            current = self._current_refresh_lease(lease.id, pull_request.number)
+            if current is None:
+                return
+            if pull_request.state == "OPEN":
+                self._transition_refresh(
+                    lease.id,
+                    pull_request,
+                    LeaseState.PR_OPEN,
+                    deployment_state=None,
+                )
+            elif (
+                pull_request.state == "MERGED"
+                or (
+                    pull_request.state == "CLOSED"
+                    and pull_request.merge_commit_sha is not None
+                )
+            ):
+                if current.purpose is Purpose.PROMOTE:
+                    self._refresh_promotion(lease.id, pull_request, warnings)
+                else:
+                    self._transition_refresh(
+                        lease.id,
+                        pull_request,
+                        LeaseState.CLEANABLE,
+                        deployment_state=DeploymentState.NOT_REQUIRED,
+                    )
+            elif pull_request.state == "CLOSED":
+                self._transition_refresh(
+                    lease.id,
+                    pull_request,
+                    LeaseState.CLOSED_UNMERGED,
+                    deployment_state=None,
+                )
+            else:
+                raise ExternalServiceError("unsupported pull request state")
+        except ExternalServiceError:
+            warnings.append(
+                {
+                    "code": "github_refresh_failed",
+                    "message": f"Unable to refresh pull request state for lease {lease.id}.",
+                }
+            )
+        except Exception:
+            warnings.append(
+                {
+                    "code": "lease_refresh_failed",
+                    "message": f"Unable to record refreshed state for lease {lease.id}.",
+                }
+            )
+
+    def _refresh_promotion(
+        self,
+        lease_id: str,
+        pull_request: PullRequest,
+        warnings: list[dict[str, str]],
+    ) -> None:
+        command = self.config.deployment_status_command
+        self._transition_refresh(
+            lease_id,
+            pull_request,
+            LeaseState.DEPLOYING,
+            deployment_state=(
+                DeploymentState.PENDING if command else DeploymentState.UNKNOWN
+            ),
+        )
+        if not command:
+            return
+        current = self._current_refresh_lease(lease_id, pull_request.number)
+        if current is None:
+            return
+        try:
+            completed = self.deployment_runner(
+                list(command),
+                cwd=current.repository_root,
+                check=False,
+                shell=False,
+                capture_output=True,
+                text=True,
+            )
+        except Exception:
+            warnings.append(
+                {
+                    "code": "deployment_refresh_failed",
+                    "message": f"Unable to refresh deployment state for lease {lease_id}.",
+                }
+            )
+            return
+        if completed.returncode != 0:
+            self._transition_refresh(
+                lease_id,
+                pull_request,
+                LeaseState.BLOCKED,
+                deployment_state=DeploymentState.FAILED,
+            )
+            return
+        self._transition_refresh(
+            lease_id,
+            pull_request,
+            LeaseState.DEPLOYED,
+            deployment_state=DeploymentState.HEALTHY,
+        )
+        self._transition_refresh(
+            lease_id,
+            pull_request,
+            LeaseState.CLEANABLE,
+            deployment_state=DeploymentState.HEALTHY,
+        )
+
+    def _current_refresh_lease(
+        self, lease_id: str, pull_request_number: int
+    ) -> Lease | None:
+        current = self.registry.get_lease(lease_id)
+        if (
+            current is None
+            or current.state is LeaseState.REMOVED
+            or current.target_pr != pull_request_number
+        ):
+            return None
+        return current
+
+    def _transition_refresh(
+        self,
+        lease_id: str,
+        pull_request: PullRequest,
+        state: LeaseState,
+        *,
+        deployment_state: DeploymentState | None,
+    ) -> Lease | None:
+        current = self._current_refresh_lease(lease_id, pull_request.number)
+        if current is None:
+            return None
+        if (
+            current.state is state
+            and (
+                deployment_state is None
+                or current.deployment_state is deployment_state
+            )
+        ):
+            return current
+        return self.registry.transition(
+            lease_id,
+            state,
+            expected_version=current.version,
+            event_type="github_refresh",
+            summary="GitHub refresh",
+            observed_head_sha=pull_request.head_sha,
+            pr_number=pull_request.number,
+            deployment_state=deployment_state,
         )
 
     def import_root(self, root: Path, *, apply: bool) -> CommandResult:

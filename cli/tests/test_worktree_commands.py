@@ -6,9 +6,12 @@ import subprocess
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 
+import pytest
+
+from awf.commands.wt import _emit
 from awf.cli import build_parser, main
 from awf.worktrees.git import GitClient
-from awf.worktrees.models import Lease, Purpose
+from awf.worktrees.models import CommandResult, Lease, Purpose
 from awf.worktrees.registry import WorktreeRegistry
 from worktree_fixtures import make_repository
 
@@ -42,7 +45,16 @@ def register_lease(db: Path, repo: Path, initiative: str) -> None:
 
 def test_wt_status_parser_surface() -> None:
     args = build_parser().parse_args(
-        ["wt", "status", "--repo-root", "/repo", "--initiative", "reward", "--json"]
+        [
+            "wt",
+            "status",
+            "--repo-root",
+            "/repo",
+            "--initiative",
+            "reward",
+            "--refresh",
+            "--json",
+        ]
     )
 
     assert args.command == "wt"
@@ -50,6 +62,31 @@ def test_wt_status_parser_surface() -> None:
     assert args.repo_root == "/repo"
     assert args.initiative == "reward"
     assert args.json is True
+    assert args.refresh is True
+
+
+def test_wt_human_output_emits_refresh_warning_to_stderr(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = CommandResult.ok(
+        "wt.status",
+        decision="ready",
+        warnings=(
+            {
+                "code": "github_refresh_failed",
+                "message": "Unable to refresh pull request state for lease safe-id.",
+            },
+        ),
+    )
+
+    assert _emit(result, as_json=False) == 0
+
+    captured = capsys.readouterr()
+    assert captured.out == "wt.status: ready\n"
+    assert captured.err == (
+        "warning: github_refresh_failed: "
+        "Unable to refresh pull request state for lease safe-id.\n"
+    )
 
 
 def test_wt_status_emits_one_json_document(

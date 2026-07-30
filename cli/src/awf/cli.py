@@ -732,6 +732,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Limit leases to an initiative.",
     )
     wt_status_parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Refresh pull request and deployment state from external services.",
+    )
+    wt_status_parser.add_argument(
         "--json",
         action="store_true",
         help="Print a versioned JSON result.",
