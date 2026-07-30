@@ -57,6 +57,13 @@ def _run(
             message=str(error),
             exit_code=5,
         )
+    except OSError as error:
+        result = CommandResult.error(
+            command,
+            code="filesystem_error",
+            message=str(error),
+            exit_code=5,
+        )
     except (sqlite3.Error, ValueError) as error:
         result = CommandResult.error(
             command,

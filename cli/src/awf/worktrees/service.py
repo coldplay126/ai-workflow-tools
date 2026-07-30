@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
-from .config import WorktreeConfig, load_worktree_config
+from .config import ConfigError, WorktreeConfig, load_worktree_config
 from .git import GitClient, GitError, GitWorktree
 from .locking import repository_lock
 from .models import CommandResult, Lease, LeaseState, Purpose, now_iso
@@ -234,7 +234,7 @@ class WorktreeService:
         if candidate is None:
             candidate = self.git.default_remote_branch()
         if not candidate:
-            raise ValueError("base must not be empty")
+            raise ConfigError("base must not be empty")
         base_ref = self._remote_base_ref(candidate)
         fetch_ref = base_ref[len("origin/") :]
         return base_ref, self.git.fetch_ref(fetch_ref)
@@ -245,11 +245,24 @@ class WorktreeService:
             base = base[len("refs/remotes/origin/") :]
         elif base.startswith("refs/heads/"):
             base = base[len("refs/heads/") :]
-        if base.startswith("origin/"):
-            return base
-        if base.startswith("refs/") or base.startswith("/") or "\0" in base:
-            raise ValueError(f"invalid base ref: {base!r}")
+        elif base.startswith("origin/"):
+            base = base[len("origin/") :]
+        elif base.startswith("refs/"):
+            raise ConfigError(f"invalid base ref: {base!r}")
+        if not WorktreeService._is_safe_remote_branch(base):
+            raise ConfigError(f"invalid base ref: {base!r}")
         return f"origin/{base}"
+
+    @staticmethod
+    def _is_safe_remote_branch(branch: str) -> bool:
+        if not branch or branch[0] in ".-/" or branch[-1] in "./":
+            return False
+        if ".." in branch or "//" in branch:
+            return False
+        allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/-"
+        if any(character not in allowed for character in branch):
+            return False
+        return all(not component.endswith(".lock") for component in branch.split("/"))
 
     def _branch_conflict(self, branch: str) -> Path | None:
         for worktree in self.git.list_worktrees():
@@ -342,13 +355,26 @@ class WorktreeService:
     def _handle_creation_failure(self, lease: Lease, error: Exception) -> CommandResult:
         try:
             clean = not self.git.status_porcelain(lease.worktree_path)
-        except GitError:
+        except (GitError, OSError):
             clean = False
-        if clean:
-            try:
-                self.git.remove_worktree(lease.worktree_path)
-            except GitError:
-                pass
+        if not clean:
+            return self._blocked("registry_conflict", str(error), lease=lease)
+        try:
+            self.git.remove_worktree(lease.worktree_path)
+        except (GitError, OSError) as cleanup_error:
+            return self._blocked(
+                "registry_recovery_failed",
+                f"worktree cleanup failed after registry failure: {cleanup_error}",
+                lease=lease,
+            )
+        try:
+            self.git.delete_local_branch(lease.branch)
+        except (GitError, OSError) as cleanup_error:
+            return self._blocked(
+                "registry_recovery_failed",
+                f"branch cleanup failed after registry failure: {cleanup_error}",
+                lease=lease,
+            )
         return self._blocked("registry_conflict", str(error), lease=lease)
 
     def _block_prepare_failure(self, lease: Lease, error: str) -> CommandResult:

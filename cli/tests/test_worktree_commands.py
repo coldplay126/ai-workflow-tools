@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import json
 import subprocess
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from awf.cli import build_parser, main
@@ -275,3 +275,69 @@ def test_wt_acquire_orphaned_lease_emits_blocked_json(
     assert stderr == ""
     assert payload["status"] == "blocked"
     assert payload["blockers"][0]["code"] == "orphaned_lease"
+
+
+
+def test_wt_acquire_rejects_unsafe_base_with_json_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo = make_repository(tmp_path)
+    monkeypatch.setenv(
+        "AWF_WORKTREE_STATE_DB", str(tmp_path / "state" / "worktrees.sqlite3")
+    )
+    monkeypatch.setenv("AWF_WORKTREE_CACHE_DIR", str(tmp_path / "cache"))
+
+    rc, stdout, stderr = capture_main(
+        [
+            "wt",
+            "acquire",
+            "--repo-root",
+            str(repo),
+            "--initiative",
+            "reward-widget",
+            "--base",
+            "main:refs/heads/unrelated",
+            "--json",
+        ]
+    )
+
+    payload = json.loads(stdout)
+    assert rc == 2
+    assert stderr == ""
+    assert payload["status"] == "error"
+    assert payload["blockers"][0]["code"] == "config_error"
+    assert len(GitClient(repo).list_worktrees()) == 1
+
+
+def test_wt_acquire_lock_filesystem_error_emits_one_json_document(
+    tmp_path: Path, monkeypatch
+) -> None:
+    @contextmanager
+    def denied_lock(*args, **kwargs):
+        raise PermissionError("lock directory is read-only")
+        yield
+
+    repo = make_repository(tmp_path)
+    monkeypatch.setenv(
+        "AWF_WORKTREE_STATE_DB", str(tmp_path / "state" / "worktrees.sqlite3")
+    )
+    monkeypatch.setenv("AWF_WORKTREE_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr("awf.worktrees.service.repository_lock", denied_lock)
+
+    rc, stdout, stderr = capture_main(
+        [
+            "wt",
+            "acquire",
+            "--repo-root",
+            str(repo),
+            "--initiative",
+            "reward-widget",
+            "--json",
+        ]
+    )
+
+    payload = json.loads(stdout)
+    assert rc == 5
+    assert stderr == ""
+    assert payload["status"] == "error"
+    assert payload["blockers"][0]["code"] == "filesystem_error"

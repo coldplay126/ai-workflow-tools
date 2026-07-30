@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 
 from awf.worktrees.config import WorktreeConfig
-from awf.worktrees.git import GitClient
-from awf.worktrees.models import Lease, Purpose
+from awf.worktrees.git import GitClient, GitError
+from awf.worktrees.models import Lease, LeaseState, Purpose
 from awf.worktrees.registry import WorktreeRegistry
 from awf.worktrees.service import WorktreeService
 from worktree_fixtures import make_repository
@@ -61,10 +61,10 @@ class Harness:
             apply=True,
         )
 
-    def enable_prepare_command(self, log: Path) -> None:
+    def enable_prepare_command(self, log: Path, message: str = "prepared") -> None:
         script = (
             "from pathlib import Path; "
-            f"Path({str(log)!r}).open('a', encoding='utf-8').write('prepared\\n')"
+            f"Path({str(log)!r}).open('a', encoding='utf-8').write({message + chr(10)!r})"
         )
         self.service = WorktreeService(
             self.registry,
@@ -273,3 +273,157 @@ def test_acquire_preserves_a_dirty_worktree_when_registry_filesystem_insert_fail
     assert result.status == "blocked"
     assert result.blockers[0]["code"] == "registry_conflict"
     assert len(git.list_worktrees()) == 2
+
+
+def test_acquire_retry_succeeds_after_clean_registry_recovery(
+    tmp_path: Path,
+) -> None:
+    class FlakyRegistry(WorktreeRegistry):
+        failed = False
+
+        def create_lease(self, lease: Lease) -> Lease:
+            if not self.failed:
+                self.failed = True
+                raise sqlite3.IntegrityError("registry is unavailable")
+            return super().create_lease(lease)
+
+    repo = make_repository(tmp_path)
+    git = GitClient(repo)
+    service = WorktreeService(
+        FlakyRegistry(tmp_path / "state" / "worktrees.sqlite3"),
+        git,
+        config=WorktreeConfig(default_base="staging"),
+        cache_dir=tmp_path / "cache",
+        state_dir=tmp_path / "state",
+        lock_dir=tmp_path / "locks",
+    )
+    request = {
+        "initiative": "reward-widget",
+        "purpose": Purpose.FEATURE,
+        "base": None,
+        "branch": None,
+        "owner_id": "session-1",
+        "apply": True,
+    }
+
+    failed = service.acquire(**request)
+    recovered = service.acquire(**request)
+
+    assert failed.status == "blocked"
+    assert recovered.decision == "ready"
+    assert len(git.list_worktrees()) == 2
+
+
+@pytest.mark.parametrize(
+    "base",
+    [
+        "main:refs/heads/unrelated",
+        "+main",
+        "main*",
+        "main^{commit}",
+    ],
+)
+def test_acquire_rejects_unsafe_base_before_fetch(
+    tmp_path: Path, base: str
+) -> None:
+    class NoFetchGit(GitClient):
+        def fetch_ref(self, ref: str) -> str:
+            raise AssertionError(f"fetch_ref unexpectedly called with {ref!r}")
+
+    repo = make_repository(tmp_path)
+    git = NoFetchGit(repo)
+    service = WorktreeService(
+        WorktreeRegistry(tmp_path / "state" / "worktrees.sqlite3"),
+        git,
+        config=WorktreeConfig(),
+        cache_dir=tmp_path / "cache",
+        state_dir=tmp_path / "state",
+        lock_dir=tmp_path / "locks",
+    )
+
+    with pytest.raises(ValueError, match="invalid base ref"):
+        service.acquire(
+            initiative="reward-widget",
+            purpose=Purpose.FEATURE,
+            base=base,
+            branch=None,
+            owner_id="session-1",
+            apply=False,
+        )
+
+
+def test_acquire_reports_branch_cleanup_failure_after_registry_insert_failure(
+    tmp_path: Path,
+) -> None:
+    class FailingRegistry(WorktreeRegistry):
+        def create_lease(self, lease: Lease) -> Lease:
+            raise sqlite3.IntegrityError("registry is unavailable")
+
+    class BranchDeleteFailingGit(GitClient):
+        def delete_local_branch(self, branch: str) -> None:
+            raise GitError(f"could not delete {branch}")
+
+    repo = make_repository(tmp_path)
+    git = BranchDeleteFailingGit(repo)
+    service = WorktreeService(
+        FailingRegistry(tmp_path / "state" / "worktrees.sqlite3"),
+        git,
+        config=WorktreeConfig(default_base="staging"),
+        cache_dir=tmp_path / "cache",
+        state_dir=tmp_path / "state",
+        lock_dir=tmp_path / "locks",
+    )
+
+    result = service.acquire(
+        initiative="reward-widget",
+        purpose=Purpose.FEATURE,
+        base=None,
+        branch=None,
+        owner_id="session-1",
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "registry_recovery_failed"
+    assert "branch cleanup failed" in result.blockers[0]["message"]
+    assert len(git.list_worktrees()) == 1
+
+
+def test_acquire_reprepares_when_the_prepare_key_changes(
+    harness: Harness, tmp_path: Path
+) -> None:
+    log = tmp_path / "prepare.log"
+    harness.enable_prepare_command(log, "first")
+
+    first = harness.acquire("reward-widget")
+    harness.enable_prepare_command(log, "second")
+    second = harness.acquire("reward-widget")
+
+    assert first.decision == "ready"
+    assert second.decision == "reuse"
+    assert log.read_text(encoding="utf-8").splitlines() == ["first", "second"]
+
+
+def test_acquire_blocks_prepare_failure_without_writing_a_marker(
+    harness: Harness,
+) -> None:
+    harness.service = WorktreeService(
+        harness.registry,
+        harness.git,
+        config=WorktreeConfig(
+            default_base="staging",
+            prepare_command=(sys.executable, "-c", "import sys; sys.exit(7)"),
+        ),
+        cache_dir=harness.cache_dir,
+        state_dir=harness.state_dir,
+        lock_dir=harness.lock_dir,
+    )
+
+    result = harness.acquire("reward-widget")
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "prepare_failed"
+    assert result.lease is not None
+    assert result.lease.state is LeaseState.BLOCKED
+    assert not (harness.state_dir / "prepare" / f"{result.lease.id}.json").exists()
+    assert len(harness.git.list_worktrees()) == 2
