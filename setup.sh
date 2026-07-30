@@ -4,6 +4,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CLAUDE_DIR="$HOME/.claude"
 OMP_AGENT_DIR="${OMP_AGENT_DIR:-$HOME/.omp/agent/agents}"
+AGENTS_SKILLS_DIR="${AGENTS_SKILLS_DIR:-$HOME/.agents/skills}"
 
 if ! command -v uv >/dev/null 2>&1; then
   echo "error: uv가 필요합니다: https://docs.astral.sh/uv/getting-started/installation/" >&2
@@ -63,6 +64,11 @@ for skill in "${SKILLS[@]}"; do
   ln -sf "$source" "$target"
   echo "  ✓ $skill"
 done
+
+"$SCRIPT_DIR/scripts/install-skill-links.sh" \
+  "$SCRIPT_DIR/claude/skills/release-worktree-lifecycle" \
+  "$CLAUDE_DIR/skills" \
+  "$AGENTS_SKILLS_DIR"
 
 # 1b. Agents 심링크
 echo ""
