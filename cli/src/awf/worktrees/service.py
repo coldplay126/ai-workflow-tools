@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sqlite3
+import signal
 import subprocess
 import sys
 from collections.abc import Callable
@@ -47,6 +48,7 @@ def cache_root() -> Path:
 _MAX_IMPORT_COLLISION_ACTIONS = 32
 _DEPLOYMENT_STATUS_TIMEOUT_SECONDS = 30.0
 
+_PRODUCTION_VERIFY_TIMEOUT_SECONDS = 300.0
 
 def _initiative_slug(initiative: str) -> str:
     if not initiative or not initiative.isascii():
@@ -197,6 +199,12 @@ class WorktreeService:
         source_blocker = self._promotion_source_blocker(source, target_ref)
         if source_blocker is not None:
             return source_blocker
+        invalid_oid = self._invalid_promotion_oid(source)
+        if invalid_oid is not None:
+            return self._promotion_blocked(
+                "source_pr_invalid_oid",
+                f"source pull request has an invalid {invalid_oid}",
+            )
         if not self.config.verify_production:
             return self._promotion_blocked(
                 "production_verify_missing",
@@ -233,12 +241,6 @@ class WorktreeService:
                 ),
             )
 
-        source_merge_commit = source.merge_commit_sha
-        if source_merge_commit is None:
-            return self._promotion_blocked(
-                "source_merge_provenance_missing",
-                "source pull request does not provide a merge commit",
-            )
 
         repository_id = self.git.repository_id()
         initiative = self._promotion_initiative(source.number, target_branch)
@@ -259,26 +261,18 @@ class WorktreeService:
             try:
                 source_base_sha = self.git.fetch_ref(source.base_sha)
                 source_head_sha = self.git.fetch_ref(source.head_sha)
-                source_merge_sha = self.git.fetch_ref(source_merge_commit)
                 target_sha = self.git.fetch_ref(target_branch)
-                merge_parents = self.git.commit_parents(source_merge_sha)
-                if not merge_parents:
-                    return self._promotion_blocked(
-                        "source_merge_provenance_invalid",
-                        "source pull request merge commit has no parent",
-                    )
-                merge_base = self.git.merge_base(merge_parents[0], source_head_sha)
+                merge_base = self.git.merge_base(source_base_sha, source_head_sha)
                 patch = self.git.binary_diff(merge_base, source_head_sha)
                 source_paths = self.git.changed_paths(
-                    self.git.repository_root(), merge_base, source_head_sha
+                    self.git.repository_root(),
+                    merge_base,
+                    source_head_sha,
+                    find_renames=True,
                 )
             except GitError as error:
                 return self._promotion_blocked("source_delta_unavailable", str(error))
-            if (
-                source_base_sha != source.base_sha
-                or source_head_sha != source.head_sha
-                or source_merge_sha != source_merge_commit
-            ):
+            if source_base_sha != source.base_sha or source_head_sha != source.head_sha:
                 return self._promotion_blocked(
                     "source_sha_mismatch",
                     "fetched source pull request refs do not match the reviewed SHAs",
@@ -329,7 +323,10 @@ class WorktreeService:
                     allow_empty=True,
                 )
                 promoted_paths = self.git.changed_paths(
-                    lease.worktree_path, target_sha, promotion_head
+                    lease.worktree_path,
+                    target_sha,
+                    promotion_head,
+                    find_renames=True,
                 )
                 if promoted_paths != expected_paths:
                     return self._block_promotion_lease(
@@ -1192,6 +1189,17 @@ class WorktreeService:
             )
         return None
 
+    @staticmethod
+    def _invalid_promotion_oid(source: PullRequest) -> str | None:
+        for name, value in (
+            ("base SHA", source.base_sha),
+            ("head SHA", source.head_sha),
+            ("merge SHA", source.merge_commit_sha),
+        ):
+            if value is not None and re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", value) is None:
+                return name
+        return None
+
     def _new_promotion_lease(
         self, source: PullRequest, target_ref: str, target_sha: str
     ) -> Lease:
@@ -1518,27 +1526,42 @@ class WorktreeService:
     def _verify_promotion(self, worktree_path: Path) -> tuple[dict[str, object], ...]:
         actions: list[dict[str, object]] = []
         for command in self.config.verify_production:
-            completed = self.command_runner(
-                list(command),
-                cwd=worktree_path,
-                check=False,
-                shell=False,
-                capture_output=True,
-                text=True,
-            )
-            stderr = self._bounded_promotion_stderr(completed.stderr)
+            try:
+                process = subprocess.Popen(
+                    list(command),
+                    cwd=worktree_path,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    start_new_session=True,
+                )
+                try:
+                    _, raw_stderr = process.communicate(
+                        timeout=_PRODUCTION_VERIFY_TIMEOUT_SECONDS
+                    )
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGTERM)
+                    try:
+                        _, raw_stderr = process.communicate(timeout=1.0)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        _, raw_stderr = process.communicate()
+                    raise RuntimeError("production verification timed out")
+            except OSError as error:
+                raise RuntimeError("production verification failed to launch") from error
+            stderr = self._bounded_promotion_stderr(raw_stderr)
             actions.append(
                 {
                     "kind": "verify_production",
                     "argv": list(command),
-                    "exit_code": completed.returncode,
+                    "exit_code": process.returncode,
                     "stderr": stderr,
                 }
             )
-            if completed.returncode != 0:
+            if process.returncode != 0:
                 detail = f": {stderr}" if stderr else ""
                 raise RuntimeError(
-                    f"production verification failed with exit {completed.returncode}{detail}"
+                    f"production verification failed with exit {process.returncode}{detail}"
                 )
         return tuple(actions)
 
@@ -1548,7 +1571,13 @@ class WorktreeService:
             value = value.decode("utf-8", errors="replace")
         if not value:
             return ""
-        return value.strip().encode("utf-8")[:512].decode(
+        redacted = re.sub(
+            r"(?i)(?:gh[pousr]_[a-z0-9_]+|github_pat_[a-z0-9_]+|bearer\s+\S+|token\s+\S+)",
+            "<redacted>",
+            value,
+        )
+        redacted = re.sub(r"https?://[^/@\s]*@", "https://<redacted>@", redacted)
+        return redacted.strip().encode("utf-8")[:512].decode(
             "utf-8", errors="ignore"
         )
 

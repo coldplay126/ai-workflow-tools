@@ -219,6 +219,7 @@ class PromotionHarness:
         (repo / "team.txt").write_text("team\n", encoding="utf-8")
         git_command(repo, "add", "team.txt")
         git_command(repo, "commit", "-q", "-m", "staging team change")
+        source_base_sha = git_command(repo, "rev-parse", "HEAD")
         git_command(repo, "checkout", "-q", "-b", "feature/pr-372")
         (repo / "feature.txt").write_text("feature\n", encoding="utf-8")
         git_command(repo, "add", "feature.txt")
@@ -239,7 +240,7 @@ class PromotionHarness:
         git_command(repo, "push", "-q", "-u", "origin", "feature/pr-372")
         git_command(repo, "checkout", "-q", "staging")
         git_command(repo, "merge", "--no-ff", "-q", "feature/pr-372", "-m", "merge source")
-        source_base_sha = git_command(repo, "rev-parse", "HEAD")
+        merged_sha = git_command(repo, "rev-parse", "HEAD")
         git_command(repo, "push", "-q", "origin", "staging")
         registry = WorktreeRegistry(tmp_path / "state" / "worktrees.sqlite3")
         cache_dir = tmp_path / "cache"
@@ -255,7 +256,7 @@ class PromotionHarness:
                     base_sha=source_base_sha,
                     head_ref="feature/pr-372",
                     head_sha=source_head_sha,
-                    merge_commit_sha=source_base_sha,
+                    merge_commit_sha=merged_sha,
                     review_decision="APPROVED",
                     checks_passed=True,
                     changed_paths=changed_paths,

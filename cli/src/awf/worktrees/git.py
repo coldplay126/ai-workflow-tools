@@ -135,9 +135,18 @@ class GitClient:
         self._run("apply", "--3way", "--index", "-", cwd=cwd, input_bytes=patch)
 
     def changed_paths(
-        self, cwd: Path, base: str, head: str = "HEAD"
+        self,
+        cwd: Path,
+        base: str,
+        head: str = "HEAD",
+        *,
+        find_renames: bool = False,
     ) -> tuple[str, ...]:
-        completed = self._run("diff", "--name-only", "-z", f"{base}..{head}", cwd=cwd)
+        arguments = ["diff", "--name-only", "-z"]
+        if find_renames:
+            arguments.append("--find-renames")
+        arguments.append(f"{base}..{head}")
+        completed = self._run(*arguments, cwd=cwd)
         return _nul_records(completed.stdout)
 
     def commit(self, cwd: Path, message: str, *, allow_empty: bool = False) -> str:
