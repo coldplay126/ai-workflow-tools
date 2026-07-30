@@ -6,6 +6,9 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from awf.cli import build_parser, main
+from awf.worktrees.git import GitClient
+from awf.worktrees.models import Lease, Purpose
+from awf.worktrees.registry import WorktreeRegistry
 from worktree_fixtures import make_repository
 
 
@@ -15,6 +18,25 @@ def capture_main(argv: list[str]) -> tuple[int, str, str]:
     with redirect_stdout(stdout), redirect_stderr(stderr):
         result = main(argv)
     return result, stdout.getvalue(), stderr.getvalue()
+
+
+def register_lease(db: Path, repo: Path, initiative: str) -> None:
+    git = GitClient(repo)
+    WorktreeRegistry(db).create_lease(
+        Lease.new(
+            repository_id=git.repository_id(),
+            repository_name=git.repository_name(),
+            repository_root=git.repository_root(),
+            worktree_path=repo / f"worktree-{initiative}",
+            initiative=initiative,
+            purpose=Purpose.FEATURE,
+            branch=f"awf/{initiative}/feature",
+            base_ref="origin/staging",
+            head_sha=git.head_sha(),
+            managed=True,
+            owner_kind="awf",
+        )
+    )
 
 
 def test_wt_status_parser_surface() -> None:
@@ -47,6 +69,57 @@ def test_wt_status_emits_one_json_document(
     assert payload["command"] == "wt.status"
     assert payload["decision"] == "no_op"
     assert not db.parent.exists()
+
+
+def test_wt_status_lists_registered_leases_without_an_initiative_filter(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db = tmp_path / "state.sqlite3"
+    repo = make_repository(tmp_path)
+    register_lease(db, repo, "reward")
+    register_lease(db, repo, "metrics")
+    monkeypatch.setenv("AWF_WORKTREE_STATE_DB", str(db))
+
+    rc, stdout, stderr = capture_main(
+        ["wt", "status", "--repo-root", str(repo), "--json"]
+    )
+
+    payload = json.loads(stdout)
+    assert rc == 0
+    assert stderr == ""
+    assert payload["decision"] == "ready"
+    assert {lease["initiative"] for lease in payload["leases"]} == {
+        "reward",
+        "metrics",
+    }
+
+
+def test_wt_status_filters_registered_leases_by_initiative(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db = tmp_path / "state.sqlite3"
+    repo = make_repository(tmp_path)
+    register_lease(db, repo, "reward")
+    register_lease(db, repo, "metrics")
+    monkeypatch.setenv("AWF_WORKTREE_STATE_DB", str(db))
+
+    rc, stdout, stderr = capture_main(
+        [
+            "wt",
+            "status",
+            "--repo-root",
+            str(repo),
+            "--initiative",
+            "reward",
+            "--json",
+        ]
+    )
+
+    payload = json.loads(stdout)
+    assert rc == 0
+    assert stderr == ""
+    assert payload["decision"] == "ready"
+    assert [lease["initiative"] for lease in payload["leases"]] == ["reward"]
 
 
 def test_wt_doctor_reports_unregistered_worktree_without_mutation(

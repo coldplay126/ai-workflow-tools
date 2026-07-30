@@ -32,12 +32,13 @@ class WorktreeService:
         self.git = git
 
     def status(self, *, initiative: str | None = None) -> CommandResult:
-        repository_id = self.git.repository_id()
+        filters: dict[str, str] = {"repository_id": self.git.repository_id()}
+        if initiative is not None:
+            filters["initiative"] = initiative
         leases = tuple(
             self.registry.list_leases_read_only(
-                repository_id=repository_id,
-                initiative=initiative,
                 include_removed=False,
+                **filters,
             )
         )
         return CommandResult.ok(

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import subprocess
 import signal
 import sys
 import time
@@ -20,32 +19,9 @@ from awf.worktrees.git import (
 )
 from awf.worktrees import locking as locking_module
 from awf.worktrees.locking import repository_lock
+from worktree_fixtures import git, make_repository
 
 
-def git(cwd: Path, *args: str) -> str:
-    completed = subprocess.run(
-        ["git", *args], cwd=cwd, text=True, capture_output=True, check=True
-    )
-    return completed.stdout.strip()
-
-
-def repository(tmp_path: Path, *, name: str = "repo") -> Path:
-    bare = tmp_path / "origin.git"
-    repo = tmp_path / name
-    git(tmp_path, "init", "--bare", "-q", str(bare))
-    git(tmp_path, "init", "-q", "-b", "staging", str(repo))
-    git(repo, "config", "user.email", "test@example.com")
-    git(repo, "config", "user.name", "AWF Test")
-    git(repo, "config", "commit.gpgsign", "false")
-    (repo / "README.txt").write_text("base\n", encoding="utf-8")
-    git(repo, "add", "README.txt")
-    git(repo, "commit", "-q", "-m", "base")
-    git(repo, "remote", "add", "origin", str(bare))
-    git(repo, "push", "-q", "-u", "origin", "staging")
-    git(bare, "symbolic-ref", "HEAD", "refs/heads/staging")
-    git(repo, "fetch", "-q", "origin")
-    git(repo, "remote", "set-head", "origin", "-a")
-    return repo
 
 
 def test_load_config_accepts_only_argv_arrays(tmp_path: Path) -> None:
@@ -93,7 +69,7 @@ def test_load_config_defaults_when_file_is_absent(tmp_path: Path) -> None:
 
 
 def test_git_client_reports_repository_identity_and_worktrees(tmp_path: Path) -> None:
-    repo = repository(tmp_path)
+    repo = make_repository(tmp_path)
     client = GitClient(repo)
 
     assert client.repository_root() == repo.resolve()
@@ -109,7 +85,7 @@ def test_git_client_rejects_non_repository(tmp_path: Path) -> None:
 
 
 def test_git_client_reads_refs_and_nul_delimited_status(tmp_path: Path) -> None:
-    repo = repository(tmp_path)
+    repo = make_repository(tmp_path)
     client = GitClient(repo)
     spaced_path = repo / "file with spaces.txt"
     spaced_path.write_text("untracked\n", encoding="utf-8")
@@ -122,7 +98,7 @@ def test_git_client_reads_refs_and_nul_delimited_status(tmp_path: Path) -> None:
 
 
 def test_git_client_adds_and_removes_worktrees(tmp_path: Path) -> None:
-    repo = repository(tmp_path)
+    repo = make_repository(tmp_path)
     client = GitClient(repo)
     worktree = tmp_path / "worktree with spaces"
 
@@ -136,7 +112,7 @@ def test_git_client_adds_and_removes_worktrees(tmp_path: Path) -> None:
 def test_git_client_interprets_relative_worktree_paths_from_repository(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    repo = repository(tmp_path)
+    repo = make_repository(tmp_path)
     client = GitClient(repo)
     monkeypatch.chdir(tmp_path)
     relative_path = Path("relative worktree")
@@ -150,7 +126,7 @@ def test_git_client_interprets_relative_worktree_paths_from_repository(
 
 
 def test_git_client_deletes_local_and_remote_branches(tmp_path: Path) -> None:
-    repo = repository(tmp_path)
+    repo = make_repository(tmp_path)
     client = GitClient(repo)
     git(repo, "branch", "awf/local-delete")
     git(repo, "branch", "awf/remote-delete")
@@ -164,7 +140,7 @@ def test_git_client_deletes_local_and_remote_branches(tmp_path: Path) -> None:
 
 
 def test_git_client_applies_binary_diff_and_commits_from_a_worktree(tmp_path: Path) -> None:
-    repo = repository(tmp_path)
+    repo = make_repository(tmp_path)
     client = GitClient(repo)
     source = tmp_path / "source"
     target = tmp_path / "target"
@@ -187,7 +163,7 @@ def test_git_client_applies_binary_diff_and_commits_from_a_worktree(tmp_path: Pa
 
 
 def test_git_client_pushes_branch_from_the_given_worktree(tmp_path: Path) -> None:
-    repo = repository(tmp_path)
+    repo = make_repository(tmp_path)
     client = GitClient(repo)
     worktree = tmp_path / "push-worktree"
     client.add_worktree(worktree, "awf/push", client.head_sha())
@@ -208,13 +184,13 @@ def test_repository_lock_blocks_a_second_nonblocking_holder(tmp_path: Path) -> N
 def test_git_client_preserves_repository_root_trailing_whitespace(
     tmp_path: Path,
 ) -> None:
-    repo = repository(tmp_path, name="repo ")
+    repo = make_repository(tmp_path, name="repo ")
 
     assert GitClient(repo).repository_root() == repo.resolve()
 
 
 def test_repository_identity_ignores_remote_url_userinfo(tmp_path: Path) -> None:
-    repo = repository(tmp_path)
+    repo = make_repository(tmp_path)
     client = GitClient(repo)
     git(
         repo,
@@ -235,7 +211,7 @@ def test_repository_identity_ignores_remote_url_userinfo(tmp_path: Path) -> None
     assert client.repository_id() == first
 
 def test_repository_identity_preserves_scp_ssh_user(tmp_path: Path) -> None:
-    repo = repository(tmp_path)
+    repo = make_repository(tmp_path)
     client = GitClient(repo)
     git(repo, "remote", "set-url", "origin", "git@host:owner/repository.git")
 
@@ -249,7 +225,7 @@ def test_repository_identity_preserves_scp_ssh_user(tmp_path: Path) -> None:
 def test_repository_identity_hashes_invalid_repository_root_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    repo = repository(tmp_path)
+    repo = make_repository(tmp_path)
     root_bytes = os.fsencode(tmp_path) + b"/repository-\xff"
     root_output = root_bytes + b"\n"
     _install_fake_git(
@@ -308,7 +284,7 @@ def test_config_rejects_raw_toml_nul(tmp_path: Path) -> None:
 def test_git_client_maps_embedded_nul_subprocess_argument_to_git_error(
     tmp_path: Path,
 ) -> None:
-    client = GitClient(repository(tmp_path))
+    client = GitClient(make_repository(tmp_path))
 
     with pytest.raises(GitError, match="failed to launch"):
         client.resolve_ref("HEAD\x00invalid")
