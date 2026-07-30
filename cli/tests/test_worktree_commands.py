@@ -311,6 +311,41 @@ def test_wt_status_filters_registered_leases_by_initiative(
     assert [lease["initiative"] for lease in payload["leases"]] == ["reward"]
 
 
+def test_wt_status_refresh_json_reports_pr_head_mismatch_as_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = tmp_path / "state.sqlite3"
+    repo = make_repository(tmp_path)
+    register_lease(db, repo, "reward")
+    registry = WorktreeRegistry(db)
+    lease = registry.list_leases()[0]
+    lease = registry.transition(
+        lease.id,
+        LeaseState.PR_OPEN,
+        expected_version=lease.version,
+        pr_number=42,
+    )
+    monkeypatch.setenv("AWF_WORKTREE_STATE_DB", str(db))
+    monkeypatch.setattr(
+        "awf.worktrees.github.GhClient.view_pr",
+        lambda _self, _number: merged_pull_request(
+            replace(lease, head_sha="different-head-sha")
+        ),
+    )
+
+    rc, stdout, stderr = capture_main(
+        ["wt", "status", "--repo-root", str(repo), "--refresh", "--json"]
+    )
+
+    payload = json.loads(stdout)
+    assert rc == 0
+    assert stderr == ""
+    assert payload["status"] == "ok"
+    assert payload["leases"][0]["state"] == "BLOCKED"
+    assert payload["leases"][0]["deployment_state"] == "unknown"
+    assert payload["leases"][0]["head_sha"] == lease.head_sha
+
+
 def test_wt_doctor_reports_unregistered_worktree_without_mutation(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -1613,6 +1613,9 @@ class WorktreeService:
             current = self._current_refresh_lease(lease.id, pull_request.number)
             if current is None:
                 return
+            if pull_request.head_sha != current.head_sha:
+                self._block_refresh_head_mismatch(current, pull_request)
+                return
             if pull_request.state == "OPEN":
                 self._transition_refresh(
                     lease.id,
@@ -1741,6 +1744,27 @@ class WorktreeService:
         ):
             return None
         return current
+
+    def _block_refresh_head_mismatch(
+        self, lease: Lease, pull_request: PullRequest
+    ) -> Lease:
+        if (
+            lease.state is LeaseState.BLOCKED
+            and lease.deployment_state is DeploymentState.UNKNOWN
+        ):
+            return lease
+        return self.registry.transition(
+            lease.id,
+            LeaseState.BLOCKED,
+            expected_version=lease.version,
+            event_type="github_refresh_head_mismatch",
+            summary=(
+                "GitHub refresh: pull request HEAD does not match recorded lease HEAD"
+            ),
+            observed_head_sha=pull_request.head_sha,
+            pr_number=pull_request.number,
+            deployment_state=DeploymentState.UNKNOWN,
+        )
 
     def _transition_refresh(
         self,

@@ -580,6 +580,38 @@ def test_refresh_marks_merged_feature_cleanable(harness: Harness) -> None:
     assert second.leases[0].version == first.leases[0].version
 
 
+def test_refresh_blocks_merged_feature_when_pr_head_differs_from_lease(
+    harness: Harness,
+) -> None:
+    acquired = harness.acquire("reward-widget")
+    assert acquired.lease is not None
+    lease = harness.attach_pr(acquired.lease, 42)
+    pull_request_head = "different-head-sha"
+    harness.github.prs[42] = merged_pr(
+        number=42,
+        base="staging",
+        head_sha=pull_request_head,
+        changed_paths=("README.txt",),
+    )
+
+    result = harness.service.status(initiative="reward-widget", refresh=True)
+
+    current = result.leases[0]
+    assert current.state is LeaseState.BLOCKED
+    assert current.deployment_state is DeploymentState.UNKNOWN
+    assert current.head_sha == lease.head_sha
+    event = harness.registry.list_events(lease.id)[-1]
+    assert event.event_type == "github_refresh_head_mismatch"
+    assert event.observed_head_sha == pull_request_head
+    assert event.pr_number == 42
+    assert event.summary == (
+        "GitHub refresh: pull request HEAD does not match recorded lease HEAD"
+    )
+    payload = result.to_dict()
+    assert payload["leases"][0]["state"] == "BLOCKED"
+    assert payload["leases"][0]["deployment_state"] == "unknown"
+
+
 def test_refresh_does_not_churn_an_unchanged_open_pr(harness: Harness) -> None:
     acquired = harness.acquire("reward-widget")
     assert acquired.lease is not None
@@ -668,6 +700,58 @@ def test_refresh_promoted_lease_cleanable_after_healthy_deployment(
     assert first.leases[0].deployment_state is DeploymentState.HEALTHY
     assert second.leases[0].version == first.leases[0].version
     assert deployment_calls == [["deploy", "status"]]
+
+
+def test_refresh_blocks_merged_promotion_when_pr_head_differs_before_deployment(
+    harness: Harness,
+) -> None:
+    acquired = harness.service.acquire(
+        initiative="reward-widget",
+        purpose=Purpose.PROMOTE,
+        base=None,
+        branch=None,
+        owner_id="session-1",
+        apply=True,
+    )
+    assert acquired.lease is not None
+    lease = harness.attach_pr(acquired.lease, 42)
+    pull_request_head = "different-head-sha"
+    harness.github.prs[42] = merged_pr(number=42, head_sha=pull_request_head)
+    deployment_calls: list[list[str]] = []
+
+    def deployment_runner(
+        command: list[str], **_: object
+    ) -> subprocess.CompletedProcess[str]:
+        deployment_calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    harness.service = WorktreeService(
+        harness.registry,
+        harness.git,
+        config=WorktreeConfig(
+            default_base="staging", deployment_status_command=("deploy", "status")
+        ),
+        github=harness.github,
+        deployment_runner=deployment_runner,
+        cache_dir=harness.cache_dir,
+        state_dir=harness.state_dir,
+        lock_dir=harness.lock_dir,
+    )
+
+    result = harness.service.status(initiative="reward-widget", refresh=True)
+
+    current = result.leases[0]
+    assert current.state is LeaseState.BLOCKED
+    assert current.deployment_state is DeploymentState.UNKNOWN
+    assert current.head_sha == lease.head_sha
+    assert deployment_calls == []
+    event = harness.registry.list_events(lease.id)[-1]
+    assert event.event_type == "github_refresh_head_mismatch"
+    assert event.observed_head_sha == pull_request_head
+    assert event.pr_number == 42
+    payload = result.to_dict()
+    assert payload["leases"][0]["state"] == "BLOCKED"
+    assert payload["leases"][0]["deployment_state"] == "unknown"
 
 
 def test_refresh_blocks_promoted_lease_when_deployment_fails(
