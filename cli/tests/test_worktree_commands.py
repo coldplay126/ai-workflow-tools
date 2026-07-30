@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+from dataclasses import replace
 import subprocess
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -11,7 +12,14 @@ import pytest
 from awf.commands.wt import _emit
 from awf.cli import build_parser, main
 from awf.worktrees.git import GitClient
-from awf.worktrees.models import CommandResult, Lease, Purpose
+from awf.worktrees.github import PullRequest
+from awf.worktrees.models import (
+    CommandResult,
+    DeploymentState,
+    Lease,
+    LeaseState,
+    Purpose,
+)
 from awf.worktrees.registry import WorktreeRegistry
 from worktree_fixtures import make_repository
 
@@ -40,6 +48,57 @@ def register_lease(db: Path, repo: Path, initiative: str) -> None:
             managed=True,
             owner_kind="awf",
         )
+    )
+
+
+def register_cleanable_worktree_lease(
+    db: Path, repo: Path, cache_dir: Path
+) -> Lease:
+    git = GitClient(repo)
+    draft = Lease.new(
+        repository_id=git.repository_id(),
+        repository_name=git.repository_name(),
+        repository_root=git.repository_root(),
+        worktree_path=cache_dir / git.repository_name() / "draft",
+        initiative="cache-path",
+        purpose=Purpose.FEATURE,
+        branch="awf/cache-path/feature",
+        base_ref="origin/staging",
+        head_sha=git.head_sha(),
+        managed=True,
+        owner_kind="awf",
+    )
+    lease = replace(
+        draft,
+        worktree_path=cache_dir / git.repository_name() / draft.id,
+    )
+    git.add_worktree(lease.worktree_path, lease.branch, lease.head_sha)
+    registry = WorktreeRegistry(db)
+    registry.create_lease(lease)
+    opened = registry.transition(
+        lease.id, LeaseState.PR_OPEN, expected_version=lease.version, pr_number=42
+    )
+    return registry.transition(
+        lease.id,
+        LeaseState.CLEANABLE,
+        expected_version=opened.version,
+        deployment_state=DeploymentState.NOT_REQUIRED,
+    )
+
+
+def merged_pull_request(lease: Lease) -> PullRequest:
+    return PullRequest(
+        number=42,
+        state="MERGED",
+        base_ref="staging",
+        base_sha=lease.head_sha,
+        head_ref=lease.branch,
+        head_sha=lease.head_sha,
+        merge_commit_sha=lease.head_sha,
+        review_decision="APPROVED",
+        checks_passed=True,
+        changed_paths=(),
+        url="https://github.example/acme/repo/pull/42",
     )
 
 
@@ -560,3 +619,36 @@ def test_wt_gc_rejects_apply_and_dry_run_together() -> None:
                 "--dry-run",
             ]
         )
+
+
+@pytest.mark.parametrize("ancestor_symlink", [False, True])
+def test_wt_finish_preserves_worktree_for_lexically_symlinked_cache_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ancestor_symlink: bool
+) -> None:
+    repo = make_repository(tmp_path)
+    db = tmp_path / "state" / "worktrees.sqlite3"
+    real_parent = tmp_path / "real-cache-parent"
+    real_cache = real_parent / "cache"
+    if ancestor_symlink:
+        configured_parent = tmp_path / "configured-parent"
+        configured_parent.symlink_to(real_parent, target_is_directory=True)
+        configured_cache = configured_parent / "cache"
+    else:
+        configured_cache = tmp_path / "configured-cache"
+        configured_cache.symlink_to(real_cache, target_is_directory=True)
+    lease = register_cleanable_worktree_lease(db, repo, real_cache)
+    monkeypatch.setenv("AWF_WORKTREE_STATE_DB", str(db))
+    monkeypatch.setenv("AWF_WORKTREE_CACHE_DIR", str(configured_cache))
+    monkeypatch.setattr(
+        "awf.worktrees.github.GhClient.view_pr",
+        lambda _self, _number: merged_pull_request(lease),
+    )
+
+    rc, stdout, _ = capture_main(
+        ["wt", "finish", "--repo-root", str(repo), "--pr", "42", "--apply", "--json"]
+    )
+
+    payload = json.loads(stdout)
+    assert rc == 3
+    assert payload["blockers"][0]["code"] == "unsafe_worktree_path"
+    assert lease.worktree_path.exists()

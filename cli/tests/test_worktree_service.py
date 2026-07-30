@@ -6,6 +6,7 @@ import subprocess
 import sqlite3
 import sys
 from dataclasses import dataclass, field, replace
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -2736,7 +2737,7 @@ def test_finish_recovers_a_reserved_lease_after_post_remove_registry_failure(
     assert promotion_harness.registry.get_lease(lease.id).state is LeaseState.REMOVED
 
 
-def test_finish_preserves_a_recreated_local_branch_with_a_cas_delete(
+def test_finish_blocks_a_recreated_local_branch_while_ref_lock_is_held(
     promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     lease = promotion_harness.merged_promotion("healthy")
@@ -2751,33 +2752,42 @@ def test_finish_preserves_a_recreated_local_branch_with_a_cas_delete(
     original_remove = promotion_harness.git.remove_worktree
     original_delete = promotion_harness.git.delete_branch_if_at
     cas_calls: list[tuple[str, str]] = []
+    race_codes: list[int] = []
 
-    def remove_then_recreate(path: Path) -> None:
+    def remove_then_attempt_recreate(path: Path) -> None:
         original_remove(path)
-        git_command(
-            promotion_harness.repo,
-            "update-ref",
-            f"refs/heads/{lease.branch}",
-            recreated_head,
-            lease.head_sha,
+        raced = subprocess.run(
+            [
+                "git",
+                "update-ref",
+                f"refs/heads/{lease.branch}",
+                recreated_head,
+                lease.head_sha,
+            ],
+            cwd=promotion_harness.repo,
+            check=False,
+            capture_output=True,
+            text=True,
         )
+        race_codes.append(raced.returncode)
 
     def record_cas(branch: str, expected_sha: str) -> None:
         cas_calls.append((branch, expected_sha))
         original_delete(branch, expected_sha)
 
-    monkeypatch.setattr(promotion_harness.git, "remove_worktree", remove_then_recreate)
+    monkeypatch.setattr(
+        promotion_harness.git, "remove_worktree", remove_then_attempt_recreate
+    )
     monkeypatch.setattr(promotion_harness.git, "delete_branch_if_at", record_cas)
 
     result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
 
     assert result.decision == "removed"
     assert cas_calls == [(lease.branch, lease.head_sha)]
-    assert promotion_harness.git.resolve_ref(lease.branch) == recreated_head
-    assert "local_branch_cleanup_failed" in {item["code"] for item in result.warnings}
-    assert promotion_harness.registry.list_events(lease.id)[-1].event_type == (
-        "local_branch_cleanup_failed"
-    )
+    assert race_codes and race_codes[0] != 0
+    assert lease.branch not in git_command(
+        promotion_harness.repo, "branch", "--format=%(refname:short)"
+    ).splitlines()
 
 
 def test_finish_preserves_a_recreated_remote_branch_with_a_cas_delete(
@@ -2847,3 +2857,78 @@ def test_finish_rejects_a_configured_symlink_cache_root(
     assert "unsafe_worktree_path" in {item["code"] for item in result.blockers}
     assert configured_cache.is_symlink()
     assert lease.worktree_path.exists()
+
+
+def test_finish_holds_branch_ref_lock_against_post_reservation_ref_race(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+    git_command(
+        promotion_harness.repo, "checkout", "-q", "-b", "lock-race-source", lease.branch
+    )
+    (promotion_harness.repo / "lock-race.txt").write_text("race\n", encoding="utf-8")
+    git_command(promotion_harness.repo, "add", "lock-race.txt")
+    git_command(promotion_harness.repo, "commit", "-q", "-m", "lock race")
+    advanced_head = git_command(promotion_harness.repo, "rev-parse", "HEAD")
+    git_command(promotion_harness.repo, "checkout", "-q", "staging")
+    original_lock = promotion_harness.git.hold_branch_if_at
+    attempts: list[int] = []
+
+    @contextmanager
+    def lock_then_race(branch: str, expected_sha: str):
+        with original_lock(branch, expected_sha):
+            raced = subprocess.run(
+                [
+                    "git",
+                    "update-ref",
+                    f"refs/heads/{branch}",
+                    advanced_head,
+                    expected_sha,
+                ],
+                cwd=promotion_harness.repo,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            attempts.append(raced.returncode)
+            yield
+
+    monkeypatch.setattr(promotion_harness.git, "hold_branch_if_at", lock_then_race)
+
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.decision == "removed"
+    assert attempts and attempts[0] != 0
+
+
+def test_finish_rechecks_mutation_before_remove_and_releases_reservation(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+    original_reserve = promotion_harness.registry.reserve_cleanup
+    original_lock = promotion_harness.git.hold_branch_if_at
+    lock_calls: list[tuple[str, str]] = []
+
+    def reserve_then_dirty(*args: object, **kwargs: object):
+        reservation = original_reserve(*args, **kwargs)
+        (lease.worktree_path / "raced.txt").write_text("raced\n", encoding="utf-8")
+        return reservation
+
+    @contextmanager
+    def record_lock(branch: str, expected_sha: str):
+        lock_calls.append((branch, expected_sha))
+        with original_lock(branch, expected_sha):
+            yield
+
+    monkeypatch.setattr(
+        promotion_harness.registry, "reserve_cleanup", reserve_then_dirty
+    )
+    monkeypatch.setattr(promotion_harness.git, "hold_branch_if_at", record_lock)
+
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.status == "blocked"
+    assert "dirty_worktree" in {item["code"] for item in result.blockers}
+    assert lock_calls == [(lease.branch, lease.head_sha)]
+    assert lease.worktree_path.exists()
+    assert promotion_harness.registry.get_cleanup_reservation(lease.id) is None

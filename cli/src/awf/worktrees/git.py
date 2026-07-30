@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+
 import hashlib
 import os
 import signal
@@ -101,6 +104,66 @@ class GitClient:
             "origin",
             f":{ref}",
         )
+
+    @contextmanager
+    def hold_branch_if_at(self, branch: str, expected_sha: str) -> Iterator[None]:
+        ref = f"refs/heads/{branch}"
+        try:
+            process = subprocess.Popen(
+                ["git", "update-ref", "--stdin"],
+                cwd=str(self.cwd.resolve()),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                start_new_session=True,
+            )
+        except OSError as error:
+            raise GitError(f"git update-ref failed to launch: {error}") from error
+        try:
+            self._ref_transaction_command(process, "start")
+            self._ref_transaction_command(
+                process, f"update {ref} {expected_sha} {expected_sha}", response=False
+            )
+            self._ref_transaction_command(process, "prepare")
+            yield
+        finally:
+            if process.poll() is None:
+                try:
+                    self._ref_transaction_command(process, "abort")
+                except GitError:
+                    _stop_process_group(process)
+            if process.stdin is not None and not process.stdin.closed:
+                process.stdin.close()
+            try:
+                process.wait(timeout=self.timeout)
+            except subprocess.TimeoutExpired:
+                _stop_process_group(process)
+
+    def _ref_transaction_command(
+        self,
+        process: subprocess.Popen[str],
+        command: str,
+        *,
+        response: bool = True,
+    ) -> None:
+        if process.stdin is None or process.stdout is None:
+            raise GitError("git update-ref did not expose transaction pipes")
+        try:
+            process.stdin.write(f"{command}\n")
+            process.stdin.flush()
+            if not response:
+                return
+            result = process.stdout.readline().strip()
+        except (OSError, ValueError) as error:
+            raise GitError(f"git update-ref transaction failed: {error}") from error
+        if result == f"{command.split(' ', 1)[0]}: ok":
+            return
+        stderr = process.stderr.read() if process.stderr is not None else ""
+        detail = _bounded_stderr(stderr.encode("utf-8", errors="replace"))
+        suffix = f": {detail}" if detail else ""
+        raise GitError(f"git update-ref transaction rejected {command!r}{suffix}")
 
     def merge_base(self, left: str, right: str) -> str:
         return self._text(self._run("merge-base", left, right).stdout)

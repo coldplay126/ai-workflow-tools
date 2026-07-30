@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -238,6 +239,39 @@ def test_git_client_applies_binary_patch_and_commits_from_a_worktree(tmp_path: P
     assert client.merge_base(base, source_head) == base
     assert client.changed_paths(target, base) == ("feature with spaces.txt",)
     assert target_head == git(target, "rev-parse", "HEAD")
+
+
+def test_git_client_holds_an_expected_branch_ref_transaction(
+    tmp_path: Path,
+) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    git(repo, "branch", "awf/ref-lock")
+    expected_head = git(repo, "rev-parse", "awf/ref-lock")
+    git(repo, "checkout", "-q", "-b", "ref-lock-update", "awf/ref-lock")
+    (repo / "locked.txt").write_text("locked\n", encoding="utf-8")
+    git(repo, "add", "locked.txt")
+    git(repo, "commit", "-q", "-m", "locked branch update")
+    advanced_head = git(repo, "rev-parse", "HEAD")
+    git(repo, "checkout", "-q", "staging")
+
+    with client.hold_branch_if_at("awf/ref-lock", expected_head):
+        raced = subprocess.run(
+            [
+                "git",
+                "update-ref",
+                "refs/heads/awf/ref-lock",
+                advanced_head,
+                expected_head,
+            ],
+            cwd=repo,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    assert raced.returncode != 0
+    assert client.resolve_ref("awf/ref-lock") == expected_head
 
 
 

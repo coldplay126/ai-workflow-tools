@@ -42,11 +42,12 @@ def state_db_path() -> Path:
 
 def cache_root() -> Path:
     configured = os.environ.get("AWF_WORKTREE_CACHE_DIR")
-    return (
-        Path(configured).expanduser().resolve()
+    candidate = (
+        Path(configured).expanduser()
         if configured
         else Path.home() / ".cache/awf/worktrees"
     )
+    return Path(os.path.abspath(str(candidate)))
 
 
 _MAX_IMPORT_COLLISION_ACTIONS = 32
@@ -776,14 +777,75 @@ class WorktreeService:
                     lease=current,
                     warnings=warnings,
                 )
+            post_lock_blockers: tuple[dict[str, str], ...] = ()
+            post_lock_code: str | None = None
+            post_lock_message = ""
+            removal_error: GitError | OSError | None = None
             try:
-                self.git.remove_worktree(current.worktree_path)
-            except (GitError, OSError) as error:
+                with self.git.hold_branch_if_at(current.branch, reservation.branch_sha):
+                    reserved_current = self.registry.get_lease(current.id)
+                    if (
+                        reserved_current is None
+                        or reserved_current.version != reservation.reserved_version
+                        or self.registry.get_cleanup_reservation(current.id)
+                        != reservation
+                    ):
+                        post_lock_code = "lease_changed"
+                        post_lock_message = (
+                            f"Lease {current.id} changed while cleanup was reserved."
+                        )
+                    else:
+                        try:
+                            pull_request = (
+                                self.github or GhClient(reserved_current.repository_root)
+                            ).view_pr(reserved_current.target_pr)
+                        except (ExternalServiceError, KeyError, OSError, ValueError) as error:
+                            post_lock_code = "github_refresh_failed"
+                            post_lock_message = (
+                                f"Unable to revalidate pull request state: {error}"
+                            )
+                        else:
+                            post_lock_blockers = self._cleanup_blockers(
+                                reserved_current, pull_request
+                            )
+                            if not post_lock_blockers:
+                                try:
+                                    self.git.remove_worktree(
+                                        reserved_current.worktree_path
+                                    )
+                                except (GitError, OSError) as error:
+                                    removal_error = error
+            except GitError as error:
+                return self._release_cleanup_reservation(
+                    current,
+                    reservation,
+                    warnings,
+                    code="branch_head_mismatch",
+                    message=(
+                        f"Branch {current.branch!r} changed before cleanup lock: {error}"
+                    ),
+                )
+            if post_lock_blockers:
+                return self._release_cleanup_reservation(
+                    current,
+                    reservation,
+                    warnings,
+                    blockers=post_lock_blockers,
+                )
+            if post_lock_code is not None:
+                return self._release_cleanup_reservation(
+                    current,
+                    reservation,
+                    warnings,
+                    code=post_lock_code,
+                    message=post_lock_message,
+                )
+            if removal_error is not None:
                 return self._recover_cleanup_reservation(
                     current,
                     reservation,
                     warnings,
-                    removal_error=error,
+                    removal_error=removal_error,
                 )
             try:
                 removed = self.registry.complete_cleanup(
@@ -811,6 +873,43 @@ class WorktreeService:
                 actions=tuple(actions),
                 warnings=tuple(warnings),
             )
+
+    def _release_cleanup_reservation(
+        self,
+        lease: Lease,
+        reservation: CleanupReservation,
+        warnings: list[dict[str, str]],
+        *,
+        code: str | None = None,
+        message: str | None = None,
+        blockers: tuple[dict[str, str], ...] = (),
+    ) -> CommandResult:
+        try:
+            released = self.registry.release_cleanup_reservation(
+                lease.id, expected_version=reservation.reserved_version
+            )
+        except (RuntimeError, sqlite3.Error) as error:
+            return self._cleanup_blocked(
+                "wt.finish",
+                "cleanup_reserved",
+                f"Lease {lease.id} remains reserved for cleanup: {error}",
+                lease=lease,
+                warnings=warnings,
+            )
+        if blockers:
+            return CommandResult.blocked(
+                "wt.finish",
+                blockers=blockers,
+                lease=released,
+                warnings=tuple(warnings),
+            )
+        return self._cleanup_blocked(
+            "wt.finish",
+            code or "cleanup_reserved",
+            message or f"Lease {lease.id} cleanup reservation was released.",
+            lease=released,
+            warnings=warnings,
+        )
 
     def _force_cleanup_deployment_probe(
         self,
@@ -1168,12 +1267,19 @@ class WorktreeService:
                 "code": "unsafe_worktree_path",
                 "message": f"Lease {lease.id} does not use its managed cache path.",
             }
-        for component in (
-            self.cache_dir,
-            self.cache_dir / lease.repository_name,
-            lease.worktree_path,
-        ):
-            if component.is_symlink():
+        current = Path(expected.anchor)
+        for part in expected.parts[1:]:
+            current /= part
+            try:
+                current.lstat()
+            except FileNotFoundError:
+                break
+            except OSError:
+                return {
+                    "code": "unsafe_worktree_path",
+                    "message": f"Lease {lease.id} cache path could not be inspected.",
+                }
+            if current.is_symlink():
                 return {
                     "code": "unsafe_worktree_path",
                     "message": (
