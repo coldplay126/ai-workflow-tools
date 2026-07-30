@@ -110,6 +110,86 @@ def test_event_summary_is_bounded_to_512_utf8_bytes(tmp_path: Path) -> None:
 
     stored = registry.list_events(created.id)[-1].summary
     assert len(stored.encode("utf-8")) <= 512
+    assert stored == "한" * 170
+
+
+def test_touch_updates_only_usage_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = WorktreeRegistry(tmp_path / "worktrees.sqlite3")
+    created = registry.create_lease(lease(tmp_path))
+    timestamp = "2030-01-02T03:04:05+00:00"
+    monkeypatch.setattr("awf.worktrees.registry.now_iso", lambda: timestamp)
+
+    updated = registry.touch(
+        created.id,
+        expected_version=created.version,
+        head_sha="b" * 40,
+    )
+
+    expected = created.to_dict()
+    expected.update(
+        head_sha="b" * 40,
+        last_used_at=timestamp,
+        updated_at=timestamp,
+        version=created.version + 1,
+    )
+    assert updated.to_dict() == expected
+
+
+def test_touch_rejects_a_stale_version(tmp_path: Path) -> None:
+    registry = WorktreeRegistry(tmp_path / "worktrees.sqlite3")
+    created = registry.create_lease(lease(tmp_path))
+    registry.touch(created.id, expected_version=created.version, head_sha="b" * 40)
+
+    with pytest.raises(RuntimeError, match="lease changed concurrently"):
+        registry.touch(created.id, expected_version=created.version, head_sha="c" * 40)
+
+
+def test_registry_closes_each_sqlite_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = WorktreeRegistry(tmp_path / "worktrees.sqlite3")
+    actual_connect = registry._connect
+    connections: list[TrackingConnection] = []
+
+    def connect() -> TrackingConnection:
+        tracked = TrackingConnection(actual_connect())
+        connections.append(tracked)
+        return tracked
+
+    monkeypatch.setattr(registry, "_connect", connect)
+    registry.ensure()
+    created = registry.create_lease(lease(tmp_path))
+
+    assert registry.get_lease(created.id) == created
+    assert registry.find_active(
+        created.repository_id, created.initiative, created.purpose
+    ) == created
+    assert registry.list_leases() == [created]
+    assert registry.list_events(created.id) == []
+    assert connections
+    assert all(connection.closed for connection in connections)
+
+
+class TrackingConnection:
+    def __init__(self, connection: object) -> None:
+        self.connection = connection
+        self.closed = False
+
+    def __enter__(self) -> "TrackingConnection":
+        self.connection.__enter__()
+        return self
+
+    def __exit__(self, *args: object) -> bool | None:
+        return self.connection.__exit__(*args)
+
+    def close(self) -> None:
+        self.closed = True
+        self.connection.close()
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.connection, name)
 
 
 def test_command_result_has_versioned_json_envelope() -> None:

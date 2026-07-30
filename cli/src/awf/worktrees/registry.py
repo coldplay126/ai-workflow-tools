@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import closing
+
 import sqlite3
 from enum import Enum
 from pathlib import Path
@@ -92,13 +94,13 @@ class WorktreeRegistry:
 
     def ensure(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.executescript(_SCHEMA)
 
     def create_lease(self, lease: Lease) -> Lease:
         self.ensure()
         try:
-            with self._connect() as connection:
+            with closing(self._connect()) as connection, connection:
                 connection.execute(
                     """
                     INSERT INTO worktree_leases (
@@ -127,7 +129,7 @@ class WorktreeRegistry:
 
     def get_lease(self, lease_id: str) -> Lease | None:
         self.ensure()
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             row = connection.execute(
                 "SELECT * FROM worktree_leases WHERE id = ?", (lease_id,)
             ).fetchone()
@@ -137,7 +139,7 @@ class WorktreeRegistry:
         self, repository_id: str, initiative: str, purpose: Purpose
     ) -> Lease | None:
         self.ensure()
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             row = connection.execute(
                 """
                 SELECT * FROM worktree_leases
@@ -172,7 +174,7 @@ class WorktreeRegistry:
             statement += " WHERE " + " AND ".join(predicates)
         statement += " ORDER BY created_at, id"
 
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             rows = connection.execute(statement, values).fetchall()
         return [self._lease_from_row(row) for row in rows]
 
@@ -295,7 +297,7 @@ class WorktreeRegistry:
 
     def list_events(self, lease_id: str) -> list[WorktreeEvent]:
         self.ensure()
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             rows = connection.execute(
                 "SELECT * FROM worktree_events WHERE lease_id = ? ORDER BY id",
                 (lease_id,),
