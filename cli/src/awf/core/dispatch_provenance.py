@@ -30,6 +30,10 @@ def _text(metadata: Mapping[str, Any], *keys: str) -> str | None:
     return None
 
 
+def _is_ascii_graphic(value: str) -> bool:
+    return bool(value) and all(0x21 <= ord(character) <= 0x7E for character in value)
+
+
 def _safe_schema_validation(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {
@@ -250,14 +254,144 @@ def write_omp_dispatch_provenance(
     return target
 
 
+def _native_checkpoint_record(
+    path: Path, payload: Mapping[str, Any]
+) -> dict[str, Any]:
+    version = payload.get("version")
+    if type(version) is not int or version != 1:
+        raise ValueError(f"invalid OMP native checkpoint {path}: unsupported version")
+    fingerprint = payload.get("batch_fingerprint")
+    session_id = payload.get("coordinator_session_id")
+    workers = payload.get("workers")
+    if not isinstance(fingerprint, str) or not fingerprint.strip():
+        raise ValueError(f"invalid OMP native checkpoint {path}: missing batch_fingerprint")
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise ValueError(
+            f"invalid OMP native checkpoint {path}: missing coordinator_session_id"
+        )
+    if not isinstance(workers, list) or not workers:
+        raise ValueError(f"invalid OMP native checkpoint {path}: missing workers")
+    state = payload.get("state")
+    if not isinstance(state, str) or state not in (
+        "prepared",
+        "resuming",
+        "completed",
+        "interrupted",
+        "ambiguous",
+    ):
+        raise ValueError(f"invalid OMP native checkpoint {path}: invalid state")
+    session_id = session_id.strip()
+
+    records: list[dict[str, Any]] = []
+    task_ids: set[str] = set()
+    for position, worker in enumerate(workers):
+        if not isinstance(worker, Mapping):
+            raise ValueError(
+                f"invalid OMP native checkpoint {path}: worker {position} is not an object"
+            )
+        if "index" not in worker:
+            raise ValueError(
+                f"invalid OMP native checkpoint {path}: worker {position} missing index"
+            )
+        index = worker["index"]
+        if (
+            not isinstance(index, int)
+            or isinstance(index, bool)
+            or index != position
+        ):
+            raise ValueError(
+                f"invalid OMP native checkpoint {path}: worker {position} has invalid index"
+            )
+        if "task_id" not in worker:
+            raise ValueError(
+                f"invalid OMP native checkpoint {path}: worker {position} has no task ID"
+            )
+        task_id = worker["task_id"]
+        if not isinstance(task_id, str):
+            raise ValueError(
+                f"invalid OMP native checkpoint {path}: worker {position} has invalid task ID"
+            )
+        if not task_id.strip():
+            raise ValueError(
+                f"invalid OMP native checkpoint {path}: worker {position} has no task ID"
+            )
+        if not _is_ascii_graphic(task_id):
+            raise ValueError(
+                f"invalid OMP native checkpoint {path}: worker {position} has invalid task ID"
+            )
+        if task_id in task_ids:
+            raise ValueError(
+                f"invalid OMP native checkpoint {path}: duplicate task ID {task_id}"
+            )
+        task_ids.add(task_id)
+        name = worker.get("name")
+        if not isinstance(name, str) or not name or name != name.strip():
+            raise ValueError(
+                f"invalid OMP native checkpoint {path}: worker {position} has invalid name"
+            )
+        agent_uri = worker.get("agent_uri")
+        if agent_uri is not None and (
+            not isinstance(agent_uri, str)
+            or not agent_uri.startswith("agent://")
+            or not _is_ascii_graphic(agent_uri[len("agent://") :])
+        ):
+            raise ValueError(
+                f"invalid OMP native checkpoint {path}: worker {position} has invalid agent_uri"
+            )
+        history_uri = worker.get("history_uri")
+        if history_uri is not None and (
+            not isinstance(history_uri, str)
+            or not history_uri.startswith("history://")
+            or not _is_ascii_graphic(history_uri[len("history://") :])
+        ):
+            raise ValueError(
+                f"invalid OMP native checkpoint {path}: worker {position} has invalid history_uri"
+            )
+        status = worker.get("status")
+        if status is not None and (
+            not isinstance(status, str)
+            or not status
+            or status != status.strip()
+        ):
+            raise ValueError(
+                f"invalid OMP native checkpoint {path}: worker {position} has invalid status"
+            )
+        records.append(
+            {
+                "worker_index": index,
+                "name": name,
+                "task_id": task_id,
+                "agent_uri": agent_uri or "",
+                "history_uri": history_uri or "",
+                "status": status or "",
+                "session_persisted": payload.get("session_persisted") is True,
+                "coordinator_session_id": session_id,
+            }
+        )
+
+    return {
+        "schema_version": 2,
+        "backend": "omp",
+        "source_kind": "omp_native_batch",
+        "run_id": path.stem,
+        "status": state,
+        "coordinator_session_id": session_id,
+        "agents": records,
+    }
+
+
 def _load_record(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"invalid OMP provenance file {path}: {exc}") from exc
-    if not isinstance(payload, dict) or payload.get("backend") != "omp":
-        raise ValueError(f"not an OMP provenance record: {path}")
-    return payload
+    if not isinstance(payload, dict):
+        raise ValueError(f"not a supported OMP provenance record: {path}")
+    if payload.get("backend") == "omp" and payload.get("schema_version") == 2:
+        return payload
+    if payload.get("kind") == "omp_native_batch":
+        return _native_checkpoint_record(path, payload)
+    raise ValueError(f"not a supported OMP provenance record: {path}")
 
 
 def lookup_omp_provenance(
