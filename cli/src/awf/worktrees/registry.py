@@ -135,6 +135,15 @@ class WorktreeRegistry:
             ).fetchone()
         return self._lease_from_row(row) if row is not None else None
 
+    def get_lease_read_only(self, lease_id: str) -> Lease | None:
+        if not self.db_path.is_file():
+            return None
+        with closing(self._connect_read_only()) as connection:
+            row = connection.execute(
+                "SELECT * FROM worktree_leases WHERE id = ?", (lease_id,)
+            ).fetchone()
+        return self._lease_from_row(row) if row is not None else None
+
     def find_active(
         self, repository_id: str, initiative: str, purpose: Purpose
     ) -> Lease | None:

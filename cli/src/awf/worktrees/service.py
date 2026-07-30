@@ -3,8 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import subprocess
+import re
 import sqlite3
+import subprocess
 import sys
 from collections.abc import Callable
 from dataclasses import replace
@@ -35,6 +36,9 @@ def cache_root() -> Path:
     )
 
 
+_MAX_IMPORT_COLLISION_ACTIONS = 32
+
+
 def _initiative_slug(initiative: str) -> str:
     if not initiative or not initiative.isascii():
         raise ValueError("initiative must contain lowercase letters, digits, and single hyphens")
@@ -49,21 +53,35 @@ class WorktreeService:
     def __init__(
         self,
         registry: WorktreeRegistry,
-        git: GitClient,
+        git: GitClient | None,
         *,
         config: WorktreeConfig | None = None,
         command_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
         cache_dir: Path | None = None,
         state_dir: Path | None = None,
         lock_dir: Path | None = None,
+        git_factory: Callable[[Path], GitClient] = GitClient,
+        skill_source_dir: Path | None = None,
+        home_dir: Path | None = None,
     ) -> None:
         self.registry = registry
         self.git = git
-        self.config = config or load_worktree_config(git.repository_root())
+        self.config = config or (
+            load_worktree_config(git.repository_root()) if git is not None else WorktreeConfig()
+        )
         self.command_runner = command_runner or subprocess.run
         self.cache_dir = (cache_dir or cache_root()).expanduser().resolve()
         self.state_dir = (state_dir or state_db_path().parent).expanduser().resolve()
         self.lock_dir = (lock_dir or self.state_dir / "locks").expanduser().resolve()
+        self.git_factory = git_factory
+        self.skill_source_dir = (
+            skill_source_dir
+            or Path(__file__).resolve().parents[4]
+            / "claude"
+            / "skills"
+            / "release-worktree-lifecycle"
+        ).resolve()
+        self.home_dir = (home_dir or Path.home()).expanduser().resolve()
 
     def acquire(
         self,
@@ -159,14 +177,351 @@ class WorktreeService:
             leases=leases,
         )
 
+    def import_root(self, root: Path, *, apply: bool) -> CommandResult:
+        candidates = tuple(
+            sorted(
+                (
+                    path.resolve()
+                    for path in root.expanduser().resolve().iterdir()
+                    if path.is_dir()
+                    and ((path / ".git").is_file() or (path / ".git").is_dir())
+                ),
+                key=lambda path: str(path),
+            )
+        )
+        discovered: dict[Path, tuple[GitClient, GitWorktree]] = {}
+        for candidate in candidates:
+            candidate_git = self.git_factory(candidate)
+            worktrees = candidate_git.list_worktrees()
+            metadata_path = next(
+                (
+                    item.path
+                    for item in worktrees
+                    if not item.bare
+                    and not item.prunable
+                    and item.path.resolve().is_dir()
+                ),
+                None,
+            )
+            if metadata_path is None:
+                continue
+            metadata_git = self.git_factory(metadata_path)
+            for worktree in worktrees:
+                path = worktree.path.resolve()
+                if (
+                    worktree.bare
+                    or worktree.detached
+                    or worktree.prunable
+                    or not path.is_dir()
+                    or not worktree.branch
+                    or not worktree.head_sha
+                ):
+                    continue
+                discovered.setdefault(path, (metadata_git, worktree))
+
+        existing_leases = self.registry.list_leases_read_only(include_removed=True)
+        existing_paths = {
+            lease.worktree_path.resolve() for lease in existing_leases
+        }
+        reserved_identities = {
+            (lease.repository_id, lease.initiative, lease.purpose)
+            for lease in existing_leases
+            if lease.state is not LeaseState.REMOVED
+        }
+        inventory_items: list[Lease] = []
+        collision_actions: list[dict[str, object]] = []
+        skipped_collisions = 0
+        for path, (git, worktree) in sorted(
+            discovered.items(),
+            key=lambda item: (item[1][0].repository_id(), str(item[0])),
+        ):
+            if path in existing_paths:
+                continue
+            lease = self._imported_lease(git, worktree)
+            identity = (lease.repository_id, lease.initiative, lease.purpose)
+            if identity in reserved_identities:
+                skipped_collisions += 1
+                if len(collision_actions) < _MAX_IMPORT_COLLISION_ACTIONS:
+                    collision_actions.append(
+                        {
+                            "kind": "skipped_identity_collision",
+                            "path": str(path),
+                            "repository_id": lease.repository_id,
+                            "initiative": lease.initiative,
+                            "purpose": lease.purpose.value,
+                        }
+                    )
+                continue
+            reserved_identities.add(identity)
+            inventory_items.append(lease)
+        if skipped_collisions > len(collision_actions):
+            collision_actions.append(
+                {
+                    "kind": "skipped_identity_collision_summary",
+                    "count": skipped_collisions,
+                    "reported": len(collision_actions),
+                }
+            )
+        inventory = tuple(inventory_items)
+        preview_actions = [
+            {
+                "kind": "import_worktree",
+                "path": str(lease.worktree_path),
+                "lease_id": lease.id,
+            }
+            for lease in inventory
+        ]
+        preview_actions.extend(collision_actions)
+        if not apply:
+            return CommandResult.ok(
+                "wt.import",
+                decision="preview",
+                leases=inventory,
+                actions=tuple(preview_actions),
+            )
+
+        actions: list[dict[str, object]] = list(collision_actions)
+
+        imported: list[Lease] = []
+        for snapshot in inventory:
+            with repository_lock(self.lock_dir / f"{snapshot.repository_id}.lock"):
+                lease, skipped_action = self._revalidate_import_lease(snapshot)
+                if lease is None:
+                    if skipped_action is not None:
+                        actions.append(skipped_action)
+                    continue
+                current = self.registry.list_leases(
+                    include_removed=True,
+                    worktree_path=lease.worktree_path,
+                )
+                if current:
+                    actions.append(
+                        {
+                            "kind": "skipped_existing_registration",
+                            "path": str(lease.worktree_path),
+                        }
+                    )
+                    continue
+                if self.registry.find_active(
+                    lease.repository_id, lease.initiative, lease.purpose
+                ):
+                    actions.append(self._identity_collision_action(lease))
+                    continue
+                try:
+                    created = self.registry.create_lease(lease)
+                    imported.append(created)
+                    actions.append(
+                        {
+                            "kind": "import_worktree",
+                            "path": str(created.worktree_path),
+                            "lease_id": created.id,
+                        }
+                    )
+                except ValueError as error:
+                    if str(error) != "active lease already exists":
+                        raise
+                    actions.append(self._identity_collision_action(lease))
+                except sqlite3.IntegrityError:
+                    actions.append(self._identity_collision_action(lease))
+        return CommandResult.ok(
+            "wt.import",
+            decision="ready" if imported else "no_op",
+            leases=tuple(imported),
+            actions=tuple(actions),
+        )
+
+    def _revalidate_import_lease(
+        self, snapshot: Lease
+    ) -> tuple[Lease | None, dict[str, object] | None]:
+        try:
+            git = self.git_factory(snapshot.repository_root)
+            if git.repository_id() != snapshot.repository_id:
+                return None, {
+                    "kind": "skipped_unavailable_worktree",
+                    "path": str(snapshot.worktree_path),
+                    "reason": "repository_identity_changed",
+                }
+            worktree = next(
+                (
+                    item
+                    for item in git.list_worktrees()
+                    if item.path.resolve() == snapshot.worktree_path.resolve()
+                ),
+                None,
+            )
+            if (
+                worktree is None
+                or worktree.bare
+                or worktree.detached
+                or worktree.prunable
+                or not worktree.path.resolve().is_dir()
+                or not worktree.branch
+                or not worktree.head_sha
+            ):
+                return None, {
+                    "kind": "skipped_unavailable_worktree",
+                    "path": str(snapshot.worktree_path),
+                    "reason": "registration_changed",
+                }
+            return self._imported_lease(git, worktree), None
+        except (GitError, OSError):
+            return None, {
+                "kind": "skipped_unavailable_worktree",
+                "path": str(snapshot.worktree_path),
+                "reason": "registration_unavailable",
+            }
+
+    @staticmethod
+    def _identity_collision_action(lease: Lease) -> dict[str, object]:
+        return {
+            "kind": "skipped_identity_collision",
+            "path": str(lease.worktree_path),
+            "repository_id": lease.repository_id,
+            "initiative": lease.initiative,
+            "purpose": lease.purpose.value,
+        }
+
+    def adopt(self, lease_id: str, *, apply: bool) -> CommandResult:
+        imported = self.registry.get_lease_read_only(lease_id)
+        if imported is None:
+            return self._adopt_blocked(
+                "unknown_lease",
+                f"lease {lease_id} does not exist",
+            )
+        if not apply:
+            blocker = self._adoption_blocker(imported)
+            if blocker is not None:
+                return blocker
+            return CommandResult.ok(
+                "wt.adopt",
+                decision="preview",
+                lease=imported,
+                actions=(
+                    {
+                        "kind": "adopt",
+                        "path": str(imported.worktree_path),
+                        "lease_id": imported.id,
+                    },
+                ),
+            )
+
+        with repository_lock(self.lock_dir / f"{imported.repository_id}.lock"):
+            imported = self.registry.get_lease(lease_id)
+            if imported is None:
+                return self._adopt_blocked(
+                    "unknown_lease",
+                    f"lease {lease_id} does not exist",
+                )
+            blocker = self._adoption_blocker(imported)
+            if blocker is not None:
+                return blocker
+            adopted = self.registry.transition(
+                imported.id,
+                imported.state,
+                expected_version=imported.version,
+                managed=True,
+                summary="imported lease adopted",
+            )
+        return CommandResult.ok("wt.adopt", decision="ready", lease=adopted)
+
+    def _adoption_blocker(self, imported: Lease) -> CommandResult | None:
+        if imported.state is LeaseState.REMOVED:
+            return self._adopt_blocked(
+                "removed_lease",
+                f"lease {imported.id} has been removed",
+                lease=imported,
+            )
+        if imported.owner_kind != "imported":
+            return self._adopt_blocked(
+                "lease_not_imported",
+                f"lease {imported.id} was not imported",
+                lease=imported,
+            )
+        if imported.managed:
+            return self._adopt_blocked(
+                "already_adopted",
+                f"lease {imported.id} is already managed",
+                lease=imported,
+            )
+        if imported.state is LeaseState.CLOSED_UNMERGED:
+            return self._adopt_blocked(
+                "closed_unmerged",
+                f"lease {imported.id} was closed without merging",
+                lease=imported,
+            )
+        if self.git is None or self.git.repository_id() != imported.repository_id:
+            return self._adopt_blocked(
+                "repository_mismatch",
+                f"lease {imported.id} does not match this repository",
+                lease=imported,
+            )
+        registered = self.git.list_worktrees()
+        expected_path = imported.worktree_path.resolve()
+        worktree = next(
+            (
+                item
+                for item in registered
+                if item.path.resolve() == expected_path and expected_path.is_dir()
+            ),
+            None,
+        )
+        if worktree is None:
+            return self._adopt_blocked(
+                "orphaned_lease",
+                f"lease {imported.id} is not registered as a Git worktree",
+                lease=imported,
+            )
+        if worktree.bare or worktree.detached or worktree.branch != imported.branch:
+            return self._adopt_blocked(
+                "branch_mismatch",
+                f"lease {imported.id} does not match its registered branch",
+                lease=imported,
+            )
+        if any(
+            item.path.resolve() != expected_path and item.branch == imported.branch
+            for item in registered
+        ):
+            return self._adopt_blocked(
+                "branch_conflict",
+                f"branch {imported.branch!r} is checked out at another worktree",
+                lease=imported,
+            )
+        if (
+            worktree.head_sha != imported.head_sha
+            or self.git.head_sha(imported.worktree_path) != imported.head_sha
+        ):
+            return self._adopt_blocked(
+                "head_mismatch",
+                f"lease {imported.id} does not match its recorded HEAD",
+                lease=imported,
+            )
+        if self.git.status_porcelain(imported.worktree_path):
+            return self._adopt_blocked(
+                "dirty_worktree",
+                f"lease {imported.id} has uncommitted changes",
+                lease=imported,
+            )
+        if self.git.head_sha(imported.worktree_path) != imported.head_sha:
+            return self._adopt_blocked(
+                "head_mismatch",
+                f"lease {imported.id} changed while being adopted",
+                lease=imported,
+            )
+        return None
+
     def doctor(self) -> CommandResult:
+        if self.git is None:
+            raise ValueError("doctor requires a repository")
+        repository_id = self.git.repository_id()
         registered = {
-            lease.worktree_path: lease
+            lease.worktree_path.resolve(): lease
             for lease in self.registry.list_leases_read_only(
-                repository_id=self.git.repository_id(), include_removed=False
+                repository_id=repository_id, include_removed=False
             )
         }
-        actual = {item.path: item for item in self.git.list_worktrees()}
+        actual = {
+            item.path.resolve(): item for item in self.git.list_worktrees()
+        }
         actions: list[dict[str, object]] = []
         for path in sorted(actual.keys() - registered.keys()):
             actions.append({"kind": "unregistered_worktree", "path": str(path)})
@@ -178,10 +533,144 @@ class WorktreeService:
                     "lease_id": registered[path].id,
                 }
             )
+        for branch, paths in self._duplicate_registered_branches(
+            registered, actual
+        ).items():
+            actions.append(
+                {
+                    "kind": "duplicate_branch",
+                    "branch": branch,
+                    "paths": [str(path) for path in paths],
+                }
+            )
+        for path in sorted(registered.keys() & actual.keys()):
+            lease = registered[path]
+            worktree = actual[path]
+            if worktree.head_sha != lease.head_sha:
+                actions.append(
+                    {
+                        "kind": "head_mismatch",
+                        "path": str(path),
+                        "lease_id": lease.id,
+                        "expected_head_sha": lease.head_sha,
+                        "actual_head_sha": worktree.head_sha,
+                    }
+                )
+            if not worktree.bare and path.is_dir() and self.git.status_porcelain(path):
+                actions.append(
+                    {
+                        "kind": "dirty_worktree",
+                        "path": str(path),
+                        "lease_id": lease.id,
+                    }
+                )
+        cache_repository_dir = self.cache_dir / self.git.repository_name()
+        if cache_repository_dir.is_dir():
+            for path in sorted(
+                (
+                    candidate.resolve()
+                    for candidate in cache_repository_dir.iterdir()
+                    if candidate.is_dir()
+                ),
+                key=str,
+            ):
+                if path not in actual and self._is_current_cache_child(
+                    path, repository_id, registered
+                ):
+                    actions.append(
+                        {
+                            "kind": "unregistered_cache_directory",
+                            "path": str(path),
+                        }
+                    )
+        actions.extend(self._skill_link_actions())
         return CommandResult.ok(
             "wt.doctor",
             decision="no_op" if not actions else "preview",
             actions=tuple(actions),
+        )
+
+    def _is_current_cache_child(
+        self,
+        path: Path,
+        repository_id: str,
+        registered: dict[Path, Lease],
+    ) -> bool:
+        try:
+            return self.git_factory(path).repository_id() == repository_id
+        except (GitError, OSError, ValueError):
+            lease = registered.get(path)
+            return lease is not None and lease.managed
+
+    def _imported_lease(self, git: GitClient, worktree: GitWorktree) -> Lease:
+        if not worktree.branch or not worktree.head_sha:
+            raise ValueError("imported worktree must have a branch and HEAD")
+        lease = Lease.new(
+            repository_id=git.repository_id(),
+            repository_name=git.repository_name(),
+            repository_root=git.repository_root(),
+            worktree_path=worktree.path,
+            initiative=self._import_initiative(worktree.branch, worktree.head_sha),
+            purpose=Purpose.SCRATCH,
+            branch=worktree.branch,
+            base_ref=worktree.branch,
+            head_sha=worktree.head_sha,
+            managed=False,
+            owner_kind="imported",
+        )
+        if git.status_porcelain(worktree.path):
+            return replace(lease, state=LeaseState.DIRTY)
+        return lease
+
+    @staticmethod
+    def _import_initiative(branch: str, head_sha: str) -> str:
+        slug = re.sub(r"[^a-z0-9]+", "-", branch.lower()).strip("-")
+        return f"import-{slug or 'worktree'}-{head_sha[:8].lower()}"
+
+    @staticmethod
+    def _duplicate_registered_branches(
+        registered: dict[Path, Lease], actual: dict[Path, GitWorktree]
+    ) -> dict[str, tuple[Path, ...]]:
+        paths_by_branch: dict[str, list[Path]] = {}
+        for path in sorted(registered.keys() & actual.keys()):
+            branch = actual[path].branch
+            if branch is not None:
+                paths_by_branch.setdefault(branch, []).append(path)
+        return {
+            branch: tuple(paths)
+            for branch, paths in sorted(paths_by_branch.items())
+            if len(paths) > 1
+        }
+
+    def _skill_link_actions(self) -> list[dict[str, object]]:
+        actions: list[dict[str, object]] = []
+        for path in (
+            self.home_dir / ".claude" / "skills" / "release-worktree-lifecycle",
+            self.home_dir / ".agents" / "skills" / "release-worktree-lifecycle",
+        ):
+            if path.exists() and path.resolve() == self.skill_source_dir:
+                continue
+            actions.append(
+                {
+                    "kind": (
+                        "wrong_skill_link"
+                        if path.is_symlink() or path.exists()
+                        else "missing_skill_link"
+                    ),
+                    "path": str(path),
+                    "target": str(self.skill_source_dir),
+                }
+            )
+        return actions
+
+    @staticmethod
+    def _adopt_blocked(
+        code: str, message: str, *, lease: Lease | None = None
+    ) -> CommandResult:
+        return CommandResult.blocked(
+            "wt.adopt",
+            blockers=({"code": code, "message": message},),
+            lease=lease,
         )
 
     def _reuse(self, lease: Lease, expected_branch: str) -> CommandResult:

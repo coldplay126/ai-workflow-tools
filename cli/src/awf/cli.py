@@ -19,7 +19,13 @@ from awf.commands.init import run_init
 from awf.commands.scan import run_scan
 from awf.commands.wf_apply import run_wf_apply_result
 from awf.commands.wf_pr import run_wf_pr
-from awf.commands.wt import run_wt_acquire, run_wt_doctor, run_wt_status
+from awf.commands.wt import (
+    run_wt_acquire,
+    run_wt_adopt,
+    run_wt_doctor,
+    run_wt_import,
+    run_wt_status,
+)
 from awf.commands.wf import (
     run_wf_decide,
     run_wf_detect_class,
@@ -664,6 +670,54 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print a versioned JSON result.",
     )
     wt_acquire_parser.set_defaults(handler=run_wt_acquire)
+
+    wt_import_parser = wt_subparsers.add_parser(
+        "import",
+        help="Inventory existing worktrees under a direct-child repository root.",
+    )
+    wt_import_parser.add_argument(
+        "--root",
+        required=True,
+        help="Directory whose direct child repositories should be inventoried.",
+    )
+    wt_import_mode = wt_import_parser.add_mutually_exclusive_group()
+    wt_import_mode.add_argument(
+        "--apply",
+        action="store_true",
+        help="Register discovered worktrees as unmanaged imported leases.",
+    )
+    wt_import_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview discovered worktrees without registry changes.",
+    )
+    wt_import_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_import_parser.set_defaults(handler=run_wt_import)
+
+    wt_adopt_parser = wt_subparsers.add_parser(
+        "adopt",
+        help="Mark an exact clean imported lease as managed.",
+    )
+    wt_adopt_parser.add_argument(
+        "--lease",
+        required=True,
+        help="Existing imported lease id.",
+    )
+    wt_adopt_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Adopt the imported lease instead of previewing it.",
+    )
+    wt_adopt_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_adopt_parser.set_defaults(handler=run_wt_adopt)
 
     wt_status_parser = wt_subparsers.add_parser(
         "status",

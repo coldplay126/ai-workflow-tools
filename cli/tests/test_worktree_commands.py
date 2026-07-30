@@ -148,6 +148,8 @@ def test_wt_doctor_human_output_lists_each_mismatch(
     monkeypatch.setenv(
         "AWF_WORKTREE_STATE_DB", str(tmp_path / "state" / "worktrees.sqlite3")
     )
+    home_dir = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home_dir))
 
     rc, stdout, stderr = capture_main(
         ["wt", "doctor", "--repo-root", str(repo)]
@@ -158,6 +160,10 @@ def test_wt_doctor_human_output_lists_each_mismatch(
     assert stdout == (
         "wt.doctor: preview\n"
         f"unregistered_worktree: {repo.resolve()}\n"
+        "missing_skill_link: "
+        f"{home_dir}/.claude/skills/release-worktree-lifecycle\n"
+        "missing_skill_link: "
+        f"{home_dir}/.agents/skills/release-worktree-lifecycle\n"
     )
 
 
@@ -341,3 +347,102 @@ def test_wt_acquire_lock_filesystem_error_emits_one_json_document(
     assert stderr == ""
     assert payload["status"] == "error"
     assert payload["blockers"][0]["code"] == "filesystem_error"
+
+
+def test_wt_import_parser_surface() -> None:
+    args = build_parser().parse_args(
+        ["wt", "import", "--root", "/repos", "--dry-run", "--json"]
+    )
+
+    assert args.command == "wt"
+    assert args.wt_command == "import"
+    assert args.root == "/repos"
+    assert args.apply is False
+    assert args.dry_run is True
+    assert args.json is True
+
+
+def test_wt_import_preview_emits_one_json_document(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo = make_repository(tmp_path)
+    external = tmp_path / "legacy-release"
+    subprocess.run(
+        [
+            "git",
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "legacy-release",
+            str(external),
+            "staging",
+        ],
+        cwd=repo,
+        check=True,
+    )
+    db = tmp_path / "state" / "worktrees.sqlite3"
+    monkeypatch.setenv("AWF_WORKTREE_STATE_DB", str(db))
+
+    rc, stdout, stderr = capture_main(
+        ["wt", "import", "--root", str(tmp_path), "--dry-run", "--json"]
+    )
+
+    payload = json.loads(stdout)
+    assert rc == 0
+    assert stderr == ""
+    assert payload["command"] == "wt.import"
+    assert payload["decision"] == "preview"
+    assert any(lease["worktree_path"] == str(external.resolve()) for lease in payload["leases"])
+    assert not db.parent.exists()
+
+
+def test_wt_adopt_promotes_imported_lease_without_repo_argument(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo = make_repository(tmp_path)
+    external = tmp_path / "legacy-release"
+    subprocess.run(
+        [
+            "git",
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "legacy-release",
+            str(external),
+            "staging",
+        ],
+        cwd=repo,
+        check=True,
+    )
+    db = tmp_path / "state" / "worktrees.sqlite3"
+    monkeypatch.setenv("AWF_WORKTREE_STATE_DB", str(db))
+    git = GitClient(external)
+    lease = WorktreeRegistry(db).create_lease(
+        Lease.new(
+            repository_id=git.repository_id(),
+            repository_name=git.repository_name(),
+            repository_root=git.repository_root(),
+            worktree_path=external,
+            initiative="import-legacy-release-12345678",
+            purpose=Purpose.SCRATCH,
+            branch="legacy-release",
+            base_ref="legacy-release",
+            head_sha=git.head_sha(),
+            managed=False,
+            owner_kind="imported",
+        )
+    )
+
+    rc, stdout, stderr = capture_main(
+        ["wt", "adopt", "--lease", lease.id, "--apply", "--json"]
+    )
+
+    payload = json.loads(stdout)
+    assert rc == 0
+    assert stderr == ""
+    assert payload["command"] == "wt.adopt"
+    assert payload["decision"] == "ready"
+    assert payload["lease"]["managed"] is True
+    assert payload["lease"]["owner_kind"] == "imported"

@@ -5,6 +5,7 @@ import json
 import sqlite3
 import sys
 from collections.abc import Callable
+from pathlib import Path
 
 from awf.core.paths import find_repo_root
 from awf.worktrees.config import ConfigError
@@ -22,7 +23,13 @@ def _emit(result: CommandResult, *, as_json: bool) -> int:
         for lease in result.leases:
             print(f"{lease.id}  {lease.state.value:16}  {lease.worktree_path}")
         for action in result.actions:
-            print(f"{action['kind']}: {action['path']}")
+            detail = (
+                action.get("path")
+                or action.get("branch")
+                or action.get("lease_id")
+                or ""
+            )
+            print(f"{action['kind']}: {detail}")
         for blocker in result.blockers:
             print(
                 f"blocked: {blocker['code']}: {blocker['message']}",
@@ -99,3 +106,91 @@ def run_wt_acquire(args: argparse.Namespace) -> int:
             apply=args.apply,
         ),
     )
+
+
+def run_wt_import(
+    args: argparse.Namespace,
+    *,
+    git_factory: Callable[[Path], GitClient] = GitClient,
+) -> int:
+    try:
+        registry = WorktreeRegistry(state_db_path())
+        service = WorktreeService(registry, None, git_factory=git_factory)
+        result = service.import_root(Path(args.root), apply=args.apply)
+    except (ConfigError, FileNotFoundError) as error:
+        result = CommandResult.error(
+            "wt.import",
+            code="config_error",
+            message=str(error),
+            exit_code=2,
+        )
+    except GitError as error:
+        result = CommandResult.error(
+            "wt.import",
+            code="git_error",
+            message=str(error),
+            exit_code=5,
+        )
+    except OSError as error:
+        result = CommandResult.error(
+            "wt.import",
+            code="filesystem_error",
+            message=str(error),
+            exit_code=5,
+        )
+    except (sqlite3.Error, ValueError) as error:
+        result = CommandResult.error(
+            "wt.import",
+            code="registry_conflict",
+            message=str(error),
+            exit_code=5,
+        )
+    return _emit(result, as_json=bool(args.json))
+
+
+def run_wt_adopt(args: argparse.Namespace) -> int:
+    registry = WorktreeRegistry(state_db_path())
+    try:
+        lease = registry.get_lease_read_only(args.lease)
+        if lease is None:
+            result = CommandResult.blocked(
+                "wt.adopt",
+                blockers=(
+                    {
+                        "code": "unknown_lease",
+                        "message": f"lease {args.lease} does not exist",
+                    },
+                ),
+            )
+        else:
+            service = WorktreeService(registry, GitClient(lease.repository_root))
+            result = service.adopt(args.lease, apply=args.apply)
+    except (ConfigError, FileNotFoundError) as error:
+        result = CommandResult.error(
+            "wt.adopt",
+            code="config_error",
+            message=str(error),
+            exit_code=2,
+        )
+    except GitError as error:
+        result = CommandResult.error(
+            "wt.adopt",
+            code="git_error",
+            message=str(error),
+            exit_code=5,
+        )
+    except OSError as error:
+        result = CommandResult.error(
+            "wt.adopt",
+            code="filesystem_error",
+            message=str(error),
+            exit_code=5,
+        )
+    except (sqlite3.Error, ValueError) as error:
+        result = CommandResult.error(
+            "wt.adopt",
+            code="registry_conflict",
+            message=str(error),
+            exit_code=5,
+        )
+    return _emit(result, as_json=bool(args.json))
