@@ -3356,7 +3356,10 @@ def test_finish_propagates_remote_branch_delete_failure_after_removal(
     lease = promotion_harness.merged_promotion("healthy")
 
     def remote_failure(*_args: object, **_kwargs: object) -> None:
-        raise GitRemoteError("git push failed: network unavailable")
+        raise GitRemoteError(
+            "git push failed (128): Permission denied (publickey). "
+            "Could not read from remote repository."
+        )
 
     monkeypatch.setattr(
         promotion_harness.git,

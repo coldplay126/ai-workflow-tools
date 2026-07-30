@@ -14,6 +14,7 @@ from awf.worktrees.config import ConfigError, WorktreeConfig, load_worktree_conf
 from awf.worktrees.git import (
     GitClient,
     GitError,
+    GitRemoteError,
     _bounded_stderr,
     _nul_records,
     _parse_worktrees,
@@ -216,6 +217,45 @@ def test_git_client_remote_cas_delete_preserves_recreated_branch(
         client.delete_remote_branch_if_at("awf/remote-cas-race", expected_head)
 
     assert git(repo, "ls-remote", "--heads", "origin", "awf/remote-cas-race").split()[0] == changed_head
+
+
+@pytest.mark.parametrize(
+    "detail",
+    (
+        "Permission denied (publickey).\nCould not read from remote repository.",
+        "Could not read from remote repository.",
+    ),
+)
+def test_git_client_classifies_unrecognized_remote_delete_failures_as_transport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, detail: str
+) -> None:
+    client = GitClient(make_repository(tmp_path))
+
+    def fail_push(*_args: str, **_kwargs: object) -> object:
+        raise GitError(f"git push failed (128): {detail}")
+
+    monkeypatch.setattr(client, "_run", fail_push)
+
+    with pytest.raises(GitRemoteError):
+        client.delete_remote_branch_if_at("awf/remote-delete", "a" * 40)
+
+
+def test_git_client_classifies_push_transport_failure_as_external(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+
+    def fail_push(*_args: str, **_kwargs: object) -> object:
+        raise GitError(
+            "git push failed (128): Permission denied (publickey). "
+            "Could not read from remote repository."
+        )
+
+    monkeypatch.setattr(client, "_run", fail_push)
+
+    with pytest.raises(GitRemoteError):
+        client.push_branch(repo, "awf/push")
 
 
 def test_git_client_applies_binary_patch_and_commits_from_a_worktree(tmp_path: Path) -> None:
