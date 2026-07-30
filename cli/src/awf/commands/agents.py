@@ -18,6 +18,7 @@ from awf.core.dispatch_provenance import (
 from awf.core.omp_agents import sync_omp_agents
 from awf.runners.omp import (
     OmpRunnerConfig,
+    omp_worker_name,
     _terminate_process_group,
     parse_omp_json_stream,
     parse_omp_task_events,
@@ -63,16 +64,32 @@ def _provenance_records(repo_root: Path) -> list[tuple[Path, dict[str, Any]]]:
         return records
     for path in sorted(dispatch_dir.glob("*.json")):
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            resolved_path, payload = lookup_omp_provenance(repo_root, path)
+        except (FileNotFoundError, ValueError):
             continue
-        if (
-            isinstance(payload, dict)
-            and payload.get("backend") == "omp"
-            and payload.get("schema_version") == 2
-        ):
-            records.append((path, payload))
+        records.append((resolved_path, payload))
     return records
+
+
+def _record_matches_role(
+    payload: Mapping[str, Any],
+    record: Mapping[str, Any],
+    role: str,
+) -> bool:
+    if payload.get("source_kind") != "omp_native_batch":
+        return record.get("role") == role
+    worker_index = record.get("worker_index")
+    if (
+        not isinstance(worker_index, int)
+        or isinstance(worker_index, bool)
+        or worker_index < 0
+    ):
+        return False
+    worker_name = omp_worker_name(worker_index, role)
+    return (
+        record.get("name") == worker_name
+        or record.get("task_id") == worker_name
+    )
 
 
 def _find_followup_target(
@@ -89,7 +106,10 @@ def _find_followup_target(
         matches = [
             record
             for record in payload.get("agents", [])
-            if isinstance(record, dict) and record.get("role") == role
+            if (
+                isinstance(record, dict)
+                and _record_matches_role(payload, record, role)
+            )
         ]
         if not matches:
             raise FileNotFoundError(
