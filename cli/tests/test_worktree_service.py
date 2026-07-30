@@ -2284,3 +2284,22 @@ def test_promote_recovers_pending_worktree_after_source_base_advances(
     assert second.decision == "ready"
     assert second.lease is not None
     assert second.lease.state is LeaseState.PR_OPEN
+
+
+@pytest.mark.parametrize("field", ("base_sha", "head_sha", "merge_commit_sha"))
+def test_promote_rejects_invalid_github_oids_before_git_mutation(
+    promotion_harness: PromotionHarness, field: str
+) -> None:
+    promotion_harness.github.prs[372] = replace(
+        promotion_harness.github.prs[372], **{field: "--malformed"}
+    )
+
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "source_pr_invalid_oid"
+    assert not promotion_harness.registry.db_path.exists()
