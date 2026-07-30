@@ -519,3 +519,38 @@ def test_repository_lock_closes_descriptor_when_unlock_fails(
 
     with repository_lock(lock_path, blocking=False):
         pass
+
+
+def test_binary_patch_preserves_rename_mode_and_gitlink_delta(tmp_path: Path) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    source = tmp_path / "source-delta"
+    target = tmp_path / "target-delta"
+    base = client.head_sha()
+    client.add_worktree(source, "awf/source-delta", base)
+    client.add_worktree(target, "awf/target-delta", base)
+    git(source, "mv", "README.txt", "renamed.txt")
+    (source / "script.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (source / "script.sh").chmod(0o755)
+    git(source, "add", "script.sh")
+    git(source, "update-index", "--add", "--cacheinfo", f"160000,{base},submodule")
+    git(source, "commit", "-q", "-m", "rename mode gitlink")
+    source_head = client.head_sha(source)
+
+    client.apply_indexed_patch(target, client.binary_diff(base, source_head))
+    target_head = client.commit(target, "apply delta")
+
+    assert client.changed_paths(source, base, source_head, find_renames=True) == (
+        "renamed.txt",
+        "script.sh",
+        "submodule",
+    )
+    assert client.changed_paths(target, base, target_head, find_renames=True) == (
+        "renamed.txt",
+        "script.sh",
+        "submodule",
+    )
+    assert (target / "script.sh").stat().st_mode & 0o111
+    assert client.path_blob(source_head, "submodule") == client.path_blob(
+        target_head, "submodule"
+    )
