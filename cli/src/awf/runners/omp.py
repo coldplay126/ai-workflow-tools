@@ -11,7 +11,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Protocol, Sequence
+from typing import Any, Literal, Protocol, Sequence, Union
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
@@ -20,7 +20,7 @@ from awf.core.agent_runner import AgentResult, _try_parse_json
 SchemaMode = Literal["permissive", "strict"]
 CoordinationSurface = Literal["native", "print"]
 OmpExecutionMode = Literal["external_host", "current_host"]
-JsonSchema = dict[str, Any] | bool | str | None
+JsonSchema = Union[dict[str, Any], bool, str, None]
 
 
 @dataclass(frozen=True)

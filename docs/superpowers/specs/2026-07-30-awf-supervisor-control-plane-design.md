@@ -304,23 +304,24 @@ SQS는 at-least-once 전달을 전제로 한다. 명령은 `command_id`를 가�
 
 ```bash
 awf supervisor submit \
+  --workflow-id release-2026-07-30 \
   --repo blip-server:main \
   --repo blip-api:staging \
   --prompt-file task.txt
 
 awf supervisor status <job-id>
 awf supervisor watch <job-id>
-awf supervisor cancel <job-id>
-awf supervisor approve <job-id>
-awf supervisor reject <job-id>
+awf supervisor cancel <job-id> --generation 1
+awf supervisor approve <job-id> --generation 1
+awf supervisor reject <job-id> --generation 1
 awf supervisor agents
 ```
 
 `submit` 기본 target은 `auto`다. `--target local|aws`로 명시할 수 있지만 capability와 security policy를 우회하지 않는다.
 
-agent 운영 명령은 별도 namespace를 사용한다.
+다음 명령은 후속 작업에서 계획된 agent 운영 명령이며, 현재 Task 5 CLI에는 포함되지 않는다.
 
-```bash
+```text
 awf supervisor agent enroll
 awf supervisor agent run
 awf supervisor agent doctor

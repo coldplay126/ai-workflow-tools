@@ -242,7 +242,7 @@ git -C /Users/steven/Documents/GitHub/aws-agent-poc commit -m "test: add supervi
 
 - [ ] **Step 1: Enroll and install the local agent**
 
-```bash
+```text
 export AWS_PROFILE=personal-agent
 aws sso login --profile "$AWS_PROFILE"
 awf supervisor agent enroll --agent-id local-mac-01 --json
@@ -250,6 +250,8 @@ awf supervisor agent doctor --agent-id local-mac-01 --environment local --repo-r
 awf supervisor agent install-launchd --agent-id local-mac-01 --repo-root "$HOME/Documents/GitHub"
 launchctl print gui/"$(id -u)"/com.awf.supervisor-agent
 ```
+
+These planned agent commands arrive in the Agent Runtime plan; Core Task 5 does not implement them.
 
 Expected: enrollment succeeds once, doctor reports healthy, launchd reports running, Control Plane lists `local-mac-01` online.
 

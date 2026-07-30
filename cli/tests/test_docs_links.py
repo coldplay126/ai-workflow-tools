@@ -116,6 +116,11 @@ def _awf_argv_from_bash_line(line: str) -> list[str] | None:
         if token in {"|", "||", "&&", ";"}:
             break
         argv.append(token)
+    if any(
+        re.search(r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{|\()", token)
+        for token in argv
+    ):
+        return None
     return argv
 
 
