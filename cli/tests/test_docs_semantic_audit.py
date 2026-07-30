@@ -22,6 +22,7 @@ ANGLE_TEMPLATE_ARG_RE = re.compile(r"<[^>]+>")
 FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---", re.DOTALL)
 TOP_LEVEL_SCALAR_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*):\s*(.*?)\s*$")
 STALE_WF_ALIAS_RE = re.compile(r"/wf(?:\.|\b(?!-))")
+SHELL_FENCE_RE = re.compile(r"```(?:bash|sh|shell)\n(.*?)\n```", re.DOTALL)
 KNOWN_GATE_IDS = {gate for gate in PHASE_GATE.values() if gate is not None}
 
 
@@ -56,6 +57,30 @@ def _argv_from_skill_command(command: str) -> list[str]:
     if argv and argv[0] == "awf":
         argv = argv[1:]
     return argv
+
+
+def _shell_fenced_awf_commands(text: str) -> tuple[str, ...]:
+    commands: list[str] = []
+    continued = ""
+    for block in SHELL_FENCE_RE.findall(text):
+        for raw_line in block.splitlines():
+            line = raw_line.strip()
+            if continued:
+                continued = f"{continued} {line.removesuffix('\\').strip()}"
+                if line.endswith("\\"):
+                    continue
+                commands.append(continued)
+                continued = ""
+                continue
+            if not line.startswith("awf wt "):
+                continue
+            if line.endswith("\\"):
+                continued = line.removesuffix("\\").strip()
+                continue
+            commands.append(line)
+    if continued:
+        commands.append(continued)
+    return tuple(commands)
 
 
 def _skill_files() -> tuple[Path, ...]:
@@ -531,3 +556,22 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "removed": "report_completion",
         "blocked": "preserve_worktree_report_code_message",
     }
+
+
+def test_release_worktree_lifecycle_shell_examples_match_contract() -> None:
+    path = REPO_ROOT / "claude" / "skills" / "release-worktree-lifecycle" / "SKILL.md"
+    text = path.read_text(encoding="utf-8")
+    contract = next(
+        json.loads(match.group(1))
+        for match in re.finditer(r"```json\n(.*?)\n```", text, re.DOTALL)
+        if json.loads(match.group(1)).get("schema")
+        == "awf.release-worktree-lifecycle/v1"
+    )
+    displayed_commands = _shell_fenced_awf_commands(text)
+
+    assert set(displayed_commands) == set(contract["commands"].values())
+
+    parser = build_parser()
+    for command in displayed_commands:
+        parsed = parser.parse_args(_argv_from_skill_command(command))
+        assert parsed.command == "wt"
