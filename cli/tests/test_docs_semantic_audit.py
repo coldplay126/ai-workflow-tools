@@ -568,8 +568,6 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
             "status": "inspect_select_lifecycle_action",
             "acquire_apply": "use_or_report_returned_lease",
             "promote_apply": "use_or_report_returned_lease",
-            "finish_preview": "review_blockers_then_apply",
-            "gc_preview": "review_blockers_then_apply",
         },
         "removed": "report_completion",
         "blocked": "preserve_worktree_report_code_message",

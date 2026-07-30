@@ -73,7 +73,7 @@ Only after deployment health is proven, preview the managed PR cleanup:
 awf wt finish --repo-root <repo-root> --pr <number> --json
 ```
 
-A `ready` finish preview means review returned blockers, then explicitly apply only when none remain. A finish `--apply` result of `removed` ends cleanup and MUST be reported:
+A `preview` finish result means review returned blockers, then explicitly apply only when none remain. A finish `--apply` result of `removed` ends cleanup and MUST be reported:
 
 ```sh
 awf wt finish --repo-root <repo-root> --pr <number> --apply --json
@@ -89,7 +89,7 @@ Bulk cleanup MUST begin with a preview:
 awf wt gc --repo-root <repo-root> --merged --older-than 7d --dry-run --json
 ```
 
-A `ready` GC preview means review every candidate and blocker, then apply only the proven-safe set. A GC `--apply` result of `removed` MUST be reported:
+A `preview` GC result means review every candidate and blocker, then apply only the proven-safe set. A GC `--apply` result of `removed` MUST be reported:
 
 ```sh
 awf wt gc --repo-root <repo-root> --merged --older-than 7d --apply --json
@@ -155,9 +155,7 @@ MUST NOT use direct worktree creation, removal, pruning, or other unmanaged dele
     "ready": {
       "status": "inspect_select_lifecycle_action",
       "acquire_apply": "use_or_report_returned_lease",
-      "promote_apply": "use_or_report_returned_lease",
-      "finish_preview": "review_blockers_then_apply",
-      "gc_preview": "review_blockers_then_apply"
+      "promote_apply": "use_or_report_returned_lease"
     },
     "removed": "report_completion",
     "blocked": "preserve_worktree_report_code_message"
