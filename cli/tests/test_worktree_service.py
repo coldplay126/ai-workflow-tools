@@ -279,11 +279,29 @@ def test_refresh_marks_merged_feature_cleanable(harness: Harness) -> None:
         changed_paths=("README.txt",),
     )
 
-    result = harness.service.status(initiative="reward-widget", refresh=True)
+    first = harness.service.status(initiative="reward-widget", refresh=True)
+    second = harness.service.status(initiative="reward-widget", refresh=True)
 
-    refreshed = result.leases[0]
-    assert refreshed.state is LeaseState.CLEANABLE
-    assert refreshed.deployment_state is DeploymentState.NOT_REQUIRED
+    assert first.leases[0].state is LeaseState.CLEANABLE
+    assert first.leases[0].deployment_state is DeploymentState.NOT_REQUIRED
+    assert second.leases[0].version == first.leases[0].version
+
+
+def test_refresh_does_not_churn_an_unchanged_open_pr(harness: Harness) -> None:
+    acquired = harness.acquire("reward-widget")
+    assert acquired.lease is not None
+    lease = harness.attach_pr(acquired.lease, 42)
+    harness.github.prs[42] = pull_request(
+        number=42,
+        state="OPEN",
+        head_sha=lease.head_sha,
+    )
+
+    first = harness.service.status(initiative="reward-widget", refresh=True)
+    second = harness.service.status(initiative="reward-widget", refresh=True)
+
+    assert first.leases[0].state is LeaseState.PR_OPEN
+    assert second.leases[0].version == first.leases[0].version
 
 
 def test_refresh_marks_closed_unmerged_without_deleting(harness: Harness) -> None:
@@ -292,10 +310,12 @@ def test_refresh_marks_closed_unmerged_without_deleting(harness: Harness) -> Non
     lease = harness.attach_pr(acquired.lease, 42)
     harness.github.prs[42] = closed_pr(number=42, head_sha=lease.head_sha)
 
-    result = harness.service.status(initiative="reward-widget", refresh=True)
+    first = harness.service.status(initiative="reward-widget", refresh=True)
+    second = harness.service.status(initiative="reward-widget", refresh=True)
 
-    assert result.leases[0].state is LeaseState.CLOSED_UNMERGED
+    assert first.leases[0].state is LeaseState.CLOSED_UNMERGED
     assert lease.worktree_path.exists()
+    assert second.leases[0].version == first.leases[0].version
 
 
 def test_refresh_external_failure_keeps_previous_state_and_warns(
@@ -327,9 +347,12 @@ def test_refresh_promoted_lease_cleanable_after_healthy_deployment(
     lease = harness.attach_pr(acquired.lease, 42)
     harness.github.prs[42] = merged_pr(number=42, head_sha=lease.head_sha)
 
+    deployment_calls: list[list[str]] = []
+
     def deployment_runner(
-        command: tuple[str, ...], **_: object
+        command: list[str], **_: object
     ) -> subprocess.CompletedProcess[str]:
+        deployment_calls.append(command)
         return subprocess.CompletedProcess(command, 0, "", "")
 
     harness.service = WorktreeService(
@@ -345,10 +368,13 @@ def test_refresh_promoted_lease_cleanable_after_healthy_deployment(
         lock_dir=harness.lock_dir,
     )
 
-    result = harness.service.status(initiative="reward-widget", refresh=True)
+    first = harness.service.status(initiative="reward-widget", refresh=True)
+    second = harness.service.status(initiative="reward-widget", refresh=True)
 
-    assert result.leases[0].state is LeaseState.CLEANABLE
-    assert result.leases[0].deployment_state is DeploymentState.HEALTHY
+    assert first.leases[0].state is LeaseState.CLEANABLE
+    assert first.leases[0].deployment_state is DeploymentState.HEALTHY
+    assert second.leases[0].version == first.leases[0].version
+    assert deployment_calls == [["deploy", "status"]]
 
 
 def test_refresh_blocks_promoted_lease_when_deployment_fails(
@@ -405,14 +431,92 @@ def test_refresh_keeps_promoted_lease_deploying_without_status_command(
     lease = harness.attach_pr(acquired.lease, 42)
     harness.github.prs[42] = merged_pr(number=42, head_sha=lease.head_sha)
 
-    result = harness.service.status(initiative="reward-widget", refresh=True)
+    first = harness.service.status(initiative="reward-widget", refresh=True)
+    second = harness.service.status(initiative="reward-widget", refresh=True)
 
-    assert result.leases[0].state is LeaseState.DEPLOYING
-    assert result.leases[0].deployment_state is DeploymentState.UNKNOWN
+    assert first.leases[0].state is LeaseState.DEPLOYING
+    assert first.leases[0].deployment_state is DeploymentState.UNKNOWN
+    assert second.leases[0].version == first.leases[0].version
 
 @pytest.fixture
 def harness(tmp_path: Path) -> Harness:
     return Harness.create(tmp_path)
+
+
+def test_refresh_warns_when_github_returns_a_different_pr_number(
+    harness: Harness,
+) -> None:
+    acquired = harness.acquire("reward-widget")
+    assert acquired.lease is not None
+    lease = harness.attach_pr(acquired.lease, 42)
+    harness.github.prs[42] = merged_pr(number=43, head_sha=lease.head_sha)
+
+    result = harness.service.status(initiative="reward-widget", refresh=True)
+
+    assert result.leases[0].state is LeaseState.PR_OPEN
+    assert result.warnings[0]["code"] == "github_refresh_failed"
+
+
+def test_refresh_warns_when_compare_and_swap_loses_a_race(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    acquired = harness.acquire("reward-widget")
+    assert acquired.lease is not None
+    lease = harness.attach_pr(acquired.lease, 42)
+    harness.github.prs[42] = merged_pr(number=42, head_sha=lease.head_sha)
+
+    def conflict(*_: object, **__: object) -> Lease:
+        raise RuntimeError("lease changed concurrently")
+
+    monkeypatch.setattr(harness.registry, "transition", conflict)
+
+    result = harness.service.status(initiative="reward-widget", refresh=True)
+
+    assert result.leases[0].state is LeaseState.PR_OPEN
+    assert result.warnings[0]["code"] == "lease_refresh_failed"
+
+
+def test_refresh_warns_after_a_bounded_deployment_timeout(
+    harness: Harness,
+) -> None:
+    acquired = harness.service.acquire(
+        initiative="reward-widget",
+        purpose=Purpose.PROMOTE,
+        base=None,
+        branch=None,
+        owner_id="session-1",
+        apply=True,
+    )
+    assert acquired.lease is not None
+    lease = harness.attach_pr(acquired.lease, 42)
+    harness.github.prs[42] = merged_pr(number=42, head_sha=lease.head_sha)
+    timeouts: list[float] = []
+
+    def deployment_runner(
+        command: list[str], *, timeout: float, **_: object
+    ) -> subprocess.CompletedProcess[str]:
+        timeouts.append(timeout)
+        raise subprocess.TimeoutExpired(command, timeout)
+
+    harness.service = WorktreeService(
+        harness.registry,
+        harness.git,
+        config=WorktreeConfig(
+            default_base="staging", deployment_status_command=("deploy", "status")
+        ),
+        github=harness.github,
+        deployment_runner=deployment_runner,
+        cache_dir=harness.cache_dir,
+        state_dir=harness.state_dir,
+        lock_dir=harness.lock_dir,
+    )
+
+    result = harness.service.status(initiative="reward-widget", refresh=True)
+
+    assert result.leases[0].state is LeaseState.DEPLOYING
+    assert result.leases[0].deployment_state is DeploymentState.PENDING
+    assert result.warnings[0]["code"] == "deployment_refresh_failed"
+    assert timeouts == [30.0]
 
 
 def test_acquire_previews_without_creating_a_worktree(harness: Harness) -> None:

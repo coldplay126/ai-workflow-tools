@@ -45,6 +45,7 @@ def cache_root() -> Path:
 
 
 _MAX_IMPORT_COLLISION_ACTIONS = 32
+_DEPLOYMENT_STATUS_TIMEOUT_SECONDS = 30.0
 
 
 def _initiative_slug(initiative: str) -> str:
@@ -222,6 +223,15 @@ class WorktreeService:
                 }
             )
             return
+        if pull_request.number != lease.target_pr:
+            warnings.append(
+                {
+                    "code": "github_refresh_failed",
+                    "message": f"Unable to refresh pull request state for lease {lease.id}.",
+                }
+            )
+            return
+
 
         try:
             current = self._current_refresh_lease(lease.id, pull_request.number)
@@ -280,6 +290,15 @@ class WorktreeService:
         pull_request: PullRequest,
         warnings: list[dict[str, str]],
     ) -> None:
+        current = self._current_refresh_lease(lease_id, pull_request.number)
+        if current is None:
+            return
+        if (
+            current.state is LeaseState.CLEANABLE
+            and current.deployment_state is DeploymentState.HEALTHY
+        ):
+            return
+
         command = self.config.deployment_status_command
         self._transition_refresh(
             lease_id,
@@ -302,6 +321,7 @@ class WorktreeService:
                 shell=False,
                 capture_output=True,
                 text=True,
+                timeout=_DEPLOYMENT_STATUS_TIMEOUT_SECONDS,
             )
         except Exception:
             warnings.append(
