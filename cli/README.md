@@ -66,6 +66,116 @@
 - `permissions.allowed_tools` / `disabled_tools` / `yolo`: provider 실행 전 최소 권한 검사
 - `tools/` 모듈: `read/write/glob/grep/git diff/log` 기본 계층 추가 (Phase 2 groundwork)
 
+### Managed release worktrees (`awf wt`)
+
+`awf wt` is the CLI authority for leased Git worktrees. It keeps each managed
+worktree in a registry and requires explicit evidence before removing one. The
+eight subcommands are:
+
+| Command | Purpose |
+|---------|---------|
+| `awf wt acquire` | Preview or create/reuse a feature, promotion, or scratch lease. |
+| `awf wt promote` | Preview or promote one approved, merged staging PR delta to a production branch. |
+| `awf wt finish` | Preview or remove one proven-safe managed lease for a merged PR. |
+| `awf wt gc` | Preview or remove stale, proven-safe merged leases; `--merged` is required. |
+| `awf wt import` | Inventory existing direct-child repository worktrees and optionally register them as imported leases. |
+| `awf wt adopt` | Preview or mark one clean imported lease as managed. |
+| `awf wt status` | Read registered leases, optionally refreshing PR and deployment state. |
+| `awf wt doctor` | Read-only report of registry and local Git-worktree mismatches. |
+
+Every mutation-capable command is a preview by default. Pass `--apply` only
+after inspecting that preview; `gc` also accepts explicit `--dry-run`. `status`
+and `doctor` are read-only. `import` records discovered worktrees as unmanaged,
+so an imported worktree remains unmanaged until an explicit `awf wt adopt
+--lease <id> --apply`.
+
+With `--json`, stdout is one versioned result envelope; diagnostics stay on
+stderr:
+
+```json
+{
+  "schema_version": 1,
+  "command": "wt.promote",
+  "status": "ok",
+  "decision": "ready",
+  "lease": {},
+  "leases": [],
+  "actions": [],
+  "blockers": [],
+  "warnings": [],
+  "observed_at": "2026-07-30T00:00:00+00:00"
+}
+```
+
+Exit code `0` means success, preview, reuse, or no-op; `2` means CLI usage or
+configuration-schema error; `3` means a safety blocker; `4` means an external
+GitHub, Git remote, or deployment-checker failure; and `5` means a registry or
+local-Git conflict. Automation should use the structured `blockers` and
+`warnings` rather than parse prose.
+
+By default the registry is
+`~/.local/state/awf/worktrees.sqlite3` and the worktree cache is
+`~/.cache/awf/worktrees`. Isolate an invocation with:
+
+```bash
+AWF_WORKTREE_STATE_DB="$TMPDIR/awf-worktrees.sqlite3" \
+AWF_WORKTREE_CACHE_DIR="$TMPDIR/awf-worktrees" \
+awf wt status --repo-root . --json
+```
+
+Repository policy belongs in `.awf/worktree.toml`. Commands are argv arrays,
+not shell strings:
+
+```toml
+[worktree]
+default_base = "staging"
+production_branch = "main"
+
+[prepare]
+inputs = ["pyproject.toml", "uv.lock"]
+command = ["uv", "sync", "--frozen"]
+
+[verify.production]
+commands = [
+  ["uv", "run", "pytest", "tests/release", "-q"],
+  ["uv", "run", "ruff", "check", "."],
+]
+
+[deployment]
+status_command = ["./scripts/deployment-status", "production"]
+```
+
+Feature flow:
+
+```bash
+# Inspect the generated branch and worktree path first.
+awf wt acquire --initiative reward-widget --purpose feature \
+  --base staging --owner-id "$USER" --json
+
+# Create or reuse the exact managed lease.
+awf wt acquire --initiative reward-widget --purpose feature \
+  --base staging --owner-id "$USER" --apply --json
+awf wt status --repo-root . --initiative reward-widget --json
+```
+
+Promotion and finish flow:
+
+```bash
+# The source PR must be merged, approved, checked, and based on staging.
+awf wt promote --source-pr 372 --to main --json
+awf wt promote --source-pr 372 --to main --apply --json
+
+# After the promotion PR has merged, refresh its repository-configured status.
+awf wt status --repo-root . --refresh --json
+awf wt finish --pr 900 --json
+awf wt finish --pr 900 --apply --json
+```
+
+AWF does not provide generic deployment orchestration. It runs the
+repository-configured verification and status argv commands around the existing
+CI and deployment system, and preserves the worktree when that evidence is
+missing, unhealthy, or inconclusive.
+
 ### Operations wiki / `awf wiki` (English summary)
 
 `awf wiki` manages the project-scoped knowledge layer under `.awf-operations/`:
