@@ -19,6 +19,7 @@ from awf.commands.init import run_init
 from awf.commands.scan import run_scan
 from awf.commands.wf_apply import run_wf_apply_result
 from awf.commands.wf_pr import run_wf_pr
+from awf.commands.wt import run_wt_doctor, run_wt_status
 from awf.commands.wf import (
     run_wf_decide,
     run_wf_detect_class,
@@ -42,7 +43,7 @@ from awf.commands.wiki import (
 from awf.core.router import route_natural_language
 
 
-KNOWN_COMMANDS = {"agents", "chat", "analyze", "wf", "config", "skills", "mcp", "doctor", "ready", "scan", "init", "cmux", "wiki", "dashboard"}
+KNOWN_COMMANDS = {"agents", "chat", "analyze", "wf", "config", "skills", "mcp", "doctor", "ready", "scan", "init", "cmux", "wiki", "dashboard", "wt"}
 
 
 def _should_skip_execution_confirmation(args: argparse.Namespace) -> bool:
@@ -617,6 +618,43 @@ def build_parser() -> argparse.ArgumentParser:
     scan_parser.add_argument("--dry-run", action="store_true", help="With --merge, print merged config instead of writing.")
     scan_parser.add_argument("--no-ai", action="store_true", help="Heuristic only, skip AI domain discovery fallback.")
     scan_parser.set_defaults(handler=run_scan)
+
+    wt_parser = subparsers.add_parser("wt", help="Managed Git worktree helpers.")
+    wt_subparsers = wt_parser.add_subparsers(dest="wt_command", required=True)
+
+    wt_status_parser = wt_subparsers.add_parser(
+        "status",
+        help="Show registered worktree leases.",
+    )
+    wt_status_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to current or parent directories.",
+    )
+    wt_status_parser.add_argument(
+        "--initiative",
+        help="Limit leases to an initiative.",
+    )
+    wt_status_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_status_parser.set_defaults(handler=run_wt_status)
+
+    wt_doctor_parser = wt_subparsers.add_parser(
+        "doctor",
+        help="Report registry and Git worktree mismatches without repairing them.",
+    )
+    wt_doctor_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to current or parent directories.",
+    )
+    wt_doctor_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_doctor_parser.set_defaults(handler=run_wt_doctor)
 
     return parser
 
