@@ -85,9 +85,11 @@ eight subcommands are:
 
 Every mutation-capable command is a preview by default. Pass `--apply` only
 after inspecting that preview; `gc` also accepts explicit `--dry-run`. `status`
-and `doctor` are read-only. `import` records discovered worktrees as unmanaged,
-so an imported worktree remains unmanaged until an explicit `awf wt adopt
---lease <id> --apply`.
+and `doctor` never mutate Git worktrees. Plain `status` and `doctor` are
+registry reads; `status --refresh` records observed provider/deployment state
+and lease transitions in the registry, so it needs a writable state database.
+`import` records discovered worktrees as unmanaged, so an imported worktree
+remains unmanaged until an explicit `awf wt adopt --lease <id> --apply`.
 
 With `--json`, stdout is one versioned result envelope; diagnostics stay on
 stderr:
