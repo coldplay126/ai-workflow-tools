@@ -3456,9 +3456,9 @@ def test_finish_propagates_remote_branch_delete_failure_after_removal(
     assert result.status == "error"
     assert result.exit_code == 4
     assert result.blockers[0]["code"] == "remote_branch_cleanup_failed"
-    assert "remote_branch_cleanup_failed" in {
-        warning["code"] for warning in result.warnings
-    }
+    assert [warning["code"] for warning in result.warnings].count(
+        "remote_branch_cleanup_failed"
+    ) == 1
     assert result.lease is not None
     assert result.lease.id == lease.id
     assert result.lease.state is LeaseState.REMOVED
