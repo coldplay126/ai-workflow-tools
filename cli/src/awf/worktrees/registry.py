@@ -154,6 +154,32 @@ class WorktreeRegistry:
         self, *, include_removed: bool = True, **filters: Any
     ) -> list[Lease]:
         self.ensure()
+        with closing(self._connect()) as connection:
+            return self._list_leases(
+                connection,
+                include_removed=include_removed,
+                filters=filters,
+            )
+
+    def list_leases_read_only(
+        self, *, include_removed: bool = True, **filters: Any
+    ) -> list[Lease]:
+        if not self.db_path.is_file():
+            return []
+        with closing(self._connect_read_only()) as connection:
+            return self._list_leases(
+                connection,
+                include_removed=include_removed,
+                filters=filters,
+            )
+
+    def _list_leases(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        include_removed: bool,
+        filters: dict[str, Any],
+    ) -> list[Lease]:
         predicates: list[str] = []
         values: list[Any] = []
         for name, value in filters.items():
@@ -174,8 +200,7 @@ class WorktreeRegistry:
             statement += " WHERE " + " AND ".join(predicates)
         statement += " ORDER BY created_at, id"
 
-        with closing(self._connect()) as connection:
-            rows = connection.execute(statement, values).fetchall()
+        rows = connection.execute(statement, values).fetchall()
         return [self._lease_from_row(row) for row in rows]
 
     def transition(
@@ -325,6 +350,15 @@ class WorktreeRegistry:
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(str(self.db_path))
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        return connection
+
+    def _connect_read_only(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(
+            f"{self.db_path.resolve().as_uri()}?mode=ro",
+            uri=True,
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection

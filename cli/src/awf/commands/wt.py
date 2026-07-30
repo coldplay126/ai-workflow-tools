@@ -21,6 +21,8 @@ def _emit(result: CommandResult, *, as_json: bool) -> int:
         print(f"{result.command}: {result.decision}")
         for lease in result.leases:
             print(f"{lease.id}  {lease.state.value:16}  {lease.worktree_path}")
+        for action in result.actions:
+            print(f"{action['kind']}: {action['path']}")
         for blocker in result.blockers:
             print(
                 f"blocked: {blocker['code']}: {blocker['message']}",

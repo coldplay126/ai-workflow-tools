@@ -34,7 +34,7 @@ class WorktreeService:
     def status(self, *, initiative: str | None = None) -> CommandResult:
         repository_id = self.git.repository_id()
         leases = tuple(
-            self.registry.list_leases(
+            self.registry.list_leases_read_only(
                 repository_id=repository_id,
                 initiative=initiative,
                 include_removed=False,
@@ -49,7 +49,7 @@ class WorktreeService:
     def doctor(self) -> CommandResult:
         registered = {
             lease.worktree_path: lease
-            for lease in self.registry.list_leases(
+            for lease in self.registry.list_leases_read_only(
                 repository_id=self.git.repository_id(), include_removed=False
             )
         }

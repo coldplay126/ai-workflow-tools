@@ -32,7 +32,7 @@ def test_wt_status_parser_surface() -> None:
 def test_wt_status_emits_one_json_document(
     tmp_path: Path, monkeypatch
 ) -> None:
-    db = tmp_path / "state.sqlite3"
+    db = tmp_path / "state" / "worktrees.sqlite3"
     monkeypatch.setenv("AWF_WORKTREE_STATE_DB", str(db))
     repo = make_repository(tmp_path)
 
@@ -46,13 +46,15 @@ def test_wt_status_emits_one_json_document(
     assert payload["schema_version"] == 1
     assert payload["command"] == "wt.status"
     assert payload["decision"] == "no_op"
+    assert not db.parent.exists()
 
 
 def test_wt_doctor_reports_unregistered_worktree_without_mutation(
     tmp_path: Path, monkeypatch
 ) -> None:
     repo = make_repository(tmp_path)
-    monkeypatch.setenv("AWF_WORKTREE_STATE_DB", str(tmp_path / "state.sqlite3"))
+    db = tmp_path / "state" / "worktrees.sqlite3"
+    monkeypatch.setenv("AWF_WORKTREE_STATE_DB", str(db))
 
     rc, stdout, _ = capture_main(
         ["wt", "doctor", "--repo-root", str(repo), "--json"]
@@ -62,3 +64,24 @@ def test_wt_doctor_reports_unregistered_worktree_without_mutation(
     assert rc == 0
     assert payload["actions"][0]["kind"] == "unregistered_worktree"
     assert payload["actions"][0]["path"] == str(repo.resolve())
+    assert not db.parent.exists()
+
+
+def test_wt_doctor_human_output_lists_each_mismatch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo = make_repository(tmp_path)
+    monkeypatch.setenv(
+        "AWF_WORKTREE_STATE_DB", str(tmp_path / "state" / "worktrees.sqlite3")
+    )
+
+    rc, stdout, stderr = capture_main(
+        ["wt", "doctor", "--repo-root", str(repo)]
+    )
+
+    assert rc == 0
+    assert stderr == ""
+    assert stdout == (
+        "wt.doctor: preview\n"
+        f"unregistered_worktree: {repo.resolve()}\n"
+    )
