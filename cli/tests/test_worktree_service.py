@@ -940,6 +940,57 @@ def test_acquire_preview_reuses_active_lease_without_mutation_or_preparing(
     else:
         assert json.loads(marker.read_text(encoding="utf-8")) == {"key": marker_key}
 
+
+@pytest.mark.parametrize("lock_exists", [False, True])
+def test_acquire_preview_reuse_does_not_mutate_the_repository_lock(
+    harness: Harness, lock_exists: bool, monkeypatch
+) -> None:
+    first = harness.acquire("reward-widget")
+    assert first.lease is not None
+    lock_path = harness.lock_dir / f"{harness.git.repository_id()}.lock"
+    assert lock_path.is_file()
+    if lock_exists:
+        lock_path.write_bytes(b"pre-existing lock content\n")
+        os.utime(lock_path, ns=(1_700_000_000_000_000_000,) * 2)
+        before_lock = (lock_path.read_bytes(), lock_path.stat().st_mtime_ns)
+    else:
+        lock_path.unlink()
+
+    snapshot_calls: list[dict[str, object]] = []
+    list_leases_read_only = harness.registry.list_leases_read_only
+
+    def recording_list_leases_read_only(**kwargs: object) -> list[Lease]:
+        snapshot_calls.append(kwargs)
+        return list_leases_read_only(**kwargs)
+
+    monkeypatch.setattr(
+        harness.registry, "list_leases_read_only", recording_list_leases_read_only
+    )
+
+    result = harness.service.acquire(
+        initiative="reward-widget",
+        purpose=Purpose.FEATURE,
+        base=None,
+        branch=None,
+        owner_id="session-1",
+        apply=False,
+    )
+
+    assert result.status == "ok"
+    assert result.decision == "reuse"
+    assert snapshot_calls == [
+        {
+            "include_removed": False,
+            "repository_id": harness.git.repository_id(),
+            "initiative": "reward-widget",
+            "purpose": Purpose.FEATURE,
+        }
+    ]
+    if lock_exists:
+        assert (lock_path.read_bytes(), lock_path.stat().st_mtime_ns) == before_lock
+    else:
+        assert not lock_path.exists()
+
 @pytest.mark.parametrize("apply", [False, True])
 def test_acquire_blocks_when_registered_path_is_missing(
     harness: Harness, apply: bool

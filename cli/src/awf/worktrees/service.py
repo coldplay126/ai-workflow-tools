@@ -118,6 +118,15 @@ class WorktreeService:
         slug = _initiative_slug(initiative)
         expected_branch = branch or f"awf/{slug}/{purpose.value}"
         repository_id = self.git.repository_id()
+        if not apply:
+            active_leases = self.registry.list_leases_read_only(
+                include_removed=False,
+                repository_id=repository_id,
+                initiative=slug,
+                purpose=purpose,
+            )
+            if active_leases:
+                return self._reuse(active_leases[0], expected_branch, apply=False)
         with repository_lock(self.lock_dir / f"{repository_id}.lock"):
             active = self.registry.find_active(repository_id, slug, purpose)
             if active is not None:
