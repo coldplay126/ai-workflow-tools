@@ -62,31 +62,51 @@ def _write_native_checkpoint(
     session_persisted: bool = True,
 ) -> Path:
     target = tmp_path / ".workflow" / "artifacts" / "dispatch" / "omp-native-batch-1.json"
+    fingerprint = "a" * 64
+    descriptor_sha256 = "b" * 64
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(
         json.dumps(
             {
                 "version": 1,
                 "kind": "omp_native_batch",
-                "batch_fingerprint": "batch-1",
-                "coordinator_session_id": "session-native-1",
-                "session_persisted": session_persisted,
+                "batch_fingerprint": fingerprint,
+                "descriptor_hashes": [descriptor_sha256],
+                "worker_names": [task_id],
                 "state": "completed",
+                "attempt": 1,
+                "session_persistence_requested": session_persisted,
+                "session_persisted": session_persisted,
+                "resumable": False,
+                "coordinator_session_id": (
+                    "session-native-1" if session_persisted else None
+                ),
                 "workers": [
                     {
                         "index": 0,
                         "name": task_id,
+                        "descriptor_sha256": descriptor_sha256,
                         "task_id": task_id,
                         "agent_uri": f"agent://{task_id}",
                         "history_uri": f"history://{task_id}",
                         "status": "completed",
                     }
                 ],
+                "steering_evidence": {
+                    "reported": False,
+                    "wait_calls": 0,
+                    "inspected_completed": [],
+                    "message_sent": False,
+                    "message_target": None,
+                    "message_kind": None,
+                },
             }
         ),
         encoding="utf-8",
     )
     return target
+
+
 
 
 
@@ -297,22 +317,23 @@ def test_lookup_omp_provenance_rejects_invalid_native_checkpoint_scalars(
 
 
 @pytest.mark.parametrize(
-    ("field", "value", "message"),
+    ("field", "value", "remove", "message"),
     [
-        ("index", None, "worker 0 missing index"),
-        ("index", 1, "worker 0 has invalid index"),
-        ("task_id", None, "worker 0 has no task ID"),
-        ("task_id", True, "worker 0 has invalid task ID"),
-        ("task_id", {}, "worker 0 has invalid task ID"),
+        ("index", None, True, "worker 0 missing index"),
+        ("index", 1, False, "worker 0 has invalid index"),
+        ("task_id", None, True, "worker 0 has no task ID"),
+        ("task_id", None, False, "worker 0 has invalid task ID"),
+        ("task_id", True, False, "worker 0 has invalid task ID"),
+        ("task_id", {}, False, "worker 0 has invalid task ID"),
     ],
 )
 def test_lookup_omp_provenance_rejects_invalid_native_worker_fields(
-    tmp_path: Path, field: str, value: object, message: str
+    tmp_path: Path, field: str, value: object, remove: bool, message: str
 ):
     checkpoint = _write_native_checkpoint(tmp_path)
     payload = json.loads(checkpoint.read_text(encoding="utf-8"))
     worker = payload["workers"][0]
-    if value is None:
+    if remove:
         worker.pop(field)
     else:
         worker[field] = value
@@ -329,7 +350,15 @@ def test_lookup_omp_provenance_rejects_duplicate_native_worker_task_ids(
 ):
     checkpoint = _write_native_checkpoint(tmp_path)
     payload = json.loads(checkpoint.read_text(encoding="utf-8"))
-    payload["workers"].append({**payload["workers"][0], "index": 1})
+    duplicate = {
+        **payload["workers"][0],
+        "index": 1,
+        "name": "Awf001Implementer",
+        "descriptor_sha256": "c" * 64,
+    }
+    payload["workers"].append(duplicate)
+    payload["descriptor_hashes"].append(duplicate["descriptor_sha256"])
+    payload["worker_names"].append(duplicate["name"])
     checkpoint.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(
@@ -339,23 +368,28 @@ def test_lookup_omp_provenance_rejects_duplicate_native_worker_task_ids(
         lookup_omp_provenance(tmp_path, checkpoint)
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("agent_uri", None),
-        ("history_uri", None),
-        ("status", None),
-    ],
-)
-def test_lookup_omp_provenance_allows_null_native_worker_optional_fields(
-    tmp_path: Path, field: str, value: None
-):
+def test_lookup_omp_provenance_allows_null_interrupted_worker_status(tmp_path: Path):
     checkpoint = _write_native_checkpoint(tmp_path)
     payload = json.loads(checkpoint.read_text(encoding="utf-8"))
-    payload["workers"][0][field] = value
+    payload.update(
+        {
+            "state": "interrupted",
+            "session_persisted": True,
+            "resumable": True,
+            "coordinator_session_id": "session-native-1",
+            "steering_evidence": {},
+        }
+    )
+    payload["workers"][0]["status"] = None
     checkpoint.write_text(json.dumps(payload), encoding="utf-8")
 
-    lookup_omp_provenance(tmp_path, checkpoint)
+    _, normalized = lookup_omp_provenance(tmp_path, checkpoint)
+
+    assert normalized["agents"][0]["status"] == ""
+
+
+
+
 
 
 @pytest.mark.parametrize(
@@ -368,14 +402,17 @@ def test_lookup_omp_provenance_allows_null_native_worker_optional_fields(
         ("agent_uri", True, "worker 0 has invalid agent_uri"),
         ("agent_uri", {}, "worker 0 has invalid agent_uri"),
         ("agent_uri", "history://task-1", "worker 0 has invalid agent_uri"),
+        ("agent_uri", None, "completed worker 0 missing handles"),
         ("history_uri", True, "worker 0 has invalid history_uri"),
         ("history_uri", {}, "worker 0 has invalid history_uri"),
         ("history_uri", "agent://task-1", "worker 0 has invalid history_uri"),
+        ("history_uri", None, "completed worker 0 missing handles"),
         ("status", "", "worker 0 has invalid status"),
         ("status", " ", "worker 0 has invalid status"),
         ("status", " completed ", "worker 0 has invalid status"),
         ("status", True, "worker 0 has invalid status"),
         ("status", {}, "worker 0 has invalid status"),
+        ("status", None, "completed worker 0 is not terminal"),
     ],
 )
 def test_lookup_omp_provenance_rejects_invalid_native_worker_metadata(
@@ -390,6 +427,23 @@ def test_lookup_omp_provenance_rejects_invalid_native_worker_metadata(
         ValueError, match=rf"invalid OMP native checkpoint .*: {message}"
     ):
         lookup_omp_provenance(tmp_path, checkpoint)
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["completed", "success", "ok", "failed", "error", "cancelled", "canceled"],
+)
+def test_lookup_omp_provenance_preserves_terminal_native_worker_status(
+    tmp_path: Path, status: str
+):
+    checkpoint = _write_native_checkpoint(tmp_path)
+    payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+    payload["workers"][0]["status"] = status
+    checkpoint.write_text(json.dumps(payload), encoding="utf-8")
+
+    _, normalized = lookup_omp_provenance(tmp_path, checkpoint)
+
+    assert normalized["agents"][0]["status"] == status
 
 
 @pytest.mark.parametrize(
@@ -466,7 +520,6 @@ def test_lookup_omp_provenance_rejects_unsafe_native_worker_handles(
             "agent://Awf000Implementer",
             "history://Awf000Implementer",
         ),
-        ("CamelCaseTask", None, None),
         ("task-1", "agent://opaque-agent", "history://opaque-history"),
     ],
 )
@@ -480,6 +533,7 @@ def test_lookup_omp_provenance_normalizes_valid_native_worker_handles(
     payload = json.loads(checkpoint.read_text(encoding="utf-8"))
     worker = payload["workers"][0]
     worker["name"] = task_id
+    payload["worker_names"][0] = task_id
     worker["task_id"] = task_id
     worker["agent_uri"] = agent_uri
     worker["history_uri"] = history_uri
@@ -494,20 +548,106 @@ def test_lookup_omp_provenance_normalizes_valid_native_worker_handles(
 
 
 @pytest.mark.parametrize(
-    "state",
-    ["prepared", "resuming", "completed", "interrupted", "ambiguous"],
+    ("state", "updates"),
+    [
+        (
+            "prepared",
+            {
+                "session_persisted": False,
+                "resumable": False,
+                "coordinator_session_id": None,
+                "steering_evidence": None,
+            },
+        ),
+        (
+            "resuming",
+            {
+                "session_persisted": True,
+                "resumable": True,
+                "coordinator_session_id": "session-native-1",
+                "steering_evidence": None,
+            },
+        ),
+        ("completed", {}),
+        (
+            "interrupted",
+            {
+                "session_persisted": True,
+                "resumable": True,
+                "coordinator_session_id": "session-native-1",
+                "steering_evidence": {},
+            },
+        ),
+        (
+            "ambiguous",
+            {
+                "session_persisted": True,
+                "resumable": False,
+                "coordinator_session_id": "session-native-1",
+                "steering_evidence": {},
+            },
+        ),
+    ],
 )
 def test_lookup_omp_provenance_accepts_valid_native_checkpoint_states(
-    tmp_path: Path, state: str
+    tmp_path: Path, state: str, updates: dict[str, object]
 ):
     checkpoint = _write_native_checkpoint(tmp_path)
     payload = json.loads(checkpoint.read_text(encoding="utf-8"))
     payload["state"] = state
+    payload.update(updates)
+    if state == "prepared":
+        payload["workers"][0].update(
+            {
+                "task_id": None,
+                "agent_uri": None,
+                "history_uri": None,
+                "status": None,
+            }
+        )
     checkpoint.write_text(json.dumps(payload), encoding="utf-8")
 
     _, normalized = lookup_omp_provenance(tmp_path, checkpoint)
 
     assert normalized["status"] == state
+    if state == "prepared":
+        record = normalized["agents"][0]
+        assert record["task_id"] == ""
+        assert record["agent_uri"] == ""
+        assert record["history_uri"] == ""
+        assert record["status"] == ""
+        with pytest.raises(ValueError, match="requires a persisted coordinator session"):
+            agents_command._require_actionable_target(normalized, record)
+
+
+@pytest.mark.parametrize(
+    ("state", "steering_evidence"),
+    [("resuming", None), ("interrupted", {})],
+)
+def test_lookup_omp_provenance_rejects_resumable_worker_without_task_id(
+    tmp_path: Path, state: str, steering_evidence: object
+):
+    checkpoint = _write_native_checkpoint(tmp_path)
+    payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+    payload.update(
+        {
+            "state": state,
+            "session_persisted": True,
+            "resumable": True,
+            "coordinator_session_id": "session-native-1",
+            "steering_evidence": steering_evidence,
+        }
+    )
+    payload["workers"][0].update(
+        {"task_id": None, "agent_uri": None, "history_uri": None}
+    )
+    checkpoint.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match=r"invalid OMP native checkpoint .*: resumable worker 0 missing task ID",
+    ):
+        lookup_omp_provenance(tmp_path, checkpoint)
 
 
 @pytest.mark.parametrize("state", [None, True, {}, "", "failed"])
@@ -522,6 +662,157 @@ def test_lookup_omp_provenance_rejects_invalid_native_checkpoint_state(
     with pytest.raises(
         ValueError,
         match=r"invalid OMP native checkpoint .*: invalid state",
+    ):
+        lookup_omp_provenance(tmp_path, checkpoint)
+
+
+def test_lookup_omp_provenance_rejects_conflicting_native_discriminator(
+    tmp_path: Path,
+):
+    checkpoint = _write_native_checkpoint(tmp_path)
+    payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+    payload.update({"backend": "omp", "schema_version": 2})
+    checkpoint.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match=r"invalid OMP native checkpoint .*: conflicting discriminator",
+    ):
+        lookup_omp_provenance(tmp_path, checkpoint)
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ("descriptor_hashes", "missing descriptor_hashes"),
+        ("worker_names", "missing worker_names"),
+        ("attempt", "missing attempt"),
+        (
+            "session_persistence_requested",
+            "missing session_persistence_requested",
+        ),
+        ("session_persisted", "missing session_persisted"),
+        ("resumable", "missing resumable"),
+        ("steering_evidence", "missing steering_evidence"),
+        ("worker_descriptor_sha256", "worker 0 missing descriptor_sha256"),
+    ],
+)
+def test_lookup_omp_provenance_rejects_missing_native_checkpoint_identity_fields(
+    tmp_path: Path, field: str, message: str
+):
+    checkpoint = _write_native_checkpoint(tmp_path)
+    payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+    if field == "worker_descriptor_sha256":
+        payload["workers"][0].pop("descriptor_sha256")
+    else:
+        payload.pop(field)
+    checkpoint.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ValueError, match=rf"invalid OMP native checkpoint .*: {message}"
+    ):
+        lookup_omp_provenance(tmp_path, checkpoint)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("batch_fingerprint", "A" * 64, "invalid batch_fingerprint"),
+        ("descriptor_hashes", ["g" * 64], "invalid descriptor_hashes"),
+        (
+            "worker_descriptor_sha256",
+            "c" * 63,
+            "worker 0 has invalid descriptor_sha256",
+        ),
+    ],
+)
+def test_lookup_omp_provenance_rejects_invalid_native_checkpoint_sha256_fields(
+    tmp_path: Path, field: str, value: object, message: str
+):
+    checkpoint = _write_native_checkpoint(tmp_path)
+    payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+    if field == "worker_descriptor_sha256":
+        payload["workers"][0]["descriptor_sha256"] = value
+    else:
+        payload[field] = value
+    checkpoint.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ValueError, match=rf"invalid OMP native checkpoint .*: {message}"
+    ):
+        lookup_omp_provenance(tmp_path, checkpoint)
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("descriptor_cardinality", "descriptor_hashes cardinality"),
+        ("worker_names_ordering", "worker_names ordering"),
+        ("worker_descriptor_mismatch", "worker 0 descriptor mismatch"),
+    ],
+)
+def test_lookup_omp_provenance_rejects_incoherent_native_checkpoint_identity(
+    tmp_path: Path, case: str, message: str
+):
+    checkpoint = _write_native_checkpoint(tmp_path)
+    payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+    if case == "descriptor_cardinality":
+        payload["descriptor_hashes"] = []
+    elif case == "worker_names_ordering":
+        second = {
+            **payload["workers"][0],
+            "index": 1,
+            "name": "Awf001Implementer",
+            "descriptor_sha256": "c" * 64,
+            "task_id": "Awf001Implementer",
+            "agent_uri": "agent://Awf001Implementer",
+            "history_uri": "history://Awf001Implementer",
+        }
+        payload["workers"].append(second)
+        payload["descriptor_hashes"].append(second["descriptor_sha256"])
+        payload["worker_names"].append(second["name"])
+        payload["worker_names"].reverse()
+    else:
+        payload["workers"][0]["descriptor_sha256"] = "c" * 64
+    checkpoint.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ValueError, match=rf"invalid OMP native checkpoint .*: {message}"
+    ):
+        lookup_omp_provenance(tmp_path, checkpoint)
+
+
+@pytest.mark.parametrize(
+    ("updates", "message"),
+    [
+        ({"resumable": True}, "completed checkpoint cannot be resumable"),
+        (
+            {"session_persistence_requested": False},
+            "session persistence contradiction",
+        ),
+        ({"session_persisted": False}, "coordinator session contradiction"),
+        (
+            {
+                "state": "interrupted",
+                "session_persistence_requested": True,
+                "session_persisted": False,
+                "resumable": True,
+                "coordinator_session_id": None,
+            },
+            "resumable checkpoint requires persisted session",
+        ),
+    ],
+)
+def test_lookup_omp_provenance_rejects_contradictory_native_checkpoint_session(
+    tmp_path: Path, updates: dict[str, object], message: str
+):
+    checkpoint = _write_native_checkpoint(tmp_path)
+    payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+    payload.update(updates)
+    checkpoint.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ValueError, match=rf"invalid OMP native checkpoint .*: {message}"
     ):
         lookup_omp_provenance(tmp_path, checkpoint)
 
@@ -792,6 +1083,10 @@ def test_followup_command_resumes_native_checkpoint_and_persists_v2_child(
             "history_uri": "history://Awf000Reviewer",
         }
     )
+    checkpoint_payload["worker_names"][0] = "Awf000Reviewer"
+    implementer_descriptor_hash = hashlib.sha256(
+        b"Awf001Implementer descriptor"
+    ).hexdigest()
     checkpoint_payload["workers"].append(
         {
             "index": 1,
@@ -800,11 +1095,11 @@ def test_followup_command_resumes_native_checkpoint_and_persists_v2_child(
             "agent_uri": "agent://Awf001Implementer",
             "history_uri": "history://Awf001Implementer",
             "status": "completed",
-            "descriptor_sha256": hashlib.sha256(
-                b"Awf001Implementer descriptor"
-            ).hexdigest(),
+            "descriptor_sha256": implementer_descriptor_hash,
         }
     )
+    checkpoint_payload["worker_names"].append("Awf001Implementer")
+    checkpoint_payload["descriptor_hashes"].append(implementer_descriptor_hash)
     checkpoint.write_text(json.dumps(checkpoint_payload), encoding="utf-8")
 
     (tmp_path / ".workflow" / "provider-config.json").write_text(

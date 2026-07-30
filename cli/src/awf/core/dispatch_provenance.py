@@ -34,6 +34,41 @@ def _is_ascii_graphic(value: str) -> bool:
     return bool(value) and all(0x21 <= ord(character) <= 0x7E for character in value)
 
 
+_NATIVE_CHECKPOINT_STATES = frozenset(
+    {"prepared", "resuming", "completed", "interrupted", "ambiguous"}
+)
+_NATIVE_TERMINAL_STATUSES = frozenset(
+    {"completed", "success", "ok", "failed", "error", "cancelled", "canceled"}
+)
+
+
+def _is_lower_sha256(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _is_opaque_uri(value: Any, prefix: str) -> bool:
+    return (
+        isinstance(value, str)
+        and value.startswith(prefix)
+        and _is_ascii_graphic(value[len(prefix) :])
+    )
+
+
+def _native_required_bool(
+    path: Path, payload: Mapping[str, Any], field: str
+) -> bool:
+    if field not in payload:
+        raise ValueError(f"invalid OMP native checkpoint {path}: missing {field}")
+    value = payload[field]
+    if type(value) is not bool:
+        raise ValueError(f"invalid OMP native checkpoint {path}: invalid {field}")
+    return value
+
+
 def _safe_schema_validation(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {
@@ -260,27 +295,122 @@ def _native_checkpoint_record(
     version = payload.get("version")
     if type(version) is not int or version != 1:
         raise ValueError(f"invalid OMP native checkpoint {path}: unsupported version")
+
     fingerprint = payload.get("batch_fingerprint")
-    session_id = payload.get("coordinator_session_id")
-    workers = payload.get("workers")
     if not isinstance(fingerprint, str) or not fingerprint.strip():
         raise ValueError(f"invalid OMP native checkpoint {path}: missing batch_fingerprint")
-    if not isinstance(session_id, str) or not session_id.strip():
-        raise ValueError(
-            f"invalid OMP native checkpoint {path}: missing coordinator_session_id"
-        )
+    if not _is_lower_sha256(fingerprint):
+        raise ValueError(f"invalid OMP native checkpoint {path}: invalid batch_fingerprint")
+
+    workers = payload.get("workers")
     if not isinstance(workers, list) or not workers:
         raise ValueError(f"invalid OMP native checkpoint {path}: missing workers")
-    state = payload.get("state")
-    if not isinstance(state, str) or state not in (
-        "prepared",
-        "resuming",
-        "completed",
-        "interrupted",
-        "ambiguous",
+
+    if "descriptor_hashes" not in payload:
+        raise ValueError(f"invalid OMP native checkpoint {path}: missing descriptor_hashes")
+    descriptor_hashes = payload["descriptor_hashes"]
+    if not isinstance(descriptor_hashes, list) or not all(
+        _is_lower_sha256(descriptor) for descriptor in descriptor_hashes
     ):
+        raise ValueError(f"invalid OMP native checkpoint {path}: invalid descriptor_hashes")
+    if len(descriptor_hashes) != len(workers):
+        raise ValueError(
+            f"invalid OMP native checkpoint {path}: descriptor_hashes cardinality"
+        )
+
+    if "worker_names" not in payload:
+        raise ValueError(f"invalid OMP native checkpoint {path}: missing worker_names")
+    worker_names = payload["worker_names"]
+    if not isinstance(worker_names, list) or not all(
+        isinstance(name, str) for name in worker_names
+    ):
+        raise ValueError(f"invalid OMP native checkpoint {path}: invalid worker_names")
+    if len(worker_names) != len(workers):
+        raise ValueError(
+            f"invalid OMP native checkpoint {path}: worker_names cardinality"
+        )
+
+    if "attempt" not in payload:
+        raise ValueError(f"invalid OMP native checkpoint {path}: missing attempt")
+    attempt = payload["attempt"]
+    if type(attempt) is not int or attempt < 1:
+        raise ValueError(f"invalid OMP native checkpoint {path}: invalid attempt")
+
+    session_persistence_requested = _native_required_bool(
+        path, payload, "session_persistence_requested"
+    )
+    session_persisted = _native_required_bool(path, payload, "session_persisted")
+    resumable = _native_required_bool(path, payload, "resumable")
+
+    if "steering_evidence" not in payload:
+        raise ValueError(f"invalid OMP native checkpoint {path}: missing steering_evidence")
+    steering_evidence = payload["steering_evidence"]
+    if steering_evidence is not None and not isinstance(steering_evidence, Mapping):
+        raise ValueError(f"invalid OMP native checkpoint {path}: invalid steering_evidence")
+
+    state = payload.get("state")
+    if not isinstance(state, str) or state not in _NATIVE_CHECKPOINT_STATES:
         raise ValueError(f"invalid OMP native checkpoint {path}: invalid state")
-    session_id = session_id.strip()
+
+    if resumable and not session_persisted:
+        raise ValueError(
+            f"invalid OMP native checkpoint {path}: resumable checkpoint requires persisted session"
+        )
+    if session_persisted and not session_persistence_requested:
+        raise ValueError(
+            f"invalid OMP native checkpoint {path}: session persistence contradiction"
+        )
+
+    session_id = payload.get("coordinator_session_id")
+    if session_persisted:
+        if not isinstance(session_id, str) or not _is_ascii_graphic(session_id):
+            raise ValueError(
+                f"invalid OMP native checkpoint {path}: missing coordinator_session_id"
+            )
+    elif session_id is not None:
+        raise ValueError(
+            f"invalid OMP native checkpoint {path}: coordinator session contradiction"
+        )
+
+    if state == "prepared":
+        if session_persisted or resumable or steering_evidence is not None:
+            raise ValueError(
+                f"invalid OMP native checkpoint {path}: prepared checkpoint state contradiction"
+            )
+    elif state == "resuming":
+        if (
+            not session_persistence_requested
+            or not session_persisted
+            or not resumable
+            or steering_evidence is not None
+        ):
+            raise ValueError(
+                f"invalid OMP native checkpoint {path}: resuming checkpoint state contradiction"
+            )
+    else:
+        if not isinstance(steering_evidence, Mapping):
+            raise ValueError(f"invalid OMP native checkpoint {path}: invalid steering_evidence")
+        if state == "completed":
+            if resumable:
+                raise ValueError(
+                    f"invalid OMP native checkpoint {path}: completed checkpoint cannot be resumable"
+                )
+        elif state == "interrupted":
+            if not (
+                (session_persisted and resumable)
+                or (
+                    not session_persistence_requested
+                    and not session_persisted
+                    and not resumable
+                )
+            ):
+                raise ValueError(
+                    f"invalid OMP native checkpoint {path}: interrupted checkpoint state contradiction"
+                )
+        elif resumable or (not session_persisted and not session_persistence_requested):
+            raise ValueError(
+                f"invalid OMP native checkpoint {path}: ambiguous checkpoint state contradiction"
+            )
 
     records: list[dict[str, Any]] = []
     task_ids: set[str] = set()
@@ -302,69 +432,112 @@ def _native_checkpoint_record(
             raise ValueError(
                 f"invalid OMP native checkpoint {path}: worker {position} has invalid index"
             )
-        if "task_id" not in worker:
+
+        if "descriptor_sha256" not in worker:
             raise ValueError(
-                f"invalid OMP native checkpoint {path}: worker {position} has no task ID"
+                f"invalid OMP native checkpoint {path}: worker {position} missing descriptor_sha256"
             )
-        task_id = worker["task_id"]
-        if not isinstance(task_id, str):
+        descriptor_sha256 = worker["descriptor_sha256"]
+        if not _is_lower_sha256(descriptor_sha256):
             raise ValueError(
-                f"invalid OMP native checkpoint {path}: worker {position} has invalid task ID"
+                f"invalid OMP native checkpoint {path}: worker {position} has invalid descriptor_sha256"
             )
-        if not task_id.strip():
+        if descriptor_sha256 != descriptor_hashes[position]:
             raise ValueError(
-                f"invalid OMP native checkpoint {path}: worker {position} has no task ID"
+                f"invalid OMP native checkpoint {path}: worker {position} descriptor mismatch"
             )
-        if not _is_ascii_graphic(task_id):
-            raise ValueError(
-                f"invalid OMP native checkpoint {path}: worker {position} has invalid task ID"
-            )
-        if task_id in task_ids:
-            raise ValueError(
-                f"invalid OMP native checkpoint {path}: duplicate task ID {task_id}"
-            )
-        task_ids.add(task_id)
+
         name = worker.get("name")
         if not isinstance(name, str) or not name or name != name.strip():
             raise ValueError(
                 f"invalid OMP native checkpoint {path}: worker {position} has invalid name"
             )
+        if name != worker_names[position]:
+            raise ValueError(
+                f"invalid OMP native checkpoint {path}: worker_names ordering"
+            )
+
+        task_id = worker.get("task_id")
         agent_uri = worker.get("agent_uri")
-        if agent_uri is not None and (
-            not isinstance(agent_uri, str)
-            or not agent_uri.startswith("agent://")
-            or not _is_ascii_graphic(agent_uri[len("agent://") :])
-        ):
-            raise ValueError(
-                f"invalid OMP native checkpoint {path}: worker {position} has invalid agent_uri"
-            )
         history_uri = worker.get("history_uri")
-        if history_uri is not None and (
-            not isinstance(history_uri, str)
-            or not history_uri.startswith("history://")
-            or not _is_ascii_graphic(history_uri[len("history://") :])
-        ):
-            raise ValueError(
-                f"invalid OMP native checkpoint {path}: worker {position} has invalid history_uri"
-            )
         status = worker.get("status")
-        if status is not None and (
-            not isinstance(status, str)
-            or not status
-            or status != status.strip()
-        ):
-            raise ValueError(
-                f"invalid OMP native checkpoint {path}: worker {position} has invalid status"
-            )
+        if state == "prepared":
+            if (
+                task_id is not None
+                or agent_uri is not None
+                or history_uri is not None
+                or status is not None
+            ):
+                raise ValueError(
+                    f"invalid OMP native checkpoint {path}: prepared worker {position} has finalized fields"
+                )
+        else:
+            if state == "completed" and "task_id" not in worker:
+                raise ValueError(
+                    f"invalid OMP native checkpoint {path}: worker {position} has no task ID"
+                )
+            if task_id is None:
+                if resumable:
+                    raise ValueError(
+                        f"invalid OMP native checkpoint {path}: resumable worker {position} missing task ID"
+                    )
+                if state == "completed":
+                    raise ValueError(
+                        f"invalid OMP native checkpoint {path}: worker {position} has invalid task ID"
+                    )
+                if agent_uri is not None or history_uri is not None:
+                    raise ValueError(
+                        f"invalid OMP native checkpoint {path}: worker {position} has handles without task ID"
+                    )
+            else:
+                if not isinstance(task_id, str) or not _is_ascii_graphic(task_id):
+                    raise ValueError(
+                        f"invalid OMP native checkpoint {path}: worker {position} has invalid task ID"
+                    )
+                if agent_uri is None or history_uri is None:
+                    if state == "completed":
+                        raise ValueError(
+                            f"invalid OMP native checkpoint {path}: completed worker {position} missing handles"
+                        )
+                    raise ValueError(
+                        f"invalid OMP native checkpoint {path}: worker {position} missing handles"
+                    )
+                if not _is_opaque_uri(agent_uri, "agent://"):
+                    raise ValueError(
+                        f"invalid OMP native checkpoint {path}: worker {position} has invalid agent_uri"
+                    )
+                if not _is_opaque_uri(history_uri, "history://"):
+                    raise ValueError(
+                        f"invalid OMP native checkpoint {path}: worker {position} has invalid history_uri"
+                    )
+                if task_id in task_ids:
+                    raise ValueError(
+                        f"invalid OMP native checkpoint {path}: duplicate task ID {task_id}"
+                    )
+                task_ids.add(task_id)
+
+            if status is not None and (
+                not isinstance(status, str)
+                or not status
+                or status != status.strip()
+            ):
+                raise ValueError(
+                    f"invalid OMP native checkpoint {path}: worker {position} has invalid status"
+                )
+            if state == "completed" and status not in _NATIVE_TERMINAL_STATUSES:
+                raise ValueError(
+                    f"invalid OMP native checkpoint {path}: completed worker {position} is not terminal"
+                )
+
         records.append(
             {
                 "worker_index": index,
                 "name": name,
-                "task_id": task_id,
+                "task_id": task_id or "",
                 "agent_uri": agent_uri or "",
                 "history_uri": history_uri or "",
                 "status": status or "",
-                "session_persisted": payload.get("session_persisted") is True,
+                "session_persisted": session_persisted,
                 "coordinator_session_id": session_id,
             }
         )
@@ -387,10 +560,14 @@ def _load_record(path: Path) -> dict[str, Any]:
         raise ValueError(f"invalid OMP provenance file {path}: {exc}") from exc
     if not isinstance(payload, dict):
         raise ValueError(f"not a supported OMP provenance record: {path}")
+    if payload.get("kind") == "omp_native_batch":
+        if "backend" in payload or "schema_version" in payload:
+            raise ValueError(
+                f"invalid OMP native checkpoint {path}: conflicting discriminator"
+            )
+        return _native_checkpoint_record(path, payload)
     if payload.get("backend") == "omp" and payload.get("schema_version") == 2:
         return payload
-    if payload.get("kind") == "omp_native_batch":
-        return _native_checkpoint_record(path, payload)
     raise ValueError(f"not a supported OMP provenance record: {path}")
 
 
