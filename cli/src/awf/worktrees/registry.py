@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS worktree_leases (
     repository_id TEXT NOT NULL,
     repository_name TEXT NOT NULL,
     repository_root TEXT NOT NULL,
-    worktree_path TEXT NOT NULL,
+    worktree_path TEXT NOT NULL UNIQUE,
     initiative TEXT NOT NULL,
     purpose TEXT NOT NULL CHECK (purpose IN ('feature','promote','scratch')),
     branch TEXT NOT NULL,
@@ -48,9 +48,6 @@ CREATE TABLE IF NOT EXISTS worktree_leases (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_worktree_active_identity
 ON worktree_leases(repository_id, initiative, purpose)
-WHERE state <> 'REMOVED';
-CREATE UNIQUE INDEX IF NOT EXISTS uq_worktree_active_path
-ON worktree_leases(worktree_path)
 WHERE state <> 'REMOVED';
 CREATE TABLE IF NOT EXISTS worktree_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+
 from pathlib import Path
 
 import pytest
@@ -14,12 +16,17 @@ from awf.worktrees.models import (
 from awf.worktrees.registry import WorktreeRegistry
 
 
-def lease(path: Path, *, initiative: str = "reward-widget") -> Lease:
+def lease(
+    path: Path,
+    *,
+    initiative: str = "reward-widget",
+    worktree_name: str | None = None,
+) -> Lease:
     return Lease.new(
         repository_id="repo-1",
         repository_name="demo",
         repository_root=path / "repo",
-        worktree_path=path / "cache" / initiative,
+        worktree_path=path / "cache" / (worktree_name or initiative),
         initiative=initiative,
         purpose=Purpose.FEATURE,
         branch=f"awf/{initiative}/feature",
@@ -54,9 +61,21 @@ def test_removed_lease_does_not_block_a_replacement(tmp_path: Path) -> None:
     first = registry.create_lease(lease(tmp_path))
     registry.transition(first.id, LeaseState.REMOVED, expected_version=first.version)
 
-    second = registry.create_lease(lease(tmp_path))
+    replacement = lease(tmp_path, worktree_name="reward-widget-replacement")
+    second = registry.create_lease(replacement)
 
     assert second.id != first.id
+    assert second.worktree_path == replacement.worktree_path
+    with pytest.raises(
+        sqlite3.IntegrityError, match="worktree_leases.worktree_path"
+    ):
+        registry.create_lease(
+            lease(
+                tmp_path,
+                initiative="another-initiative",
+                worktree_name="reward-widget",
+            )
+        )
 
 
 def test_transition_is_compare_and_swap_and_appends_event(tmp_path: Path) -> None:
