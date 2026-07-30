@@ -19,6 +19,16 @@ from awf.commands.init import run_init
 from awf.commands.scan import run_scan
 from awf.commands.wf_apply import run_wf_apply_result
 from awf.commands.wf_pr import run_wf_pr
+from awf.commands.wt import (
+    run_wt_acquire,
+    run_wt_adopt,
+    run_wt_doctor,
+    run_wt_import,
+    run_wt_status,
+    run_wt_promote,
+    run_wt_finish,
+    run_wt_gc,
+)
 from awf.commands.wf import (
     run_wf_decide,
     run_wf_detect_class,
@@ -42,7 +52,7 @@ from awf.commands.wiki import (
 from awf.core.router import route_natural_language
 
 
-KNOWN_COMMANDS = {"agents", "chat", "analyze", "wf", "config", "skills", "mcp", "doctor", "ready", "scan", "init", "cmux", "wiki", "dashboard"}
+KNOWN_COMMANDS = {"agents", "chat", "analyze", "wf", "config", "skills", "mcp", "doctor", "ready", "scan", "init", "cmux", "wiki", "dashboard", "wt"}
 
 
 def _should_skip_execution_confirmation(args: argparse.Namespace) -> bool:
@@ -617,6 +627,232 @@ def build_parser() -> argparse.ArgumentParser:
     scan_parser.add_argument("--dry-run", action="store_true", help="With --merge, print merged config instead of writing.")
     scan_parser.add_argument("--no-ai", action="store_true", help="Heuristic only, skip AI domain discovery fallback.")
     scan_parser.set_defaults(handler=run_scan)
+
+    wt_parser = subparsers.add_parser("wt", help="Managed Git worktree helpers.")
+    wt_subparsers = wt_parser.add_subparsers(dest="wt_command", required=True)
+
+    wt_acquire_parser = wt_subparsers.add_parser(
+        "acquire",
+        help="Create or reuse a managed worktree lease.",
+    )
+    wt_acquire_parser.add_argument(
+        "--initiative",
+        required=True,
+        help="Stable lowercase initiative slug.",
+    )
+    wt_acquire_parser.add_argument(
+        "--purpose",
+        choices=["feature", "promote", "scratch"],
+        default="feature",
+        help="Lease purpose. Defaults to feature.",
+    )
+    wt_acquire_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to current or parent directories.",
+    )
+    wt_acquire_parser.add_argument(
+        "--base",
+        help="Base branch or origin tracking ref.",
+    )
+    wt_acquire_parser.add_argument(
+        "--branch",
+        help="Branch to create. Defaults to awf/<initiative>/<purpose>.",
+    )
+    wt_acquire_parser.add_argument(
+        "--owner-id",
+        help="Optional session, run, or user ownership label.",
+    )
+    wt_acquire_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Create a new managed worktree instead of previewing it.",
+    )
+    wt_acquire_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_acquire_parser.set_defaults(handler=run_wt_acquire)
+
+    wt_promote_parser = wt_subparsers.add_parser(
+        "promote",
+        help="Promote one approved staging pull request delta to production.",
+    )
+    wt_promote_parser.add_argument(
+        "--source-pr",
+        required=True,
+        type=int,
+        help="Merged, approved staging pull request number.",
+    )
+    wt_promote_parser.add_argument(
+        "--to",
+        required=True,
+        help="Production branch (main or master).",
+    )
+    wt_promote_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to current or parent directories.",
+    )
+    wt_promote_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Create, verify, push, and open the promotion pull request.",
+    )
+    wt_promote_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_promote_parser.set_defaults(handler=run_wt_promote)
+
+    wt_finish_parser = wt_subparsers.add_parser(
+        "finish",
+        help="Preview or remove one proven-safe managed worktree lease.",
+    )
+    wt_finish_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to current or parent directories.",
+    )
+    wt_finish_parser.add_argument(
+        "--pr",
+        required=True,
+        type=int,
+        help="Merged pull request number for the managed lease.",
+    )
+    wt_finish_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Remove the proven-safe worktree instead of previewing it.",
+    )
+    wt_finish_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_finish_parser.set_defaults(handler=run_wt_finish)
+
+    wt_gc_parser = wt_subparsers.add_parser(
+        "gc",
+        help="Preview or remove stale proven-safe merged worktree leases.",
+    )
+    wt_gc_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to current or parent directories.",
+    )
+    wt_gc_parser.add_argument(
+        "--merged",
+        action="store_true",
+        help="Limit cleanup to leases proven merged by their pull requests.",
+    )
+    wt_gc_parser.add_argument(
+        "--older-than",
+        required=True,
+        help="Positive age threshold using s, m, h, or d (for example: 7d).",
+    )
+    wt_gc_mode = wt_gc_parser.add_mutually_exclusive_group()
+    wt_gc_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview cleanup without mutations (the default).",
+    )
+    wt_gc_mode.add_argument(
+        "--apply",
+        action="store_true",
+        help="Remove each proven-safe stale worktree.",
+    )
+    wt_gc_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_gc_parser.set_defaults(handler=run_wt_gc)
+
+    wt_import_parser = wt_subparsers.add_parser(
+        "import",
+        help="Inventory existing worktrees under a direct-child repository root.",
+    )
+    wt_import_parser.add_argument(
+        "--root",
+        required=True,
+        help="Directory whose direct child repositories should be inventoried.",
+    )
+    wt_import_mode = wt_import_parser.add_mutually_exclusive_group()
+    wt_import_mode.add_argument(
+        "--apply",
+        action="store_true",
+        help="Register discovered worktrees as unmanaged imported leases.",
+    )
+    wt_import_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview discovered worktrees without registry changes.",
+    )
+    wt_import_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_import_parser.set_defaults(handler=run_wt_import)
+
+    wt_adopt_parser = wt_subparsers.add_parser(
+        "adopt",
+        help="Mark an exact clean imported lease as managed.",
+    )
+    wt_adopt_parser.add_argument(
+        "--lease",
+        required=True,
+        help="Existing imported lease id.",
+    )
+    wt_adopt_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Adopt the imported lease instead of previewing it.",
+    )
+    wt_adopt_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_adopt_parser.set_defaults(handler=run_wt_adopt)
+
+    wt_status_parser = wt_subparsers.add_parser(
+        "status",
+        help="Show registered worktree leases.",
+    )
+    wt_status_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to current or parent directories.",
+    )
+    wt_status_parser.add_argument(
+        "--initiative",
+        help="Limit leases to an initiative.",
+    )
+    wt_status_parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Refresh pull request and deployment state from external services.",
+    )
+    wt_status_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_status_parser.set_defaults(handler=run_wt_status)
+
+    wt_doctor_parser = wt_subparsers.add_parser(
+        "doctor",
+        help="Report registry and Git worktree mismatches without repairing them.",
+    )
+    wt_doctor_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to current or parent directories.",
+    )
+    wt_doctor_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_doctor_parser.set_defaults(handler=run_wt_doctor)
 
     return parser
 

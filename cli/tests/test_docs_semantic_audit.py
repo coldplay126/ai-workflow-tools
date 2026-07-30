@@ -18,9 +18,11 @@ AGENT_CARDS_DIR = (
 )
 SKILL_COMMAND_RE = re.compile(r"^\s+command:\s*[\"']?(.+?)[\"']?\s*$", re.MULTILINE)
 TEMPLATE_ARG_RE = re.compile(r"\{[^}]+\}")
+ANGLE_TEMPLATE_ARG_RE = re.compile(r"<[^>]+>")
 FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---", re.DOTALL)
 TOP_LEVEL_SCALAR_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*):\s*(.*?)\s*$")
 STALE_WF_ALIAS_RE = re.compile(r"/wf(?:\.|\b(?!-))")
+SHELL_FENCE_RE = re.compile(r"```(?:bash|sh|shell)\n(.*?)\n```", re.DOTALL)
 KNOWN_GATE_IDS = {gate for gate in PHASE_GATE.values() if gate is not None}
 
 
@@ -50,11 +52,36 @@ def _nested_command_surface() -> dict[str, list[str]]:
 
 
 def _argv_from_skill_command(command: str) -> list[str]:
-    concrete = TEMPLATE_ARG_RE.sub("example", command)
+    concrete = ANGLE_TEMPLATE_ARG_RE.sub("1", TEMPLATE_ARG_RE.sub("1", command))
     argv = shlex.split(concrete)
     if argv and argv[0] == "awf":
         argv = argv[1:]
     return argv
+
+
+def _shell_fenced_awf_commands(text: str) -> tuple[str, ...]:
+    commands: list[str] = []
+    continued = ""
+    for block in SHELL_FENCE_RE.findall(text):
+        for raw_line in block.splitlines():
+            line = raw_line.strip()
+            if continued:
+                fragment = line.removesuffix("\\").strip()
+                continued = f"{continued} {fragment}"
+                if line.endswith("\\"):
+                    continue
+                commands.append(continued)
+                continued = ""
+                continue
+            if not line.startswith("awf wt "):
+                continue
+            if line.endswith("\\"):
+                continued = line.removesuffix("\\").strip()
+                continue
+            commands.append(line)
+    if continued:
+        commands.append(continued)
+    return tuple(commands)
 
 
 def _skill_files() -> tuple[Path, ...]:
@@ -456,3 +483,113 @@ def test_only_umbrella_skill_uses_wf_slash_aliases() -> None:
                 stale.append(f"{path.relative_to(REPO_ROOT)}:{line_no} {line.strip()}")
 
     assert stale == []
+
+
+def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
+    path = REPO_ROOT / "claude" / "skills" / "release-worktree-lifecycle" / "SKILL.md"
+    text = path.read_text(encoding="utf-8")
+    contracts = [
+        json.loads(match.group(1))
+        for match in re.finditer(r"```json\n(.*?)\n```", text, re.DOTALL)
+    ]
+    contract = next(
+        item
+        for item in contracts
+        if item.get("schema") == "awf.release-worktree-lifecycle/v1"
+    )
+
+    commands = contract["commands"]
+    expected_commands = {
+        "status": ("wt", "status"),
+        "doctor": ("wt", "doctor"),
+        "acquire_preview": ("wt", "acquire"),
+        "acquire_apply": ("wt", "acquire"),
+        "promote_preview": ("wt", "promote"),
+        "promote_apply": ("wt", "promote"),
+        "finish_preview": ("wt", "finish"),
+        "finish_apply": ("wt", "finish"),
+        "gc_preview": ("wt", "gc"),
+        "gc_apply": ("wt", "gc"),
+    }
+    parser = build_parser()
+    for name, expected in expected_commands.items():
+        argv = _argv_from_skill_command(commands[name])
+        parsed = parser.parse_args(argv)
+        assert (parsed.command, parsed.wt_command) == expected
+
+    assert "--refresh" in commands["status"]
+    assert "--json" in commands["status"]
+    assert "--apply" not in commands["acquire_preview"]
+    assert "--apply" in commands["acquire_apply"]
+    assert "--apply" not in commands["promote_preview"]
+    assert "--apply" in commands["promote_apply"]
+    assert "--apply" not in commands["finish_preview"]
+    assert "--apply" in commands["finish_apply"]
+    assert "--merged" in commands["gc_preview"]
+    assert "--older-than 7d" in commands["gc_preview"]
+    assert "--apply" not in commands["gc_preview"]
+    assert "--apply" in commands["gc_apply"]
+
+    safety = contract["safety"]
+    assert safety["preflight"] == "required_non_destructive_status_refresh"
+    assert safety["lease_reuse"] == "exact"
+    assert safety["promotion_scope"] == "source_pr_delta_only"
+    assert safety["deployment_health"] == "repository_rollout_evidence"
+    assert safety["blocked_action"] == "preserve_worktree_report_code_message"
+    assert safety["preview_before_apply"] == [
+        "acquire",
+        "promote",
+        "finish",
+        "gc",
+    ]
+    assert safety["stop_conditions"] == [
+        "deployment_health_unknown",
+        "closed_unmerged",
+        "dirty_worktree",
+    ]
+    assert set(safety["forbidden_fallbacks"]) == {
+        "direct_worktree_mutation",
+        "staging_wholesale_merge",
+        "branch_merged_heuristic",
+        "stash",
+        "reset",
+        "force_delete",
+        "unmanaged_deletion",
+    }
+    assert contract["decisions"] == {
+        "reuse": "use_exact_lease",
+        "preview": {
+            "acquire": "review_then_apply_explicitly",
+            "promote": "review_then_apply_explicitly",
+            "finish": "review_blockers_then_apply",
+            "gc": "review_blockers_then_apply",
+        },
+        "ready": {
+            "status": "inspect_select_lifecycle_action",
+            "acquire_apply": "use_or_report_returned_lease",
+            "promote_apply": "use_or_report_returned_lease",
+        },
+        "removed": "report_completion",
+        "blocked": "preserve_worktree_report_code_message",
+    }
+
+
+def test_release_worktree_lifecycle_shell_examples_match_contract() -> None:
+    path = REPO_ROOT / "claude" / "skills" / "release-worktree-lifecycle" / "SKILL.md"
+    text = path.read_text(encoding="utf-8")
+    contract = next(
+        json.loads(match.group(1))
+        for match in re.finditer(r"```json\n(.*?)\n```", text, re.DOTALL)
+        if json.loads(match.group(1)).get("schema")
+        == "awf.release-worktree-lifecycle/v1"
+    )
+    commands = contract["commands"]
+    displayed_commands = _shell_fenced_awf_commands(text)
+
+    assert displayed_commands[0] == commands["status"]
+    assert set(displayed_commands) == set(commands.values())
+
+    parser = build_parser()
+    for command in displayed_commands:
+        parsed = parser.parse_args(_argv_from_skill_command(command))
+        assert parsed.command == "wt"

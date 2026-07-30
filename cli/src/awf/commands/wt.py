@@ -1,0 +1,244 @@
+from __future__ import annotations
+
+import argparse
+import json
+import sqlite3
+import sys
+from collections.abc import Callable
+from pathlib import Path
+
+from awf.core.paths import find_repo_root
+from awf.worktrees.config import ConfigError, load_worktree_config
+from awf.worktrees.git import GitClient, GitError, GitRemoteError
+from awf.worktrees.models import CommandResult, Purpose
+from awf.worktrees.registry import WorktreeRegistry
+from awf.worktrees.service import WorktreeService, state_db_path
+
+
+def _emit(result: CommandResult, *, as_json: bool) -> int:
+    if as_json:
+        print(json.dumps(result.to_dict(), ensure_ascii=False, sort_keys=True))
+    else:
+        print(f"{result.command}: {result.decision}")
+        for lease in result.leases:
+            print(f"{lease.id}  {lease.state.value:16}  {lease.worktree_path}")
+        for action in result.actions:
+            detail = (
+                action.get("path")
+                or action.get("branch")
+                or action.get("lease_id")
+                or ""
+            )
+            print(f"{action['kind']}: {detail}")
+        for blocker in result.blockers:
+            print(
+                f"blocked: {blocker['code']}: {blocker['message']}",
+                file=sys.stderr,
+            )
+        for warning in result.warnings:
+            print(
+                f"warning: {warning['code']}: {warning['message']}",
+                file=sys.stderr,
+            )
+    return result.exit_code
+
+
+def _run(
+    args: argparse.Namespace,
+    command: str,
+    operation: Callable[[WorktreeService], CommandResult],
+) -> int:
+    try:
+        repository_root = find_repo_root(args.repo_root)
+        config = load_worktree_config(repository_root)
+        service = WorktreeService(
+            WorktreeRegistry(state_db_path()),
+            GitClient(repository_root),
+            config=config,
+        )
+        result = operation(service)
+    except (ConfigError, FileNotFoundError) as error:
+        result = CommandResult.error(
+            command,
+            code="config_error",
+            message=str(error),
+            exit_code=2,
+        )
+    except GitRemoteError as error:
+        result = CommandResult.external_error(
+            command,
+            code="git_remote_error",
+            message=str(error),
+        )
+    except GitError as error:
+        result = CommandResult.error(
+            command,
+            code="git_error",
+            message=str(error),
+            exit_code=5,
+        )
+    except OSError as error:
+        result = CommandResult.error(
+            command,
+            code="filesystem_error",
+            message=str(error),
+            exit_code=5,
+        )
+    except (sqlite3.Error, ValueError) as error:
+        result = CommandResult.error(
+            command,
+            code="registry_conflict",
+            message=str(error),
+            exit_code=5,
+        )
+    return _emit(result, as_json=bool(args.json))
+
+
+def run_wt_status(args: argparse.Namespace) -> int:
+    return _run(
+        args,
+        "wt.status",
+        lambda service: service.status(
+            initiative=args.initiative,
+            refresh=args.refresh,
+        ),
+    )
+
+
+def run_wt_doctor(args: argparse.Namespace) -> int:
+    return _run(args, "wt.doctor", lambda service: service.doctor())
+
+
+def run_wt_acquire(args: argparse.Namespace) -> int:
+    return _run(
+        args,
+        "wt.acquire",
+        lambda service: service.acquire(
+            initiative=args.initiative,
+            purpose=Purpose(args.purpose),
+            base=args.base,
+            branch=args.branch,
+            owner_id=args.owner_id,
+            apply=args.apply,
+        ),
+    )
+
+
+def run_wt_promote(args: argparse.Namespace) -> int:
+    return _run(
+        args,
+        "wt.promote",
+        lambda service: service.promote(
+            source_pr=args.source_pr,
+            target_branch=args.to,
+            apply=args.apply,
+        ),
+    )
+
+
+def run_wt_finish(args: argparse.Namespace) -> int:
+    return _run(
+        args,
+        "wt.finish",
+        lambda service: service.finish(pr_number=args.pr, apply=args.apply),
+    )
+
+
+def run_wt_gc(args: argparse.Namespace) -> int:
+    return _run(
+        args,
+        "wt.gc",
+        lambda service: service.gc(
+            merged=args.merged,
+            older_than=args.older_than,
+            apply=args.apply,
+        ),
+    )
+
+
+def run_wt_import(
+    args: argparse.Namespace,
+    *,
+    git_factory: Callable[[Path], GitClient] = GitClient,
+) -> int:
+    try:
+        registry = WorktreeRegistry(state_db_path())
+        service = WorktreeService(registry, None, git_factory=git_factory)
+        result = service.import_root(Path(args.root), apply=args.apply)
+    except (ConfigError, FileNotFoundError) as error:
+        result = CommandResult.error(
+            "wt.import",
+            code="config_error",
+            message=str(error),
+            exit_code=2,
+        )
+    except GitError as error:
+        result = CommandResult.error(
+            "wt.import",
+            code="git_error",
+            message=str(error),
+            exit_code=5,
+        )
+    except OSError as error:
+        result = CommandResult.error(
+            "wt.import",
+            code="filesystem_error",
+            message=str(error),
+            exit_code=5,
+        )
+    except (sqlite3.Error, ValueError) as error:
+        result = CommandResult.error(
+            "wt.import",
+            code="registry_conflict",
+            message=str(error),
+            exit_code=5,
+        )
+    return _emit(result, as_json=bool(args.json))
+
+
+def run_wt_adopt(args: argparse.Namespace) -> int:
+    registry = WorktreeRegistry(state_db_path())
+    try:
+        lease = registry.get_lease_read_only(args.lease)
+        if lease is None:
+            result = CommandResult.blocked(
+                "wt.adopt",
+                blockers=(
+                    {
+                        "code": "unknown_lease",
+                        "message": f"lease {args.lease} does not exist",
+                    },
+                ),
+            )
+        else:
+            service = WorktreeService(registry, GitClient(lease.repository_root))
+            result = service.adopt(args.lease, apply=args.apply)
+    except (ConfigError, FileNotFoundError) as error:
+        result = CommandResult.error(
+            "wt.adopt",
+            code="config_error",
+            message=str(error),
+            exit_code=2,
+        )
+    except GitError as error:
+        result = CommandResult.error(
+            "wt.adopt",
+            code="git_error",
+            message=str(error),
+            exit_code=5,
+        )
+    except OSError as error:
+        result = CommandResult.error(
+            "wt.adopt",
+            code="filesystem_error",
+            message=str(error),
+            exit_code=5,
+        )
+    except (sqlite3.Error, ValueError) as error:
+        result = CommandResult.error(
+            "wt.adopt",
+            code="registry_conflict",
+            message=str(error),
+            exit_code=5,
+        )
+    return _emit(result, as_json=bool(args.json))

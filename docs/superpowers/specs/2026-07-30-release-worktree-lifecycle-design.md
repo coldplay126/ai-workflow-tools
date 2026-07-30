@@ -188,7 +188,7 @@ awf wt acquire \
 
 ### `awf wt status`
 
-```bash
+```text
 awf wt status [--repo-root PATH] [--initiative SLUG] [--refresh] [--json]
 ```
 
