@@ -88,8 +88,8 @@ class GitClient:
     def remove_worktree(self, path: Path) -> None:
         self._run("worktree", "remove", str(path))
 
-    def delete_local_branch(self, branch: str) -> None:
-        self._run("branch", "-d", branch)
+    def delete_local_branch(self, branch: str, *, force: bool = False) -> None:
+        self._run("branch", "-D" if force else "-d", branch)
 
     def delete_remote_branch(self, branch: str) -> None:
         self._run("push", "origin", "--delete", branch)

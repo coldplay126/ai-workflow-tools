@@ -13,6 +13,7 @@ from awf.worktrees.git import GitClient, GitError
 from awf.worktrees.models import Lease, LeaseState, Purpose
 from awf.worktrees.registry import WorktreeRegistry
 from awf.worktrees.service import WorktreeService
+from worktree_fixtures import git as git_command
 from worktree_fixtures import make_repository
 
 
@@ -360,7 +361,7 @@ def test_acquire_reports_branch_cleanup_failure_after_registry_insert_failure(
             raise sqlite3.IntegrityError("registry is unavailable")
 
     class BranchDeleteFailingGit(GitClient):
-        def delete_local_branch(self, branch: str) -> None:
+        def delete_local_branch(self, branch: str, *, force: bool = False) -> None:
             raise GitError(f"could not delete {branch}")
 
     repo = make_repository(tmp_path)
@@ -427,3 +428,48 @@ def test_acquire_blocks_prepare_failure_without_writing_a_marker(
     assert result.lease.state is LeaseState.BLOCKED
     assert not (harness.state_dir / "prepare" / f"{result.lease.id}.json").exists()
     assert len(harness.git.list_worktrees()) == 2
+
+
+def test_acquire_retry_succeeds_after_divergent_base_registry_recovery(
+    tmp_path: Path,
+) -> None:
+    class FlakyRegistry(WorktreeRegistry):
+        failed = False
+
+        def create_lease(self, lease: Lease) -> Lease:
+            if not self.failed:
+                self.failed = True
+                raise sqlite3.IntegrityError("registry is unavailable")
+            return super().create_lease(lease)
+
+    repo = make_repository(tmp_path)
+    git_command(repo, "checkout", "-q", "-b", "release")
+    (repo / "release.txt").write_text("release\n", encoding="utf-8")
+    git_command(repo, "add", "release.txt")
+    git_command(repo, "commit", "-q", "-m", "release")
+    git_command(repo, "push", "-q", "-u", "origin", "release")
+    git_command(repo, "checkout", "-q", "staging")
+    git = GitClient(repo)
+    service = WorktreeService(
+        FlakyRegistry(tmp_path / "state" / "worktrees.sqlite3"),
+        git,
+        config=WorktreeConfig(default_base="staging"),
+        cache_dir=tmp_path / "cache",
+        state_dir=tmp_path / "state",
+        lock_dir=tmp_path / "locks",
+    )
+    request = {
+        "initiative": "reward-widget",
+        "purpose": Purpose.FEATURE,
+        "base": "release",
+        "branch": None,
+        "owner_id": "session-1",
+        "apply": True,
+    }
+
+    failed = service.acquire(**request)
+    recovered = service.acquire(**request)
+
+    assert failed.status == "blocked"
+    assert recovered.decision == "ready"
+    assert len(git.list_worktrees()) == 2

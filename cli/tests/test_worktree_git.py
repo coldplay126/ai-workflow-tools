@@ -139,6 +139,25 @@ def test_git_client_deletes_local_and_remote_branches(tmp_path: Path) -> None:
     assert git(repo, "ls-remote", "--heads", "origin", "awf/remote-delete") == ""
 
 
+def test_git_client_force_deletes_an_unmerged_local_branch(tmp_path: Path) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    git(repo, "checkout", "-q", "-b", "awf/unmerged-delete")
+    (repo / "unmerged.txt").write_text("unmerged\n", encoding="utf-8")
+    git(repo, "add", "unmerged.txt")
+    git(repo, "commit", "-q", "-m", "unmerged")
+    git(repo, "checkout", "-q", "staging")
+
+    with pytest.raises(GitError):
+        client.delete_local_branch("awf/unmerged-delete")
+
+    client.delete_local_branch("awf/unmerged-delete", force=True)
+
+    assert "awf/unmerged-delete" not in git(
+        repo, "branch", "--format=%(refname:short)"
+    ).splitlines()
+
+
 def test_git_client_applies_binary_diff_and_commits_from_a_worktree(tmp_path: Path) -> None:
     repo = make_repository(tmp_path)
     client = GitClient(repo)

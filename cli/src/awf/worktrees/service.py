@@ -368,7 +368,7 @@ class WorktreeService:
                 lease=lease,
             )
         try:
-            self.git.delete_local_branch(lease.branch)
+            self.git.delete_local_branch(lease.branch, force=True)
         except (GitError, OSError) as cleanup_error:
             return self._blocked(
                 "registry_recovery_failed",
