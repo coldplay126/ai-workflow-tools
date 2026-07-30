@@ -2871,13 +2871,16 @@ def test_finish_holds_branch_ref_lock_against_post_reservation_ref_race(
     git_command(promotion_harness.repo, "commit", "-q", "-m", "lock race")
     advanced_head = git_command(promotion_harness.repo, "rev-parse", "HEAD")
     git_command(promotion_harness.repo, "checkout", "-q", "staging")
-    original_lock = promotion_harness.git.hold_branch_if_at
+    git_command(
+        promotion_harness.repo, "branch", "lock-race-alternate", lease.head_sha
+    )
+    original_lock = promotion_harness.git.hold_worktree_branch_if_at
     attempts: list[int] = []
 
     @contextmanager
-    def lock_then_race(branch: str, expected_sha: str):
-        with original_lock(branch, expected_sha):
-            raced = subprocess.run(
+    def lock_then_race(path: Path, branch: str, expected_sha: str):
+        with original_lock(path, branch, expected_sha):
+            ref_race = subprocess.run(
                 [
                     "git",
                     "update-ref",
@@ -2890,15 +2893,60 @@ def test_finish_holds_branch_ref_lock_against_post_reservation_ref_race(
                 capture_output=True,
                 text=True,
             )
-            attempts.append(raced.returncode)
+            detach_race = subprocess.run(
+                ["git", "checkout", "--detach"],
+                cwd=path,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            alternate_race = subprocess.run(
+                ["git", "checkout", "-q", "lock-race-alternate"],
+                cwd=path,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            attempts.extend(
+                (
+                    ref_race.returncode,
+                    detach_race.returncode,
+                    alternate_race.returncode,
+                )
+            )
             yield
 
-    monkeypatch.setattr(promotion_harness.git, "hold_branch_if_at", lock_then_race)
+    monkeypatch.setattr(
+        promotion_harness.git, "hold_worktree_branch_if_at", lock_then_race
+    )
 
     result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
 
     assert result.decision == "removed"
-    assert attempts and attempts[0] != 0
+    assert attempts and all(attempt != 0 for attempt in attempts)
+
+
+def test_finish_releases_reservation_when_worktree_head_changes_before_hold(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+    original_reserve = promotion_harness.registry.reserve_cleanup
+
+    def reserve_then_detach(*args: object, **kwargs: object):
+        reservation = original_reserve(*args, **kwargs)
+        git_command(lease.worktree_path, "checkout", "--detach")
+        return reservation
+
+    monkeypatch.setattr(
+        promotion_harness.registry, "reserve_cleanup", reserve_then_detach
+    )
+
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.status == "blocked"
+    assert "branch_head_mismatch" in {item["code"] for item in result.blockers}
+    assert lease.worktree_path.exists()
+    assert promotion_harness.registry.get_cleanup_reservation(lease.id) is None
 
 
 def test_finish_rechecks_mutation_before_remove_and_releases_reservation(
@@ -2906,8 +2954,8 @@ def test_finish_rechecks_mutation_before_remove_and_releases_reservation(
 ) -> None:
     lease = promotion_harness.merged_promotion("healthy")
     original_reserve = promotion_harness.registry.reserve_cleanup
-    original_lock = promotion_harness.git.hold_branch_if_at
-    lock_calls: list[tuple[str, str]] = []
+    original_lock = promotion_harness.git.hold_worktree_branch_if_at
+    lock_calls: list[tuple[Path, str, str]] = []
 
     def reserve_then_dirty(*args: object, **kwargs: object):
         reservation = original_reserve(*args, **kwargs)
@@ -2915,20 +2963,22 @@ def test_finish_rechecks_mutation_before_remove_and_releases_reservation(
         return reservation
 
     @contextmanager
-    def record_lock(branch: str, expected_sha: str):
-        lock_calls.append((branch, expected_sha))
-        with original_lock(branch, expected_sha):
+    def record_lock(path: Path, branch: str, expected_sha: str):
+        lock_calls.append((path, branch, expected_sha))
+        with original_lock(path, branch, expected_sha):
             yield
 
     monkeypatch.setattr(
         promotion_harness.registry, "reserve_cleanup", reserve_then_dirty
     )
-    monkeypatch.setattr(promotion_harness.git, "hold_branch_if_at", record_lock)
+    monkeypatch.setattr(
+        promotion_harness.git, "hold_worktree_branch_if_at", record_lock
+    )
 
     result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
 
     assert result.status == "blocked"
     assert "dirty_worktree" in {item["code"] for item in result.blockers}
-    assert lock_calls == [(lease.branch, lease.head_sha)]
+    assert lock_calls == [(lease.worktree_path, lease.branch, lease.head_sha)]
     assert lease.worktree_path.exists()
     assert promotion_harness.registry.get_cleanup_reservation(lease.id) is None

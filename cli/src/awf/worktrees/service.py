@@ -782,7 +782,9 @@ class WorktreeService:
             post_lock_message = ""
             removal_error: GitError | OSError | None = None
             try:
-                with self.git.hold_branch_if_at(current.branch, reservation.branch_sha):
+                with self.git.hold_worktree_branch_if_at(
+                    current.worktree_path, current.branch, reservation.branch_sha
+                ):
                     reserved_current = self.registry.get_lease(current.id)
                     if (
                         reserved_current is None

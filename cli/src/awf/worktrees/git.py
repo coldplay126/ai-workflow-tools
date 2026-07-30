@@ -106,12 +106,42 @@ class GitClient:
         )
 
     @contextmanager
-    def hold_branch_if_at(self, branch: str, expected_sha: str) -> Iterator[None]:
+    def hold_worktree_branch_if_at(
+        self, worktree_path: Path, branch: str, expected_sha: str
+    ) -> Iterator[None]:
         ref = f"refs/heads/{branch}"
+        branch_transaction = self._start_ref_transaction(self.cwd)
+        head_transaction: subprocess.Popen[str] | None = None
         try:
-            process = subprocess.Popen(
+            self._ref_transaction_command(branch_transaction, "start")
+            self._ref_transaction_command(
+                branch_transaction, f"verify {ref} {expected_sha}", response=False
+            )
+
+            # Git rejects duplicate branch/HEAD verification in one transaction
+            # because HEAD resolves through the branch, so hold both refs separately.
+            head_transaction = self._start_ref_transaction(worktree_path)
+            self._ref_transaction_command(head_transaction, "start")
+            self._ref_transaction_command(
+                head_transaction, "option no-deref", response=False
+            )
+            self._ref_transaction_command(
+                head_transaction, f"symref-verify HEAD {ref}", response=False
+            )
+
+            self._ref_transaction_command(branch_transaction, "prepare")
+            self._ref_transaction_command(head_transaction, "prepare")
+            yield
+        finally:
+            if head_transaction is not None:
+                self._abort_ref_transaction(head_transaction)
+            self._abort_ref_transaction(branch_transaction)
+
+    def _start_ref_transaction(self, cwd: Path) -> subprocess.Popen[str]:
+        try:
+            return subprocess.Popen(
                 ["git", "update-ref", "--stdin"],
-                cwd=str(self.cwd.resolve()),
+                cwd=str(cwd),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -121,25 +151,19 @@ class GitClient:
             )
         except OSError as error:
             raise GitError(f"git update-ref failed to launch: {error}") from error
-        try:
-            self._ref_transaction_command(process, "start")
-            self._ref_transaction_command(
-                process, f"update {ref} {expected_sha} {expected_sha}", response=False
-            )
-            self._ref_transaction_command(process, "prepare")
-            yield
-        finally:
-            if process.poll() is None:
-                try:
-                    self._ref_transaction_command(process, "abort")
-                except GitError:
-                    _stop_process_group(process)
-            if process.stdin is not None and not process.stdin.closed:
-                process.stdin.close()
+
+    def _abort_ref_transaction(self, process: subprocess.Popen[str]) -> None:
+        if process.poll() is None:
             try:
-                process.wait(timeout=self.timeout)
-            except subprocess.TimeoutExpired:
+                self._ref_transaction_command(process, "abort")
+            except GitError:
                 _stop_process_group(process)
+        if process.stdin is not None and not process.stdin.closed:
+            process.stdin.close()
+        try:
+            process.wait(timeout=self.timeout)
+        except subprocess.TimeoutExpired:
+            _stop_process_group(process)
 
     def _ref_transaction_command(
         self,

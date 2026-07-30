@@ -241,22 +241,27 @@ def test_git_client_applies_binary_patch_and_commits_from_a_worktree(tmp_path: P
     assert target_head == git(target, "rev-parse", "HEAD")
 
 
-def test_git_client_holds_an_expected_branch_ref_transaction(
+def test_git_client_holds_branch_and_worktree_head_transactions(
     tmp_path: Path,
 ) -> None:
     repo = make_repository(tmp_path)
     client = GitClient(repo)
-    git(repo, "branch", "awf/ref-lock")
-    expected_head = git(repo, "rev-parse", "awf/ref-lock")
+    worktree = tmp_path / "lease"
+    base = client.head_sha()
+    client.add_worktree(worktree, "awf/ref-lock", base)
+    expected_head = git(worktree, "rev-parse", "HEAD")
     git(repo, "checkout", "-q", "-b", "ref-lock-update", "awf/ref-lock")
     (repo / "locked.txt").write_text("locked\n", encoding="utf-8")
     git(repo, "add", "locked.txt")
     git(repo, "commit", "-q", "-m", "locked branch update")
     advanced_head = git(repo, "rev-parse", "HEAD")
     git(repo, "checkout", "-q", "staging")
+    git(repo, "branch", "alternate-lock", expected_head)
 
-    with client.hold_branch_if_at("awf/ref-lock", expected_head):
-        raced = subprocess.run(
+    with client.hold_worktree_branch_if_at(
+        worktree, "awf/ref-lock", expected_head
+    ):
+        ref_race = subprocess.run(
             [
                 "git",
                 "update-ref",
@@ -269,9 +274,26 @@ def test_git_client_holds_an_expected_branch_ref_transaction(
             capture_output=True,
             text=True,
         )
+        detach_race = subprocess.run(
+            ["git", "checkout", "--detach"],
+            cwd=worktree,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        alternate_race = subprocess.run(
+            ["git", "checkout", "-q", "alternate-lock"],
+            cwd=worktree,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
 
-    assert raced.returncode != 0
+    assert ref_race.returncode != 0
+    assert detach_race.returncode != 0
+    assert alternate_race.returncode != 0
     assert client.resolve_ref("awf/ref-lock") == expected_head
+    assert git(worktree, "symbolic-ref", "--short", "HEAD") == "awf/ref-lock"
 
 
 
