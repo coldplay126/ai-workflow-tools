@@ -20,6 +20,7 @@ from .git import GitClient, GitError, GitWorktree
 from .github import ExternalServiceError, GhClient, PullRequest
 from .locking import repository_lock
 from .models import (
+    CleanupReservation,
     CommandResult,
     DeploymentState,
     Lease,
@@ -88,7 +89,9 @@ class WorktreeService:
         self.command_runner = command_runner or subprocess.run
         self.github = github
         self.deployment_runner = deployment_runner or self.command_runner
-        self.cache_dir = (cache_dir or cache_root()).expanduser().resolve()
+        self.cache_dir = Path(
+            os.path.abspath(str((cache_dir or cache_root()).expanduser()))
+        )
         self.state_dir = (state_dir or state_db_path().parent).expanduser().resolve()
         self.lock_dir = (lock_dir or self.state_dir / "locks").expanduser().resolve()
         self.git_factory = git_factory
@@ -618,6 +621,14 @@ class WorktreeService:
         apply: bool,
         pull_request: PullRequest | None = None,
     ) -> CommandResult:
+        reservation = self.registry.get_cleanup_reservation(lease.id)
+        if reservation is not None and not apply:
+            return self._cleanup_blocked(
+                "wt.finish",
+                "cleanup_reserved",
+                f"Lease {lease.id} is already reserved for cleanup.",
+                lease=lease,
+            )
         if not apply:
             try:
                 pull_request = pull_request or (
@@ -664,6 +675,11 @@ class WorktreeService:
                     "lease_changed",
                     f"Lease {lease.id} changed before cleanup could be applied.",
                     lease=current,
+                )
+            reservation = self.registry.get_cleanup_reservation(current.id)
+            if reservation is not None:
+                return self._recover_cleanup_reservation(
+                    current, reservation, warnings
                 )
             self._refresh_lease(current, warnings)
             current = self.registry.get_lease(current.id)
@@ -729,33 +745,57 @@ class WorktreeService:
                     warnings=tuple(warnings),
                 )
             try:
-                self.git.remove_worktree(current.worktree_path)
-            except (GitError, OSError) as error:
+                branch_sha = self.git.resolve_ref(current.branch)
+            except GitError as error:
                 return self._cleanup_blocked(
                     "wt.finish",
-                    "worktree_remove_failed",
-                    f"Unable to remove worktree for lease {current.id}: {error}",
+                    "branch_unavailable",
+                    f"Unable to validate cleanup branch {current.branch!r}: {error}",
+                    lease=current,
+                    warnings=warnings,
+                )
+            if branch_sha != current.head_sha:
+                return self._cleanup_blocked(
+                    "wt.finish",
+                    "branch_head_mismatch",
+                    f"Branch {current.branch!r} changed before cleanup.",
                     lease=current,
                     warnings=warnings,
                 )
             try:
-                removed = self.registry.transition(
+                reservation = self.registry.reserve_cleanup(
                     current.id,
-                    LeaseState.REMOVED,
                     expected_version=current.version,
-                    event_type="worktree_removed",
-                    summary="Removed proven-safe AWF worktree lease",
-                    observed_head_sha=pull_request.head_sha,
-                    pr_number=pull_request.number,
-                    head_sha=pull_request.head_sha,
+                    branch_sha=branch_sha,
+                )
+            except (RuntimeError, sqlite3.Error) as error:
+                return self._cleanup_blocked(
+                    "wt.finish",
+                    "registry_conflict",
+                    f"Unable to reserve lease {current.id} for cleanup: {error}",
+                    lease=current,
+                    warnings=warnings,
+                )
+            try:
+                self.git.remove_worktree(current.worktree_path)
+            except (GitError, OSError) as error:
+                return self._recover_cleanup_reservation(
+                    current,
+                    reservation,
+                    warnings,
+                    removal_error=error,
+                )
+            try:
+                removed = self.registry.complete_cleanup(
+                    current.id, expected_version=reservation.reserved_version
                 )
             except (RuntimeError, sqlite3.Error) as error:
                 return self._cleanup_blocked(
                     "wt.finish",
                     "registry_conflict",
                     (
-                        "Worktree was removed but the registry transition could not be "
-                        f"recorded: {error}"
+                        "Worktree was removed but the cleanup reservation could not be "
+                        f"completed: {error}"
                     ),
                     lease=current,
                     warnings=warnings,
@@ -763,7 +803,7 @@ class WorktreeService:
             actions: list[dict[str, object]] = [
                 self._cleanup_action("remove_worktree", removed)
             ]
-            self._cleanup_branches(removed, actions, warnings)
+            self._cleanup_branches(removed, reservation.branch_sha, actions, warnings)
             return CommandResult.ok(
                 "wt.finish",
                 decision="removed",
@@ -781,6 +821,7 @@ class WorktreeService:
         if lease.purpose is not Purpose.PROMOTE:
             return lease
         command = self.config.deployment_status_command
+
         if not command:
             return self._record_cleanup_deployment_probe(
                 lease,
@@ -886,6 +927,88 @@ class WorktreeService:
             return None
         return current
 
+    def _recover_cleanup_reservation(
+        self,
+        lease: Lease,
+        reservation: CleanupReservation,
+        warnings: list[dict[str, str]],
+        *,
+        removal_error: Exception | None = None,
+    ) -> CommandResult:
+        path_blocker = self._cleanup_path_blocker(lease)
+        if path_blocker is not None:
+            return CommandResult.blocked(
+                "wt.finish",
+                blockers=(path_blocker,),
+                lease=lease,
+                warnings=tuple(warnings),
+            )
+        try:
+            worktrees = self.git.list_worktrees()
+        except (GitError, OSError) as error:
+            return self._cleanup_blocked(
+                "wt.finish",
+                "worktree_inspection_failed",
+                f"Unable to inspect reserved worktree: {error}",
+                lease=lease,
+                warnings=warnings,
+            )
+        path_is_absent = (
+            not lease.worktree_path.exists()
+            and all(worktree.path != lease.worktree_path for worktree in worktrees)
+        )
+        if path_is_absent:
+            try:
+                removed = self.registry.complete_cleanup(
+                    lease.id, expected_version=reservation.reserved_version
+                )
+            except (RuntimeError, sqlite3.Error) as error:
+                return self._cleanup_blocked(
+                    "wt.finish",
+                    "registry_conflict",
+                    f"Unable to recover reserved cleanup for lease {lease.id}: {error}",
+                    lease=lease,
+                    warnings=warnings,
+                )
+            actions: list[dict[str, object]] = [
+                self._cleanup_action("remove_worktree", removed)
+            ]
+            self._cleanup_branches(removed, reservation.branch_sha, actions, warnings)
+            return CommandResult.ok(
+                "wt.finish",
+                decision="removed",
+                lease=removed,
+                actions=tuple(actions),
+                warnings=tuple(warnings),
+            )
+        try:
+            self.registry.release_cleanup_reservation(
+                lease.id, expected_version=reservation.reserved_version
+            )
+        except (RuntimeError, sqlite3.Error) as error:
+            return self._cleanup_blocked(
+                "wt.finish",
+                "cleanup_reserved",
+                f"Lease {lease.id} remains reserved for cleanup: {error}",
+                lease=lease,
+                warnings=warnings,
+            )
+        if removal_error is not None:
+            return self._cleanup_blocked(
+                "wt.finish",
+                "worktree_remove_failed",
+                f"Unable to remove worktree for lease {lease.id}: {removal_error}",
+                lease=self.registry.get_lease(lease.id),
+                warnings=warnings,
+            )
+        return self._cleanup_blocked(
+            "wt.finish",
+            "cleanup_reserved",
+            f"Lease {lease.id} cleanup reservation was released because its path remains.",
+            lease=self.registry.get_lease(lease.id),
+            warnings=warnings,
+        )
+
     def _cleanup_blockers(
         self, lease: Lease, pull_request: PullRequest
     ) -> tuple[dict[str, str], ...]:
@@ -918,6 +1041,16 @@ class WorktreeService:
                     "message": f"Pull request #{lease.target_pr} is not merged.",
                 }
             )
+        if pull_request.head_sha != lease.head_sha:
+            blockers.append(
+                {
+                    "code": "head_mismatch",
+                    "message": (
+                        f"Pull request #{pull_request.number} no longer matches the "
+                        f"recorded head for lease {lease.id}."
+                    ),
+                }
+            )
         if lease.purpose is Purpose.PROMOTE and (
             lease.deployment_state is not DeploymentState.HEALTHY
         ):
@@ -927,6 +1060,10 @@ class WorktreeService:
                     "message": f"Promotion lease {lease.id} has no healthy deployment.",
                 }
             )
+        path_blocker = self._cleanup_path_blocker(lease)
+        if path_blocker is not None:
+            blockers.append(path_blocker)
+            return tuple(blockers)
 
         try:
             worktrees = self.git.list_worktrees()
@@ -938,7 +1075,7 @@ class WorktreeService:
                 }
             )
             return tuple(blockers)
-        lease_path = lease.worktree_path.resolve()
+        lease_path = lease.worktree_path
         registered = tuple(
             worktree for worktree in worktrees if worktree.path == lease_path
         )
@@ -1009,48 +1146,93 @@ class WorktreeService:
                     }
                 )
             else:
-                if actual_head != pull_request.head_sha:
+                if (
+                    actual_head != lease.head_sha
+                    or actual_head != pull_request.head_sha
+                ):
                     blockers.append(
                         {
                             "code": "head_mismatch",
                             "message": (
-                                f"Lease {lease.id} HEAD does not match pull request "
-                                f"#{pull_request.number}."
+                                f"Lease {lease.id} HEAD does not match the recorded "
+                                f"pull request head for #{pull_request.number}."
                             ),
                         }
                     )
         return tuple(blockers)
 
+    def _cleanup_path_blocker(self, lease: Lease) -> dict[str, str] | None:
+        expected = self.cache_dir / lease.repository_name / lease.id
+        if lease.worktree_path != expected:
+            return {
+                "code": "unsafe_worktree_path",
+                "message": f"Lease {lease.id} does not use its managed cache path.",
+            }
+        for component in (
+            self.cache_dir,
+            self.cache_dir / lease.repository_name,
+            lease.worktree_path,
+        ):
+            if component.is_symlink():
+                return {
+                    "code": "unsafe_worktree_path",
+                    "message": (
+                        f"Lease {lease.id} has a symlinked managed worktree path."
+                    ),
+                }
+        return None
+
     def _cleanup_branches(
         self,
         lease: Lease,
+        expected_sha: str,
         actions: list[dict[str, object]],
         warnings: list[dict[str, str]],
     ) -> None:
         if lease.owner_kind != "awf" or not lease.branch.startswith("awf/"):
             return
         try:
-            self.git.delete_local_branch(lease.branch)
+            self.git.delete_branch_if_at(lease.branch, expected_sha)
         except (GitError, OSError) as error:
-            warnings.append(
-                {
-                    "code": "local_branch_cleanup_failed",
-                    "message": f"Could not delete local branch {lease.branch!r}: {error}",
-                }
+            self._branch_cleanup_warning(
+                lease,
+                "local_branch_cleanup_failed",
+                f"Could not delete local branch {lease.branch!r}: {error}",
+                warnings,
             )
         else:
             actions.append(self._cleanup_action("delete_local_branch", lease))
         try:
-            self.git.delete_remote_branch(lease.branch)
+            self.git.delete_remote_branch_if_at(lease.branch, expected_sha)
         except (GitError, OSError) as error:
-            warnings.append(
-                {
-                    "code": "remote_branch_cleanup_failed",
-                    "message": f"Could not delete remote branch {lease.branch!r}: {error}",
-                }
+            self._branch_cleanup_warning(
+                lease,
+                "remote_branch_cleanup_failed",
+                f"Could not delete remote branch {lease.branch!r}: {error}",
+                warnings,
             )
         else:
             actions.append(self._cleanup_action("delete_remote_branch", lease))
+
+    def _branch_cleanup_warning(
+        self,
+        lease: Lease,
+        code: str,
+        message: str,
+        warnings: list[dict[str, str]],
+    ) -> None:
+        warnings.append({"code": code, "message": message})
+        try:
+            self.registry.record_cleanup_event(
+                lease.id, event_type=code, summary=message
+            )
+        except (RuntimeError, sqlite3.Error):
+            warnings.append(
+                {
+                    "code": "cleanup_warning_record_failed",
+                    "message": f"Unable to record cleanup warning for lease {lease.id}.",
+                }
+            )
 
     @staticmethod
     def _cleanup_action(kind: str, lease: Lease) -> dict[str, object]:
@@ -1288,6 +1470,8 @@ class WorktreeService:
         self, lease_id: str, pull_request_number: int
     ) -> Lease | None:
         current = self.registry.get_lease(lease_id)
+        if self.registry.get_cleanup_reservation(lease_id) is not None:
+            raise RuntimeError("lease cleanup is reserved")
         if (
             current is None
             or current.state is LeaseState.REMOVED

@@ -97,6 +97,76 @@ def test_transition_is_compare_and_swap_and_appends_event(tmp_path: Path) -> Non
         registry.transition(created.id, LeaseState.MERGED, expected_version=created.version)
 
 
+
+def test_cleanup_reservation_is_cas_guarded_and_completes_removal(
+    tmp_path: Path,
+) -> None:
+    registry = WorktreeRegistry(tmp_path / "worktrees.sqlite3")
+    created = registry.create_lease(lease(tmp_path))
+
+    reservation = registry.reserve_cleanup(
+        created.id,
+        expected_version=created.version,
+        branch_sha="a" * 40,
+    )
+
+    assert reservation.lease_id == created.id
+    assert reservation.reserved_version == created.version + 1
+    with pytest.raises(RuntimeError, match="cleanup is reserved"):
+        registry.transition(
+            created.id,
+            LeaseState.PR_OPEN,
+            expected_version=reservation.reserved_version,
+        )
+    removed = registry.complete_cleanup(
+        created.id, expected_version=reservation.reserved_version
+    )
+
+    assert removed.state is LeaseState.REMOVED
+    assert registry.get_cleanup_reservation(created.id) is None
+
+
+def test_releasing_cleanup_reservation_allows_later_refresh_transition(
+    tmp_path: Path,
+) -> None:
+    registry = WorktreeRegistry(tmp_path / "worktrees.sqlite3")
+    created = registry.create_lease(lease(tmp_path))
+    reservation = registry.reserve_cleanup(
+        created.id,
+        expected_version=created.version,
+        branch_sha="a" * 40,
+    )
+
+    registry.release_cleanup_reservation(
+        created.id, expected_version=reservation.reserved_version
+    )
+    refreshed = registry.transition(
+        created.id,
+        LeaseState.PR_OPEN,
+        expected_version=reservation.reserved_version + 1,
+    )
+
+    assert refreshed.state is LeaseState.PR_OPEN
+
+
+def test_cleanup_warning_event_preserves_the_reservation_version(
+    tmp_path: Path,
+) -> None:
+    registry = WorktreeRegistry(tmp_path / "worktrees.sqlite3")
+    created = registry.create_lease(lease(tmp_path))
+    reservation = registry.reserve_cleanup(
+        created.id,
+        expected_version=created.version,
+        branch_sha="a" * 40,
+    )
+
+    registry.record_cleanup_event(
+        created.id, event_type="remote_branch_cleanup_failed", summary="branch changed"
+    )
+
+    assert registry.get_lease(created.id).version == reservation.reserved_version
+    assert registry.list_events(created.id)[-1].event_type == "remote_branch_cleanup_failed"
+
 def test_event_summary_is_bounded_to_512_utf8_bytes(tmp_path: Path) -> None:
     registry = WorktreeRegistry(tmp_path / "worktrees.sqlite3")
     created = registry.create_lease(lease(tmp_path))

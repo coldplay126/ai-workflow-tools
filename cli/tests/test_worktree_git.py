@@ -125,37 +125,24 @@ def test_git_client_interprets_relative_worktree_paths_from_repository(
     assert not expected_path.exists()
 
 
-def test_git_client_deletes_local_and_remote_branches(tmp_path: Path) -> None:
+def test_git_client_cas_deletes_local_and_remote_branches(tmp_path: Path) -> None:
     repo = make_repository(tmp_path)
     client = GitClient(repo)
     git(repo, "branch", "awf/local-delete")
     git(repo, "branch", "awf/remote-delete")
     git(repo, "push", "-q", "origin", "awf/remote-delete")
+    local_head = git(repo, "rev-parse", "awf/local-delete")
+    remote_head = git(repo, "rev-parse", "awf/remote-delete")
 
-    client.delete_local_branch("awf/local-delete")
-    client.delete_remote_branch("awf/remote-delete")
+    client.delete_branch_if_at("awf/local-delete", local_head)
+    client.delete_remote_branch_if_at("awf/remote-delete", remote_head)
 
-    assert "awf/local-delete" not in git(repo, "branch", "--format=%(refname:short)").splitlines()
+    assert "awf/local-delete" not in git(
+        repo, "branch", "--format=%(refname:short)"
+    ).splitlines()
     assert git(repo, "ls-remote", "--heads", "origin", "awf/remote-delete") == ""
 
 
-def test_git_client_safe_delete_preserves_an_unmerged_local_branch(
-    tmp_path: Path,
-) -> None:
-    repo = make_repository(tmp_path)
-    client = GitClient(repo)
-    git(repo, "checkout", "-q", "-b", "awf/unmerged-delete")
-    (repo / "unmerged.txt").write_text("unmerged\n", encoding="utf-8")
-    git(repo, "add", "unmerged.txt")
-    git(repo, "commit", "-q", "-m", "unmerged")
-    git(repo, "checkout", "-q", "staging")
-
-    with pytest.raises(GitError):
-        client.delete_local_branch("awf/unmerged-delete")
-
-    assert "awf/unmerged-delete" in git(
-        repo, "branch", "--format=%(refname:short)"
-    ).splitlines()
 
 
 def test_git_client_cas_deletes_a_branch_at_the_expected_head(
@@ -192,6 +179,42 @@ def test_git_client_cas_delete_preserves_a_branch_after_a_race(
         client.delete_branch_if_at("awf/cas-race", expected_head)
 
     assert git(repo, "rev-parse", "awf/cas-race") == changed_head
+
+
+def test_git_client_cas_deletes_remote_branch_at_expected_head(
+    tmp_path: Path,
+) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    git(repo, "branch", "awf/remote-cas-delete")
+    git(repo, "push", "-q", "origin", "awf/remote-cas-delete")
+    expected_head = git(repo, "rev-parse", "awf/remote-cas-delete")
+
+    client.delete_remote_branch_if_at("awf/remote-cas-delete", expected_head)
+
+    assert git(repo, "ls-remote", "--heads", "origin", "awf/remote-cas-delete") == ""
+
+
+def test_git_client_remote_cas_delete_preserves_recreated_branch(
+    tmp_path: Path,
+) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    git(repo, "branch", "awf/remote-cas-race")
+    git(repo, "push", "-q", "origin", "awf/remote-cas-race")
+    expected_head = git(repo, "rev-parse", "awf/remote-cas-race")
+    git(repo, "checkout", "-q", "-b", "remote-upstream-change")
+    (repo / "remote-changed.txt").write_text("changed\n", encoding="utf-8")
+    git(repo, "add", "remote-changed.txt")
+    git(repo, "commit", "-q", "-m", "remote changed")
+    changed_head = git(repo, "rev-parse", "HEAD")
+    git(repo, "push", "-q", "origin", f"{changed_head}:awf/remote-cas-race")
+    git(repo, "checkout", "-q", "staging")
+
+    with pytest.raises(GitError):
+        client.delete_remote_branch_if_at("awf/remote-cas-race", expected_head)
+
+    assert git(repo, "ls-remote", "--heads", "origin", "awf/remote-cas-race").split()[0] == changed_head
 
 
 def test_git_client_applies_binary_patch_and_commits_from_a_worktree(tmp_path: Path) -> None:

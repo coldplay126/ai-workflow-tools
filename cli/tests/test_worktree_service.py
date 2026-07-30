@@ -2615,3 +2615,235 @@ def test_finish_preserves_promotion_when_forced_probe_cannot_be_recorded(
         item["code"] for item in result.warnings
     }
     assert lease.worktree_path.exists()
+
+
+def test_finish_rejects_a_post_merge_pr_head_advance(
+    promotion_harness: PromotionHarness,
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+    (lease.worktree_path / "advanced.txt").write_text("advanced\n", encoding="utf-8")
+    git_command(lease.worktree_path, "add", "advanced.txt")
+    git_command(lease.worktree_path, "commit", "-q", "-m", "advance merged PR")
+    advanced_head = git_command(lease.worktree_path, "rev-parse", "HEAD")
+    promotion_harness.github.prs[lease.target_pr] = replace(
+        promotion_harness.github.prs[lease.target_pr], head_sha=advanced_head
+    )
+
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.status == "blocked"
+    assert "head_mismatch" in {item["code"] for item in result.blockers}
+    assert lease.worktree_path.exists()
+
+
+def test_gc_rejects_a_post_merge_feature_head_advance(harness: Harness) -> None:
+    lease = harness.merged_feature(age_days=10)
+    (lease.worktree_path / "advanced.txt").write_text("advanced\n", encoding="utf-8")
+    git_command(lease.worktree_path, "add", "advanced.txt")
+    git_command(lease.worktree_path, "commit", "-q", "-m", "advance merged PR")
+    advanced_head = git_command(lease.worktree_path, "rev-parse", "HEAD")
+    harness.github.prs[lease.target_pr] = replace(
+        harness.github.prs[lease.target_pr], head_sha=advanced_head
+    )
+
+    result = harness.service.gc(merged=True, older_than="7d", apply=True)
+
+    assert result.status == "blocked"
+    assert "head_mismatch" in {item["code"] for item in result.blockers}
+    assert lease.worktree_path.exists()
+
+
+def test_finish_rejects_a_symlinked_lease_leaf_before_git_inspection(
+    promotion_harness: PromotionHarness, tmp_path: Path
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+    relocated = tmp_path / "outside-worktree"
+    lease.worktree_path.rename(relocated)
+    lease.worktree_path.symlink_to(relocated, target_is_directory=True)
+
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=False)
+
+    assert result.status == "blocked"
+    assert "unsafe_worktree_path" in {item["code"] for item in result.blockers}
+    assert lease.worktree_path.is_symlink()
+    assert relocated.is_dir()
+
+
+def test_finish_rejects_a_symlinked_lease_path_component_before_git_inspection(
+    promotion_harness: PromotionHarness, tmp_path: Path
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+    relocated_cache = tmp_path / "relocated-cache"
+    promotion_harness.cache_dir.rename(relocated_cache)
+    promotion_harness.cache_dir.symlink_to(relocated_cache, target_is_directory=True)
+
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=False)
+
+    assert result.status == "blocked"
+    assert "unsafe_worktree_path" in {item["code"] for item in result.blockers}
+    assert promotion_harness.cache_dir.is_symlink()
+    assert lease.worktree_path.is_dir()
+
+
+def test_finish_releases_reservation_when_removal_fails_after_refresh_race(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+
+    def failing_remove(path: Path) -> None:
+        current = promotion_harness.registry.get_lease(lease.id)
+        assert current is not None
+        refresh_warnings: list[dict[str, str]] = []
+        promotion_harness.service._refresh_lease(current, refresh_warnings)
+        assert "lease_refresh_failed" in {
+            item["code"] for item in refresh_warnings
+        }
+        raise GitError("simulated worktree removal failure")
+
+    monkeypatch.setattr(promotion_harness.git, "remove_worktree", failing_remove)
+
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.status == "blocked"
+    assert lease.worktree_path.exists()
+    assert promotion_harness.registry.get_cleanup_reservation(lease.id) is None
+
+
+def test_finish_recovers_a_reserved_lease_after_post_remove_registry_failure(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+    original_complete = promotion_harness.registry.complete_cleanup
+
+    def failing_complete(*_: object, **__: object) -> Lease:
+        raise RuntimeError("final cleanup write failed")
+
+    monkeypatch.setattr(
+        promotion_harness.registry, "complete_cleanup", failing_complete
+    )
+    first = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert first.status == "blocked"
+    assert not lease.worktree_path.exists()
+    assert promotion_harness.registry.get_cleanup_reservation(lease.id) is not None
+
+    monkeypatch.setattr(
+        promotion_harness.registry, "complete_cleanup", original_complete
+    )
+    recovered = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert recovered.decision == "removed"
+    assert promotion_harness.registry.get_lease(lease.id).state is LeaseState.REMOVED
+
+
+def test_finish_preserves_a_recreated_local_branch_with_a_cas_delete(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+    git_command(
+        promotion_harness.repo, "checkout", "-q", "-b", "local-race-source", lease.branch
+    )
+    (promotion_harness.repo / "local-race.txt").write_text("race\n", encoding="utf-8")
+    git_command(promotion_harness.repo, "add", "local-race.txt")
+    git_command(promotion_harness.repo, "commit", "-q", "-m", "local race")
+    recreated_head = git_command(promotion_harness.repo, "rev-parse", "HEAD")
+    git_command(promotion_harness.repo, "checkout", "-q", "staging")
+    original_remove = promotion_harness.git.remove_worktree
+    original_delete = promotion_harness.git.delete_branch_if_at
+    cas_calls: list[tuple[str, str]] = []
+
+    def remove_then_recreate(path: Path) -> None:
+        original_remove(path)
+        git_command(
+            promotion_harness.repo,
+            "update-ref",
+            f"refs/heads/{lease.branch}",
+            recreated_head,
+            lease.head_sha,
+        )
+
+    def record_cas(branch: str, expected_sha: str) -> None:
+        cas_calls.append((branch, expected_sha))
+        original_delete(branch, expected_sha)
+
+    monkeypatch.setattr(promotion_harness.git, "remove_worktree", remove_then_recreate)
+    monkeypatch.setattr(promotion_harness.git, "delete_branch_if_at", record_cas)
+
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.decision == "removed"
+    assert cas_calls == [(lease.branch, lease.head_sha)]
+    assert promotion_harness.git.resolve_ref(lease.branch) == recreated_head
+    assert "local_branch_cleanup_failed" in {item["code"] for item in result.warnings}
+    assert promotion_harness.registry.list_events(lease.id)[-1].event_type == (
+        "local_branch_cleanup_failed"
+    )
+
+
+def test_finish_preserves_a_recreated_remote_branch_with_a_cas_delete(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+    git_command(
+        promotion_harness.repo, "checkout", "-q", "-b", "remote-race-source", lease.branch
+    )
+    (promotion_harness.repo / "remote-race.txt").write_text("race\n", encoding="utf-8")
+    git_command(promotion_harness.repo, "add", "remote-race.txt")
+    git_command(promotion_harness.repo, "commit", "-q", "-m", "remote race")
+    recreated_head = git_command(promotion_harness.repo, "rev-parse", "HEAD")
+    git_command(promotion_harness.repo, "checkout", "-q", "staging")
+    original_remove = promotion_harness.git.remove_worktree
+
+    def remove_then_recreate_remote(path: Path) -> None:
+        original_remove(path)
+        git_command(
+            promotion_harness.repo,
+            "push",
+            "-q",
+            "origin",
+            f"{recreated_head}:refs/heads/{lease.branch}",
+        )
+
+    monkeypatch.setattr(
+        promotion_harness.git, "remove_worktree", remove_then_recreate_remote
+    )
+
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.decision == "removed"
+    remote = git_command(
+        promotion_harness.repo,
+        "ls-remote",
+        "--heads",
+        "origin",
+        lease.branch,
+    )
+    assert remote.split()[0] == recreated_head
+    assert "remote_branch_cleanup_failed" in {item["code"] for item in result.warnings}
+    assert promotion_harness.registry.list_events(lease.id)[-1].event_type == (
+        "remote_branch_cleanup_failed"
+    )
+
+
+def test_finish_rejects_a_configured_symlink_cache_root(
+    promotion_harness: PromotionHarness, tmp_path: Path
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+    configured_cache = tmp_path / "configured-cache"
+    configured_cache.symlink_to(promotion_harness.cache_dir, target_is_directory=True)
+    service = WorktreeService(
+        promotion_harness.registry,
+        promotion_harness.git,
+        config=promotion_harness.config,
+        github=promotion_harness.github,
+        cache_dir=configured_cache,
+        state_dir=promotion_harness.state_dir,
+        lock_dir=promotion_harness.lock_dir,
+    )
+
+    result = service.finish(pr_number=lease.target_pr, apply=False)
+
+    assert result.status == "blocked"
+    assert "unsafe_worktree_path" in {item["code"] for item in result.blockers}
+    assert configured_cache.is_symlink()
+    assert lease.worktree_path.exists()

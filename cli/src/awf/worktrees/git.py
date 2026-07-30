@@ -88,14 +88,19 @@ class GitClient:
     def remove_worktree(self, path: Path) -> None:
         self._run("worktree", "remove", str(path))
 
-    def delete_local_branch(self, branch: str) -> None:
-        self._run("branch", "-d", branch)
 
     def delete_branch_if_at(self, branch: str, expected_sha: str) -> None:
         self._run("update-ref", "-d", f"refs/heads/{branch}", expected_sha)
 
-    def delete_remote_branch(self, branch: str) -> None:
-        self._run("push", "origin", "--delete", branch)
+
+    def delete_remote_branch_if_at(self, branch: str, expected_sha: str) -> None:
+        ref = f"refs/heads/{branch}"
+        self._run(
+            "push",
+            f"--force-with-lease={ref}:{expected_sha}",
+            "origin",
+            f":{ref}",
+        )
 
     def merge_base(self, left: str, right: str) -> str:
         return self._text(self._run("merge-base", left, right).stdout)
@@ -283,7 +288,6 @@ def _parse_worktrees(value: bytes) -> tuple[GitWorktree, ...]:
         worktrees.append(_worktree_from_fields(fields))
     return tuple(worktrees)
 
-
 def _worktree_from_fields(fields: dict[str, str | bool]) -> GitWorktree:
     raw_path = fields.get("worktree")
     if not isinstance(raw_path, str):
@@ -292,7 +296,7 @@ def _worktree_from_fields(fields: dict[str, str | bool]) -> GitWorktree:
     if isinstance(branch, str) and branch.startswith("refs/heads/"):
         branch = branch[len("refs/heads/") :]
     return GitWorktree(
-        path=Path(raw_path).resolve(),
+        path=Path(raw_path),
         head_sha=_optional_string(fields.get("HEAD")),
         branch=_optional_string(branch),
         bare=fields.get("bare") is True,

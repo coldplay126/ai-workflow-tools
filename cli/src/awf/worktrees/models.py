@@ -140,6 +140,14 @@ class WorktreeEvent:
 
 
 @dataclass(frozen=True)
+class CleanupReservation:
+    lease_id: str
+    reserved_version: int
+    branch_sha: str
+    created_at: str
+
+
+@dataclass(frozen=True)
 class CommandResult:
     command: str
     status: str

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import (
+    CleanupReservation,
     DeploymentState,
     Lease,
     LeaseState,
@@ -64,6 +65,12 @@ CREATE TABLE IF NOT EXISTS worktree_events (
 );
 CREATE INDEX IF NOT EXISTS idx_worktree_events_lease_id_id
 ON worktree_events(lease_id, id);
+CREATE TABLE IF NOT EXISTS worktree_cleanup_reservations (
+    lease_id TEXT PRIMARY KEY REFERENCES worktree_leases(id),
+    reserved_version INTEGER NOT NULL,
+    branch_sha TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 _LEASE_FILTER_COLUMNS = {
@@ -236,6 +243,8 @@ class WorktreeRegistry:
             ).fetchone()
             if current_row is None or current_row["version"] != expected_version:
                 raise RuntimeError("lease changed concurrently")
+            if self._has_cleanup_reservation(connection, lease_id):
+                raise RuntimeError("lease cleanup is reserved")
             current = self._lease_from_row(current_row)
             timestamp = now_iso()
             update_values: dict[str, Any] = {
@@ -298,6 +307,9 @@ class WorktreeRegistry:
         self.ensure()
         connection = self._connect()
         try:
+            connection.execute("BEGIN IMMEDIATE")
+            if self._has_cleanup_reservation(connection, lease_id):
+                raise RuntimeError("lease cleanup is reserved")
             timestamp = now_iso()
             cursor = connection.execute(
                 """
@@ -328,6 +340,272 @@ class WorktreeRegistry:
         if updated_row is None:
             raise RuntimeError("lease changed concurrently")
         return self._lease_from_row(updated_row)
+
+    def reserve_cleanup(
+        self, lease_id: str, *, expected_version: int, branch_sha: str
+    ) -> CleanupReservation:
+        self.ensure()
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            current_row = connection.execute(
+                "SELECT * FROM worktree_leases WHERE id = ?", (lease_id,)
+            ).fetchone()
+            if (
+                current_row is None
+                or current_row["version"] != expected_version
+                or current_row["state"] == LeaseState.REMOVED.value
+            ):
+                raise RuntimeError("lease changed concurrently")
+            if self._has_cleanup_reservation(connection, lease_id):
+                raise RuntimeError("lease cleanup is reserved")
+            timestamp = now_iso()
+            reserved_version = expected_version + 1
+            cursor = connection.execute(
+                """
+                UPDATE worktree_leases
+                SET updated_at = ?, version = ?
+                WHERE id = ? AND version = ?
+                """,
+                (timestamp, reserved_version, lease_id, expected_version),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("lease changed concurrently")
+            connection.execute(
+                """
+                INSERT INTO worktree_cleanup_reservations (
+                    lease_id, reserved_version, branch_sha, created_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (lease_id, reserved_version, branch_sha, timestamp),
+            )
+            connection.execute(
+                """
+                INSERT INTO worktree_events (
+                    lease_id, event_type, from_state, to_state, observed_head_sha,
+                    pr_number, summary, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    lease_id,
+                    "cleanup_reserved",
+                    current_row["state"],
+                    current_row["state"],
+                    branch_sha,
+                    current_row["target_pr"],
+                    "Cleanup reserved",
+                    timestamp,
+                ),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return CleanupReservation(
+            lease_id=lease_id,
+            reserved_version=reserved_version,
+            branch_sha=branch_sha,
+            created_at=timestamp,
+        )
+
+    def get_cleanup_reservation(self, lease_id: str) -> CleanupReservation | None:
+        if not self.db_path.is_file():
+            return None
+        with closing(self._connect_read_only()) as connection:
+            row = connection.execute(
+                """
+                SELECT lease_id, reserved_version, branch_sha, created_at
+                FROM worktree_cleanup_reservations
+                WHERE lease_id = ?
+                """,
+                (lease_id,),
+            ).fetchone()
+        return self._cleanup_reservation_from_row(row) if row is not None else None
+
+    def complete_cleanup(self, lease_id: str, *, expected_version: int) -> Lease:
+        self.ensure()
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            reservation = connection.execute(
+                """
+                SELECT lease_id, reserved_version, branch_sha, created_at
+                FROM worktree_cleanup_reservations
+                WHERE lease_id = ?
+                """,
+                (lease_id,),
+            ).fetchone()
+            current_row = connection.execute(
+                "SELECT * FROM worktree_leases WHERE id = ?", (lease_id,)
+            ).fetchone()
+            if (
+                reservation is None
+                or reservation["reserved_version"] != expected_version
+                or current_row is None
+                or current_row["version"] != expected_version
+            ):
+                raise RuntimeError("lease changed concurrently")
+            timestamp = now_iso()
+            cursor = connection.execute(
+                """
+                UPDATE worktree_leases
+                SET state = ?, updated_at = ?, removed_at = ?, version = ?
+                WHERE id = ? AND version = ?
+                """,
+                (
+                    LeaseState.REMOVED.value,
+                    timestamp,
+                    timestamp,
+                    expected_version + 1,
+                    lease_id,
+                    expected_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("lease changed concurrently")
+            connection.execute(
+                """
+                INSERT INTO worktree_events (
+                    lease_id, event_type, from_state, to_state, observed_head_sha,
+                    pr_number, summary, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    lease_id,
+                    "worktree_removed",
+                    current_row["state"],
+                    LeaseState.REMOVED.value,
+                    reservation["branch_sha"],
+                    current_row["target_pr"],
+                    "Removed proven-safe AWF worktree lease",
+                    timestamp,
+                ),
+            )
+            connection.execute(
+                "DELETE FROM worktree_cleanup_reservations WHERE lease_id = ?",
+                (lease_id,),
+            )
+            updated_row = connection.execute(
+                "SELECT * FROM worktree_leases WHERE id = ?", (lease_id,)
+            ).fetchone()
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        if updated_row is None:
+            raise RuntimeError("lease changed concurrently")
+        return self._lease_from_row(updated_row)
+
+    def release_cleanup_reservation(
+        self, lease_id: str, *, expected_version: int
+    ) -> Lease:
+        self.ensure()
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            reservation = connection.execute(
+                """
+                SELECT reserved_version FROM worktree_cleanup_reservations
+                WHERE lease_id = ?
+                """,
+                (lease_id,),
+            ).fetchone()
+            current_row = connection.execute(
+                "SELECT * FROM worktree_leases WHERE id = ?", (lease_id,)
+            ).fetchone()
+            if (
+                reservation is None
+                or reservation["reserved_version"] != expected_version
+                or current_row is None
+                or current_row["version"] != expected_version
+            ):
+                raise RuntimeError("lease changed concurrently")
+            timestamp = now_iso()
+            cursor = connection.execute(
+                """
+                UPDATE worktree_leases
+                SET updated_at = ?, version = ?
+                WHERE id = ? AND version = ?
+                """,
+                (timestamp, expected_version + 1, lease_id, expected_version),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("lease changed concurrently")
+            connection.execute(
+                "DELETE FROM worktree_cleanup_reservations WHERE lease_id = ?",
+                (lease_id,),
+            )
+            connection.execute(
+                """
+                INSERT INTO worktree_events (
+                    lease_id, event_type, from_state, to_state, observed_head_sha,
+                    pr_number, summary, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    lease_id,
+                    "cleanup_released",
+                    current_row["state"],
+                    current_row["state"],
+                    None,
+                    current_row["target_pr"],
+                    "Cleanup reservation released",
+                    timestamp,
+                ),
+            )
+            updated_row = connection.execute(
+                "SELECT * FROM worktree_leases WHERE id = ?", (lease_id,)
+            ).fetchone()
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        if updated_row is None:
+            raise RuntimeError("lease changed concurrently")
+        return self._lease_from_row(updated_row)
+
+    def record_cleanup_event(
+        self, lease_id: str, *, event_type: str, summary: str
+    ) -> None:
+        self.ensure()
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            current_row = connection.execute(
+                "SELECT * FROM worktree_leases WHERE id = ?", (lease_id,)
+            ).fetchone()
+            if current_row is None:
+                raise RuntimeError("lease changed concurrently")
+            connection.execute(
+                """
+                INSERT INTO worktree_events (
+                    lease_id, event_type, from_state, to_state, observed_head_sha,
+                    pr_number, summary, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    lease_id,
+                    event_type,
+                    current_row["state"],
+                    current_row["state"],
+                    None,
+                    current_row["target_pr"],
+                    self._bound_summary(summary),
+                    now_iso(),
+                ),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def list_events(self, lease_id: str) -> list[WorktreeEvent]:
         self.ensure()
@@ -426,6 +704,27 @@ class WorktreeRegistry:
             updated_at=row["updated_at"],
             removed_at=row["removed_at"],
             version=row["version"],
+        )
+
+    @staticmethod
+    def _cleanup_reservation_from_row(row: sqlite3.Row) -> CleanupReservation:
+        return CleanupReservation(
+            lease_id=row["lease_id"],
+            reserved_version=row["reserved_version"],
+            branch_sha=row["branch_sha"],
+            created_at=row["created_at"],
+        )
+
+    @staticmethod
+    def _has_cleanup_reservation(
+        connection: sqlite3.Connection, lease_id: str
+    ) -> bool:
+        return (
+            connection.execute(
+                "SELECT 1 FROM worktree_cleanup_reservations WHERE lease_id = ?",
+                (lease_id,),
+            ).fetchone()
+            is not None
         )
 
     @staticmethod
