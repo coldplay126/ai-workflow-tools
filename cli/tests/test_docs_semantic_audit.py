@@ -66,7 +66,8 @@ def _shell_fenced_awf_commands(text: str) -> tuple[str, ...]:
         for raw_line in block.splitlines():
             line = raw_line.strip()
             if continued:
-                continued = f"{continued} {line.removesuffix('\\').strip()}"
+                fragment = line.removesuffix("\\").strip()
+                continued = f"{continued} {fragment}"
                 if line.endswith("\\"):
                     continue
                 commands.append(continued)
