@@ -754,6 +754,64 @@ def test_refresh_blocks_merged_promotion_when_pr_head_differs_before_deployment(
     assert payload["leases"][0]["deployment_state"] == "unknown"
 
 
+def test_refresh_records_head_mismatch_for_unrelated_blocked_promotion(
+    harness: Harness,
+) -> None:
+    acquired = harness.service.acquire(
+        initiative="reward-widget",
+        purpose=Purpose.PROMOTE,
+        base=None,
+        branch=None,
+        owner_id="session-1",
+        apply=True,
+    )
+    assert acquired.lease is not None
+    lease = harness.attach_pr(acquired.lease, 42)
+    unrelated_block = harness.registry.transition(
+        lease.id,
+        LeaseState.BLOCKED,
+        expected_version=lease.version,
+        event_type="deployment_refresh_failed",
+        summary="unrelated deployment failure",
+        deployment_state=DeploymentState.UNKNOWN,
+    )
+    pull_request_head = "different-head-sha"
+    harness.github.prs[42] = merged_pr(number=42, head_sha=pull_request_head)
+    deployment_calls: list[list[str]] = []
+
+    def deployment_runner(
+        command: list[str], **_: object
+    ) -> subprocess.CompletedProcess[str]:
+        deployment_calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    harness.service = WorktreeService(
+        harness.registry,
+        harness.git,
+        config=WorktreeConfig(
+            default_base="staging", deployment_status_command=("deploy", "status")
+        ),
+        github=harness.github,
+        deployment_runner=deployment_runner,
+        cache_dir=harness.cache_dir,
+        state_dir=harness.state_dir,
+        lock_dir=harness.lock_dir,
+    )
+
+    first = harness.service.status(initiative="reward-widget", refresh=True)
+    events = harness.registry.list_events(lease.id)
+    second = harness.service.status(initiative="reward-widget", refresh=True)
+
+    assert first.leases[0].state is LeaseState.BLOCKED
+    assert first.leases[0].deployment_state is DeploymentState.UNKNOWN
+    assert first.leases[0].version == unrelated_block.version + 1
+    assert events[-1].event_type == "github_refresh_head_mismatch"
+    assert events[-1].observed_head_sha == pull_request_head
+    assert deployment_calls == []
+    assert second.leases[0].version == first.leases[0].version
+    assert harness.registry.list_events(lease.id) == events
+
+
 def test_refresh_blocks_promoted_lease_when_deployment_fails(
     harness: Harness,
 ) -> None:

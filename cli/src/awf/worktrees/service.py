@@ -1752,7 +1752,14 @@ class WorktreeService:
             lease.state is LeaseState.BLOCKED
             and lease.deployment_state is DeploymentState.UNKNOWN
         ):
-            return lease
+            events = self.registry.list_events(lease.id)
+            if (
+                events
+                and events[-1].event_type == "github_refresh_head_mismatch"
+                and events[-1].observed_head_sha == pull_request.head_sha
+                and events[-1].pr_number == pull_request.number
+            ):
+                return lease
         return self.registry.transition(
             lease.id,
             LeaseState.BLOCKED,
