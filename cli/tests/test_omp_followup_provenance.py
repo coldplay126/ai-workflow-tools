@@ -779,6 +779,105 @@ def test_followup_command_resumes_session_and_persists_redacted_child(
     assert "sensitive follow-up message" not in child_text
     assert '{"delivery":"direct"' not in child_text
 
+def test_followup_command_resumes_native_checkpoint_and_persists_v2_child(
+    tmp_path: Path, monkeypatch, capsys
+):
+    checkpoint = _write_native_checkpoint(tmp_path)
+    checkpoint_payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+    checkpoint_payload["workers"][0].update(
+        {
+            "name": "Awf000Reviewer",
+            "task_id": "Awf000Reviewer",
+            "agent_uri": "agent://Awf000Reviewer",
+            "history_uri": "history://Awf000Reviewer",
+        }
+    )
+    checkpoint_payload["workers"].append(
+        {
+            "index": 1,
+            "name": "Awf001Implementer",
+            "task_id": "Awf001Implementer",
+            "agent_uri": "agent://Awf001Implementer",
+            "history_uri": "history://Awf001Implementer",
+            "status": "completed",
+            "descriptor_sha256": hashlib.sha256(
+                b"Awf001Implementer descriptor"
+            ).hexdigest(),
+        }
+    )
+    checkpoint.write_text(json.dumps(checkpoint_payload), encoding="utf-8")
+
+    (tmp_path / ".workflow" / "provider-config.json").write_text(
+        json.dumps({"dispatch": {"omp": {"command": "repo-omp"}}}),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_resume(**kwargs):
+        captured.update(kwargs)
+        return (
+            subprocess.CompletedProcess(
+                ["omp-fixture"],
+                0,
+                stdout=_direct_evidence("Awf001Implementer"),
+                stderr="",
+            ),
+            0.2,
+        )
+
+    monkeypatch.setattr(agents_command, "_run_omp_resume", fake_resume)
+    monkeypatch.setattr(
+        agents_command,
+        "parse_omp_json_stream",
+        lambda *_args, **_kwargs: (
+            '{"delivery":"direct","status":"completed"}',
+            {"provider": "fixture", "session_id": "session-native-1"},
+            1,
+            2,
+        ),
+    )
+    monkeypatch.setattr(agents_command, "parse_omp_task_events", lambda _text: [])
+    args = Namespace(
+        repo_root=str(tmp_path),
+        run=str(checkpoint),
+        role="implementer",
+        task_id=None,
+        message="resume native checkpoint worker",
+        message_file=None,
+        json=True,
+    )
+
+    assert agents_command.run_agents_followup_omp(args) == 0
+    assert captured["session_id"] == "session-native-1"
+    prompt = str(captured["prompt"])
+    assert "Awf001Implementer" in prompt
+    assert "Awf000Reviewer" not in prompt
+
+
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["status"] == "completed"
+    assert summary["delivery"] == "direct"
+    assert summary["task_id"] == "Awf001Implementer"
+    assert summary["parent_run_id"] == checkpoint.stem
+    assert summary["parent_task_id"] == "Awf001Implementer"
+    child_path = Path(summary["provenance_path"])
+    child = json.loads(child_path.read_text(encoding="utf-8"))
+    assert child["status"] == "completed"
+    assert len(child["agents"]) == 1
+    child_agent = child["agents"][0]
+    assert child_agent["task_id"] == "Awf001Implementer"
+    assert child_agent["metadata"]["session_id"] == "session-native-1"
+    assert child_agent["status"] == "completed"
+    lineage = child_agent["lineage"]
+    assert lineage["parent_run_id"] == checkpoint.stem
+    assert lineage["parent_task_id"] == "Awf001Implementer"
+    assert lineage["original_task_id"] == "Awf001Implementer"
+    assert lineage["successor_task_id"] is None
+    assert lineage["followup_kind"] == "direct"
+    assert child["schema_version"] == 2
+    assert child["parent_run_id"] == checkpoint.stem
+    assert child["parent_task_id"] == "Awf001Implementer"
+
 
 def test_followup_command_fails_before_spawn_without_persisted_session(
     tmp_path: Path, monkeypatch, capsys
