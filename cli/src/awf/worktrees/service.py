@@ -134,7 +134,7 @@ class WorktreeService:
                     head_sha=self.git.head_sha(lease.worktree_path),
                 )
                 lease = self.registry.create_lease(lease)
-            except (GitError, RuntimeError, ValueError, sqlite3.Error) as error:
+            except (GitError, OSError, RuntimeError, ValueError, sqlite3.Error) as error:
                 return self._handle_creation_failure(lease, error)
 
             prepare_error = self._prepare(lease, force=True)

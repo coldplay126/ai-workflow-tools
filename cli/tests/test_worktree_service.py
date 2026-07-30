@@ -205,3 +205,71 @@ def test_acquire_removes_a_clean_worktree_when_registry_insert_fails(
     assert result.status == "blocked"
     assert result.blockers[0]["code"] == "registry_conflict"
     assert len(git.list_worktrees()) == 1
+
+
+def test_acquire_removes_a_clean_worktree_when_registry_filesystem_insert_fails(
+    tmp_path: Path,
+) -> None:
+    class FailingRegistry(WorktreeRegistry):
+        def create_lease(self, lease: Lease) -> Lease:
+            raise PermissionError("state directory is read-only")
+
+    repo = make_repository(tmp_path)
+    git = GitClient(repo)
+    service = WorktreeService(
+        FailingRegistry(tmp_path / "state" / "worktrees.sqlite3"),
+        git,
+        config=WorktreeConfig(default_base="staging"),
+        cache_dir=tmp_path / "cache",
+        state_dir=tmp_path / "state",
+        lock_dir=tmp_path / "locks",
+    )
+
+    result = service.acquire(
+        initiative="reward-widget",
+        purpose=Purpose.FEATURE,
+        base=None,
+        branch=None,
+        owner_id="session-1",
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "registry_conflict"
+    assert len(git.list_worktrees()) == 1
+
+
+def test_acquire_preserves_a_dirty_worktree_when_registry_filesystem_insert_fails(
+    tmp_path: Path,
+) -> None:
+    class FailingRegistry(WorktreeRegistry):
+        def create_lease(self, lease: Lease) -> Lease:
+            (lease.worktree_path / "recovery.txt").write_text(
+                "keep this worktree\n",
+                encoding="utf-8",
+            )
+            raise PermissionError("state directory is read-only")
+
+    repo = make_repository(tmp_path)
+    git = GitClient(repo)
+    service = WorktreeService(
+        FailingRegistry(tmp_path / "state" / "worktrees.sqlite3"),
+        git,
+        config=WorktreeConfig(default_base="staging"),
+        cache_dir=tmp_path / "cache",
+        state_dir=tmp_path / "state",
+        lock_dir=tmp_path / "locks",
+    )
+
+    result = service.acquire(
+        initiative="reward-widget",
+        purpose=Purpose.FEATURE,
+        base=None,
+        branch=None,
+        owner_id="session-1",
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "registry_conflict"
+    assert len(git.list_worktrees()) == 2
