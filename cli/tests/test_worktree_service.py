@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sqlite3
 import sys
@@ -2303,3 +2304,57 @@ def test_promote_rejects_invalid_github_oids_before_git_mutation(
     assert result.status == "blocked"
     assert result.blockers[0]["code"] == "source_pr_invalid_oid"
     assert not promotion_harness.registry.db_path.exists()
+
+
+def test_production_verifier_bounds_and_redacts_large_stderr(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.configure(
+        verify_production=(
+            (
+                sys.executable,
+                "-c",
+                "import sys; sys.stderr.write('token secret-value ' + 'x' * 1_000_000); sys.exit(7)",
+            ),
+        )
+    )
+
+    with pytest.raises(RuntimeError) as error:
+        promotion_harness.service._verify_promotion(promotion_harness.repo)
+
+    detail = str(error.value)
+    assert "secret-value" not in detail
+    assert "<redacted>" in detail
+    assert len(detail.encode("utf-8")) <= 600
+
+
+def test_production_verifier_kills_timeout_descendant(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from awf.worktrees import service as service_module
+
+    pid_path = tmp_path / "descendant.pid"
+    monkeypatch.setattr(service_module, "_PRODUCTION_VERIFY_TIMEOUT_SECONDS", 0.1)
+    script = (
+        "import os, pathlib, signal, subprocess, sys, time; "
+        "child=subprocess.Popen([sys.executable, '-c', "
+        "'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'], "
+        "stderr=subprocess.DEVNULL); "
+        f"pathlib.Path({str(pid_path)!r}).write_text(str(child.pid)); "
+        "time.sleep(60)"
+    )
+    promotion_harness.configure(
+        verify_production=((sys.executable, "-c", script),)
+    )
+
+    with pytest.raises(RuntimeError, match="timed out"):
+        promotion_harness.service._verify_promotion(promotion_harness.repo)
+    child_pid = int(pid_path.read_text(encoding="utf-8"))
+
+    status = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(child_pid)],
+        check=False,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert not status or status.startswith("Z")
