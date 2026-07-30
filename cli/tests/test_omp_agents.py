@@ -53,6 +53,28 @@ def test_sync_omp_agents_compiles_supported_frontmatter(tmp_path: Path):
     assert len(manifest["files"][0]["sha256"]) == 64
 
 
+def test_sync_omp_agents_role_selector_overrides_explicit_model(tmp_path: Path):
+    source = _write_claude_agent(
+        tmp_path / "claude" / "agents" / "implementer.md"
+    )
+    source.write_text(
+        source.read_text(encoding="utf-8")
+        .replace("model: opus", "model: openai-codex/gpt-5.6-sol")
+        .replace(
+            "provider_hint: claude-code",
+            'omp_model_role: " @task "\nprovider_hint: claude-code',
+        ),
+        encoding="utf-8",
+    )
+    sync_omp_agents(tmp_path)
+    generated = (
+        tmp_path / ".omp" / "agents" / "implementer.md"
+    ).read_text(encoding="utf-8")
+    assert generated.count("\nmodel: ") == 1
+    assert 'model: "@task"' in generated
+    assert "openai-codex/gpt-5.6-sol" not in generated
+
+
 def test_sync_omp_agents_preserves_explicit_cross_runtime_model(tmp_path: Path):
     source = _write_claude_agent(
         tmp_path / "claude" / "agents" / "implementer.md"

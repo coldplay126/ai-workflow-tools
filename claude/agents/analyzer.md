@@ -5,6 +5,7 @@ tools: Read, Grep, Glob, Bash
 model: sonnet
 # awf extensions
 provider_hint: codex
+omp_model_role: smol
 codex_sandbox: workspace-write
 roles: [analyzer, code_analyzer, analysis_worker]
 ---

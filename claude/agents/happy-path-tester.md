@@ -5,6 +5,7 @@ tools: Read, Grep, Glob, Bash
 model: sonnet
 # awf extensions
 provider_hint: codex
+omp_model_role: task
 codex_sandbox: workspace-write
 roles: [happy_path]
 ---

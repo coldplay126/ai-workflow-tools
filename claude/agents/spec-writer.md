@@ -5,6 +5,7 @@ tools: Read, Grep, Glob, Edit, Write, Bash
 model: opus
 # awf extensions
 provider_hint: claude-code
+omp_model_role: plan
 codex_sandbox: workspace-write
 roles: [spec_writer]
 ---

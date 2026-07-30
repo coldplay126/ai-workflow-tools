@@ -5,6 +5,7 @@ tools: Read, Grep, Glob, Bash
 model: sonnet
 # awf extensions
 provider_hint: claude:sonnet
+omp_model_role: slow
 codex_sandbox: workspace-write
 roles: [quality_validation]
 ---

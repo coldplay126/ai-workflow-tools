@@ -5,6 +5,7 @@ tools: Read, Grep, Glob, Bash
 model: sonnet
 # awf extensions
 provider_hint: claude-code
+omp_model_role: smol
 codex_sandbox: read-only
 roles: [wf_discovery, project_discovery]
 ---

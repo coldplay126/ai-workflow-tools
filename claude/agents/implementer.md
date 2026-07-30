@@ -6,6 +6,7 @@ model: opus
 isolation: worktree
 # awf extensions
 provider_hint: claude-code
+omp_model_role: task
 codex_sandbox: workspace-write
 roles: [implementer]
 ---
