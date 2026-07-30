@@ -16,6 +16,10 @@ class GitError(RuntimeError):
     """Raised when a checked Git command cannot complete successfully."""
 
 
+
+class GitRemoteError(GitError):
+    """Raised when a Git operation against the origin remote fails."""
+
 @dataclass(frozen=True)
 class GitCompleted:
     returncode: int
@@ -70,8 +74,12 @@ class GitClient:
         return _parse_worktrees(completed.stdout)
 
     def fetch_ref(self, ref: str) -> str:
-        self._run("fetch", "origin", ref)
+        try:
+            self._run("fetch", "origin", ref)
+        except GitError as error:
+            raise GitRemoteError(str(error)) from error
         return self._text(self._run("rev-parse", "FETCH_HEAD").stdout)
+
 
     def resolve_ref(self, ref: str) -> str:
         return self._text(self._run("rev-parse", "--verify", ref).stdout)
@@ -98,12 +106,15 @@ class GitClient:
 
     def delete_remote_branch_if_at(self, branch: str, expected_sha: str) -> None:
         ref = f"refs/heads/{branch}"
-        self._run(
-            "push",
-            f"--force-with-lease={ref}:{expected_sha}",
-            "origin",
-            f":{ref}",
-        )
+        try:
+            self._run(
+                "push",
+                f"--force-with-lease={ref}:{expected_sha}",
+                "origin",
+                f":{ref}",
+            )
+        except GitError as error:
+            raise GitRemoteError(str(error)) from error
 
     @contextmanager
     def hold_worktree_branch_if_at(
@@ -250,7 +261,10 @@ class GitClient:
         return self.head_sha(cwd)
 
     def push_branch(self, cwd: Path, branch: str) -> None:
-        self._run("push", "-u", "origin", f"HEAD:refs/heads/{branch}", cwd=cwd)
+        try:
+            self._run("push", "-u", "origin", f"HEAD:refs/heads/{branch}", cwd=cwd)
+        except GitError as error:
+            raise GitRemoteError(str(error)) from error
 
     def _run(
         self,

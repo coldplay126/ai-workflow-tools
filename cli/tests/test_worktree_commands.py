@@ -11,7 +11,7 @@ import pytest
 
 from awf.commands.wt import _emit
 from awf.cli import build_parser, main
-from awf.worktrees.git import GitClient
+from awf.worktrees.git import GitClient, GitError, GitRemoteError
 from awf.worktrees.github import PullRequest
 from awf.worktrees.models import (
     CommandResult,
@@ -146,6 +146,98 @@ def test_wt_human_output_emits_refresh_warning_to_stderr(
         "warning: github_refresh_failed: "
         "Unable to refresh pull request state for lease safe-id.\n"
     )
+
+
+def test_wt_json_output_preserves_external_failure_exit_code(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = CommandResult.error(
+        "wt.promote",
+        code="github_unavailable",
+        message="gh authentication failed",
+        exit_code=4,
+    )
+
+    assert _emit(result, as_json=True) == 4
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    payload = json.loads(captured.out)
+    assert payload["status"] == "error"
+    assert payload["exit_code"] == 4
+    assert payload["blockers"] == [
+        {"code": "github_unavailable", "message": "gh authentication failed"}
+    ]
+
+
+def test_wt_promote_maps_escaped_remote_failure_to_external_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = make_repository(tmp_path)
+
+    def remote_failure(*_args: object, **_kwargs: object) -> CommandResult:
+        raise GitRemoteError("git push failed: network unavailable")
+
+    monkeypatch.setattr(
+        "awf.commands.wt.WorktreeService.promote",
+        remote_failure,
+    )
+
+    rc, stdout, stderr = capture_main(
+        [
+            "wt",
+            "promote",
+            "--source-pr",
+            "372",
+            "--to",
+            "main",
+            "--repo-root",
+            str(repo),
+            "--json",
+        ]
+    )
+
+    payload = json.loads(stdout)
+    assert rc == 4
+    assert stderr == ""
+    assert payload["status"] == "error"
+    assert payload["exit_code"] == 4
+    assert payload["blockers"][0]["code"] == "git_remote_error"
+
+
+def test_wt_promote_keeps_local_git_failure_as_conflict_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = make_repository(tmp_path)
+
+    def local_failure(*_args: object, **_kwargs: object) -> CommandResult:
+        raise GitError("git rev-parse failed: local ref is malformed")
+
+    monkeypatch.setattr(
+        "awf.commands.wt.WorktreeService.promote",
+        local_failure,
+    )
+
+    rc, stdout, stderr = capture_main(
+        [
+            "wt",
+            "promote",
+            "--source-pr",
+            "372",
+            "--to",
+            "main",
+            "--repo-root",
+            str(repo),
+            "--json",
+        ]
+    )
+
+    payload = json.loads(stdout)
+    assert rc == 5
+    assert stderr == ""
+    assert payload["status"] == "error"
+    assert payload["exit_code"] == 5
+    assert payload["blockers"][0]["code"] == "git_error"
 
 
 def test_wt_status_emits_one_json_document(

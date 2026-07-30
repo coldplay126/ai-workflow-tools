@@ -179,7 +179,13 @@ class CommandResult:
 
     @classmethod
     def error(
-        cls, command: str, *, code: str, message: str, exit_code: int
+        cls,
+        command: str,
+        *,
+        code: str,
+        message: str,
+        exit_code: int,
+        **values: Any,
     ) -> CommandResult:
         return cls(
             command=command,
@@ -187,6 +193,19 @@ class CommandResult:
             decision="blocked",
             blockers=({"code": code, "message": message},),
             exit_code=exit_code,
+            **values,
+        )
+
+    @classmethod
+    def external_error(
+        cls, command: str, *, code: str, message: str, **values: Any
+    ) -> CommandResult:
+        return cls.error(
+            command,
+            code=code,
+            message=message,
+            exit_code=4,
+            **values,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -200,5 +219,6 @@ class CommandResult:
             "actions": list(self.actions),
             "blockers": list(self.blockers),
             "warnings": list(self.warnings),
+            "exit_code": self.exit_code,
             "observed_at": self.observed_at,
         }

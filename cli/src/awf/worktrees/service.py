@@ -16,7 +16,7 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 from .config import ConfigError, WorktreeConfig, load_worktree_config
-from .git import GitClient, GitError, GitWorktree
+from .git import GitClient, GitError, GitRemoteError, GitWorktree
 from .github import ExternalServiceError, GhClient, PullRequest
 from .locking import repository_lock
 from .models import (
@@ -201,7 +201,11 @@ class WorktreeService:
         try:
             github = self.github or GhClient(self.git.repository_root())
             source = github.view_pr(source_pr)
-        except (ExternalServiceError, ValueError) as error:
+        except ExternalServiceError as error:
+            return self._external_error(
+                "wt.promote", "source_pr_unavailable", str(error)
+            )
+        except ValueError as error:
             return self._promotion_blocked("source_pr_unavailable", str(error))
         source_blocker = self._promotion_source_blocker(source, target_ref)
         if source_blocker is not None:
@@ -276,6 +280,10 @@ class WorktreeService:
                     merge_base,
                     source_head_sha,
                     find_renames=True,
+                )
+            except GitRemoteError as error:
+                return self._external_error(
+                    "wt.promote", "source_delta_unavailable", str(error)
                 )
             except GitError as error:
                 return self._promotion_blocked("source_delta_unavailable", str(error))
@@ -374,6 +382,14 @@ class WorktreeService:
 
             try:
                 self.git.push_branch(lease.worktree_path, lease.branch)
+            except GitError as error:
+                return self._external_error(
+                    "wt.promote",
+                    "promotion_publish_failed",
+                    str(error),
+                    lease=lease,
+                )
+            try:
                 target_pull_request = github.find_open_pr(
                     head=lease.branch, base=target_branch
                 )
@@ -388,7 +404,14 @@ class WorktreeService:
                             lease=lease,
                         ),
                     )
-            except (ExternalServiceError, GitError, ValueError) as error:
+            except ExternalServiceError as error:
+                return self._external_error(
+                    "wt.promote",
+                    "promotion_publish_failed",
+                    str(error),
+                    lease=lease,
+                )
+            except ValueError as error:
                 return self._promotion_blocked(
                     "promotion_publish_failed", str(error), lease=lease
                 )
@@ -635,7 +658,14 @@ class WorktreeService:
                 pull_request = pull_request or (
                     self.github or GhClient(lease.repository_root)
                 ).view_pr(lease.target_pr)
-            except (ExternalServiceError, KeyError, OSError, ValueError) as error:
+            except ExternalServiceError as error:
+                return self._external_error(
+                    "wt.finish",
+                    "github_refresh_failed",
+                    f"Unable to refresh pull request state: {error}",
+                    lease=lease,
+                )
+            except (KeyError, OSError, ValueError) as error:
                 return self._cleanup_blocked(
                     "wt.finish",
                     "github_refresh_failed",
@@ -696,7 +726,15 @@ class WorktreeService:
                 pull_request = (self.github or GhClient(current.repository_root)).view_pr(
                     current.target_pr
                 )
-            except (ExternalServiceError, KeyError, OSError, ValueError) as error:
+            except ExternalServiceError as error:
+                return self._external_error(
+                    "wt.finish",
+                    "github_refresh_failed",
+                    f"Unable to refresh pull request state: {error}",
+                    lease=current,
+                    warnings=warnings,
+                )
+            except (KeyError, OSError, ValueError) as error:
                 return self._cleanup_blocked(
                     "wt.finish",
                     "github_refresh_failed",
@@ -715,6 +753,8 @@ class WorktreeService:
             forced = self._force_cleanup_deployment_probe(
                 current, pull_request, warnings
             )
+            if isinstance(forced, CommandResult):
+                return forced
             if forced is None:
                 recorded = self.registry.get_lease(current.id) or current
                 return self._cleanup_blocked(
@@ -729,7 +769,15 @@ class WorktreeService:
                 pull_request = (self.github or GhClient(current.repository_root)).view_pr(
                     current.target_pr
                 )
-            except (ExternalServiceError, KeyError, OSError, ValueError) as error:
+            except ExternalServiceError as error:
+                return self._external_error(
+                    "wt.finish",
+                    "github_refresh_failed",
+                    f"Unable to revalidate pull request state: {error}",
+                    lease=current,
+                    warnings=warnings,
+                )
+            except (KeyError, OSError, ValueError) as error:
                 return self._cleanup_blocked(
                     "wt.finish",
                     "github_refresh_failed",
@@ -918,7 +966,7 @@ class WorktreeService:
         lease: Lease,
         pull_request: PullRequest,
         warnings: list[dict[str, str]],
-    ) -> Lease | None:
+    ) -> Lease | CommandResult | None:
         if lease.purpose is not Purpose.PROMOTE:
             return lease
         command = self.config.deployment_status_command
@@ -942,30 +990,29 @@ class WorktreeService:
                 text=True,
                 timeout=_DEPLOYMENT_STATUS_TIMEOUT_SECONDS,
             )
+            returncode = completed.returncode
         except Exception:
-            warnings.append(
-                {
-                    "code": "deployment_probe_failed",
-                    "message": (
-                        f"Unable to run a fresh deployment status probe for lease {lease.id}."
-                    ),
-                }
-            )
-            return self._record_cleanup_deployment_probe(
-                lease,
-                pull_request,
-                state=LeaseState.BLOCKED,
-                deployment_state=DeploymentState.UNKNOWN,
-                summary="Fresh deployment status probe could not be completed",
+            return self._external_error(
+                "wt.finish",
+                "deployment_probe_failed",
+                f"Unable to run a fresh deployment status probe for lease {lease.id}.",
+                lease=lease,
                 warnings=warnings,
             )
-        if completed.returncode != 0:
-            return self._record_cleanup_deployment_probe(
-                lease,
-                pull_request,
-                state=LeaseState.BLOCKED,
-                deployment_state=DeploymentState.FAILED,
-                summary="Fresh deployment status probe reported failure",
+        if not isinstance(returncode, int) or isinstance(returncode, bool):
+            return self._external_error(
+                "wt.finish",
+                "deployment_probe_failed",
+                f"Fresh deployment status probe returned an invalid status for lease {lease.id}.",
+                lease=lease,
+                warnings=warnings,
+            )
+        if returncode != 0:
+            return self._external_error(
+                "wt.finish",
+                "deployment_probe_failed",
+                f"Fresh deployment status probe failed for lease {lease.id}.",
+                lease=lease,
                 warnings=warnings,
             )
         return self._record_cleanup_deployment_probe(
@@ -1427,6 +1474,23 @@ class WorktreeService:
         return CommandResult.blocked(
             command,
             blockers=({"code": code, "message": message},),
+            lease=lease,
+            warnings=tuple(warnings or ()),
+        )
+
+    @staticmethod
+    def _external_error(
+        command: str,
+        code: str,
+        message: str,
+        *,
+        lease: Lease | None = None,
+        warnings: list[dict[str, str]] | None = None,
+    ) -> CommandResult:
+        return CommandResult.external_error(
+            command,
+            code=code,
+            message=message,
             lease=lease,
             warnings=tuple(warnings or ()),
         )
@@ -2337,6 +2401,13 @@ class WorktreeService:
                 observed_head_sha=promotion_head,
                 head_sha=promotion_head,
             )
+        except GitRemoteError as error:
+            return self._external_error(
+                "wt.promote",
+                "promotion_recovery_failed",
+                str(error),
+                lease=lease,
+            )
         except (
             GitError,
             OSError,
@@ -2423,8 +2494,14 @@ class WorktreeService:
                 pr_number=target_pull_request.number,
                 head_sha=head_sha,
             )
+        except (ExternalServiceError, GitRemoteError) as error:
+            return self._external_error(
+                "wt.promote",
+                "promotion_publish_failed",
+                str(error),
+                lease=lease,
+            )
         except (
-            ExternalServiceError,
             GitError,
             OSError,
             RuntimeError,

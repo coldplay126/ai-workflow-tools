@@ -9,7 +9,7 @@ from pathlib import Path
 
 from awf.core.paths import find_repo_root
 from awf.worktrees.config import ConfigError, load_worktree_config
-from awf.worktrees.git import GitClient, GitError
+from awf.worktrees.git import GitClient, GitError, GitRemoteError
 from awf.worktrees.models import CommandResult, Purpose
 from awf.worktrees.registry import WorktreeRegistry
 from awf.worktrees.service import WorktreeService, state_db_path
@@ -63,6 +63,12 @@ def _run(
             code="config_error",
             message=str(error),
             exit_code=2,
+        )
+    except GitRemoteError as error:
+        result = CommandResult.external_error(
+            command,
+            code="git_remote_error",
+            message=str(error),
         )
     except GitError as error:
         result = CommandResult.error(

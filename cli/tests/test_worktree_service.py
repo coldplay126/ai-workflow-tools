@@ -28,6 +28,7 @@ class FakeGitHub:
     error: ExternalServiceError | None = None
     view_calls: list[int] = field(default_factory=list)
     create_calls: list[dict[str, str]] = field(default_factory=list)
+    create_error: ExternalServiceError | None = None
     find_calls: list[tuple[str, str]] = field(default_factory=list)
     open_prs: dict[tuple[str, str], PullRequest] = field(default_factory=dict)
     repository_root: Path | None = None
@@ -46,6 +47,8 @@ class FakeGitHub:
     def create_pr(
         self, *, base: str, head: str, title: str, body: str
     ) -> PullRequest:
+        if self.create_error is not None:
+            raise self.create_error
         self.create_calls.append(
             {"base": base, "head": head, "title": title, "body": body}
         )
@@ -2142,6 +2145,56 @@ def test_promote_applies_only_source_pr_delta(
     assert result.lease.target_pr == 900
 
 
+@pytest.mark.parametrize(
+    "message",
+    (
+        "gh pr view failed (4): authentication required",
+        "gh pr view failed (1): network unavailable",
+    ),
+)
+def test_promote_classifies_github_source_view_failures_as_external(
+    promotion_harness: PromotionHarness, message: str
+) -> None:
+    promotion_harness.github.error = ExternalServiceError(message)
+
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert result.status == "error"
+    assert result.exit_code == 4
+    assert result.blockers[0]["code"] == "source_pr_unavailable"
+    assert not promotion_harness.registry.db_path.exists()
+
+
+def test_promote_classifies_github_create_failure_as_external(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.github.create_error = ExternalServiceError(
+        "gh pr create failed (1): network unavailable"
+    )
+
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert result.status == "error"
+    assert result.exit_code == 4
+    assert result.blockers[0]["code"] == "promotion_publish_failed"
+    assert result.lease is not None
+    current = promotion_harness.registry.get_lease(result.lease.id)
+    assert current is not None
+    assert current.state is LeaseState.ACTIVE
+    assert current.worktree_path.exists()
+    assert {
+        event.event_type for event in promotion_harness.registry.list_events(current.id)
+    } == {"promotion_publish_pending"}
+
+
 def test_promote_requires_merged_source_pr(
     promotion_harness: PromotionHarness,
 ) -> None:
@@ -2368,6 +2421,33 @@ def test_promote_never_reconciles_a_conflicted_blocked_lease(
     assert promotion_harness.github.find_calls == []
 
 
+
+def test_promote_classifies_remote_fetch_failure_as_external(
+    promotion_harness: PromotionHarness,
+) -> None:
+    origin = git_command(promotion_harness.repo, "remote", "get-url", "origin")
+    git_command(
+        promotion_harness.repo,
+        "remote",
+        "set-url",
+        "origin",
+        str(promotion_harness.repo.parent / "unreachable-origin.git"),
+    )
+    try:
+        result = promotion_harness.service.promote(
+            source_pr=372,
+            target_branch="main",
+            apply=True,
+        )
+    finally:
+        git_command(promotion_harness.repo, "remote", "set-url", "origin", origin)
+
+    assert result.status == "error"
+    assert result.exit_code == 4
+    assert result.blockers[0]["code"] == "source_delta_unavailable"
+    assert promotion_harness.registry.list_leases() == []
+    assert len(promotion_harness.git.list_worktrees()) == 1
+
 def test_promote_retries_publish_after_a_transient_push_failure(
     promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2390,7 +2470,8 @@ def test_promote_retries_publish_after_a_transient_push_failure(
         apply=True,
     )
 
-    assert first.status == "blocked"
+    assert first.status == "error"
+    assert first.exit_code == 4
     assert first.lease is not None
     assert first.lease.state is LeaseState.ACTIVE
     assert second.decision == "ready"
@@ -2616,6 +2697,26 @@ def test_finish_previews_without_mutating(
     assert promotion_harness.registry.get_lease(lease.id).state is LeaseState.CLEANABLE
 
 
+def test_finish_classifies_github_view_failure_as_external(
+    promotion_harness: PromotionHarness,
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+    promotion_harness.github.error = ExternalServiceError(
+        "gh pr view failed (4): authentication required"
+    )
+
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.status == "error"
+    assert result.exit_code == 4
+    assert result.blockers[0]["code"] == "github_refresh_failed"
+    assert lease.worktree_path.exists()
+    current = promotion_harness.registry.get_lease(lease.id)
+    assert current is not None
+    assert current.state is LeaseState.CLEANABLE
+    assert current.deployment_state is DeploymentState.HEALTHY
+
+
 @pytest.mark.parametrize(
     ("value", "expected_seconds"),
     [("15s", 15), ("2m", 120), ("3h", 10_800), ("7d", 604_800)],
@@ -2648,7 +2749,7 @@ def test_gc_is_preview_by_default_and_rechecks_each_candidate(
     assert dirty.worktree_path.exists()
 
 
-def test_finish_forced_deployment_probe_blocks_a_regressed_promotion(
+def test_finish_classifies_nonzero_deployment_probe_as_external(
     promotion_harness: PromotionHarness,
 ) -> None:
     lease = promotion_harness.merged_promotion("healthy")
@@ -2664,16 +2765,18 @@ def test_finish_forced_deployment_probe_blocks_a_regressed_promotion(
 
     result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
 
-    assert result.status == "blocked"
-    assert "deployment_not_healthy" in {item["code"] for item in result.blockers}
+    assert result.status == "error"
+    assert result.exit_code == 4
+    assert result.blockers[0]["code"] == "deployment_probe_failed"
     assert probes == [[sys.executable, "-c", "pass"]]
     assert lease.worktree_path.exists()
     current = promotion_harness.registry.get_lease(lease.id)
     assert current is not None
-    assert current.deployment_state is DeploymentState.FAILED
+    assert current.state is LeaseState.CLEANABLE
+    assert current.deployment_state is DeploymentState.HEALTHY
 
 
-def test_finish_preserves_promotion_when_forced_deployment_probe_errors(
+def test_finish_classifies_timed_out_deployment_probe_as_external(
     promotion_harness: PromotionHarness,
 ) -> None:
     lease = promotion_harness.merged_promotion("healthy")
@@ -2685,9 +2788,38 @@ def test_finish_preserves_promotion_when_forced_deployment_probe_errors(
 
     result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
 
-    assert result.status == "blocked"
-    assert "deployment_not_healthy" in {item["code"] for item in result.blockers}
+    assert result.status == "error"
+    assert result.exit_code == 4
+    assert result.blockers[0]["code"] == "deployment_probe_failed"
     assert lease.worktree_path.exists()
+    current = promotion_harness.registry.get_lease(lease.id)
+    assert current is not None
+    assert current.state is LeaseState.CLEANABLE
+    assert current.deployment_state is DeploymentState.HEALTHY
+
+
+def test_finish_classifies_malformed_deployment_probe_as_external(
+    promotion_harness: PromotionHarness,
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+
+    class MalformedCompleted:
+        returncode = None
+
+    promotion_harness.service.deployment_runner = lambda *_args, **_kwargs: (
+        MalformedCompleted()
+    )
+
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.status == "error"
+    assert result.exit_code == 4
+    assert result.blockers[0]["code"] == "deployment_probe_failed"
+    assert lease.worktree_path.exists()
+    current = promotion_harness.registry.get_lease(lease.id)
+    assert current is not None
+    assert current.state is LeaseState.CLEANABLE
+    assert current.deployment_state is DeploymentState.HEALTHY
 
 
 def test_finish_requires_a_fresh_healthy_deployment_probe(

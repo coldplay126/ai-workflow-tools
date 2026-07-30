@@ -105,17 +105,17 @@ stderr:
   "actions": [],
   "blockers": [],
   "warnings": [],
+  "exit_code": 0,
   "observed_at": "2026-07-30T00:00:00+00:00"
 }
 ```
 
 Exit code `0` means success, preview, reuse, or no-op; `2` means CLI usage or
-configuration-schema error; `3` means a safety blocker; and `5` means a
-registry or local-Git conflict. The shared exit-code contract reserves `4` for
-external GitHub, Git remote, or deployment-checker failures, but current
-`awf wt` safety-critical external failures surface as structured blockers with
-exit `3` so the worktree is preserved. Automation should use `blockers` and
-`warnings` rather than parse prose.
+configuration-schema error; `3` means a valid safety precondition blocker; `4`
+means an external GitHub, Git remote, or deployment-status failure; and `5`
+means a registry or local-Git mismatch. JSON results include `exit_code`, and
+automation should use structured `blockers` and `warnings` rather than parse
+prose.
 
 By default the registry is
 `~/.local/state/awf/worktrees.sqlite3` and the worktree cache is

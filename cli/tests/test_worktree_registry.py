@@ -274,3 +274,20 @@ def test_command_result_has_versioned_json_envelope() -> None:
     assert payload["actions"] == []
     assert payload["blockers"] == []
     assert payload["warnings"] == []
+
+
+def test_command_result_external_error_uses_external_failure_exit_code() -> None:
+    result = CommandResult.external_error(
+        "wt.promote",
+        code="github_unavailable",
+        message="gh authentication failed",
+    )
+
+    payload = result.to_dict()
+
+    assert payload["status"] == "error"
+    assert payload["decision"] == "blocked"
+    assert payload["exit_code"] == 4
+    assert payload["blockers"] == [
+        {"code": "github_unavailable", "message": "gh authentication failed"}
+    ]
