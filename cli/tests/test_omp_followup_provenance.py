@@ -539,6 +539,95 @@ def test_followup_task_id_rejects_ambiguous_exact_provenance(tmp_path: Path):
 
 
 
+def test_find_followup_target_matches_native_worker_by_role(tmp_path: Path):
+    checkpoint = _write_native_checkpoint(tmp_path)
+
+    path, payload, record = agents_command._find_followup_target(
+        tmp_path,
+        run_reference=str(checkpoint),
+        role="implementer",
+        task_id=None,
+    )
+
+    assert path == checkpoint.resolve()
+    assert payload["source_kind"] == "omp_native_batch"
+    assert payload["run_id"] == checkpoint.stem
+    assert record["task_id"] == "Awf000Implementer"
+
+
+def test_find_followup_target_matches_native_worker_by_task_id(tmp_path: Path):
+    checkpoint = _write_native_checkpoint(tmp_path)
+
+    path, payload, record = agents_command._find_followup_target(
+        tmp_path,
+        run_reference=None,
+        role=None,
+        task_id="Awf000Implementer",
+    )
+
+    assert path == checkpoint.resolve()
+    assert payload["source_kind"] == "omp_native_batch"
+    assert payload["run_id"] == checkpoint.stem
+    assert record["task_id"] == "Awf000Implementer"
+
+
+def test_find_followup_target_rejects_wrong_native_role(tmp_path: Path):
+    checkpoint = _write_native_checkpoint(tmp_path)
+
+    with pytest.raises(FileNotFoundError) as error:
+        agents_command._find_followup_target(
+            tmp_path,
+            run_reference=str(checkpoint),
+            role="reviewer",
+            task_id=None,
+        )
+
+    assert str(error.value) == (
+        "role 'reviewer' not found in OMP provenance 'omp-native-batch-1'"
+    )
+
+
+def test_followup_task_id_rejects_duplicate_native_checkpoint(tmp_path: Path):
+    first = _write_native_checkpoint(tmp_path)
+    second = first.with_name("omp-native-batch-2.json")
+    second.write_text(first.read_text(encoding="utf-8"), encoding="utf-8")
+
+    with pytest.raises(ValueError) as error:
+        agents_command._find_followup_target(
+            tmp_path,
+            run_reference=None,
+            role=None,
+            task_id="Awf000Implementer",
+        )
+
+    assert str(error.value) == (
+        "OMP task ID is ambiguous across provenance records: Awf000Implementer"
+    )
+
+
+def test_native_checkpoint_requires_persisted_session(tmp_path: Path):
+    checkpoint = _write_native_checkpoint(tmp_path, session_persisted=False)
+    path, payload, record = agents_command._find_followup_target(
+        tmp_path,
+        run_reference=str(checkpoint),
+        role="implementer",
+        task_id=None,
+    )
+
+    assert path == checkpoint.resolve()
+    assert payload["source_kind"] == "omp_native_batch"
+    assert payload["run_id"] == checkpoint.stem
+    assert record["task_id"] == "Awf000Implementer"
+
+    with pytest.raises(ValueError) as error:
+        agents_command._require_actionable_target(payload, record)
+
+    assert str(error.value) == (
+        "OMP follow-up requires a persisted coordinator session; "
+        "the selected provenance record is not resumable"
+    )
+
+
 def test_build_omp_resume_command_is_exact():
     config = OmpRunnerConfig(command="omp-bin", extra_args=("--quiet",))
     assert agents_command._build_omp_resume_command(
