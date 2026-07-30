@@ -360,6 +360,54 @@ def test_wt_acquire_preview_emits_one_json_document(
     assert not cache_dir.exists()
 
 
+def test_wt_acquire_preview_reuses_without_mutating_existing_lease(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo = make_repository(tmp_path)
+    db = tmp_path / "state" / "worktrees.sqlite3"
+    cache_dir = tmp_path / "cache"
+    (repo / ".awf").mkdir()
+    (repo / ".awf" / "worktree.toml").write_text(
+        "[worktree]\ndefault_base = \"staging\"\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AWF_WORKTREE_STATE_DB", str(db))
+    monkeypatch.setenv("AWF_WORKTREE_CACHE_DIR", str(cache_dir))
+    args = [
+        "wt",
+        "acquire",
+        "--repo-root",
+        str(repo),
+        "--initiative",
+        "reward-widget",
+    ]
+
+    first_rc, _, first_stderr = capture_main([*args, "--apply"])
+    assert first_rc == 0
+    assert first_stderr == ""
+    registry = WorktreeRegistry(db)
+    first = registry.find_active(
+        GitClient(repo).repository_id(), "reward-widget", Purpose.FEATURE
+    )
+    assert first is not None
+    before_events = registry.list_events(first.id)
+
+    rc, stdout, stderr = capture_main([*args, "--json"])
+
+    after = registry.get_lease(first.id)
+    payload = json.loads(stdout)
+    assert rc == 0
+    assert stderr == ""
+    assert payload["status"] == "ok"
+    assert payload["decision"] == "reuse"
+    assert payload["lease"]["id"] == first.id
+    assert after == first
+    assert after.version == first.version
+    assert after.last_used_at == first.last_used_at
+    assert after.head_sha == first.head_sha
+    assert registry.list_events(first.id) == before_events
+
+
 def test_wt_acquire_orphaned_lease_emits_blocked_json(
     tmp_path: Path, monkeypatch
 ) -> None:

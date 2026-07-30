@@ -854,7 +854,93 @@ def test_acquire_reuses_the_exact_active_lease(harness: Harness) -> None:
     assert len(harness.git.list_worktrees()) == 2
 
 
-def test_acquire_blocks_when_registered_path_is_missing(harness: Harness) -> None:
+@pytest.mark.parametrize("marker_key", [None, "stale-prepare-key"])
+def test_acquire_preview_reuses_active_lease_without_mutation_or_preparing(
+    harness: Harness, marker_key: str | None, monkeypatch
+) -> None:
+    first = harness.acquire("reward-widget")
+    assert first.lease is not None
+    marker = harness.state_dir / "prepare" / f"{first.lease.id}.json"
+    if marker_key is not None:
+        marker.parent.mkdir(parents=True)
+        marker.write_text(json.dumps({"key": marker_key}), encoding="utf-8")
+    list_worktree_calls: list[None] = []
+    status_paths: list[Path | None] = []
+    head_paths: list[Path | None] = []
+    list_worktrees = harness.git.list_worktrees
+    status_porcelain = harness.git.status_porcelain
+    head_sha = harness.git.head_sha
+
+    def recording_list_worktrees():
+        list_worktree_calls.append(None)
+        return list_worktrees()
+
+    def recording_status_porcelain(cwd: Path | None = None):
+        status_paths.append(cwd)
+        return status_porcelain(cwd)
+
+    def recording_head_sha(cwd: Path | None = None):
+        head_paths.append(cwd)
+        return head_sha(cwd)
+
+    monkeypatch.setattr(harness.git, "list_worktrees", recording_list_worktrees)
+    monkeypatch.setattr(harness.git, "status_porcelain", recording_status_porcelain)
+    monkeypatch.setattr(harness.git, "head_sha", recording_head_sha)
+
+
+    runner_calls: list[tuple[object, ...]] = []
+
+    def failing_prepare_runner(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        runner_calls.append(args)
+        return subprocess.CompletedProcess(args[0], 7, "", "prepare failed")
+
+    harness.service = WorktreeService(
+        harness.registry,
+        harness.git,
+        config=WorktreeConfig(
+            default_base="staging",
+            prepare_command=("prepare",),
+        ),
+        command_runner=failing_prepare_runner,
+        cache_dir=harness.cache_dir,
+        state_dir=harness.state_dir,
+        lock_dir=harness.lock_dir,
+    )
+    before = harness.registry.get_lease(first.lease.id)
+    assert before is not None
+    before_events = harness.registry.list_events(first.lease.id)
+
+    result = harness.service.acquire(
+        initiative="reward-widget",
+        purpose=Purpose.FEATURE,
+        base=None,
+        branch=None,
+        owner_id="session-1",
+        apply=False,
+    )
+
+    after = harness.registry.get_lease(first.lease.id)
+    assert result.status == "ok"
+    assert result.decision == "reuse"
+    assert result.lease == before
+    assert after == before
+    assert after.version == before.version
+    assert after.last_used_at == before.last_used_at
+    assert after.head_sha == before.head_sha
+    assert harness.registry.list_events(first.lease.id) == before_events
+    assert list_worktree_calls == [None]
+    assert status_paths == [first.lease.worktree_path]
+    assert head_paths == [first.lease.worktree_path]
+    assert runner_calls == []
+    if marker_key is None:
+        assert not marker.exists()
+    else:
+        assert json.loads(marker.read_text(encoding="utf-8")) == {"key": marker_key}
+
+@pytest.mark.parametrize("apply", [False, True])
+def test_acquire_blocks_when_registered_path_is_missing(
+    harness: Harness, apply: bool
+) -> None:
     first = harness.acquire("reward-widget")
     assert first.lease is not None
     subprocess.run(
@@ -863,10 +949,37 @@ def test_acquire_blocks_when_registered_path_is_missing(harness: Harness) -> Non
         check=True,
     )
 
-    result = harness.acquire("reward-widget")
+    result = harness.service.acquire(
+        initiative="reward-widget",
+        purpose=Purpose.FEATURE,
+        base=None,
+        branch=None,
+        owner_id="session-1",
+        apply=apply,
+    )
 
     assert result.status == "blocked"
     assert result.blockers[0]["code"] == "orphaned_lease"
+
+
+def test_acquire_preview_blocks_a_dirty_active_lease(harness: Harness) -> None:
+    first = harness.acquire("reward-widget")
+    assert first.lease is not None
+    (first.lease.worktree_path / "uncommitted.txt").write_text(
+        "uncommitted\n", encoding="utf-8"
+    )
+
+    result = harness.service.acquire(
+        initiative="reward-widget",
+        purpose=Purpose.FEATURE,
+        base=None,
+        branch=None,
+        owner_id="session-1",
+        apply=False,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "dirty_lease"
 
 
 def test_acquire_prepares_new_worktree_and_reuses_matching_prepare_key(
@@ -883,7 +996,10 @@ def test_acquire_prepares_new_worktree_and_reuses_matching_prepare_key(
     assert log.read_text(encoding="utf-8").splitlines() == ["prepared"]
 
 
-def test_acquire_blocks_for_a_conflicting_requested_branch(harness: Harness) -> None:
+@pytest.mark.parametrize("apply", [False, True])
+def test_acquire_blocks_for_a_conflicting_requested_branch(
+    harness: Harness, apply: bool
+) -> None:
     harness.acquire("reward-widget")
 
     result = harness.service.acquire(
@@ -892,7 +1008,7 @@ def test_acquire_blocks_for_a_conflicting_requested_branch(harness: Harness) -> 
         base=None,
         branch="awf/reward-widget/alternate",
         owner_id="session-1",
-        apply=True,
+        apply=apply,
     )
 
     assert result.status == "blocked"

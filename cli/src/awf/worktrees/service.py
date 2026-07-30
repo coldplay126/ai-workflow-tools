@@ -121,7 +121,7 @@ class WorktreeService:
         with repository_lock(self.lock_dir / f"{repository_id}.lock"):
             active = self.registry.find_active(repository_id, slug, purpose)
             if active is not None:
-                return self._reuse(active, expected_branch)
+                return self._reuse(active, expected_branch, apply=apply)
 
             base_ref, base_sha = self._resolve_base(base)
             lease = Lease.new(
@@ -2624,7 +2624,9 @@ class WorktreeService:
             lease=lease,
         )
 
-    def _reuse(self, lease: Lease, expected_branch: str) -> CommandResult:
+    def _reuse(
+        self, lease: Lease, expected_branch: str, *, apply: bool
+    ) -> CommandResult:
         if lease.state is not LeaseState.ACTIVE:
             return self._blocked(
                 "lease_not_active",
@@ -2657,17 +2659,20 @@ class WorktreeService:
                 lease=lease,
             )
         try:
-            lease = self.registry.touch(
-                lease.id,
-                expected_version=lease.version,
-                head_sha=self.git.head_sha(lease.worktree_path),
-            )
+            head_sha = self.git.head_sha(lease.worktree_path)
+            if apply:
+                lease = self.registry.touch(
+                    lease.id,
+                    expected_version=lease.version,
+                    head_sha=head_sha,
+                )
         except RuntimeError as error:
             return self._blocked("lease_conflict", str(error), lease=lease)
 
-        prepare_error = self._prepare(lease, force=False)
-        if prepare_error is not None:
-            return self._block_prepare_failure(lease, prepare_error)
+        if apply:
+            prepare_error = self._prepare(lease, force=False)
+            if prepare_error is not None:
+                return self._block_prepare_failure(lease, prepare_error)
         return CommandResult.ok("wt.acquire", decision="reuse", lease=lease)
 
     def _resolve_base(self, base: str | None) -> tuple[str, str]:
