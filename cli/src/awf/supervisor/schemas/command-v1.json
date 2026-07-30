@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://awf.local/contracts/supervisor/command-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "command_id", "job_id", "generation", "type"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "command_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "job_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "generation": {"type": "integer", "minimum": 0},
+    "type": {"enum": ["EXECUTE"]}
+  }
+}

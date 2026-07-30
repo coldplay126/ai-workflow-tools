@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://awf.local/contracts/supervisor/job-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "job_id",
+    "workflow_id",
+    "state",
+    "desired_state",
+    "approval_required",
+    "requested_target",
+    "generation",
+    "attempt",
+    "repo_refs",
+    "required_capabilities",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "job_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "workflow_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "state": {
+      "enum": [
+        "QUEUED",
+        "CLAIMED",
+        "PREPARING",
+        "RUNNING",
+        "WAITING_APPROVAL",
+        "PAUSED",
+        "SUCCEEDED",
+        "FAILED",
+        "CANCELLED",
+        "BLOCKED",
+        "STALE",
+        "RECOVERY_REQUIRED"
+      ]
+    },
+    "desired_state": {"enum": ["RUNNING", "CANCELLED", "PAUSED"]},
+    "approval_required": {"const": true},
+    "requested_target": {"enum": ["auto", "local", "aws"]},
+    "owner_agent_id": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "lease_expires_at": {"type": ["string", "null"], "format": "date-time"},
+    "generation": {"type": "integer", "minimum": 0},
+    "attempt": {"type": "integer", "minimum": 0},
+    "repo_refs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["repo", "base"],
+        "properties": {
+          "repo": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"},
+          "base": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/@:+-]{0,254}$"}
+        }
+      }
+    },
+    "required_capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"}
+    },
+    "checkpoint": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "artifact_uri", "sha256"],
+          "properties": {
+            "kind": {"const": "awf-omp-native"},
+            "artifact_uri": {
+              "type": "string",
+              "pattern": "^s3://[A-Za-z0-9.-]+/artifacts/checkpoints/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}/[0-9]+/[0-9a-f]{64}\\.json$"
+            },
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        }
+      ]
+    },
+    "created_at": {"type": "string", "format": "date-time"},
+    "updated_at": {"type": "string", "format": "date-time"}
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["owner_agent_id"],
+        "properties": {"owner_agent_id": {"type": "string"}}
+      },
+      "then": {
+        "required": ["lease_expires_at"],
+        "properties": {"lease_expires_at": {"type": "string", "format": "date-time"}}
+      },
+      "else": {
+        "properties": {"lease_expires_at": {"type": "null"}}
+      }
+    }
+  ]
+}

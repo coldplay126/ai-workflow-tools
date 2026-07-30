@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://awf.local/contracts/supervisor/agent-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "agent_id",
+    "environment",
+    "status",
+    "last_heartbeat_at",
+    "max_concurrency",
+    "active_jobs",
+    "capabilities",
+    "repos",
+    "version"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "agent_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "environment": {"enum": ["local", "aws"]},
+    "status": {"enum": ["ONLINE", "DRAINING", "OFFLINE"]},
+    "last_heartbeat_at": {"type": "string", "format": "date-time"},
+    "max_concurrency": {"type": "integer", "minimum": 1},
+    "active_jobs": {"type": "integer", "minimum": 0},
+    "capabilities": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"}
+    },
+    "repos": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"}
+    },
+    "version": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["awf", "omp"],
+      "properties": {
+        "awf": {"type": "string", "pattern": "^[\\x20-\\x7E]{1,128}$"},
+        "omp": {"type": "string", "pattern": "^[\\x20-\\x7E]{1,128}$"}
+      }
+    }
+  }
+}

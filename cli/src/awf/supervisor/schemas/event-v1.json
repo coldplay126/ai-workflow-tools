@@ -1,0 +1,214 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://awf.local/contracts/supervisor/event-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "job_id",
+    "generation",
+    "sequence",
+    "type",
+    "timestamp",
+    "source",
+    "data"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "job_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "generation": {"type": "integer", "minimum": 0},
+    "sequence": {"type": "integer", "minimum": 1},
+    "type": {
+      "enum": [
+        "TASK_STARTED",
+        "TASK_COMPLETED",
+        "TASK_FAILED",
+        "ESCAPE_TRIGGERED",
+        "ORCHESTRATOR_DECIDED",
+        "STAGE_STARTED",
+        "STAGE_COMPLETED",
+        "PHASE_STARTED",
+        "PHASE_COMPLETED",
+        "WORKER_SPAWNED",
+        "WORKER_PROGRESS",
+        "WORKER_COMPLETED",
+        "ARTIFACT_CREATED",
+        "ARTIFACT_UPDATED",
+        "PROVIDER_OUTPUT",
+        "PROVIDER_TOOL_CALL",
+        "GATE_EVALUATED",
+        "HEARTBEAT",
+        "PROGRESS_UPDATE",
+        "MULTI_AGENT_STARTED",
+        "AGENT_COMPLETED",
+        "JUDGE_VERDICT",
+        "TEAM_TURN_STARTED",
+        "TEAM_TURN_COMPLETED"
+      ]
+    },
+    "timestamp": {"type": "string", "format": "date-time"},
+    "source": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "dependentRequired": {
+        "artifact_uri": ["artifact_sha256"],
+        "artifact_sha256": ["artifact_uri"],
+        "provenance_uri": ["provenance_sha256"],
+        "provenance_sha256": ["provenance_uri"],
+        "checkpoint_uri": ["checkpoint_sha256"],
+        "checkpoint_sha256": ["checkpoint_uri"]
+      },
+      "properties": {
+        "phase": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+        "status_code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$"},
+        "return_code": {"type": "integer"},
+        "summary": {
+          "enum": [
+            "task_started",
+            "task_completed",
+            "task_failed",
+            "escape_triggered",
+            "orchestrator_decided",
+            "stage_started",
+            "stage_completed",
+            "phase_started",
+            "phase_completed",
+            "worker_spawned",
+            "worker_progress",
+            "worker_completed",
+            "artifact_created",
+            "artifact_updated",
+            "provider_output_suppressed",
+            "provider_tool_call_suppressed",
+            "gate_evaluated",
+            "heartbeat",
+            "progress_update",
+            "multi_agent_started",
+            "agent_completed",
+            "judge_verdict",
+            "team_turn_started",
+            "team_turn_completed"
+          ]
+        },
+        "terminal_status": {"enum": ["SUCCEEDED", "FAILED", "CANCELLED"]},
+        "retryable": {"type": "boolean"},
+        "artifact_uri": {
+          "type": "string",
+          "pattern": "^s3://[A-Za-z0-9.-]+/artifacts/redacted-results/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}/[0-9]+/[0-9a-f]{64}\\.json$"
+        },
+        "artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "provenance_uri": {
+          "type": "string",
+          "pattern": "^s3://[A-Za-z0-9.-]+/artifacts/provenance/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}/[0-9]+/[0-9a-f]{64}\\.json$"
+        },
+        "provenance_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "checkpoint_uri": {
+          "type": "string",
+          "pattern": "^s3://[A-Za-z0-9.-]+/artifacts/checkpoints/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}/[0-9]+/[0-9a-f]{64}\\.json$"
+        },
+        "checkpoint_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "error_code": {
+          "enum": [
+            "TRANSIENT",
+            "AUTH_REQUIRED",
+            "POLICY_DENIED",
+            "CONFLICT",
+            "CORRUPT_ARTIFACT",
+            "UNSAFE_RECOVERY",
+            "TERMINAL_EXECUTION"
+          ]
+        },
+        "stopped_at": {"type": "string", "format": "date-time"},
+        "cleanup_completed": {"type": "boolean"}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "data": {
+            "required": ["terminal_status"],
+            "properties": {"terminal_status": {"const": "SUCCEEDED"}}
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "required": [
+              "return_code",
+              "artifact_uri",
+              "artifact_sha256",
+              "provenance_uri",
+              "provenance_sha256"
+            ],
+            "properties": {"return_code": {"const": 0}}
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "data": {
+            "required": ["terminal_status"],
+            "properties": {"terminal_status": {"const": "FAILED"}}
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "required": ["retryable", "error_code", "stopped_at", "cleanup_completed"],
+            "properties": {
+              "retryable": {"const": false},
+              "cleanup_completed": {"const": true}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "data": {
+            "required": ["terminal_status"],
+            "properties": {"terminal_status": {"const": "CANCELLED"}}
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "required": ["stopped_at", "cleanup_completed"],
+            "properties": {"cleanup_completed": {"const": true}},
+            "not": {"required": ["error_code"]}
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "data": {"not": {"required": ["terminal_status"]}}
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "not": {
+              "anyOf": [
+                {"required": ["terminal_status"]},
+                {"required": ["retryable"]},
+                {"required": ["stopped_at"]},
+                {"required": ["cleanup_completed"]}
+              ]
+            }
+          }
+        }
+      }
+    }
+  ]
+}
