@@ -6,8 +6,10 @@ import os
 import re
 import sqlite3
 import signal
+import selectors
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -1535,18 +1537,7 @@ class WorktreeService:
                     stderr=subprocess.PIPE,
                     start_new_session=True,
                 )
-                try:
-                    _, raw_stderr = process.communicate(
-                        timeout=_PRODUCTION_VERIFY_TIMEOUT_SECONDS
-                    )
-                except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGTERM)
-                    try:
-                        _, raw_stderr = process.communicate(timeout=1.0)
-                    except subprocess.TimeoutExpired:
-                        os.killpg(process.pid, signal.SIGKILL)
-                        _, raw_stderr = process.communicate()
-                    raise RuntimeError("production verification timed out")
+                raw_stderr = self._drain_verifier_stderr(process)
             except OSError as error:
                 raise RuntimeError("production verification failed to launch") from error
             stderr = self._bounded_promotion_stderr(raw_stderr)
@@ -1564,6 +1555,46 @@ class WorktreeService:
                     f"production verification failed with exit {process.returncode}{detail}"
                 )
         return tuple(actions)
+
+    @staticmethod
+    def _drain_verifier_stderr(process: subprocess.Popen[bytes]) -> bytes:
+        if process.stderr is None:
+            raise RuntimeError("production verification did not expose stderr")
+        retained = bytearray()
+        deadline = time.monotonic() + _PRODUCTION_VERIFY_TIMEOUT_SECONDS
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stderr, selectors.EVENT_READ)
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    WorktreeService._terminate_verifier_process_group(process)
+                    raise RuntimeError("production verification timed out")
+                for key, _ in selector.select(remaining):
+                    chunk = os.read(key.fd, 65536)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                    elif len(retained) < 4096:
+                        retained.extend(chunk[: 4096 - len(retained)])
+                if process.poll() is not None and not selector.get_map():
+                    break
+        process.wait()
+        return bytes(retained)
+
+    @staticmethod
+    def _terminate_verifier_process_group(process: subprocess.Popen[bytes]) -> None:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
 
     @staticmethod
     def _bounded_promotion_stderr(value: str | bytes | None) -> str:
