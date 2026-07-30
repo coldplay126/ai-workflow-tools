@@ -67,6 +67,10 @@ EC2는 유휴 시 중지될 수 있다. Global Supervisor 역할은 Lambda, Dyna
 
 첫 구현의 S3에는 상태 envelope, checksum, redacted log, OMP provenance만 저장한다. 미커밋 source diff와 patch는 업로드하지 않는다.
 
+### 4.6 기존 EC2 lifecycle 경계를 재사용한다
+
+`aws-agent-poc`의 승인된 Cloudflare OMP Remote Access 설계는 launcher Lambda만 EC2 상태 조회와 시작 권한을 갖도록 정의한다. Supervisor Lambda에 같은 권한과 상태 정규화를 다시 만들지 않는다. Supervisor는 prompt와 repo 정보를 제외한 internal lifecycle request만 launcher Lambda에 직접 전달한다. launcher Lambda는 HTTP API Gateway event와 IAM으로 허용된 internal invocation을 명확히 구분한다.
+
 ## 5. 전체 구조
 
 ```mermaid
@@ -78,7 +82,8 @@ flowchart TD
     CP --> EVENTS[DynamoDB Events]
     CP --> QUEUE[SQS Commands]
     CP --> OBJECTS[S3 Artifacts]
-    CP --> START[EC2 StartInstances]
+    CP --> LIFECYCLE[Launcher Lifecycle Lambda]
+    LIFECYCLE --> START[EC2 StartInstances]
 
     LOCAL[macOS Supervisor Agent] --> API
     AWS[AWS Supervisor Agent] --> API
@@ -97,7 +102,7 @@ flowchart TD
 Control Plane은 다음 AWS resource로 구성한다.
 
 - API Gateway: human CLI와 agent API
-- Lambda: submit, routing, lease, event, reconciliation, EC2 start
+- Supervisor Lambda: submit, routing, lease, event, reconciliation
 - DynamoDB Jobs: job execution envelope
 - DynamoDB Agents: agent heartbeat와 capability
 - DynamoDB Events: 정렬 가능한 job event
@@ -105,6 +110,9 @@ Control Plane은 다음 AWS resource로 구성한다.
 - EventBridge: lease reconciliation과 EC2 idle 판단 트리거
 - S3: checkpoint reference, provenance, redacted 결과
 - KMS: S3와 DynamoDB 암호화 key
+- 기존 Launcher Lifecycle Lambda: EC2 상태 정규화와 시작의 단일 권한 경계
+
+Supervisor Lambda는 Launcher Lifecycle Lambda를 `lambda:InvokeFunction`으로 호출한다. internal request는 `source`, `version`, `operation`, `request_id`만 포함하며 prompt, repo, session history를 전달하지 않는다. launcher의 공개 Cloudflare 경로는 기존 Access JWT와 origin proof 계약을 유지한다.
 
 MVP는 한 리전, 한 AWS 계정, 한 AWS EC2 agent를 전제로 한다.
 
@@ -284,7 +292,7 @@ SQS는 at-least-once 전달을 전제로 한다. 명령은 `command_id`를 가�
 3. online local agent와 capacity 검사
 4. 적합한 local agent에 우선 배정
 5. local이 없으면 AWS policy 검사
-6. AWS agent가 offline이면 tagged EC2 시작
+6. AWS agent가 offline이면 기존 Launcher Lifecycle Lambda에 internal start request 전달
 7. AWS agent 등록 후 claim 생성
 8. 어느 환경도 적합하지 않으면 `BLOCKED`
 
@@ -452,7 +460,7 @@ Control Plane이 보이지 않지만 active lease 파일이 남아 있으면 idl
 
 - DynamoDB conditional update
 - SQS duplicate delivery
-- EC2 start idempotency
+- Launcher Lifecycle Lambda internal invocation과 EC2 start idempotency
 - IAM deny path
 - S3 checksum과 KMS policy
 - EventBridge reconciliation
@@ -511,6 +519,7 @@ Control Plane, macOS agent, EC2 agent는 동일한 envelope와 event fixture를 
 ### `aws-agent-poc`
 
 - Control Plane CloudFormation resource
+- 기존 Cloudflare launcher Lambda의 internal lifecycle invocation
 - EC2 role 최소 권한
 - AWF/OMP 설치와 version 확인
 - Supervisor systemd service
