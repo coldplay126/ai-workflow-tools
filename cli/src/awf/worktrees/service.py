@@ -576,7 +576,19 @@ class WorktreeService:
                 pull_request = (self.github or GhClient(lease.repository_root)).view_pr(
                     lease.target_pr
                 )
-            except (ExternalServiceError, KeyError, OSError, ValueError) as error:
+            except ExternalServiceError as error:
+                return CommandResult.external_error(
+                    "wt.gc",
+                    code="github_refresh_failed",
+                    message=(
+                        f"Unable to refresh pull request state for lease {lease.id}: "
+                        f"{error}"
+                    ),
+                    leases=tuple(processed),
+                    actions=tuple(actions),
+                    warnings=tuple(warnings),
+                )
+            except (KeyError, OSError, ValueError) as error:
                 warnings.append(
                     {
                         "code": "github_refresh_failed",
@@ -602,6 +614,16 @@ class WorktreeService:
                 processed.append(result.lease)
             actions.extend(result.actions)
             warnings.extend(result.warnings)
+            if result.status == "error":
+                blocker = result.blockers[0]
+                return CommandResult.external_error(
+                    "wt.gc",
+                    code=blocker["code"],
+                    message=blocker["message"],
+                    leases=tuple(processed),
+                    actions=tuple(actions),
+                    warnings=tuple(warnings),
+                )
             if result.decision == "removed":
                 saw_removed = True
             elif result.decision == "preview":
@@ -837,6 +859,7 @@ class WorktreeService:
             post_lock_blockers: tuple[dict[str, str], ...] = ()
             post_lock_code: str | None = None
             post_lock_message = ""
+            post_lock_external: tuple[str, str] | None = None
             removal_error: GitError | OSError | None = None
             try:
                 with self.git.hold_worktree_branch_if_at(
@@ -858,7 +881,12 @@ class WorktreeService:
                             pull_request = (
                                 self.github or GhClient(reserved_current.repository_root)
                             ).view_pr(reserved_current.target_pr)
-                        except (ExternalServiceError, KeyError, OSError, ValueError) as error:
+                        except ExternalServiceError as error:
+                            post_lock_external = (
+                                "github_refresh_failed",
+                                f"Unable to revalidate pull request state: {error}",
+                            )
+                        except (KeyError, OSError, ValueError) as error:
                             post_lock_code = "github_refresh_failed"
                             post_lock_message = (
                                 f"Unable to revalidate pull request state: {error}"
@@ -890,6 +918,14 @@ class WorktreeService:
                     reservation,
                     warnings,
                     blockers=post_lock_blockers,
+                )
+            if post_lock_external is not None:
+                return self._release_cleanup_reservation(
+                    current,
+                    reservation,
+                    warnings,
+                    external_code=post_lock_external[0],
+                    external_message=post_lock_external[1],
                 )
             if post_lock_code is not None:
                 return self._release_cleanup_reservation(
@@ -924,7 +960,20 @@ class WorktreeService:
             actions: list[dict[str, object]] = [
                 self._cleanup_action("remove_worktree", removed)
             ]
-            self._cleanup_branches(removed, reservation.branch_sha, actions, warnings)
+            remote_error = self._cleanup_branches(
+                removed, reservation.branch_sha, actions, warnings
+            )
+            if remote_error is not None:
+                return CommandResult.external_error(
+                    "wt.finish",
+                    code="remote_branch_cleanup_failed",
+                    message=(
+                        f"Could not delete remote branch {removed.branch!r}: {remote_error}"
+                    ),
+                    lease=removed,
+                    actions=tuple(actions),
+                    warnings=tuple(warnings),
+                )
             return CommandResult.ok(
                 "wt.finish",
                 decision="removed",
@@ -942,6 +991,8 @@ class WorktreeService:
         code: str | None = None,
         message: str | None = None,
         blockers: tuple[dict[str, str], ...] = (),
+        external_code: str | None = None,
+        external_message: str | None = None,
     ) -> CommandResult:
         try:
             released = self.registry.release_cleanup_reservation(
@@ -954,6 +1005,14 @@ class WorktreeService:
                 f"Lease {lease.id} remains reserved for cleanup: {error}",
                 lease=lease,
                 warnings=warnings,
+            )
+        if external_code is not None:
+            return CommandResult.external_error(
+                "wt.finish",
+                code=external_code,
+                message=external_message or external_code,
+                lease=released,
+                warnings=tuple(warnings),
             )
         if blockers:
             return CommandResult.blocked(
@@ -1130,7 +1189,20 @@ class WorktreeService:
             actions: list[dict[str, object]] = [
                 self._cleanup_action("remove_worktree", removed)
             ]
-            self._cleanup_branches(removed, reservation.branch_sha, actions, warnings)
+            remote_error = self._cleanup_branches(
+                removed, reservation.branch_sha, actions, warnings
+            )
+            if remote_error is not None:
+                return CommandResult.external_error(
+                    "wt.finish",
+                    code="remote_branch_cleanup_failed",
+                    message=(
+                        f"Could not delete remote branch {removed.branch!r}: {remote_error}"
+                    ),
+                    lease=removed,
+                    actions=tuple(actions),
+                    warnings=tuple(warnings),
+                )
             return CommandResult.ok(
                 "wt.finish",
                 decision="removed",
@@ -1352,9 +1424,9 @@ class WorktreeService:
         expected_sha: str,
         actions: list[dict[str, object]],
         warnings: list[dict[str, str]],
-    ) -> None:
+    ) -> GitRemoteError | None:
         if lease.owner_kind != "awf" or not lease.branch.startswith("awf/"):
-            return
+            return None
         try:
             self.git.delete_branch_if_at(lease.branch, expected_sha)
         except (GitError, OSError) as error:
@@ -1368,6 +1440,8 @@ class WorktreeService:
             actions.append(self._cleanup_action("delete_local_branch", lease))
         try:
             self.git.delete_remote_branch_if_at(lease.branch, expected_sha)
+        except GitRemoteError as error:
+            return error
         except (GitError, OSError) as error:
             self._branch_cleanup_warning(
                 lease,
@@ -1377,6 +1451,7 @@ class WorktreeService:
             )
         else:
             actions.append(self._cleanup_action("delete_remote_branch", lease))
+        return None
 
     def _branch_cleanup_warning(
         self,

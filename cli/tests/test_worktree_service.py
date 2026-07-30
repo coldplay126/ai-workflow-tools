@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from awf.worktrees.config import WorktreeConfig
-from awf.worktrees.git import GitClient, GitError, GitWorktree
+from awf.worktrees.git import GitClient, GitError, GitRemoteError, GitWorktree
 from awf.worktrees.github import ExternalServiceError, PullRequest
 from awf.worktrees.models import DeploymentState, Lease, LeaseState, Purpose
 from awf.worktrees.registry import WorktreeRegistry
@@ -3281,3 +3281,168 @@ def test_finish_rechecks_mutation_before_remove_and_releases_reservation(
     assert lock_calls == [(lease.worktree_path, lease.branch, lease.head_sha)]
     assert lease.worktree_path.exists()
     assert promotion_harness.registry.get_cleanup_reservation(lease.id) is None
+
+
+def test_gc_propagates_external_provider_error_after_completed_removal(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    removed_lease = harness.merged_feature(age_days=10, initiative="removed-first")
+    failed_lease = harness.merged_feature(age_days=10, initiative="failed-second")
+    with sqlite3.connect(harness.registry.db_path) as connection:
+        connection.execute(
+            "UPDATE worktree_leases SET created_at = ? WHERE id = ?",
+            ("2000-01-01T00:00:00+00:00", removed_lease.id),
+        )
+        connection.execute(
+            "UPDATE worktree_leases SET created_at = ? WHERE id = ?",
+            ("2001-01-01T00:00:00+00:00", failed_lease.id),
+        )
+    original_view = harness.github.view_pr
+
+    def fail_second_view(number: int) -> PullRequest:
+        if number == failed_lease.target_pr:
+            raise ExternalServiceError("gh pr view failed: network unavailable")
+        return original_view(number)
+
+    monkeypatch.setattr(harness.github, "view_pr", fail_second_view)
+
+    result = harness.service.gc(merged=True, older_than="7d", apply=True)
+
+    assert result.status == "error"
+    assert result.exit_code == 4
+    assert result.blockers[0]["code"] == "github_refresh_failed"
+    assert [lease.id for lease in result.leases] == [removed_lease.id]
+    assert {
+        action["kind"] for action in result.actions
+    } >= {"remove_worktree"}
+    assert not removed_lease.worktree_path.exists()
+    assert failed_lease.worktree_path.exists()
+    assert harness.registry.get_lease(removed_lease.id).state is LeaseState.REMOVED
+    assert harness.registry.get_lease(failed_lease.id).state is LeaseState.CLEANABLE
+
+
+def test_finish_releases_reservation_for_post_lock_github_failure(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+    original_view = promotion_harness.github.view_pr
+    view_calls = 0
+
+    def fail_post_lock_view(number: int) -> PullRequest:
+        nonlocal view_calls
+        view_calls += 1
+        if view_calls == 4:
+            raise ExternalServiceError("gh pr view failed: network unavailable")
+        return original_view(number)
+
+    monkeypatch.setattr(promotion_harness.github, "view_pr", fail_post_lock_view)
+
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.status == "error"
+    assert result.exit_code == 4
+    assert result.blockers[0]["code"] == "github_refresh_failed"
+    assert view_calls == 4
+    assert promotion_harness.registry.get_cleanup_reservation(lease.id) is None
+    current = promotion_harness.registry.get_lease(lease.id)
+    assert current is not None
+    assert current.state is LeaseState.CLEANABLE
+    assert lease.worktree_path.exists()
+
+
+def test_finish_propagates_remote_branch_delete_failure_after_removal(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+
+    def remote_failure(*_args: object, **_kwargs: object) -> None:
+        raise GitRemoteError("git push failed: network unavailable")
+
+    monkeypatch.setattr(
+        promotion_harness.git,
+        "delete_remote_branch_if_at",
+        remote_failure,
+    )
+
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.status == "error"
+    assert result.exit_code == 4
+    assert result.blockers[0]["code"] == "remote_branch_cleanup_failed"
+    assert result.lease is not None
+    assert result.lease.id == lease.id
+    assert result.lease.state is LeaseState.REMOVED
+    assert any(
+        action["kind"] == "remove_worktree" and action["lease_id"] == lease.id
+        for action in result.actions
+    )
+    assert not lease.worktree_path.exists()
+    assert promotion_harness.registry.get_lease(lease.id).state is LeaseState.REMOVED
+
+
+def test_finish_keeps_local_branch_delete_failure_as_warning(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+
+    def local_failure(*_args: object, **_kwargs: object) -> None:
+        raise GitError("local ref changed")
+
+    monkeypatch.setattr(
+        promotion_harness.git,
+        "delete_branch_if_at",
+        local_failure,
+    )
+
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.decision == "removed"
+    assert result.exit_code == 0
+    assert "local_branch_cleanup_failed" in {
+        warning["code"] for warning in result.warnings
+    }
+    assert not lease.worktree_path.exists()
+
+
+def test_gc_propagates_nested_finish_external_error_after_completed_removal(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    removed_lease = harness.merged_feature(age_days=10, initiative="removed-first")
+    failed_lease = harness.merged_feature(age_days=10, initiative="failed-second")
+    with sqlite3.connect(harness.registry.db_path) as connection:
+        connection.execute(
+            "UPDATE worktree_leases SET created_at = ? WHERE id = ?",
+            ("2000-01-01T00:00:00+00:00", removed_lease.id),
+        )
+        connection.execute(
+            "UPDATE worktree_leases SET created_at = ? WHERE id = ?",
+            ("2001-01-01T00:00:00+00:00", failed_lease.id),
+        )
+    original_view = harness.github.view_pr
+    failed_view_calls = 0
+
+    def fail_nested_view(number: int) -> PullRequest:
+        nonlocal failed_view_calls
+        if number == failed_lease.target_pr:
+            failed_view_calls += 1
+            if failed_view_calls == 3:
+                raise ExternalServiceError("gh pr view failed: network unavailable")
+        return original_view(number)
+
+    monkeypatch.setattr(harness.github, "view_pr", fail_nested_view)
+
+    result = harness.service.gc(merged=True, older_than="7d", apply=True)
+
+    assert result.status == "error"
+    assert result.exit_code == 4
+    assert result.blockers[0]["code"] == "github_refresh_failed"
+    assert [lease.id for lease in result.leases] == [
+        removed_lease.id,
+        failed_lease.id,
+    ]
+    assert any(
+        action["kind"] == "remove_worktree" and action["lease_id"] == removed_lease.id
+        for action in result.actions
+    )
+    assert not removed_lease.worktree_path.exists()
+    assert failed_lease.worktree_path.exists()

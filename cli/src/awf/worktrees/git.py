@@ -18,7 +18,26 @@ class GitError(RuntimeError):
 
 
 class GitRemoteError(GitError):
-    """Raised when a Git operation against the origin remote fails."""
+    """Raised when a Git transport operation against origin cannot complete."""
+
+
+_REMOTE_TRANSPORT_FAILURE_MARKERS = (
+    "authentication failed",
+    "connection refused",
+    "connection timed out",
+    "could not read username",
+    "could not resolve host",
+    "does not appear to be a git repository",
+    "failed to connect",
+    "network is unreachable",
+    "repository not found",
+    "unable to access",
+)
+
+
+def _is_remote_transport_failure(error: GitError) -> bool:
+    detail = str(error).lower()
+    return any(marker in detail for marker in _REMOTE_TRANSPORT_FAILURE_MARKERS)
 
 @dataclass(frozen=True)
 class GitCompleted:
@@ -114,7 +133,9 @@ class GitClient:
                 f":{ref}",
             )
         except GitError as error:
-            raise GitRemoteError(str(error)) from error
+            if _is_remote_transport_failure(error):
+                raise GitRemoteError(str(error)) from error
+            raise
 
     @contextmanager
     def hold_worktree_branch_if_at(
