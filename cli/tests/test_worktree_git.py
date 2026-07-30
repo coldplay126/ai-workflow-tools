@@ -218,31 +218,6 @@ def test_git_client_applies_binary_patch_and_commits_from_a_worktree(tmp_path: P
 
 
 
-def test_git_client_cherry_picks_exact_ordered_source_commits(tmp_path: Path) -> None:
-    repo = make_repository(tmp_path)
-    client = GitClient(repo)
-    source = tmp_path / "source"
-    target = tmp_path / "target"
-    base = client.head_sha()
-    client.add_worktree(source, "awf/source", base)
-    client.add_worktree(target, "awf/target", base)
-    (source / "first.txt").write_text("first\n", encoding="utf-8")
-    git(source, "add", "first.txt")
-    git(source, "commit", "-q", "-m", "first")
-    first = client.head_sha(source)
-    (source / "second.txt").write_text("second\n", encoding="utf-8")
-    git(source, "add", "second.txt")
-    git(source, "commit", "-q", "-m", "second")
-    source_head = client.head_sha(source)
-
-    commits = client.ordered_commits(base, source_head)
-    client.cherry_pick(target, commits)
-
-    assert commits == (first, source_head)
-    assert client.changed_paths(target, base) == ("first.txt", "second.txt")
-    assert client.path_blob(source_head, "second.txt") == client.path_blob(
-        client.head_sha(target), "second.txt"
-    )
 
 
 def test_git_client_reads_commit_parents(tmp_path: Path) -> None:

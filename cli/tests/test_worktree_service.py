@@ -211,7 +211,7 @@ class PromotionHarness:
     source_head_sha: str
 
     @classmethod
-    def create(cls, tmp_path: Path) -> PromotionHarness:
+    def create(cls, tmp_path: Path, *, aggregate: bool = False) -> PromotionHarness:
         repo = make_repository(tmp_path)
         git = GitClient(repo)
         git_command(repo, "branch", "main", "staging")
@@ -223,6 +223,18 @@ class PromotionHarness:
         (repo / "feature.txt").write_text("feature\n", encoding="utf-8")
         git_command(repo, "add", "feature.txt")
         git_command(repo, "commit", "-q", "-m", "source feature")
+        changed_paths = ("feature.txt",)
+        if aggregate:
+            git_command(repo, "checkout", "-q", "staging")
+            git_command(repo, "checkout", "-q", "-b", "support/pr-372")
+            (repo / "support.txt").write_text("support\n", encoding="utf-8")
+            git_command(repo, "add", "support.txt")
+            git_command(repo, "commit", "-q", "-m", "source support")
+            git_command(repo, "checkout", "-q", "feature/pr-372")
+            git_command(
+                repo, "merge", "--no-ff", "-q", "support/pr-372", "-m", "aggregate source"
+            )
+            changed_paths = ("feature.txt", "support.txt")
         source_head_sha = git_command(repo, "rev-parse", "HEAD")
         git_command(repo, "push", "-q", "-u", "origin", "feature/pr-372")
         git_command(repo, "checkout", "-q", "staging")
@@ -246,7 +258,7 @@ class PromotionHarness:
                     merge_commit_sha=source_base_sha,
                     review_decision="APPROVED",
                     checks_passed=True,
-                    changed_paths=("feature.txt",),
+                    changed_paths=changed_paths,
                     url="https://github.example/acme/repo/pull/372",
                 )
             }
@@ -2178,3 +2190,96 @@ def test_promote_retries_publish_after_a_transient_push_failure(
     assert second.lease is not None
     assert second.lease.state is LeaseState.PR_OPEN
     assert len(promotion_harness.github.create_calls) == 1
+
+
+def test_promote_applies_aggregate_delta_containing_a_merge_commit(
+    tmp_path: Path,
+) -> None:
+    harness = PromotionHarness.create(tmp_path, aggregate=True)
+
+    result = harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert result.decision == "ready"
+    assert result.lease is not None
+    assert harness.git.changed_paths(
+        result.lease.worktree_path, result.lease.base_ref
+    ) == ("feature.txt", "support.txt")
+
+
+def test_promote_recovers_when_pending_transition_fails(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_transition = promotion_harness.registry.transition
+
+    def fail_pending_transition(*args: object, **kwargs: object) -> Lease:
+        if kwargs.get("event_type") == "promotion_publish_pending":
+            raise RuntimeError("registry temporarily unavailable")
+        return original_transition(*args, **kwargs)
+
+    monkeypatch.setattr(
+        promotion_harness.registry, "transition", fail_pending_transition
+    )
+    first = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+    monkeypatch.setattr(promotion_harness.registry, "transition", original_transition)
+
+    second = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert first.status == "blocked"
+    assert first.lease is not None
+    assert first.lease.state is LeaseState.ACTIVE
+    assert second.decision == "ready"
+    assert second.lease is not None
+    assert second.lease.state is LeaseState.PR_OPEN
+    assert len(promotion_harness.github.create_calls) == 1
+
+
+def test_promote_recovers_pending_worktree_after_source_base_advances(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_transition = promotion_harness.registry.transition
+
+    def fail_pending_transition(*args: object, **kwargs: object) -> Lease:
+        if kwargs.get("event_type") == "promotion_publish_pending":
+            raise RuntimeError("registry temporarily unavailable")
+        return original_transition(*args, **kwargs)
+
+    monkeypatch.setattr(
+        promotion_harness.registry, "transition", fail_pending_transition
+    )
+    first = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+    monkeypatch.setattr(promotion_harness.registry, "transition", original_transition)
+    (promotion_harness.repo / "later-team.txt").write_text("later\n", encoding="utf-8")
+    git_command(promotion_harness.repo, "add", "later-team.txt")
+    git_command(promotion_harness.repo, "commit", "-q", "-m", "later staging change")
+    git_command(promotion_harness.repo, "push", "-q", "origin", "staging")
+    promotion_harness.github.prs[372] = replace(
+        promotion_harness.github.prs[372],
+        base_sha=promotion_harness.git.head_sha(promotion_harness.repo),
+    )
+
+    second = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert first.status == "blocked"
+    assert second.decision == "ready"
+    assert second.lease is not None
+    assert second.lease.state is LeaseState.PR_OPEN

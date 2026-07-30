@@ -114,20 +114,6 @@ class GitClient:
         )
         return completed.stdout.decode("utf-8", errors="replace").rstrip("\n")
 
-    def ordered_commits(self, base: str, head: str) -> tuple[str, ...]:
-        completed = self._run(
-            "rev-list", "--reverse", "--topo-order", f"{base}..{head}"
-        )
-        return tuple(
-            line
-            for line in completed.stdout.decode("ascii", errors="strict").splitlines()
-            if line
-        )
-
-    def cherry_pick(self, cwd: Path, commits: tuple[str, ...]) -> None:
-        if not commits:
-            raise ValueError("at least one commit is required to cherry-pick")
-        self._run("cherry-pick", *commits, cwd=cwd)
 
     def path_blob(self, ref: str, path: str) -> str | None:
         completed = self._run("ls-tree", "-z", ref, "--", path)
