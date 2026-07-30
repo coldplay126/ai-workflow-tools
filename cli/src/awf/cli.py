@@ -19,7 +19,7 @@ from awf.commands.init import run_init
 from awf.commands.scan import run_scan
 from awf.commands.wf_apply import run_wf_apply_result
 from awf.commands.wf_pr import run_wf_pr
-from awf.commands.wt import run_wt_doctor, run_wt_status
+from awf.commands.wt import run_wt_acquire, run_wt_doctor, run_wt_status
 from awf.commands.wf import (
     run_wf_decide,
     run_wf_detect_class,
@@ -621,6 +621,49 @@ def build_parser() -> argparse.ArgumentParser:
 
     wt_parser = subparsers.add_parser("wt", help="Managed Git worktree helpers.")
     wt_subparsers = wt_parser.add_subparsers(dest="wt_command", required=True)
+
+    wt_acquire_parser = wt_subparsers.add_parser(
+        "acquire",
+        help="Create or reuse a managed worktree lease.",
+    )
+    wt_acquire_parser.add_argument(
+        "--initiative",
+        required=True,
+        help="Stable lowercase initiative slug.",
+    )
+    wt_acquire_parser.add_argument(
+        "--purpose",
+        choices=["feature", "promote", "scratch"],
+        default="feature",
+        help="Lease purpose. Defaults to feature.",
+    )
+    wt_acquire_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to current or parent directories.",
+    )
+    wt_acquire_parser.add_argument(
+        "--base",
+        help="Base branch or origin tracking ref.",
+    )
+    wt_acquire_parser.add_argument(
+        "--branch",
+        help="Branch to create. Defaults to awf/<initiative>/<purpose>.",
+    )
+    wt_acquire_parser.add_argument(
+        "--owner-id",
+        help="Optional session, run, or user ownership label.",
+    )
+    wt_acquire_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Create a new managed worktree instead of previewing it.",
+    )
+    wt_acquire_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_acquire_parser.set_defaults(handler=run_wt_acquire)
 
     wt_status_parser = wt_subparsers.add_parser(
         "status",

@@ -9,7 +9,7 @@ from collections.abc import Callable
 from awf.core.paths import find_repo_root
 from awf.worktrees.config import ConfigError
 from awf.worktrees.git import GitClient, GitError
-from awf.worktrees.models import CommandResult
+from awf.worktrees.models import CommandResult, Purpose
 from awf.worktrees.registry import WorktreeRegistry
 from awf.worktrees.service import WorktreeService, state_db_path
 
@@ -77,3 +77,18 @@ def run_wt_status(args: argparse.Namespace) -> int:
 
 def run_wt_doctor(args: argparse.Namespace) -> int:
     return _run(args, "wt.doctor", lambda service: service.doctor())
+
+
+def run_wt_acquire(args: argparse.Namespace) -> int:
+    return _run(
+        args,
+        "wt.acquire",
+        lambda service: service.acquire(
+            initiative=args.initiative,
+            purpose=Purpose(args.purpose),
+            base=args.base,
+            branch=args.branch,
+            owner_id=args.owner_id,
+            apply=args.apply,
+        ),
+    )

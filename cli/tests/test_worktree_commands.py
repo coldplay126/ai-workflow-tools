@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
@@ -158,3 +159,119 @@ def test_wt_doctor_human_output_lists_each_mismatch(
         "wt.doctor: preview\n"
         f"unregistered_worktree: {repo.resolve()}\n"
     )
+
+
+def test_wt_acquire_parser_surface() -> None:
+    args = build_parser().parse_args(
+        [
+            "wt",
+            "acquire",
+            "--initiative",
+            "reward-widget",
+            "--purpose",
+            "scratch",
+            "--repo-root",
+            "/repo",
+            "--base",
+            "staging",
+            "--branch",
+            "topic/reward-widget",
+            "--owner-id",
+            "session-1",
+            "--apply",
+            "--json",
+        ]
+    )
+
+    assert args.command == "wt"
+    assert args.wt_command == "acquire"
+    assert args.initiative == "reward-widget"
+    assert args.purpose == "scratch"
+    assert args.repo_root == "/repo"
+    assert args.base == "staging"
+    assert args.branch == "topic/reward-widget"
+    assert args.owner_id == "session-1"
+    assert args.apply is True
+    assert args.json is True
+
+
+def test_wt_acquire_preview_emits_one_json_document(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo = make_repository(tmp_path)
+    db = tmp_path / "state" / "worktrees.sqlite3"
+    cache_dir = tmp_path / "cache"
+    (repo / ".awf").mkdir()
+    (repo / ".awf" / "worktree.toml").write_text(
+        "[worktree]\ndefault_base = \"staging\"\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AWF_WORKTREE_STATE_DB", str(db))
+    monkeypatch.setenv("AWF_WORKTREE_CACHE_DIR", str(cache_dir))
+
+    rc, stdout, stderr = capture_main(
+        [
+            "wt",
+            "acquire",
+            "--repo-root",
+            str(repo),
+            "--initiative",
+            "reward-widget",
+            "--json",
+        ]
+    )
+
+    payload = json.loads(stdout)
+    assert rc == 0
+    assert stderr == ""
+    assert payload["command"] == "wt.acquire"
+    assert payload["decision"] == "preview"
+    assert payload["actions"][0]["kind"] == "create_worktree"
+    assert len(GitClient(repo).list_worktrees()) == 1
+    assert WorktreeRegistry(db).list_leases() == []
+    assert not cache_dir.exists()
+
+
+def test_wt_acquire_orphaned_lease_emits_blocked_json(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo = make_repository(tmp_path)
+    db = tmp_path / "state" / "worktrees.sqlite3"
+    cache_dir = tmp_path / "cache"
+    (repo / ".awf").mkdir()
+    (repo / ".awf" / "worktree.toml").write_text(
+        "[worktree]\ndefault_base = \"staging\"\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AWF_WORKTREE_STATE_DB", str(db))
+    monkeypatch.setenv("AWF_WORKTREE_CACHE_DIR", str(cache_dir))
+    args = [
+        "wt",
+        "acquire",
+        "--repo-root",
+        str(repo),
+        "--initiative",
+        "reward-widget",
+        "--apply",
+    ]
+
+    first_rc, _, first_stderr = capture_main(args)
+    assert first_rc == 0
+    assert first_stderr == ""
+    lease = WorktreeRegistry(db).find_active(
+        GitClient(repo).repository_id(), "reward-widget", Purpose.FEATURE
+    )
+    assert lease is not None
+    subprocess.run(
+        ["git", "worktree", "remove", str(lease.worktree_path)],
+        cwd=repo,
+        check=True,
+    )
+
+    rc, stdout, stderr = capture_main([*args[:-1], "--json"])
+
+    payload = json.loads(stdout)
+    assert rc == 3
+    assert stderr == ""
+    assert payload["status"] == "blocked"
+    assert payload["blockers"][0]["code"] == "orphaned_lease"
