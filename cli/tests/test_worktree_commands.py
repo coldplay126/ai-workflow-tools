@@ -509,3 +509,54 @@ def test_wt_adopt_promotes_imported_lease_without_repo_argument(
     assert payload["decision"] == "ready"
     assert payload["lease"]["managed"] is True
     assert payload["lease"]["owner_kind"] == "imported"
+
+
+def test_wt_finish_parser_surface() -> None:
+    args = build_parser().parse_args(
+        [
+            "wt",
+            "finish",
+            "--repo-root",
+            "/repo",
+            "--pr",
+            "42",
+            "--apply",
+            "--json",
+        ]
+    )
+
+    assert args.wt_command == "finish"
+    assert args.repo_root == "/repo"
+    assert args.pr == 42
+    assert args.apply is True
+    assert args.json is True
+    assert args.handler.__name__ == "run_wt_finish"
+
+
+def test_wt_gc_parser_defaults_to_preview() -> None:
+    args = build_parser().parse_args(
+        ["wt", "gc", "--repo-root", "/repo", "--merged", "--older-than", "7d"]
+    )
+
+    assert args.wt_command == "gc"
+    assert args.repo_root == "/repo"
+    assert args.merged is True
+    assert args.older_than == "7d"
+    assert args.apply is False
+    assert args.dry_run is False
+    assert args.handler.__name__ == "run_wt_gc"
+
+
+def test_wt_gc_rejects_apply_and_dry_run_together() -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            [
+                "wt",
+                "gc",
+                "--merged",
+                "--older-than",
+                "7d",
+                "--apply",
+                "--dry-run",
+            ]
+        )

@@ -130,6 +130,26 @@ def run_wt_promote(args: argparse.Namespace) -> int:
     )
 
 
+def run_wt_finish(args: argparse.Namespace) -> int:
+    return _run(
+        args,
+        "wt.finish",
+        lambda service: service.finish(pr_number=args.pr, apply=args.apply),
+    )
+
+
+def run_wt_gc(args: argparse.Namespace) -> int:
+    return _run(
+        args,
+        "wt.gc",
+        lambda service: service.gc(
+            merged=args.merged,
+            older_than=args.older_than,
+            apply=args.apply,
+        ),
+    )
+
+
 def run_wt_import(
     args: argparse.Namespace,
     *,

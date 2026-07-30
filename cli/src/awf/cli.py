@@ -26,6 +26,8 @@ from awf.commands.wt import (
     run_wt_import,
     run_wt_status,
     run_wt_promote,
+    run_wt_finish,
+    run_wt_gc,
 )
 from awf.commands.wf import (
     run_wf_decide,
@@ -702,6 +704,68 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print a versioned JSON result.",
     )
     wt_promote_parser.set_defaults(handler=run_wt_promote)
+
+    wt_finish_parser = wt_subparsers.add_parser(
+        "finish",
+        help="Preview or remove one proven-safe managed worktree lease.",
+    )
+    wt_finish_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to current or parent directories.",
+    )
+    wt_finish_parser.add_argument(
+        "--pr",
+        required=True,
+        type=int,
+        help="Merged pull request number for the managed lease.",
+    )
+    wt_finish_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Remove the proven-safe worktree instead of previewing it.",
+    )
+    wt_finish_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_finish_parser.set_defaults(handler=run_wt_finish)
+
+    wt_gc_parser = wt_subparsers.add_parser(
+        "gc",
+        help="Preview or remove stale proven-safe merged worktree leases.",
+    )
+    wt_gc_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to current or parent directories.",
+    )
+    wt_gc_parser.add_argument(
+        "--merged",
+        action="store_true",
+        help="Limit cleanup to leases proven merged by their pull requests.",
+    )
+    wt_gc_parser.add_argument(
+        "--older-than",
+        required=True,
+        help="Positive age threshold using s, m, h, or d (for example: 7d).",
+    )
+    wt_gc_mode = wt_gc_parser.add_mutually_exclusive_group()
+    wt_gc_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview cleanup without mutations (the default).",
+    )
+    wt_gc_mode.add_argument(
+        "--apply",
+        action="store_true",
+        help="Remove each proven-safe stale worktree.",
+    )
+    wt_gc_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_gc_parser.set_defaults(handler=run_wt_gc)
 
     wt_import_parser = wt_subparsers.add_parser(
         "import",

@@ -13,6 +13,7 @@ import time
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
 from .config import ConfigError, WorktreeConfig, load_worktree_config
 from .git import GitClient, GitError, GitWorktree
@@ -458,6 +459,539 @@ class WorktreeService:
             decision="no_op" if not refreshed_leases else "ready",
             leases=refreshed_leases,
             warnings=tuple(warnings),
+        )
+
+    def finish(self, *, pr_number: int, apply: bool = False) -> CommandResult:
+        if (
+            not isinstance(pr_number, int)
+            or isinstance(pr_number, bool)
+            or pr_number <= 0
+        ):
+            return self._cleanup_blocked(
+                "wt.finish",
+                "invalid_pr",
+                "pull request must be a positive integer",
+            )
+        leases = self.registry.list_leases_read_only(
+            include_removed=False,
+            repository_id=self.git.repository_id(),
+            target_pr=pr_number,
+        )
+        if not leases:
+            return self._cleanup_blocked(
+                "wt.finish",
+                "lease_not_found",
+                f"no active lease is registered for pull request #{pr_number}",
+            )
+        if len(leases) != 1:
+            return self._cleanup_blocked(
+                "wt.finish",
+                "ambiguous_lease",
+                f"multiple active leases are registered for pull request #{pr_number}",
+            )
+        return self._finish_lease(leases[0], apply=apply)
+
+    def gc(
+        self, *, merged: bool, older_than: str, apply: bool = False
+    ) -> CommandResult:
+        if not merged:
+            return self._cleanup_blocked(
+                "wt.gc",
+                "merged_filter_required",
+                "gc requires --merged to limit cleanup to merged pull requests",
+            )
+        try:
+            threshold = self._parse_age_threshold(older_than)
+        except ValueError as error:
+            return self._cleanup_blocked(
+                "wt.gc", "invalid_age_threshold", str(error)
+            )
+        now = datetime.now(timezone.utc)
+        warnings: list[dict[str, str]] = []
+        actions: list[dict[str, object]] = []
+        processed: list[Lease] = []
+        deferred_blockers: list[dict[str, str]] = []
+        saw_preview = False
+        saw_removed = False
+        leases = self.registry.list_leases_read_only(
+            include_removed=False,
+            repository_id=self.git.repository_id(),
+        )
+        for lease in leases:
+            if not self._lease_is_older_than(lease, threshold, now):
+                continue
+            if not lease.managed or lease.owner_kind != "awf":
+                warnings.append(
+                    {
+                        "code": "unmanaged_lease",
+                        "message": f"Lease {lease.id} is not an AWF-managed lease.",
+                    }
+                )
+                continue
+            if lease.target_pr is None:
+                warnings.append(
+                    {
+                        "code": "lease_without_pr",
+                        "message": f"Lease {lease.id} has no pull request to prove merged.",
+                    }
+                )
+                continue
+            try:
+                pull_request = (self.github or GhClient(lease.repository_root)).view_pr(
+                    lease.target_pr
+                )
+            except (ExternalServiceError, KeyError, OSError, ValueError) as error:
+                warnings.append(
+                    {
+                        "code": "github_refresh_failed",
+                        "message": (
+                            f"Unable to refresh pull request state for lease {lease.id}: "
+                            f"{error}"
+                        ),
+                    }
+                )
+                continue
+            if (
+                pull_request.number != lease.target_pr
+                or pull_request.state != "MERGED"
+                or not pull_request.merge_commit_sha
+            ):
+                continue
+            result = self._finish_lease(
+                lease,
+                apply=apply,
+                pull_request=pull_request,
+            )
+            if result.lease is not None:
+                processed.append(result.lease)
+            actions.extend(result.actions)
+            warnings.extend(result.warnings)
+            if result.decision == "removed":
+                saw_removed = True
+            elif result.decision == "preview":
+                saw_preview = True
+            else:
+                deferred_blockers.extend(
+                    {
+                        "code": blocker["code"],
+                        "message": f"Lease {lease.id}: {blocker['message']}",
+                    }
+                    for blocker in result.blockers
+                )
+
+        if apply and saw_removed:
+            return CommandResult.ok(
+                "wt.gc",
+                decision="removed",
+                leases=tuple(processed),
+                actions=tuple(actions),
+                warnings=tuple(warnings + deferred_blockers),
+            )
+        if not apply and saw_preview:
+            return CommandResult.ok(
+                "wt.gc",
+                decision="preview",
+                leases=tuple(processed),
+                actions=tuple(actions),
+                warnings=tuple(warnings + deferred_blockers),
+            )
+        if deferred_blockers:
+            return CommandResult.blocked(
+                "wt.gc",
+                blockers=tuple(deferred_blockers),
+                leases=tuple(processed),
+                actions=tuple(actions),
+                warnings=tuple(warnings),
+            )
+        return CommandResult.ok(
+            "wt.gc",
+            decision="preview" if not apply else "no_op",
+            leases=tuple(processed),
+            actions=tuple(actions),
+            warnings=tuple(warnings),
+        )
+
+    def _finish_lease(
+        self,
+        lease: Lease,
+        *,
+        apply: bool,
+        pull_request: PullRequest | None = None,
+    ) -> CommandResult:
+        if not apply:
+            try:
+                pull_request = pull_request or (
+                    self.github or GhClient(lease.repository_root)
+                ).view_pr(lease.target_pr)
+            except (ExternalServiceError, KeyError, OSError, ValueError) as error:
+                return self._cleanup_blocked(
+                    "wt.finish",
+                    "github_refresh_failed",
+                    f"Unable to refresh pull request state: {error}",
+                    lease=lease,
+                )
+            if pull_request is None:
+                return self._cleanup_blocked(
+                    "wt.finish",
+                    "lease_without_pr",
+                    f"Lease {lease.id} has no pull request to prove merged.",
+                    lease=lease,
+                )
+            blockers = self._cleanup_blockers(lease, pull_request)
+            if blockers:
+                return CommandResult.blocked(
+                    "wt.finish", blockers=blockers, lease=lease
+                )
+            return CommandResult.ok(
+                "wt.finish",
+                decision="preview",
+                lease=lease,
+                actions=(self._cleanup_action("remove_worktree", lease),),
+            )
+
+        repository_id = self.git.repository_id()
+        warnings: list[dict[str, str]] = []
+        with repository_lock(self.lock_dir / f"{repository_id}.lock"):
+            current = self.registry.get_lease(lease.id)
+            if (
+                current is None
+                or current.state is LeaseState.REMOVED
+                or current.repository_id != repository_id
+                or current.target_pr != lease.target_pr
+            ):
+                return self._cleanup_blocked(
+                    "wt.finish",
+                    "lease_changed",
+                    f"Lease {lease.id} changed before cleanup could be applied.",
+                    lease=current,
+                )
+            self._refresh_lease(current, warnings)
+            current = self.registry.get_lease(current.id)
+            if current is None or current.state is LeaseState.REMOVED:
+                return self._cleanup_blocked(
+                    "wt.finish",
+                    "lease_changed",
+                    f"Lease {lease.id} changed while refresh was running.",
+                    lease=current,
+                    warnings=warnings,
+                )
+            try:
+                pull_request = (self.github or GhClient(current.repository_root)).view_pr(
+                    current.target_pr
+                )
+            except (ExternalServiceError, KeyError, OSError, ValueError) as error:
+                return self._cleanup_blocked(
+                    "wt.finish",
+                    "github_refresh_failed",
+                    f"Unable to refresh pull request state: {error}",
+                    lease=current,
+                    warnings=warnings,
+                )
+            blockers = self._cleanup_blockers(current, pull_request)
+            if blockers:
+                return CommandResult.blocked(
+                    "wt.finish",
+                    blockers=blockers,
+                    lease=current,
+                    warnings=tuple(warnings),
+                )
+            try:
+                self.git.remove_worktree(current.worktree_path)
+            except (GitError, OSError) as error:
+                return self._cleanup_blocked(
+                    "wt.finish",
+                    "worktree_remove_failed",
+                    f"Unable to remove worktree for lease {current.id}: {error}",
+                    lease=current,
+                    warnings=warnings,
+                )
+            try:
+                removed = self.registry.transition(
+                    current.id,
+                    LeaseState.REMOVED,
+                    expected_version=current.version,
+                    event_type="worktree_removed",
+                    summary="Removed proven-safe AWF worktree lease",
+                    observed_head_sha=pull_request.head_sha,
+                    pr_number=pull_request.number,
+                    head_sha=pull_request.head_sha,
+                )
+            except (RuntimeError, sqlite3.Error) as error:
+                return self._cleanup_blocked(
+                    "wt.finish",
+                    "registry_conflict",
+                    (
+                        "Worktree was removed but the registry transition could not be "
+                        f"recorded: {error}"
+                    ),
+                    lease=current,
+                    warnings=warnings,
+                )
+            actions: list[dict[str, object]] = [
+                self._cleanup_action("remove_worktree", removed)
+            ]
+            self._cleanup_branches(removed, actions, warnings)
+            return CommandResult.ok(
+                "wt.finish",
+                decision="removed",
+                lease=removed,
+                actions=tuple(actions),
+                warnings=tuple(warnings),
+            )
+
+    def _cleanup_blockers(
+        self, lease: Lease, pull_request: PullRequest
+    ) -> tuple[dict[str, str], ...]:
+        blockers: list[dict[str, str]] = []
+        if not lease.managed or lease.owner_kind != "awf":
+            blockers.append(
+                {
+                    "code": "unmanaged_lease",
+                    "message": f"Lease {lease.id} is not managed by AWF.",
+                }
+            )
+        if lease.retain:
+            blockers.append(
+                {
+                    "code": "retained_lease",
+                    "message": f"Lease {lease.id} is retained and cannot be removed.",
+                }
+            )
+        if pull_request.number != lease.target_pr:
+            blockers.append(
+                {
+                    "code": "pr_mismatch",
+                    "message": f"Lease {lease.id} does not match the refreshed pull request.",
+                }
+            )
+        if pull_request.state != "MERGED" or not pull_request.merge_commit_sha:
+            blockers.append(
+                {
+                    "code": "pr_not_merged",
+                    "message": f"Pull request #{lease.target_pr} is not merged.",
+                }
+            )
+        if lease.purpose is Purpose.PROMOTE and (
+            lease.deployment_state is not DeploymentState.HEALTHY
+        ):
+            blockers.append(
+                {
+                    "code": "deployment_not_healthy",
+                    "message": f"Promotion lease {lease.id} has no healthy deployment.",
+                }
+            )
+
+        try:
+            worktrees = self.git.list_worktrees()
+        except (GitError, OSError) as error:
+            blockers.append(
+                {
+                    "code": "worktree_inspection_failed",
+                    "message": f"Unable to inspect registered worktrees: {error}",
+                }
+            )
+            return tuple(blockers)
+        lease_path = lease.worktree_path.resolve()
+        registered = tuple(
+            worktree for worktree in worktrees if worktree.path == lease_path
+        )
+        if len(registered) != 1 or not lease_path.is_dir():
+            blockers.append(
+                {
+                    "code": "unregistered_worktree",
+                    "message": f"Lease {lease.id} is not registered at its expected path.",
+                }
+            )
+        else:
+            worktree = registered[0]
+            if (
+                worktree.branch != lease.branch
+                or worktree.bare
+                or worktree.detached
+            ):
+                blockers.append(
+                    {
+                        "code": "branch_mismatch",
+                        "message": (
+                            f"Lease {lease.id} is not checked out on its registered branch."
+                        ),
+                    }
+                )
+            if any(
+                item.path != lease_path and item.branch == lease.branch
+                for item in worktrees
+            ):
+                blockers.append(
+                    {
+                        "code": "branch_in_use",
+                        "message": f"Branch {lease.branch!r} is checked out elsewhere.",
+                    }
+                )
+            protected = self._cleanup_protected_branches(
+                worktrees, lease.repository_root, pull_request
+            )
+            if lease.branch in protected:
+                blockers.append(
+                    {
+                        "code": "protected_branch",
+                        "message": f"Branch {lease.branch!r} is protected from cleanup.",
+                    }
+                )
+            try:
+                if self.git.status_porcelain(lease_path):
+                    blockers.append(
+                        {
+                            "code": "dirty_worktree",
+                            "message": f"Lease {lease.id} has uncommitted changes.",
+                        }
+                    )
+            except (GitError, OSError) as error:
+                blockers.append(
+                    {
+                        "code": "worktree_inspection_failed",
+                        "message": f"Unable to inspect lease status: {error}",
+                    }
+                )
+            try:
+                actual_head = self.git.head_sha(lease_path)
+            except (GitError, OSError) as error:
+                blockers.append(
+                    {
+                        "code": "head_unavailable",
+                        "message": f"Unable to inspect lease HEAD: {error}",
+                    }
+                )
+            else:
+                if actual_head != pull_request.head_sha:
+                    blockers.append(
+                        {
+                            "code": "head_mismatch",
+                            "message": (
+                                f"Lease {lease.id} HEAD does not match pull request "
+                                f"#{pull_request.number}."
+                            ),
+                        }
+                    )
+        return tuple(blockers)
+
+    def _cleanup_branches(
+        self,
+        lease: Lease,
+        actions: list[dict[str, object]],
+        warnings: list[dict[str, str]],
+    ) -> None:
+        if lease.owner_kind != "awf" or not lease.branch.startswith("awf/"):
+            return
+        try:
+            self.git.delete_local_branch(lease.branch)
+        except (GitError, OSError) as error:
+            warnings.append(
+                {
+                    "code": "local_branch_cleanup_failed",
+                    "message": f"Could not delete local branch {lease.branch!r}: {error}",
+                }
+            )
+        else:
+            actions.append(self._cleanup_action("delete_local_branch", lease))
+        try:
+            self.git.delete_remote_branch(lease.branch)
+        except (GitError, OSError) as error:
+            warnings.append(
+                {
+                    "code": "remote_branch_cleanup_failed",
+                    "message": f"Could not delete remote branch {lease.branch!r}: {error}",
+                }
+            )
+        else:
+            actions.append(self._cleanup_action("delete_remote_branch", lease))
+
+    @staticmethod
+    def _cleanup_action(kind: str, lease: Lease) -> dict[str, object]:
+        return {
+            "kind": kind,
+            "lease_id": lease.id,
+            "path": str(lease.worktree_path),
+            "branch": lease.branch,
+        }
+
+    @staticmethod
+    def _parse_age_threshold(value: str) -> timedelta:
+        if not isinstance(value, str):
+            raise ValueError(
+                "older_than must be a positive duration using s, m, h, or d"
+            )
+        match = re.fullmatch(r"([1-9][0-9]*)([smhd])", value)
+        if match is None:
+            raise ValueError(
+                "older_than must be a positive duration using s, m, h, or d"
+            )
+        amount = int(match.group(1))
+        multiplier = {
+            "s": 1,
+            "m": 60,
+            "h": 60 * 60,
+            "d": 24 * 60 * 60,
+        }[match.group(2)]
+        try:
+            return timedelta(seconds=amount * multiplier)
+        except OverflowError as error:
+            raise ValueError(
+                "older_than must be a positive duration using s, m, h, or d"
+            ) from error
+
+    @staticmethod
+    def _lease_is_older_than(
+        lease: Lease, threshold: timedelta, now: datetime
+    ) -> bool:
+        try:
+            timestamp = datetime.fromisoformat(lease.last_used_at.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if timestamp.tzinfo is None:
+            return False
+        return now - timestamp.astimezone(timezone.utc) >= threshold
+
+    def _cleanup_protected_branches(
+        self,
+        worktrees: tuple[GitWorktree, ...],
+        repository_root: Path,
+        pull_request: PullRequest,
+    ) -> set[str]:
+        protected = {
+            self._local_branch_name(pull_request.base_ref),
+            self._local_branch_name(self.config.default_base),
+            self._local_branch_name(self.config.production_branch),
+        }
+        root = repository_root.resolve()
+        protected.update(
+            item.branch for item in worktrees if item.path == root and item.branch
+        )
+        protected.discard("")
+        return protected
+
+    @staticmethod
+    def _local_branch_name(value: str | None) -> str:
+        if not value:
+            return ""
+        for prefix in ("refs/heads/", "refs/remotes/origin/", "origin/"):
+            if value.startswith(prefix):
+                return value[len(prefix) :]
+        return value
+
+    @staticmethod
+    def _cleanup_blocked(
+        command: str,
+        code: str,
+        message: str,
+        *,
+        lease: Lease | None = None,
+        warnings: list[dict[str, str]] | None = None,
+    ) -> CommandResult:
+        return CommandResult.blocked(
+            command,
+            blockers=({"code": code, "message": message},),
+            lease=lease,
+            warnings=tuple(warnings or ()),
         )
 
     def _refresh_lease(self, lease: Lease, warnings: list[dict[str, str]]) -> None:

@@ -6,6 +6,7 @@ import subprocess
 import sqlite3
 import sys
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -196,6 +197,31 @@ class Harness:
         external = self.make_external_worktree(branch)
         result = self.service.import_root(self.repo.parent, apply=True)
         return next(lease for lease in result.leases if lease.worktree_path == external)
+    def merged_feature(self, *, age_days: int, initiative: str = "merged") -> Lease:
+        acquired = self.acquire(initiative)
+        assert acquired.lease is not None
+        attached = self.attach_pr(acquired.lease, 1_000 + len(self.github.prs))
+        head_sha = self.git.head_sha(attached.worktree_path)
+        self.github.prs[attached.target_pr] = merged_pr(
+            number=attached.target_pr,
+            head_sha=head_sha,
+        )
+        self.service.status(refresh=True)
+        stale_at = (datetime.now(timezone.utc) - timedelta(days=age_days)).isoformat(
+            timespec="seconds"
+        )
+        with sqlite3.connect(self.registry.db_path) as connection:
+            connection.execute(
+                """
+                UPDATE worktree_leases
+                SET created_at = ?, last_used_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (stale_at, stale_at, stale_at, attached.id),
+            )
+        lease = self.registry.get_lease(attached.id)
+        assert lease is not None
+        return lease
 
 @dataclass
 class PromotionHarness:
@@ -311,6 +337,68 @@ class PromotionHarness:
         git_command(self.repo, "commit", "-q", "-m", "target feature")
         git_command(self.repo, "push", "-q", "origin", "main")
         git_command(self.repo, "checkout", "-q", "staging")
+    def merged_promotion(self, mutation: str) -> Lease:
+        if mutation == "deployment_unknown":
+            self.configure(deployment_status_command=())
+        elif mutation == "deployment_failed":
+            self.configure(
+                deployment_status_command=(
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.exit(1)",
+                )
+            )
+        else:
+            self.configure(
+                deployment_status_command=(sys.executable, "-c", "pass")
+            )
+        promoted = self.service.promote(
+            source_pr=372, target_branch="main", apply=True
+        )
+        assert promoted.lease is not None
+        target_pr = promoted.lease.target_pr
+        assert target_pr is not None
+        target = self.github.prs[target_pr]
+        self.github.prs[target_pr] = replace(
+            target,
+            state="MERGED",
+            head_sha=promoted.lease.head_sha,
+            merge_commit_sha=promoted.lease.head_sha,
+        )
+        self.service.status(refresh=True)
+        lease = self.registry.get_lease(promoted.lease.id)
+        assert lease is not None
+        if mutation == "dirty":
+            (lease.worktree_path / "README.txt").write_text(
+                "dirty\n", encoding="utf-8"
+            )
+        elif mutation == "untracked":
+            (lease.worktree_path / "local.txt").write_text(
+                "keep\n", encoding="utf-8"
+            )
+        elif mutation == "closed":
+            self.github.prs[target_pr] = replace(
+                self.github.prs[target_pr], state="CLOSED", merge_commit_sha=None
+            )
+        elif mutation == "head_mismatch":
+            self.github.prs[target_pr] = replace(
+                self.github.prs[target_pr], head_sha="0" * 40
+            )
+        elif mutation == "unmanaged":
+            lease = self.registry.transition(
+                lease.id,
+                lease.state,
+                expected_version=lease.version,
+                managed=False,
+            )
+        elif mutation == "retain":
+            lease = self.registry.transition(
+                lease.id,
+                lease.state,
+                expected_version=lease.version,
+                retain=True,
+            )
+        return lease
 def test_github_client_marks_checks_passed_only_for_completed_successes(
     harness: Harness,
 ) -> None:
@@ -2358,3 +2446,86 @@ def test_production_verifier_kills_timeout_descendant(
         text=True,
     ).stdout.strip()
     assert not status or status.startswith("Z")
+
+
+@pytest.mark.parametrize(
+    ("mutation", "code"),
+    [
+        ("dirty", "dirty_worktree"),
+        ("untracked", "dirty_worktree"),
+        ("closed", "pr_not_merged"),
+        ("head_mismatch", "head_mismatch"),
+        ("unmanaged", "unmanaged_lease"),
+        ("retain", "retained_lease"),
+        ("deployment_unknown", "deployment_not_healthy"),
+        ("deployment_failed", "deployment_not_healthy"),
+    ],
+)
+def test_finish_preserves_unsafe_worktree(
+    promotion_harness: PromotionHarness, mutation: str, code: str
+) -> None:
+    lease = promotion_harness.merged_promotion(mutation)
+
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.status == "blocked"
+    assert code in {item["code"] for item in result.blockers}
+    assert lease.worktree_path.exists()
+
+
+def test_finish_removes_healthy_managed_promotion(
+    promotion_harness: PromotionHarness,
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.decision == "removed"
+    assert not lease.worktree_path.exists()
+    removed = promotion_harness.registry.get_lease(lease.id)
+    assert removed is not None
+    assert removed.state is LeaseState.REMOVED
+
+
+def test_finish_previews_without_mutating(
+    promotion_harness: PromotionHarness,
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=False)
+
+    assert result.decision == "preview"
+    assert lease.worktree_path.exists()
+    assert promotion_harness.registry.get_lease(lease.id).state is LeaseState.CLEANABLE
+
+
+@pytest.mark.parametrize(
+    ("value", "expected_seconds"),
+    [("15s", 15), ("2m", 120), ("3h", 10_800), ("7d", 604_800)],
+)
+def test_gc_parses_supported_age_thresholds(
+    harness: Harness, value: str, expected_seconds: int
+) -> None:
+    assert harness.service._parse_age_threshold(value) == timedelta(
+        seconds=expected_seconds
+    )
+
+
+def test_gc_is_preview_by_default_and_rechecks_each_candidate(
+    harness: Harness,
+) -> None:
+    safe = harness.merged_feature(age_days=10)
+    dirty = harness.merged_feature(age_days=10, initiative="dirty")
+    (dirty.worktree_path / "local.txt").write_text("keep", encoding="utf-8")
+
+    preview = harness.service.gc(merged=True, older_than="7d", apply=False)
+
+    assert preview.decision == "preview"
+    assert safe.worktree_path.exists()
+    assert dirty.worktree_path.exists()
+
+    applied = harness.service.gc(merged=True, older_than="7d", apply=True)
+
+    assert applied.decision == "removed"
+    assert not safe.worktree_path.exists()
+    assert dirty.worktree_path.exists()
