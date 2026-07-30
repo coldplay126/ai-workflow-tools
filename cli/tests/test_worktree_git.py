@@ -121,6 +121,21 @@ def test_git_client_adds_and_removes_worktrees(tmp_path: Path) -> None:
     client.remove_worktree(worktree)
     assert not worktree.exists()
 
+def test_git_client_interprets_relative_worktree_paths_from_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = repository(tmp_path)
+    client = GitClient(repo)
+    monkeypatch.chdir(tmp_path)
+    relative_path = Path("relative worktree")
+    expected_path = repo / relative_path
+
+    client.add_worktree(relative_path, "awf/relative", client.head_sha())
+
+    assert expected_path.is_dir()
+    client.remove_worktree(relative_path)
+    assert not expected_path.exists()
+
 
 def test_git_client_deletes_local_and_remote_branches(tmp_path: Path) -> None:
     repo = repository(tmp_path)

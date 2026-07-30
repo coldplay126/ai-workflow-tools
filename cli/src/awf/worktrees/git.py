@@ -78,10 +78,10 @@ class GitClient:
         return ref[len(prefix) :]
 
     def add_worktree(self, path: Path, branch: str, start_sha: str) -> None:
-        self._run("worktree", "add", "-b", branch, str(path.resolve()), start_sha)
+        self._run("worktree", "add", "-b", branch, str(path), start_sha)
 
     def remove_worktree(self, path: Path) -> None:
-        self._run("worktree", "remove", str(path.resolve()))
+        self._run("worktree", "remove", str(path))
 
     def delete_local_branch(self, branch: str) -> None:
         self._run("branch", "-d", branch)
