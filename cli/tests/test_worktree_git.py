@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import signal
@@ -232,6 +233,43 @@ def test_repository_identity_ignores_remote_url_userinfo(tmp_path: Path) -> None
     )
 
     assert client.repository_id() == first
+
+def test_repository_identity_preserves_scp_ssh_user(tmp_path: Path) -> None:
+    repo = repository(tmp_path)
+    client = GitClient(repo)
+    git(repo, "remote", "set-url", "origin", "git@host:owner/repository.git")
+
+    expected = hashlib.sha256(
+        b"ssh://git@host/owner/repository\0" + os.fsencode(repo.resolve())
+    ).hexdigest()
+
+    assert client.repository_id() == expected
+
+
+def test_repository_identity_hashes_invalid_repository_root_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = repository(tmp_path)
+    root_bytes = os.fsencode(tmp_path) + b"/repository-\xff"
+    root_output = root_bytes + b"\n"
+    _install_fake_git(
+        monkeypatch,
+        tmp_path,
+        "import sys\n"
+        "if sys.argv[1:] == ['remote', 'get-url', 'origin']:\n"
+        "    sys.stdout.write('https://example.com/owner/repository.git\\n')\n"
+        "elif sys.argv[1:] == ['rev-parse', '--show-toplevel']:\n"
+        f"    sys.stdout.buffer.write({root_output!r})\n"
+        "else:\n"
+        "    raise SystemExit(2)\n",
+    )
+
+    expected_root = Path(os.fsdecode(root_bytes)).resolve()
+    expected = hashlib.sha256(
+        b"https://example.com/owner/repository\0" + os.fsencode(expected_root)
+    ).hexdigest()
+
+    assert GitClient(repo).repository_id() == expected
 
 
 @pytest.mark.parametrize(

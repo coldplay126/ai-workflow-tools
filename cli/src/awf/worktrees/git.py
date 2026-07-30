@@ -47,7 +47,9 @@ class GitClient:
 
     def repository_id(self) -> str:
         normalized_remote = _normalize_remote_url(self.remote_url())
-        payload = f"{normalized_remote}\0{self.repository_root()}".encode("utf-8")
+        payload = normalized_remote.encode("utf-8") + b"\0" + os.fsencode(
+            self.repository_root()
+        )
         return hashlib.sha256(payload).hexdigest()
 
     def remote_url(self) -> str:
@@ -156,8 +158,8 @@ class GitClient:
         return value.decode("utf-8", errors="replace").strip()
 
 
-_URL_USERINFO = re.compile(
-    r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<userinfo>[^/@\s]*@)"
+_HTTP_URL_USERINFO = re.compile(
+    r"(?P<scheme>https?://)(?P<userinfo>[^/@\s]*@)", re.IGNORECASE
 )
 _PROCESS_TERMINATION_GRACE_SECONDS = 0.2
 
@@ -175,7 +177,7 @@ def _normalize_remote_url(url: str) -> str:
     if re.match(r"^[^/@:\s]+@[^/:\s]+:.+$", normalized):
         user_and_host, path = normalized.split(":", 1)
         normalized = f"ssh://{user_and_host}/{path}"
-    return _URL_USERINFO.sub(r"\g<scheme>", normalized)
+    return _HTTP_URL_USERINFO.sub(r"\g<scheme>", normalized)
 
 
 def _bounded_stderr(value: bytes | None) -> str:
@@ -186,7 +188,7 @@ def _bounded_stderr(value: bytes | None) -> str:
 
 
 def _redact_url_userinfo(value: str) -> str:
-    return _URL_USERINFO.sub(r"\g<scheme><redacted>@", value)
+    return _HTTP_URL_USERINFO.sub(r"\g<scheme><redacted>@", value)
 
 
 def _truncate_utf8(value: str, maximum_bytes: int) -> str:
