@@ -108,9 +108,11 @@ stderr:
 ```
 
 Exit code `0` means success, preview, reuse, or no-op; `2` means CLI usage or
-configuration-schema error; `3` means a safety blocker; `4` means an external
-GitHub, Git remote, or deployment-checker failure; and `5` means a registry or
-local-Git conflict. Automation should use the structured `blockers` and
+configuration-schema error; `3` means a safety blocker; and `5` means a
+registry or local-Git conflict. The shared exit-code contract reserves `4` for
+external GitHub, Git remote, or deployment-checker failures, but current
+`awf wt` safety-critical external failures surface as structured blockers with
+exit `3` so the worktree is preserved. Automation should use `blockers` and
 `warnings` rather than parse prose.
 
 By default the registry is
