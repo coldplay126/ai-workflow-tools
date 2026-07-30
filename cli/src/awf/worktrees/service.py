@@ -1577,7 +1577,11 @@ class WorktreeService:
                         retained.extend(chunk[: 4096 - len(retained)])
                 if process.poll() is not None and not selector.get_map():
                     break
-        process.wait()
+        try:
+            process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            WorktreeService._terminate_verifier_process_group(process)
+            raise RuntimeError("production verification timed out")
         return bytes(retained)
 
     @staticmethod
@@ -1608,6 +1612,7 @@ class WorktreeService:
             value,
         )
         redacted = re.sub(r"https?://[^/@\s]*@", "https://<redacted>@", redacted)
+        redacted = re.sub(r"https?://[^\s]*$", "https://<redacted>", redacted)
         return redacted.strip().encode("utf-8")[:512].decode(
             "utf-8", errors="ignore"
         )

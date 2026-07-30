@@ -2314,7 +2314,7 @@ def test_production_verifier_bounds_and_redacts_large_stderr(
             (
                 sys.executable,
                 "-c",
-                "import sys; sys.stderr.write('token secret-value ' + 'x' * 1_000_000); sys.exit(7)",
+                "import sys; sys.stderr.write('https://user:' + 'secret' * 1000 + '@host ' + 'x' * 1_000_000); sys.exit(7)",
             ),
         )
     )
@@ -2323,7 +2323,7 @@ def test_production_verifier_bounds_and_redacts_large_stderr(
         promotion_harness.service._verify_promotion(promotion_harness.repo)
 
     detail = str(error.value)
-    assert "secret-value" not in detail
+    assert "secret" not in detail
     assert "<redacted>" in detail
     assert len(detail.encode("utf-8")) <= 600
 
