@@ -17,6 +17,18 @@ from awf.commands.ready import run_ready
 from awf.commands.skills import run_skills_list
 from awf.commands.init import run_init
 from awf.commands.scan import run_scan
+from awf.commands.supervisor import (
+    parse_harness_idempotency_key,
+    parse_positive_generation,
+    parse_watch_interval,
+    run_supervisor_agents,
+    run_supervisor_approve,
+    run_supervisor_cancel,
+    run_supervisor_reject,
+    run_supervisor_status,
+    run_supervisor_submit,
+    run_supervisor_watch,
+)
 from awf.commands.wf_apply import run_wf_apply_result
 from awf.commands.wf_pr import run_wf_pr
 from awf.commands.wf import (
@@ -42,7 +54,7 @@ from awf.commands.wiki import (
 from awf.core.router import route_natural_language
 
 
-KNOWN_COMMANDS = {"agents", "chat", "analyze", "wf", "config", "skills", "mcp", "doctor", "ready", "scan", "init", "cmux", "wiki", "dashboard"}
+KNOWN_COMMANDS = {"agents", "chat", "analyze", "wf", "config", "skills", "mcp", "doctor", "ready", "scan", "init", "cmux", "wiki", "dashboard", "supervisor"}
 
 
 def _should_skip_execution_confirmation(args: argparse.Namespace) -> bool:
@@ -591,6 +603,121 @@ def build_parser() -> argparse.ArgumentParser:
     )
     wiki_compile_parser.add_argument("--no-ready-gate", action="store_true", help="Bypass the internal awf ready --gate operations preflight.")
     wiki_compile_parser.set_defaults(handler=run_wiki_compile)
+
+    supervisor_parser = subparsers.add_parser(
+        "supervisor",
+        help="Submit and manage AWF Supervisor jobs.",
+    )
+    supervisor_subparsers = supervisor_parser.add_subparsers(
+        dest="supervisor_command",
+        required=True,
+    )
+
+    supervisor_submit_parser = supervisor_subparsers.add_parser(
+        "submit",
+        help="Submit a workflow job to the Supervisor.",
+    )
+    supervisor_submit_parser.add_argument("--workflow-id", required=True)
+    supervisor_submit_parser.add_argument(
+        "--repo",
+        action="append",
+        required=True,
+        metavar="REPO:BASE",
+    )
+    supervisor_prompt_group = supervisor_submit_parser.add_mutually_exclusive_group(
+        required=True
+    )
+    supervisor_prompt_group.add_argument("--prompt", metavar="TEXT")
+    supervisor_prompt_group.add_argument("--prompt-file", metavar="PATH")
+    supervisor_submit_parser.add_argument(
+        "--require-capability",
+        action="append",
+        default=[],
+        metavar="CAPABILITY",
+    )
+    supervisor_submit_parser.add_argument(
+        "--target",
+        choices=["auto", "local", "aws"],
+        default="auto",
+    )
+    supervisor_submit_parser.add_argument(
+        "--idempotency-key",
+        type=parse_harness_idempotency_key,
+        metavar="UUID4",
+    )
+    supervisor_submit_parser.add_argument("--json", action="store_true")
+    supervisor_submit_parser.set_defaults(handler=run_supervisor_submit)
+
+    supervisor_status_parser = supervisor_subparsers.add_parser(
+        "status",
+        help="Show a Supervisor job.",
+    )
+    supervisor_status_parser.add_argument("job_id")
+    supervisor_status_parser.add_argument("--json", action="store_true")
+    supervisor_status_parser.set_defaults(handler=run_supervisor_status)
+
+    supervisor_watch_parser = supervisor_subparsers.add_parser(
+        "watch",
+        help="Watch a Supervisor job until it needs operator action or terminates.",
+    )
+    supervisor_watch_parser.add_argument("job_id")
+    supervisor_watch_parser.add_argument(
+        "--interval",
+        type=parse_watch_interval,
+        default=None,
+        metavar="1..60",
+    )
+    supervisor_watch_parser.add_argument("--json", action="store_true")
+    supervisor_watch_parser.set_defaults(handler=run_supervisor_watch)
+
+    supervisor_cancel_parser = supervisor_subparsers.add_parser(
+        "cancel",
+        help="Cancel a Supervisor job.",
+    )
+    supervisor_cancel_parser.add_argument("job_id")
+    supervisor_cancel_parser.add_argument(
+        "--generation",
+        required=True,
+        type=parse_positive_generation,
+        metavar="N",
+    )
+    supervisor_cancel_parser.add_argument("--json", action="store_true")
+    supervisor_cancel_parser.set_defaults(handler=run_supervisor_cancel)
+
+    supervisor_approve_parser = supervisor_subparsers.add_parser(
+        "approve",
+        help="Approve a Supervisor job checkpoint.",
+    )
+    supervisor_approve_parser.add_argument("job_id")
+    supervisor_approve_parser.add_argument(
+        "--generation",
+        required=True,
+        type=parse_positive_generation,
+        metavar="N",
+    )
+    supervisor_approve_parser.add_argument("--json", action="store_true")
+    supervisor_approve_parser.set_defaults(handler=run_supervisor_approve)
+
+    supervisor_reject_parser = supervisor_subparsers.add_parser(
+        "reject",
+        help="Reject a Supervisor job checkpoint.",
+    )
+    supervisor_reject_parser.add_argument("job_id")
+    supervisor_reject_parser.add_argument(
+        "--generation",
+        required=True,
+        type=parse_positive_generation,
+        metavar="N",
+    )
+    supervisor_reject_parser.add_argument("--json", action="store_true")
+    supervisor_reject_parser.set_defaults(handler=run_supervisor_reject)
+
+    supervisor_agents_parser = supervisor_subparsers.add_parser(
+        "agents",
+        help="List Supervisor agents.",
+    )
+    supervisor_agents_parser.add_argument("--json", action="store_true")
+    supervisor_agents_parser.set_defaults(handler=run_supervisor_agents)
 
     dashboard_parser = subparsers.add_parser(
         "dashboard",

@@ -61,9 +61,47 @@
 - `awf wiki lint [--stale-days N] [--json]`: orphan / stale / missing-provenance / malformed-frontmatter 검출
 - `awf wiki regenerate-index`: `wiki/` 변경 후 `index.md` 재생성
 - `awf wiki compile [--since N] [--topic ...] [--dry-run] [--show-body] [--json] [--no-ready-gate]`: `events/*.jsonl` 을 결정적으로 합성해 `wiki/operations/<topic>.md` 4 페이지(stage1-invalidation/scope-check/dispatch-performance/dual-strategy-promotions) 갱신. LLM 호출 없음, idempotent overwrite, 자동 `regenerate-index`
+- `awf supervisor <submit|status|watch|cancel|approve|reject|agents>`: AWS SigV4로 Supervisor 작업을 제출하고 상태, 승인, 취소와 agent를 관리한다. 배포된 Control Plane이 필요하며 이 저장소에는 아직 Control Plane 구현이 없다
 - `~/.config/awf/config.toml`, `.awf.toml`: 기본 provider/경로 override 읽기
 - `permissions.allowed_tools` / `disabled_tools` / `yolo`: provider 실행 전 최소 권한 검사
 - `tools/` 모듈: `read/write/glob/grep/git diff/log` 기본 계층 추가 (Phase 2 groundwork)
+
+### AWF Supervisor / `awf supervisor`
+
+`awf supervisor`는 배포된 AWF Supervisor Control Plane의 SigV4 API 클라이언트다. 설정은 `~/.config/awf/config.toml` 또는 `.awf.toml`의 `[supervisor]`에서 읽는다.
+
+```toml
+[supervisor]
+api_url = "https://api-id.execute-api.ap-northeast-2.amazonaws.com"
+region = "ap-northeast-2"
+profile = "awf-supervisor"
+poll_interval_seconds = 2
+request_timeout_seconds = 30
+```
+
+`AWF_SUPERVISOR_API_URL`, `AWF_SUPERVISOR_REGION`, `AWS_PROFILE` 환경 변수가 각각 `api_url`, `region`, `profile`을 덮어쓴다. 먼저 AWS SSO 자격 증명을 준비한다.
+
+```bash
+aws sso login --profile awf-supervisor
+```
+
+작업 제출에는 명시적인 `--workflow-id`가 필수이며 로컬 workflow state에서 자동으로 추론하지 않는다. `--repo REPO:BASE`는 하나 이상 필요하고, prompt는 `--prompt` 또는 `--prompt-file`에서 읽는 비어 있지 않은 UTF-8 64 KiB 이하 텍스트다.
+
+```bash
+awf supervisor submit --workflow-id release-2026-07-30 --repo example/service:main --prompt "Run the approved workflow" --target auto --require-capability docker
+awf supervisor status job-123
+awf supervisor watch job-123 --interval 2
+awf supervisor cancel job-123 --generation 7
+awf supervisor approve job-123 --generation 7
+awf supervisor reject job-123 --generation 7
+awf supervisor agents
+```
+
+제출의 필수 capability는 순서대로 `git`, `omp`에서 시작하고, 각 `--require-capability` 값이 그 뒤에 입력 순서대로 추가된다. `submit`은 로컬 소스 파일을 업로드하지 않는다. prompt만 `schema_version`, `workflow_id`, `requested_target`, `repo_refs`, `required_capabilities`, `prompt`의 여섯 필드 submit request로 전송한다. Control Plane이 배포되면 이 prompt는 CLI가 아니라 Control Plane이 SSE-KMS로 암호화된 결정적 S3 key `prompts/{job_id}.txt`에 저장한다.
+
+성공은 exit 0, argparse usage 오류는 2, AWS SSO 인증 또는 권한 문제는 3, stale generation 충돌은 4, 원격 서비스 또는 설정 오류는 5다. `watch`는 상태가 바뀔 때만 출력하고 terminal 또는 operator-action 상태에서 끝나며, `Ctrl-C`는 130으로 종료한다.
+
+`--idempotency-key`는 운영자 재시도 옵션이 아니다. deterministic E2E harness에서만 `AWF_SUPERVISOR_E2E_HARNESS=1`일 때 canonical lowercase UUID4를 지정할 수 있다.
 
 ### Operations wiki / `awf wiki` (English summary)
 
