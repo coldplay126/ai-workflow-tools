@@ -1441,6 +1441,12 @@ class WorktreeService:
         try:
             self.git.delete_remote_branch_if_at(lease.branch, expected_sha)
         except GitRemoteError as error:
+            self._branch_cleanup_warning(
+                lease,
+                "remote_branch_cleanup_failed",
+                f"Could not delete remote branch {lease.branch!r}: {error}",
+                warnings,
+            )
             return error
         except (GitError, OSError) as error:
             self._branch_cleanup_warning(
