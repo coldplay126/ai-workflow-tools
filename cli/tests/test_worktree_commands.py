@@ -238,6 +238,32 @@ def test_wt_acquire_parser_surface() -> None:
     assert args.json is True
 
 
+def test_wt_promote_parser_surface() -> None:
+    args = build_parser().parse_args(
+        [
+            "wt",
+            "promote",
+            "--source-pr",
+            "372",
+            "--to",
+            "main",
+            "--repo-root",
+            "/repo",
+            "--apply",
+            "--json",
+        ]
+    )
+
+    assert args.command == "wt"
+    assert args.wt_command == "promote"
+    assert args.source_pr == 372
+    assert args.to == "main"
+    assert args.repo_root == "/repo"
+    assert args.apply is True
+    assert args.json is True
+    assert args.handler.__name__ == "run_wt_promote"
+
+
 def test_wt_acquire_preview_emits_one_json_document(
     tmp_path: Path, monkeypatch
 ) -> None:

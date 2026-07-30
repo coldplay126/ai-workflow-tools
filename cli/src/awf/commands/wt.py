@@ -8,7 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from awf.core.paths import find_repo_root
-from awf.worktrees.config import ConfigError
+from awf.worktrees.config import ConfigError, load_worktree_config
 from awf.worktrees.git import GitClient, GitError
 from awf.worktrees.models import CommandResult, Purpose
 from awf.worktrees.registry import WorktreeRegistry
@@ -50,9 +50,11 @@ def _run(
 ) -> int:
     try:
         repository_root = find_repo_root(args.repo_root)
+        config = load_worktree_config(repository_root)
         service = WorktreeService(
             WorktreeRegistry(state_db_path()),
             GitClient(repository_root),
+            config=config,
         )
         result = operation(service)
     except (ConfigError, FileNotFoundError) as error:
@@ -111,6 +113,18 @@ def run_wt_acquire(args: argparse.Namespace) -> int:
             base=args.base,
             branch=args.branch,
             owner_id=args.owner_id,
+            apply=args.apply,
+        ),
+    )
+
+
+def run_wt_promote(args: argparse.Namespace) -> int:
+    return _run(
+        args,
+        "wt.promote",
+        lambda service: service.promote(
+            source_pr=args.source_pr,
+            target_branch=args.to,
             apply=args.apply,
         ),
     )

@@ -25,6 +25,7 @@ from awf.commands.wt import (
     run_wt_doctor,
     run_wt_import,
     run_wt_status,
+    run_wt_promote,
 )
 from awf.commands.wf import (
     run_wf_decide,
@@ -670,6 +671,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print a versioned JSON result.",
     )
     wt_acquire_parser.set_defaults(handler=run_wt_acquire)
+
+    wt_promote_parser = wt_subparsers.add_parser(
+        "promote",
+        help="Promote one approved staging pull request delta to production.",
+    )
+    wt_promote_parser.add_argument(
+        "--source-pr",
+        required=True,
+        type=int,
+        help="Merged, approved staging pull request number.",
+    )
+    wt_promote_parser.add_argument(
+        "--to",
+        required=True,
+        help="Production branch (main or master).",
+    )
+    wt_promote_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to current or parent directories.",
+    )
+    wt_promote_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Create, verify, push, and open the promotion pull request.",
+    )
+    wt_promote_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_promote_parser.set_defaults(handler=run_wt_promote)
 
     wt_import_parser = wt_subparsers.add_parser(
         "import",

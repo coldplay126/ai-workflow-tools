@@ -174,6 +174,258 @@ class WorktreeService:
                 return self._block_prepare_failure(lease, prepare_error)
             return CommandResult.ok("wt.acquire", decision="ready", lease=lease)
 
+    def promote(
+        self, *, source_pr: int, target_branch: str, apply: bool
+    ) -> CommandResult:
+        if (
+            not isinstance(source_pr, int)
+            or isinstance(source_pr, bool)
+            or source_pr <= 0
+        ):
+            return self._promotion_blocked(
+                "invalid_source_pr", "source pull request must be a positive integer"
+            )
+        try:
+            target_ref = self._promotion_target_ref(target_branch)
+        except ConfigError as error:
+            return self._promotion_blocked("invalid_target_branch", str(error))
+        try:
+            github = self.github or GhClient(self.git.repository_root())
+            source = github.view_pr(source_pr)
+        except (ExternalServiceError, ValueError) as error:
+            return self._promotion_blocked("source_pr_unavailable", str(error))
+        source_blocker = self._promotion_source_blocker(source, target_ref)
+        if source_blocker is not None:
+            return source_blocker
+        if not self.config.verify_production:
+            return self._promotion_blocked(
+                "production_verify_missing",
+                "verify.production.commands must configure at least one command",
+            )
+
+        if not apply:
+            try:
+                target_sha = self.git.resolve_ref(target_ref)
+            except GitError as error:
+                return self._promotion_blocked("target_ref_unavailable", str(error))
+            lease = self._new_promotion_lease(source, target_ref, target_sha)
+            return CommandResult.ok(
+                "wt.promote",
+                decision="preview",
+                actions=(
+                    {
+                        "kind": "create_worktree",
+                        "path": str(lease.worktree_path),
+                        "branch": lease.branch,
+                        "source_pr": source.number,
+                        "source_base_sha": source.base_sha,
+                        "source_head_sha": source.head_sha,
+                        "target_branch": target_branch,
+                        "target_base_sha": target_sha,
+                    },
+                    *(
+                        {
+                            "kind": "verify_production",
+                            "argv": list(command),
+                        }
+                        for command in self.config.verify_production
+                    ),
+                ),
+            )
+
+        source_merge_commit = source.merge_commit_sha
+        if source_merge_commit is None:
+            return self._promotion_blocked(
+                "source_merge_provenance_missing",
+                "source pull request does not provide a merge commit",
+            )
+
+        repository_id = self.git.repository_id()
+        initiative = self._promotion_initiative(source.number, target_branch)
+        expected_branch = self._promotion_branch(initiative)
+        with repository_lock(self.lock_dir / f"{repository_id}.lock"):
+            active = self.registry.find_active(
+                repository_id, initiative, Purpose.PROMOTE
+            )
+            if active is not None:
+                return self._reuse_promotion(
+                    active,
+                    source_pr=source.number,
+                    target_ref=target_ref,
+                    expected_branch=expected_branch,
+                    github=github,
+                    target_branch=target_branch,
+                )
+            try:
+                source_base_sha = self.git.fetch_ref(source.base_sha)
+                source_head_sha = self.git.fetch_ref(source.head_sha)
+                source_merge_sha = self.git.fetch_ref(source_merge_commit)
+                target_sha = self.git.fetch_ref(target_branch)
+                merge_parents = self.git.commit_parents(source_merge_sha)
+                if not merge_parents:
+                    return self._promotion_blocked(
+                        "source_merge_provenance_invalid",
+                        "source pull request merge commit has no parent",
+                    )
+                merge_base = self.git.merge_base(merge_parents[0], source_head_sha)
+                commits = self.git.ordered_commits(merge_base, source_head_sha)
+                source_paths = self.git.changed_paths(
+                    self.git.repository_root(), merge_base, source_head_sha
+                )
+            except GitError as error:
+                return self._promotion_blocked("source_delta_unavailable", str(error))
+            if (
+                source_base_sha != source.base_sha
+                or source_head_sha != source.head_sha
+                or source_merge_sha != source_merge_commit
+            ):
+                return self._promotion_blocked(
+                    "source_sha_mismatch",
+                    "fetched source pull request refs do not match the reviewed SHAs",
+                )
+            expected_paths = tuple(sorted(source.changed_paths))
+            if not commits:
+                return self._promotion_blocked(
+                    "source_pr_empty_delta",
+                    "source pull request has no commits after its merge base",
+                )
+            if source_paths != expected_paths:
+                return self._promotion_blocked(
+                    "source_delta_mismatch",
+                    "source pull request paths do not match its reviewed Git delta",
+                )
+
+            lease = self._new_promotion_lease(source, target_ref, target_sha)
+            branch_conflict = self._branch_conflict(lease.branch)
+            if branch_conflict is not None:
+                return self._promotion_blocked(
+                    "branch_conflict",
+                    f"branch {lease.branch!r} is already checked out at {branch_conflict}",
+                    lease=lease,
+                )
+            try:
+                self.git.add_worktree(lease.worktree_path, lease.branch, target_sha)
+            except GitError as error:
+                return self._promotion_blocked("worktree_conflict", str(error), lease=lease)
+            try:
+                lease = replace(
+                    lease, head_sha=self.git.head_sha(lease.worktree_path)
+                )
+                lease = self.registry.create_lease(lease)
+            except (GitError, OSError, RuntimeError, ValueError, sqlite3.Error) as error:
+                result = self._handle_creation_failure(lease, error, target_sha)
+                return replace(result, command="wt.promote")
+
+            try:
+                self.git.cherry_pick(lease.worktree_path, commits)
+                promotion_head = self.git.commit(
+                    lease.worktree_path,
+                    self._promotion_message(
+                        source=source,
+                        target_sha=target_sha,
+                        lease=lease,
+                        target_branch=target_branch,
+                    ),
+                    allow_empty=True,
+                )
+                promoted_paths = self.git.changed_paths(
+                    lease.worktree_path, target_sha, promotion_head
+                )
+                if promoted_paths != expected_paths:
+                    return self._block_promotion_lease(
+                        lease,
+                        "promotion_delta_mismatch",
+                        "promotion paths do not exactly match the reviewed pull request",
+                    )
+                if any(
+                    self.git.path_blob(source_head_sha, path)
+                    != self.git.path_blob(promotion_head, path)
+                    for path in expected_paths
+                ):
+                    return self._block_promotion_lease(
+                        lease,
+                        "promotion_content_mismatch",
+                        "promotion contents do not exactly match the reviewed pull request",
+                    )
+                verification_actions = self._verify_promotion(lease.worktree_path)
+            except (GitError, OSError, RuntimeError, subprocess.SubprocessError) as error:
+                return self._block_promotion_lease(
+                    lease, "promotion_apply_failed", str(error)
+                )
+            try:
+                lease = self.registry.transition(
+                    lease.id,
+                    LeaseState.ACTIVE,
+                    expected_version=lease.version,
+                    event_type="promotion_publish_pending",
+                    summary="promotion verified; publication pending",
+                    observed_head_sha=promotion_head,
+                    head_sha=promotion_head,
+                )
+            except (RuntimeError, sqlite3.Error) as error:
+                return self._promotion_blocked(
+                    "registry_conflict", str(error), lease=lease
+                )
+
+
+            try:
+                self.git.push_branch(lease.worktree_path, lease.branch)
+                target_pull_request = github.find_open_pr(
+                    head=lease.branch, base=target_branch
+                )
+                if target_pull_request is None:
+                    target_pull_request = github.create_pr(
+                        base=target_branch,
+                        head=lease.branch,
+                        title=f"Promote PR #{source.number} to {target_branch}",
+                        body=self._promotion_body(
+                            source=source,
+                            target_sha=target_sha,
+                            lease=lease,
+                        ),
+                    )
+            except (ExternalServiceError, GitError, ValueError) as error:
+                return self._promotion_blocked(
+                    "promotion_publish_failed", str(error), lease=lease
+                )
+            if (
+                target_pull_request.state != "OPEN"
+                or target_pull_request.base_ref != target_branch
+                or target_pull_request.head_ref != lease.branch
+            ):
+                return self._block_promotion_lease(
+                    lease,
+                    "target_pr_mismatch",
+                    "GitHub did not return the exact open promotion pull request",
+                )
+            if target_pull_request.head_sha != promotion_head:
+                return self._block_promotion_lease(
+                    lease,
+                    "target_pr_head_mismatch",
+                    "GitHub target pull request head does not match the verified promotion",
+                )
+            try:
+                lease = self.registry.transition(
+                    lease.id,
+                    LeaseState.PR_OPEN,
+                    expected_version=lease.version,
+                    event_type="promotion_pr_open",
+                    summary=f"promotion PR #{target_pull_request.number} opened",
+                    observed_head_sha=promotion_head,
+                    pr_number=target_pull_request.number,
+                    head_sha=promotion_head,
+                )
+            except (RuntimeError, sqlite3.Error) as error:
+                return self._promotion_blocked(
+                    "registry_conflict", str(error), lease=lease
+                )
+            return CommandResult.ok(
+                "wt.promote",
+                decision="ready",
+                lease=lease,
+                actions=verification_actions,
+            )
+
     def status(
         self, *, initiative: str | None = None, refresh: bool = False
     ) -> CommandResult:
@@ -886,6 +1138,328 @@ class WorktreeService:
     ) -> CommandResult:
         return CommandResult.blocked(
             "wt.adopt",
+            blockers=({"code": code, "message": message},),
+            lease=lease,
+        )
+
+    def _promotion_target_ref(self, target_branch: str) -> str:
+        if not isinstance(target_branch, str) or not target_branch:
+            raise ConfigError("target branch must be a non-empty string")
+        target_ref = self._remote_base_ref(target_branch)
+        if target_ref != f"origin/{target_branch}":
+            raise ConfigError("target branch must not include a ref prefix")
+        configured = self.config.production_branch
+        if configured is not None and target_ref != self._remote_base_ref(configured):
+            raise ConfigError(
+                f"target branch must match configured production branch {configured!r}"
+            )
+        if configured is None and target_branch not in {"main", "master"}:
+            raise ConfigError("target branch must be main or master")
+        return target_ref
+
+    def _promotion_source_blocker(
+        self, source: PullRequest, target_ref: str
+    ) -> CommandResult | None:
+        if source.state != "MERGED":
+            return self._promotion_blocked(
+                "source_pr_not_merged",
+                f"source pull request #{source.number} is {source.state}",
+            )
+        if source.review_decision != "APPROVED":
+            return self._promotion_blocked(
+                "source_pr_not_approved",
+                f"source pull request #{source.number} is not approved",
+            )
+        if not source.checks_passed:
+            return self._promotion_blocked(
+                "source_pr_checks_failed",
+                f"source pull request #{source.number} has incomplete or failing checks",
+            )
+        if self.config.default_base is None:
+            return self._promotion_blocked(
+                "source_base_unconfigured",
+                "worktree.default_base must identify the staging branch",
+            )
+        try:
+            source_base_ref = self._remote_base_ref(source.base_ref)
+            configured_base_ref = self._remote_base_ref(self.config.default_base)
+        except ConfigError as error:
+            return self._promotion_blocked("source_pr_base_invalid", str(error))
+        if source_base_ref != configured_base_ref or source_base_ref == target_ref:
+            return self._promotion_blocked(
+                "source_pr_base_mismatch",
+                "source pull request does not target the configured staging branch",
+            )
+        return None
+
+    def _new_promotion_lease(
+        self, source: PullRequest, target_ref: str, target_sha: str
+    ) -> Lease:
+        target_branch = target_ref[len("origin/") :]
+        initiative = self._promotion_initiative(source.number, target_branch)
+        lease = Lease.new(
+            repository_id=self.git.repository_id(),
+            repository_name=self.git.repository_name(),
+            repository_root=self.git.repository_root(),
+            worktree_path=self.cache_dir / self.git.repository_name(),
+            initiative=initiative,
+            purpose=Purpose.PROMOTE,
+            branch=self._promotion_branch(initiative),
+            base_ref=target_ref,
+            head_sha=target_sha,
+            managed=True,
+            owner_kind="awf",
+            source_pr=source.number,
+        )
+        return replace(
+            lease,
+            worktree_path=self.cache_dir / lease.repository_name / lease.id,
+        )
+
+    @staticmethod
+    def _promotion_initiative(source_pr: int, target_branch: str) -> str:
+        return f"pr-{source_pr}-to-{target_branch}"
+
+    @staticmethod
+    def _promotion_branch(initiative: str) -> str:
+        return f"awf/{initiative}/promote"
+
+    def _reuse_promotion(
+        self,
+        lease: Lease,
+        *,
+        source_pr: int,
+        target_ref: str,
+        expected_branch: str,
+        github: GhClient,
+        target_branch: str,
+    ) -> CommandResult:
+        if (
+            lease.source_pr != source_pr
+            or lease.base_ref != target_ref
+            or lease.branch != expected_branch
+        ):
+            return self._promotion_blocked(
+                "promotion_lease_conflict",
+                f"lease {lease.id} does not match the requested promotion",
+                lease=lease,
+            )
+        if lease.state is LeaseState.PR_OPEN and lease.target_pr is not None:
+            return CommandResult.ok("wt.promote", decision="reuse", lease=lease)
+        if lease.state is LeaseState.BLOCKED:
+            return self._promotion_blocked(
+                "promotion_incomplete",
+                f"lease {lease.id} is blocked without an open target pull request",
+                lease=lease,
+            )
+        if lease.state is not LeaseState.ACTIVE:
+            return self._promotion_blocked(
+                "promotion_incomplete",
+                f"lease {lease.id} is {lease.state.value} without an open target pull request",
+                lease=lease,
+            )
+        try:
+            events = self.registry.list_events(lease.id)
+        except sqlite3.Error as error:
+            return self._promotion_blocked(
+                "promotion_reconciliation_failed", str(error), lease=lease
+            )
+        if not events or events[-1].event_type != "promotion_publish_pending":
+            return self._promotion_blocked(
+                "promotion_incomplete",
+                f"lease {lease.id} was not verified for publication",
+                lease=lease,
+            )
+        return self._resume_promotion_publish(
+            lease, github=github, source_pr=source_pr, target_branch=target_branch
+        )
+
+    def _resume_promotion_publish(
+        self,
+        lease: Lease,
+        *,
+        github: GhClient,
+        source_pr: int,
+        target_branch: str,
+    ) -> CommandResult:
+        try:
+            if self._registered_worktree(lease) is None:
+                return self._block_promotion_lease(
+                    lease,
+                    "orphaned_lease",
+                    f"lease {lease.id} is not registered as a Git worktree",
+                )
+            if self.git.status_porcelain(lease.worktree_path):
+                return self._block_promotion_lease(
+                    lease,
+                    "dirty_lease",
+                    f"lease {lease.id} has uncommitted changes",
+                )
+            head_sha = self.git.head_sha(lease.worktree_path)
+            if head_sha != lease.head_sha:
+                return self._block_promotion_lease(
+                    lease,
+                    "promotion_head_mismatch",
+                    "promotion worktree changed after verification",
+                )
+            target_pull_request = github.find_open_pr(
+                head=lease.branch, base=target_branch
+            )
+            if target_pull_request is None:
+                self.git.push_branch(lease.worktree_path, lease.branch)
+                target_pull_request = github.find_open_pr(
+                    head=lease.branch, base=target_branch
+                )
+            if target_pull_request is None:
+                target_pull_request = github.create_pr(
+                    base=target_branch,
+                    head=lease.branch,
+                    title=f"Promote PR #{source_pr} to {target_branch}",
+                    body=self.git.commit_message(lease.worktree_path),
+                )
+            if (
+                target_pull_request.state != "OPEN"
+                or target_pull_request.base_ref != target_branch
+                or target_pull_request.head_ref != lease.branch
+            ):
+                return self._block_promotion_lease(
+                    lease,
+                    "target_pr_mismatch",
+                    "GitHub did not return the exact open promotion pull request",
+                )
+            if target_pull_request.head_sha != head_sha:
+                return self._block_promotion_lease(
+                    lease,
+                    "target_pr_head_mismatch",
+                    "GitHub target pull request head does not match the verified promotion",
+                )
+            lease = self.registry.transition(
+                lease.id,
+                LeaseState.PR_OPEN,
+                expected_version=lease.version,
+                event_type="promotion_pr_reconciled",
+                summary=f"promotion PR #{target_pull_request.number} reconciled",
+                observed_head_sha=head_sha,
+                pr_number=target_pull_request.number,
+                head_sha=head_sha,
+            )
+        except (
+            ExternalServiceError,
+            GitError,
+            OSError,
+            RuntimeError,
+            sqlite3.Error,
+        ) as error:
+            return self._promotion_blocked(
+                "promotion_publish_failed", str(error), lease=lease
+            )
+        return CommandResult.ok("wt.promote", decision="ready", lease=lease)
+    @staticmethod
+    def _promotion_trailers(
+        *, source: PullRequest, target_sha: str, lease: Lease
+    ) -> tuple[str, ...]:
+        return (
+            f"AWF-Source-PR: {source.number}",
+            f"AWF-Source-Base: {source.base_sha}",
+            f"AWF-Source-Head: {source.head_sha}",
+            f"AWF-Target-Base: {target_sha}",
+            f"AWF-Lease-ID: {lease.id}",
+        )
+
+    def _promotion_message(
+        self,
+        *,
+        source: PullRequest,
+        target_sha: str,
+        lease: Lease,
+        target_branch: str,
+    ) -> str:
+        return "\n".join(
+            (
+                f"Promote PR #{source.number} to {target_branch}",
+                "",
+                *self._promotion_trailers(
+                    source=source, target_sha=target_sha, lease=lease
+                ),
+            )
+        )
+
+    def _promotion_body(
+        self, *, source: PullRequest, target_sha: str, lease: Lease
+    ) -> str:
+        return "\n".join(
+            self._promotion_trailers(
+                source=source, target_sha=target_sha, lease=lease
+            )
+        )
+
+    def _verify_promotion(self, worktree_path: Path) -> tuple[dict[str, object], ...]:
+        actions: list[dict[str, object]] = []
+        for command in self.config.verify_production:
+            completed = self.command_runner(
+                list(command),
+                cwd=worktree_path,
+                check=False,
+                shell=False,
+                capture_output=True,
+                text=True,
+            )
+            stderr = self._bounded_promotion_stderr(completed.stderr)
+            actions.append(
+                {
+                    "kind": "verify_production",
+                    "argv": list(command),
+                    "exit_code": completed.returncode,
+                    "stderr": stderr,
+                }
+            )
+            if completed.returncode != 0:
+                detail = f": {stderr}" if stderr else ""
+                raise RuntimeError(
+                    f"production verification failed with exit {completed.returncode}{detail}"
+                )
+        return tuple(actions)
+
+    @staticmethod
+    def _bounded_promotion_stderr(value: str | bytes | None) -> str:
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        if not value:
+            return ""
+        return value.strip().encode("utf-8")[:512].decode(
+            "utf-8", errors="ignore"
+        )
+
+    def _block_promotion_lease(
+        self, lease: Lease, code: str, message: str
+    ) -> CommandResult:
+        try:
+            current = self.registry.get_lease(lease.id)
+            if current is not None and current.state is not LeaseState.BLOCKED:
+                try:
+                    head_sha = self.git.head_sha(current.worktree_path)
+                except GitError:
+                    head_sha = current.head_sha
+                lease = self.registry.transition(
+                    current.id,
+                    LeaseState.BLOCKED,
+                    expected_version=current.version,
+                    event_type="promotion_blocked",
+                    summary=f"{code}: {message}",
+                    head_sha=head_sha,
+                )
+            elif current is not None:
+                lease = current
+        except (OSError, RuntimeError, sqlite3.Error):
+            pass
+        return self._promotion_blocked(code, message, lease=lease)
+
+    @staticmethod
+    def _promotion_blocked(
+        code: str, message: str, *, lease: Lease | None = None
+    ) -> CommandResult:
+        return CommandResult.blocked(
+            "wt.promote",
             blockers=({"code": code, "message": message},),
             lease=lease,
         )

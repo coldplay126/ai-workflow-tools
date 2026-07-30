@@ -64,6 +64,41 @@ class GhClient:
         completed = self._run("pr", "view", str(number), "--json", _GH_VIEW_FIELDS)
         return _pull_request_from_json(completed.stdout)
 
+    def find_open_pr(self, *, head: str, base: str) -> PullRequest | None:
+        if not isinstance(head, str) or not head or not isinstance(base, str) or not base:
+            raise ValueError("pull request head and base must be non-empty strings")
+        completed = self._run(
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--base",
+            base,
+            "--head",
+            head,
+            "--json",
+            _GH_VIEW_FIELDS,
+        )
+        try:
+            payload = json.loads(completed.stdout)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ExternalServiceError("gh pr list returned malformed JSON") from error
+        if not isinstance(payload, list):
+            raise ExternalServiceError("gh pr list returned an invalid pull request list")
+        matches = tuple(
+            pull_request
+            for item in payload
+            if isinstance(item, dict)
+            and (pull_request := _pull_request_from_json(json.dumps(item))).state == "OPEN"
+            and pull_request.head_ref == head
+            and pull_request.base_ref == base
+        )
+        if len(matches) > 1:
+            raise ExternalServiceError(
+                "gh pr list returned multiple open pull requests for the branch"
+            )
+        return matches[0] if matches else None
+
     def create_pr(
         self, *, base: str, head: str, title: str, body: str
     ) -> PullRequest:

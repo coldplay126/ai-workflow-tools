@@ -194,7 +194,7 @@ def test_git_client_cas_delete_preserves_a_branch_after_a_race(
     assert git(repo, "rev-parse", "awf/cas-race") == changed_head
 
 
-def test_git_client_applies_binary_diff_and_commits_from_a_worktree(tmp_path: Path) -> None:
+def test_git_client_applies_binary_patch_and_commits_from_a_worktree(tmp_path: Path) -> None:
     repo = make_repository(tmp_path)
     client = GitClient(repo)
     source = tmp_path / "source"
@@ -216,6 +216,53 @@ def test_git_client_applies_binary_diff_and_commits_from_a_worktree(tmp_path: Pa
     assert client.changed_paths(target, base) == ("feature with spaces.txt",)
     assert target_head == git(target, "rev-parse", "HEAD")
 
+
+
+def test_git_client_cherry_picks_exact_ordered_source_commits(tmp_path: Path) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    base = client.head_sha()
+    client.add_worktree(source, "awf/source", base)
+    client.add_worktree(target, "awf/target", base)
+    (source / "first.txt").write_text("first\n", encoding="utf-8")
+    git(source, "add", "first.txt")
+    git(source, "commit", "-q", "-m", "first")
+    first = client.head_sha(source)
+    (source / "second.txt").write_text("second\n", encoding="utf-8")
+    git(source, "add", "second.txt")
+    git(source, "commit", "-q", "-m", "second")
+    source_head = client.head_sha(source)
+
+    commits = client.ordered_commits(base, source_head)
+    client.cherry_pick(target, commits)
+
+    assert commits == (first, source_head)
+    assert client.changed_paths(target, base) == ("first.txt", "second.txt")
+    assert client.path_blob(source_head, "second.txt") == client.path_blob(
+        client.head_sha(target), "second.txt"
+    )
+
+
+def test_git_client_reads_commit_parents(tmp_path: Path) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    base = client.head_sha()
+    (repo / "feature.txt").write_text("feature\n", encoding="utf-8")
+    git(repo, "add", "feature.txt")
+    git(repo, "commit", "-q", "-m", "feature")
+
+    assert client.commit_parents(client.head_sha()) == (base,)
+
+
+def test_git_client_reads_full_commit_message(tmp_path: Path) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    message = "Promote PR #372 to main\n\nAWF-Source-PR: 372"
+    client.commit(repo, message, allow_empty=True)
+
+    assert client.commit_message(repo) == message
 
 def test_git_client_pushes_branch_from_the_given_worktree(tmp_path: Path) -> None:
     repo = make_repository(tmp_path)

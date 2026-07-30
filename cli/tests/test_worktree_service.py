@@ -4,7 +4,7 @@ import json
 import subprocess
 import sqlite3
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pytest
@@ -24,7 +24,11 @@ class FakeGitHub:
     prs: dict[int, PullRequest] = field(default_factory=dict)
     error: ExternalServiceError | None = None
     view_calls: list[int] = field(default_factory=list)
-    create_calls: list[tuple[str, str, str, str]] = field(default_factory=list)
+    create_calls: list[dict[str, str]] = field(default_factory=list)
+    find_calls: list[tuple[str, str]] = field(default_factory=list)
+    open_prs: dict[tuple[str, str], PullRequest] = field(default_factory=dict)
+    repository_root: Path | None = None
+    created_head_sha: str | None = None
 
     def view_pr(self, number: int) -> PullRequest:
         self.view_calls.append(number)
@@ -32,12 +36,40 @@ class FakeGitHub:
             raise self.error
         return self.prs[number]
 
+    def find_open_pr(self, *, head: str, base: str) -> PullRequest | None:
+        self.find_calls.append((head, base))
+        return self.open_prs.get((head, base))
+
     def create_pr(
         self, *, base: str, head: str, title: str, body: str
     ) -> PullRequest:
-        self.create_calls.append((base, head, title, body))
-        return self.view_pr(next(iter(self.prs)))
-
+        self.create_calls.append(
+            {"base": base, "head": head, "title": title, "body": body}
+        )
+        pull_request = PullRequest(
+            number=900,
+            state="OPEN",
+            base_ref=base,
+            base_sha="target-base",
+            head_ref=head,
+            head_sha=(
+                self.created_head_sha
+                if self.created_head_sha is not None
+                else (
+                    GitClient(self.repository_root).resolve_ref(head)
+                    if self.repository_root is not None
+                    else "target-head"
+                )
+            ),
+            merge_commit_sha=None,
+            review_decision="",
+            checks_passed=True,
+            changed_paths=(),
+            url="https://github.example/acme/repo/pull/900",
+        )
+        self.prs[pull_request.number] = pull_request
+        self.open_prs[(head, base)] = pull_request
+        return pull_request
 
 def pull_request(
     *,
@@ -163,6 +195,108 @@ class Harness:
         external = self.make_external_worktree(branch)
         result = self.service.import_root(self.repo.parent, apply=True)
         return next(lease for lease in result.leases if lease.worktree_path == external)
+
+@dataclass
+class PromotionHarness:
+    repo: Path
+    git: GitClient
+    registry: WorktreeRegistry
+    cache_dir: Path
+    state_dir: Path
+    lock_dir: Path
+    github: FakeGitHub
+    config: WorktreeConfig
+    service: WorktreeService
+    source_base_sha: str
+    source_head_sha: str
+
+    @classmethod
+    def create(cls, tmp_path: Path) -> PromotionHarness:
+        repo = make_repository(tmp_path)
+        git = GitClient(repo)
+        git_command(repo, "branch", "main", "staging")
+        git_command(repo, "push", "-q", "origin", "main")
+        (repo / "team.txt").write_text("team\n", encoding="utf-8")
+        git_command(repo, "add", "team.txt")
+        git_command(repo, "commit", "-q", "-m", "staging team change")
+        git_command(repo, "checkout", "-q", "-b", "feature/pr-372")
+        (repo / "feature.txt").write_text("feature\n", encoding="utf-8")
+        git_command(repo, "add", "feature.txt")
+        git_command(repo, "commit", "-q", "-m", "source feature")
+        source_head_sha = git_command(repo, "rev-parse", "HEAD")
+        git_command(repo, "push", "-q", "-u", "origin", "feature/pr-372")
+        git_command(repo, "checkout", "-q", "staging")
+        git_command(repo, "merge", "--no-ff", "-q", "feature/pr-372", "-m", "merge source")
+        source_base_sha = git_command(repo, "rev-parse", "HEAD")
+        git_command(repo, "push", "-q", "origin", "staging")
+        registry = WorktreeRegistry(tmp_path / "state" / "worktrees.sqlite3")
+        cache_dir = tmp_path / "cache"
+        state_dir = tmp_path / "state"
+        lock_dir = tmp_path / "locks"
+        github = FakeGitHub(
+            repository_root=repo,
+            prs={
+                372: PullRequest(
+                    number=372,
+                    state="MERGED",
+                    base_ref="staging",
+                    base_sha=source_base_sha,
+                    head_ref="feature/pr-372",
+                    head_sha=source_head_sha,
+                    merge_commit_sha=source_base_sha,
+                    review_decision="APPROVED",
+                    checks_passed=True,
+                    changed_paths=("feature.txt",),
+                    url="https://github.example/acme/repo/pull/372",
+                )
+            }
+        )
+        config = WorktreeConfig(
+            default_base="staging",
+            production_branch="main",
+            verify_production=((sys.executable, "-c", "pass"),),
+        )
+        return cls(
+            repo=repo,
+            git=git,
+            registry=registry,
+            cache_dir=cache_dir,
+            state_dir=state_dir,
+            lock_dir=lock_dir,
+            github=github,
+            config=config,
+            service=WorktreeService(
+                registry,
+                git,
+                config=config,
+                github=github,
+                cache_dir=cache_dir,
+                state_dir=state_dir,
+                lock_dir=lock_dir,
+            ),
+            source_base_sha=source_base_sha,
+            source_head_sha=source_head_sha,
+        )
+
+    def configure(self, **values: object) -> None:
+        self.config = replace(self.config, **values)
+        self.service = WorktreeService(
+            self.registry,
+            self.git,
+            config=self.config,
+            github=self.github,
+            cache_dir=self.cache_dir,
+            state_dir=self.state_dir,
+            lock_dir=self.lock_dir,
+        )
+
+    def make_target_conflict(self) -> None:
+        git_command(self.repo, "checkout", "-q", "main")
+        (self.repo / "feature.txt").write_text("target\n", encoding="utf-8")
+        git_command(self.repo, "add", "feature.txt")
+        git_command(self.repo, "commit", "-q", "-m", "target feature")
+        git_command(self.repo, "push", "-q", "origin", "main")
+        git_command(self.repo, "checkout", "-q", "staging")
 def test_github_client_marks_checks_passed_only_for_completed_successes(
     harness: Harness,
 ) -> None:
@@ -226,6 +360,59 @@ def test_github_client_marks_checks_passed_only_for_completed_successes(
     ]
     assert pr.checks_passed is True
     assert pr.changed_paths == ("README.txt",)
+
+
+def test_github_client_finds_exact_open_pr_by_head_and_base(
+    harness: Harness,
+) -> None:
+    from awf.worktrees.github import GhClient
+
+    calls: list[list[str]] = []
+
+    def runner(
+        command: list[str], **_: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            json.dumps(
+                [
+                    {
+                        "number": 42,
+                        "state": "OPEN",
+                        "baseRefName": "main",
+                        "baseRefOid": "base-sha",
+                        "headRefName": "awf/pr-372-to-main/promote",
+                        "headRefOid": "head-sha",
+                        "mergeCommit": None,
+                        "reviewDecision": "",
+                        "statusCheckRollup": [],
+                        "files": [],
+                        "url": "https://github.example/acme/repo/pull/42",
+                    }
+                ]
+            ),
+            "",
+        )
+
+    pull_request = GhClient(harness.repo, command_runner=runner).find_open_pr(
+        head="awf/pr-372-to-main/promote", base="main"
+    )
+
+    assert pull_request is not None
+    assert pull_request.number == 42
+    assert calls[0][:9] == [
+        "gh",
+        "pr",
+        "list",
+        "--state",
+        "open",
+        "--base",
+        "main",
+        "--head",
+        "awf/pr-372-to-main/promote",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1706,3 +1893,288 @@ def test_import_apply_converts_insertion_identity_race_to_skipped_action(
     assert not any(
         action["kind"] == "import_worktree" for action in result.actions
     )
+
+
+@pytest.fixture
+def promotion_harness(tmp_path: Path) -> PromotionHarness:
+    return PromotionHarness.create(tmp_path)
+
+
+def test_promote_applies_only_source_pr_delta(
+    promotion_harness: PromotionHarness,
+) -> None:
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert result.decision == "ready"
+    assert result.lease is not None
+    worktree = result.lease.worktree_path
+    assert (worktree / "feature.txt").read_text(encoding="utf-8") == "feature\n"
+    assert not (worktree / "team.txt").exists()
+    assert promotion_harness.git.changed_paths(worktree, result.lease.base_ref) == (
+        "feature.txt",
+    )
+    assert promotion_harness.github.create_calls[0]["base"] == "main"
+    assert "AWF-Source-PR: 372" in promotion_harness.github.create_calls[0]["body"]
+    assert result.lease.state is LeaseState.PR_OPEN
+    assert result.lease.target_pr == 900
+
+
+def test_promote_requires_merged_source_pr(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.github.prs[372] = replace(
+        promotion_harness.github.prs[372], state="OPEN"
+    )
+
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "source_pr_not_merged"
+    assert not promotion_harness.registry.db_path.exists()
+
+
+def test_promote_requires_production_verify_commands(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.configure(verify_production=())
+
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "production_verify_missing"
+    assert promotion_harness.github.create_calls == []
+
+
+def test_promote_preserves_conflicted_worktree(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.make_target_conflict()
+
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.lease is not None
+    assert result.lease.state is LeaseState.BLOCKED
+    assert result.lease.worktree_path.exists()
+    assert promotion_harness.github.create_calls == []
+
+
+def test_promote_preview_avoids_mutation(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unexpected_fetch(_: str) -> str:
+        raise AssertionError("promotion preview must not fetch")
+
+    monkeypatch.setattr(promotion_harness.git, "fetch_ref", unexpected_fetch)
+
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=False,
+    )
+
+    assert result.decision == "preview"
+    assert result.actions[0]["source_head_sha"] == promotion_harness.source_head_sha
+    assert result.actions[0]["target_branch"] == "main"
+    assert len(promotion_harness.git.list_worktrees()) == 1
+    assert not promotion_harness.registry.db_path.exists()
+    assert not promotion_harness.cache_dir.exists()
+    assert promotion_harness.github.create_calls == []
+
+
+@pytest.mark.parametrize(
+    ("source_change", "blocker"),
+    (
+        ({"review_decision": "CHANGES_REQUESTED"}, "source_pr_not_approved"),
+        ({"checks_passed": False}, "source_pr_checks_failed"),
+        ({"base_ref": "main"}, "source_pr_base_mismatch"),
+    ),
+)
+def test_promote_requires_reviewed_checked_staging_source(
+    promotion_harness: PromotionHarness,
+    source_change: dict[str, object],
+    blocker: str,
+) -> None:
+    promotion_harness.github.prs[372] = replace(
+        promotion_harness.github.prs[372], **source_change
+    )
+
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == blocker
+    assert not promotion_harness.registry.db_path.exists()
+
+
+def test_promote_verifies_before_pushing_or_creating_a_pr(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.configure(
+        verify_production=(
+            (
+                sys.executable,
+                "-c",
+                "import sys; sys.stderr.write('verification failed'); sys.exit(7)",
+            ),
+        )
+    )
+
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.lease is not None
+    assert result.lease.state is LeaseState.BLOCKED
+    assert promotion_harness.github.create_calls == []
+    assert (
+        git_command(
+            promotion_harness.repo,
+            "ls-remote",
+            "--heads",
+            "origin",
+            "awf/pr-372-to-main/promote",
+        )
+        == ""
+    )
+
+
+def test_promote_reconciles_existing_pr_after_registry_transition_failure(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_transition = promotion_harness.registry.transition
+
+    def fail_pr_open_transition(*args: object, **kwargs: object) -> Lease:
+        if kwargs.get("event_type") == "promotion_pr_open":
+            raise RuntimeError("registry temporarily unavailable")
+        return original_transition(*args, **kwargs)
+
+    monkeypatch.setattr(
+        promotion_harness.registry, "transition", fail_pr_open_transition
+    )
+    first = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+    monkeypatch.setattr(promotion_harness.registry, "transition", original_transition)
+
+    second = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert first.status == "blocked"
+    assert second.decision == "ready"
+    assert second.lease is not None
+    assert second.lease.state is LeaseState.PR_OPEN
+    assert second.lease.target_pr == 900
+    assert len(promotion_harness.github.create_calls) == 1
+
+
+def test_promote_rejects_target_pr_with_a_different_head(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.github.created_head_sha = "unreviewed-remote-head"
+
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "target_pr_head_mismatch"
+    assert result.lease is not None
+    assert result.lease.state is LeaseState.BLOCKED
+
+
+def test_promote_never_reconciles_a_conflicted_blocked_lease(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.make_target_conflict()
+    first = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+    assert first.lease is not None
+    promotion_harness.github.open_prs[(first.lease.branch, "main")] = PullRequest(
+        number=901,
+        state="OPEN",
+        base_ref="main",
+        base_sha="target-base",
+        head_ref=first.lease.branch,
+        head_sha=promotion_harness.git.head_sha(first.lease.worktree_path),
+        merge_commit_sha=None,
+        review_decision="",
+        checks_passed=True,
+        changed_paths=(),
+        url="https://github.example/acme/repo/pull/901",
+    )
+
+    second = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert second.status == "blocked"
+    assert second.lease is not None
+    assert second.lease.state is LeaseState.BLOCKED
+    assert second.lease.target_pr is None
+    assert promotion_harness.github.find_calls == []
+
+
+def test_promote_retries_publish_after_a_transient_push_failure(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_push = promotion_harness.git.push_branch
+
+    def fail_push(*_: object) -> None:
+        raise GitError("transient remote failure")
+
+    monkeypatch.setattr(promotion_harness.git, "push_branch", fail_push)
+    first = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+    monkeypatch.setattr(promotion_harness.git, "push_branch", original_push)
+
+    second = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert first.status == "blocked"
+    assert first.lease is not None
+    assert first.lease.state is LeaseState.ACTIVE
+    assert second.decision == "ready"
+    assert second.lease is not None
+    assert second.lease.state is LeaseState.PR_OPEN
+    assert len(promotion_harness.github.create_calls) == 1

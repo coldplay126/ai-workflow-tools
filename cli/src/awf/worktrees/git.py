@@ -100,6 +100,46 @@ class GitClient:
     def merge_base(self, left: str, right: str) -> str:
         return self._text(self._run("merge-base", left, right).stdout)
 
+    def commit_parents(self, ref: str) -> tuple[str, ...]:
+        completed = self._run("show", "--no-patch", "--format=%P", ref)
+        return tuple(
+            parent
+            for parent in completed.stdout.decode("ascii", errors="strict").split()
+            if parent
+        )
+
+    def commit_message(self, cwd: Path, ref: str = "HEAD") -> str:
+        completed = self._run(
+            "show", "--no-patch", "--format=%B", ref, cwd=cwd
+        )
+        return completed.stdout.decode("utf-8", errors="replace").rstrip("\n")
+
+    def ordered_commits(self, base: str, head: str) -> tuple[str, ...]:
+        completed = self._run(
+            "rev-list", "--reverse", "--topo-order", f"{base}..{head}"
+        )
+        return tuple(
+            line
+            for line in completed.stdout.decode("ascii", errors="strict").splitlines()
+            if line
+        )
+
+    def cherry_pick(self, cwd: Path, commits: tuple[str, ...]) -> None:
+        if not commits:
+            raise ValueError("at least one commit is required to cherry-pick")
+        self._run("cherry-pick", *commits, cwd=cwd)
+
+    def path_blob(self, ref: str, path: str) -> str | None:
+        completed = self._run("ls-tree", "-z", ref, "--", path)
+        if not completed.stdout:
+            return None
+        record = completed.stdout.split(b"\0", 1)[0]
+        metadata, separator, _ = record.partition(b"\t")
+        fields = metadata.split()
+        if not separator or len(fields) != 3:
+            raise GitError("git ls-tree returned an invalid path record")
+        return fields[2].decode("ascii", errors="strict")
+
     def binary_diff(self, base: str, head: str) -> bytes:
         return self._run(
             "diff", "--binary", "--full-index", "--find-renames", f"{base}..{head}"
@@ -114,8 +154,12 @@ class GitClient:
         completed = self._run("diff", "--name-only", "-z", f"{base}..{head}", cwd=cwd)
         return _nul_records(completed.stdout)
 
-    def commit(self, cwd: Path, message: str) -> str:
-        self._run("commit", "-m", message, cwd=cwd)
+    def commit(self, cwd: Path, message: str, *, allow_empty: bool = False) -> str:
+        arguments = ["commit"]
+        if allow_empty:
+            arguments.append("--allow-empty")
+        arguments.extend(("-m", message))
+        self._run(*arguments, cwd=cwd)
         return self.head_sha(cwd)
 
     def push_branch(self, cwd: Path, branch: str) -> None:
