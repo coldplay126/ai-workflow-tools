@@ -531,6 +531,7 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
     assert "--apply" in commands["gc_apply"]
 
     safety = contract["safety"]
+    assert safety["preflight"] == "required_non_destructive_status_refresh"
     assert safety["lease_reuse"] == "exact"
     assert safety["promotion_scope"] == "source_pr_delta_only"
     assert safety["deployment_health"] == "repository_rollout_evidence"
@@ -540,6 +541,11 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "promote",
         "finish",
         "gc",
+    ]
+    assert safety["stop_conditions"] == [
+        "deployment_health_unknown",
+        "closed_unmerged",
+        "dirty_worktree",
     ]
     assert set(safety["forbidden_fallbacks"]) == {
         "direct_worktree_mutation",
@@ -552,8 +558,19 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
     }
     assert contract["decisions"] == {
         "reuse": "use_exact_lease",
-        "preview": "review_then_apply_explicitly",
-        "ready": "run_requested_managed_apply",
+        "preview": {
+            "acquire": "review_then_apply_explicitly",
+            "promote": "review_then_apply_explicitly",
+            "finish": "review_blockers_then_apply",
+            "gc": "review_blockers_then_apply",
+        },
+        "ready": {
+            "status": "inspect_select_lifecycle_action",
+            "acquire_apply": "use_or_report_returned_lease",
+            "promote_apply": "use_or_report_returned_lease",
+            "finish_preview": "review_blockers_then_apply",
+            "gc_preview": "review_blockers_then_apply",
+        },
         "removed": "report_completion",
         "blocked": "preserve_worktree_report_code_message",
     }
@@ -568,9 +585,11 @@ def test_release_worktree_lifecycle_shell_examples_match_contract() -> None:
         if json.loads(match.group(1)).get("schema")
         == "awf.release-worktree-lifecycle/v1"
     )
+    commands = contract["commands"]
     displayed_commands = _shell_fenced_awf_commands(text)
 
-    assert set(displayed_commands) == set(contract["commands"].values())
+    assert displayed_commands[0] == commands["status"]
+    assert set(displayed_commands) == set(commands.values())
 
     parser = build_parser()
     for command in displayed_commands:

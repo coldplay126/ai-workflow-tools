@@ -9,7 +9,7 @@ type: deployment-safety
 
 ## Overview
 
-The `awf wt` CLI is authoritative; this skill defines the operator procedure only. Use the managed lifecycle rather than direct Git worktree operations. Every mutation MUST be previewed first, and every JSON result MUST determine the next step.
+The `awf wt` CLI is authoritative; this skill defines the operator procedure only. Use the managed lifecycle rather than direct Git worktree operations. The required status preflight is non-destructive; preview-first applies to lifecycle operations before their `--apply` mutations. Every JSON result MUST determine the next step.
 
 ## Required preflight
 
@@ -18,6 +18,8 @@ Before acquiring, promoting, finishing, or collecting a worktree, MUST run:
 ```sh
 awf wt status --repo-root <repo-root> --refresh --json
 ```
+
+`status --refresh` is a required non-destructive state-refresh preflight. A `ready` status means inspect the refreshed leases and select the appropriate lifecycle action; it MUST NOT itself trigger `--apply`.
 
 If status indicates a registry or Git mismatch, MUST inspect it without repair:
 
@@ -41,6 +43,8 @@ On `reuse`, MUST use the exact returned lease and MUST NOT create another worktr
 awf wt acquire --initiative <initiative> --purpose feature --repo-root <repo-root> --apply --json
 ```
 
+If `acquire --apply` returns `ready`, MUST use or report the returned lease and MUST NOT repeat `--apply`.
+
 ## Production promotion
 
 A production promotion MUST contain the source PR delta only, never the entire staging branch. Preview the isolated promotion first:
@@ -55,6 +59,8 @@ Confirm the source PR and target branch in the JSON result, then explicitly crea
 awf wt promote --source-pr <number> --to <branch> --repo-root <repo-root> --apply --json
 ```
 
+If `promote --apply` returns `ready`, MUST use or report the returned lease and MUST NOT repeat `--apply`.
+
 ## Deployment verification
 
 After the production PR merges, MUST use the repository's existing CI and rollout path to prove the deployed revision is healthy. MUST NOT infer health from a merged PR, a passing local command, elapsed time, or an unavailable provider. Unknown or failed deployment health is `blocked`; preserve the release worktree and report the evidence gap.
@@ -67,7 +73,7 @@ Only after deployment health is proven, preview the managed PR cleanup:
 awf wt finish --repo-root <repo-root> --pr <number> --json
 ```
 
-Apply only when the result is `ready` and no blocker is returned:
+A `ready` finish preview means review returned blockers, then explicitly apply only when none remain. A finish `--apply` result of `removed` ends cleanup and MUST be reported:
 
 ```sh
 awf wt finish --repo-root <repo-root> --pr <number> --apply --json
@@ -83,7 +89,7 @@ Bulk cleanup MUST begin with a preview:
 awf wt gc --repo-root <repo-root> --merged --older-than 7d --dry-run --json
 ```
 
-Review every candidate and apply only the proven-safe set:
+A `ready` GC preview means review every candidate and blocker, then apply only the proven-safe set. A GC `--apply` result of `removed` MUST be reported:
 
 ```sh
 awf wt gc --repo-root <repo-root> --merged --older-than 7d --apply --json
@@ -92,6 +98,8 @@ awf wt gc --repo-root <repo-root> --merged --older-than 7d --apply --json
 ## Blocker response
 
 For `blocked`, MUST report the result code, message, command, and deployment/PR evidence available. MUST preserve the worktree and branch. Resolve the reported condition through the managed lifecycle, then restart at preflight.
+
+For `removed`, MUST report completion and take no further cleanup action for that lease.
 
 ## Forbidden fallbacks
 
@@ -115,11 +123,17 @@ MUST NOT use direct worktree creation, removal, pruning, or other unmanaged dele
     "gc_apply": "awf wt gc --repo-root <repo-root> --merged --older-than 7d --apply --json"
   },
   "safety": {
+    "preflight": "required_non_destructive_status_refresh",
     "lease_reuse": "exact",
     "promotion_scope": "source_pr_delta_only",
     "deployment_health": "repository_rollout_evidence",
     "blocked_action": "preserve_worktree_report_code_message",
     "preview_before_apply": ["acquire", "promote", "finish", "gc"],
+    "stop_conditions": [
+      "deployment_health_unknown",
+      "closed_unmerged",
+      "dirty_worktree"
+    ],
     "forbidden_fallbacks": [
       "direct_worktree_mutation",
       "staging_wholesale_merge",
@@ -132,8 +146,19 @@ MUST NOT use direct worktree creation, removal, pruning, or other unmanaged dele
   },
   "decisions": {
     "reuse": "use_exact_lease",
-    "preview": "review_then_apply_explicitly",
-    "ready": "run_requested_managed_apply",
+    "preview": {
+      "acquire": "review_then_apply_explicitly",
+      "promote": "review_then_apply_explicitly",
+      "finish": "review_blockers_then_apply",
+      "gc": "review_blockers_then_apply"
+    },
+    "ready": {
+      "status": "inspect_select_lifecycle_action",
+      "acquire_apply": "use_or_report_returned_lease",
+      "promote_apply": "use_or_report_returned_lease",
+      "finish_preview": "review_blockers_then_apply",
+      "gc_preview": "review_blockers_then_apply"
+    },
     "removed": "report_completion",
     "blocked": "preserve_worktree_report_code_message"
   }
