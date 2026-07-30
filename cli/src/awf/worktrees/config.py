@@ -31,6 +31,8 @@ def _argv(value: object, field: str) -> tuple[str, ...]:
         isinstance(item, str) and item for item in value
     ):
         raise ConfigError(f"{field} must be a non-empty argv array")
+    if any("\0" in item for item in value):
+        raise ConfigError(f"{field} must not contain an embedded NUL")
     return tuple(value)
 
 
@@ -40,9 +42,14 @@ def load_worktree_config(repository_root: Path) -> WorktreeConfig:
         return WorktreeConfig()
 
     try:
-        with path.open("rb") as config_file:
-            loaded = tomllib.load(config_file)
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ConfigError(f"could not load {path}: {exc}") from exc
+    if b"\0" in raw:
+        raise ConfigError(f"{path} must not contain an embedded NUL")
+    try:
+        loaded = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"could not load {path}: {exc}") from exc
 
     if not isinstance(loaded, dict):  # pragma: no cover - TOML documents are tables
@@ -98,6 +105,8 @@ def _optional_string(value: object, field: str) -> str | None:
         return None
     if not isinstance(value, str) or not value:
         raise ConfigError(f"{field} must be a non-empty string")
+    if "\0" in value:
+        raise ConfigError(f"{field} must not contain an embedded NUL")
     return value
 
 
@@ -106,6 +115,8 @@ def _string_list(value: object, field: str) -> tuple[str, ...]:
         return ()
     if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
         raise ConfigError(f"{field} must be an array of non-empty strings")
+    if any("\0" in item for item in value):
+        raise ConfigError(f"{field} must not contain an embedded NUL")
     return tuple(value)
 
 

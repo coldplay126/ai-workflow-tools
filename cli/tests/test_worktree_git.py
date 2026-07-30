@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+import os
 import subprocess
+import signal
+import sys
+import time
 from pathlib import Path
 
 import pytest
 
 from awf.worktrees.config import ConfigError, WorktreeConfig, load_worktree_config
-from awf.worktrees.git import GitClient, GitError
+from awf.worktrees.git import (
+    GitClient,
+    GitError,
+    _bounded_stderr,
+    _nul_records,
+    _parse_worktrees,
+)
+from awf.worktrees import locking as locking_module
 from awf.worktrees.locking import repository_lock
 
 
@@ -17,9 +28,9 @@ def git(cwd: Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
-def repository(tmp_path: Path) -> Path:
+def repository(tmp_path: Path, *, name: str = "repo") -> Path:
     bare = tmp_path / "origin.git"
-    repo = tmp_path / "repo"
+    repo = tmp_path / name
     git(tmp_path, "init", "--bare", "-q", str(bare))
     git(tmp_path, "init", "-q", "-b", "staging", str(repo))
     git(repo, "config", "user.email", "test@example.com")
@@ -191,3 +202,229 @@ def test_repository_lock_blocks_a_second_nonblocking_holder(tmp_path: Path) -> N
         with pytest.raises(BlockingIOError):
             with repository_lock(lock_path, blocking=False):
                 raise AssertionError("unreachable")
+
+
+def test_git_client_preserves_repository_root_trailing_whitespace(
+    tmp_path: Path,
+) -> None:
+    repo = repository(tmp_path, name="repo ")
+
+    assert GitClient(repo).repository_root() == repo.resolve()
+
+
+def test_repository_identity_ignores_remote_url_userinfo(tmp_path: Path) -> None:
+    repo = repository(tmp_path)
+    client = GitClient(repo)
+    git(
+        repo,
+        "remote",
+        "set-url",
+        "origin",
+        "https://alice:secret-one@example.com/owner/repository.git",
+    )
+    first = client.repository_id()
+    git(
+        repo,
+        "remote",
+        "set-url",
+        "origin",
+        "https://bob:secret-two@example.com/owner/repository.git",
+    )
+
+    assert client.repository_id() == first
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        "[worktree]\ndefault_base = \"staging\\u0000next\"\n",
+        "[worktree]\nproduction_branch = \"main\\u0000next\"\n",
+        "[prepare]\ninputs = [\"package\\u0000lock.json\"]\n",
+        "[prepare]\ncommand = [\"npm\\u0000ci\"]\n",
+        "[verify.production]\ncommands = [[\"npm\", \"test\\u0000all\"]]\n",
+        "[deployment]\nstatus_command = [\"argocd\\u0000app\"]\n",
+    ],
+)
+def test_config_rejects_embedded_nul_in_all_string_fields(
+    tmp_path: Path, contents: str
+) -> None:
+    config_dir = tmp_path / ".awf"
+    config_dir.mkdir()
+    (config_dir / "worktree.toml").write_text(contents, encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="embedded NUL"):
+        load_worktree_config(tmp_path)
+
+
+def test_config_rejects_raw_toml_nul(tmp_path: Path) -> None:
+    config_dir = tmp_path / ".awf"
+    config_dir.mkdir()
+    (config_dir / "worktree.toml").write_bytes(
+        b"[worktree]\ndefault_base = \"staging\x00next\"\n"
+    )
+
+    with pytest.raises(ConfigError, match="embedded NUL"):
+        load_worktree_config(tmp_path)
+
+
+def test_git_client_maps_embedded_nul_subprocess_argument_to_git_error(
+    tmp_path: Path,
+) -> None:
+    client = GitClient(repository(tmp_path))
+
+    with pytest.raises(GitError, match="failed to launch"):
+        client.resolve_ref("HEAD\x00invalid")
+
+
+@pytest.mark.parametrize("message", ["한" * 200, "😀" * 200])
+def test_git_error_stderr_is_bounded_on_a_utf8_boundary(message: str) -> None:
+    bounded = _bounded_stderr(message.encode("utf-8"))
+
+    assert len(bounded.encode("utf-8")) <= 512
+    assert "\ufffd" not in bounded
+
+
+def test_nul_porcelain_round_trips_invalid_path_bytes() -> None:
+    name = b"invalid-\xff.txt"
+
+    assert os.fsencode(_nul_records(b"?? " + name + b"\0")[0]) == b"?? " + name
+    assert os.fsencode(_nul_records(name + b"\0")[0]) == name
+
+
+def test_worktree_porcelain_distinguishes_reasonless_lock_fields(tmp_path: Path) -> None:
+    plain = tmp_path / "plain"
+    reasonless = tmp_path / "reasonless"
+    reasoned = tmp_path / "reasoned"
+    output = (
+        f"worktree {plain}\0HEAD {'a' * 40}\0branch refs/heads/main\0\0"
+        f"worktree {reasonless}\0HEAD {'b' * 40}\0locked\0prunable\0\0"
+        f"worktree {reasoned}\0HEAD {'c' * 40}\0locked maintenance\0"
+        "prunable stale metadata\0\0"
+    ).encode("utf-8")
+
+    worktrees = _parse_worktrees(output)
+
+    assert worktrees[0].locked is None
+    assert worktrees[0].prunable is None
+    assert worktrees[1].locked == ""
+    assert worktrees[1].prunable == ""
+    assert worktrees[2].locked == "maintenance"
+    assert worktrees[2].prunable == "stale metadata"
+
+
+def _install_fake_git(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    script = bin_dir / "git"
+    script.write_text(f"#!{sys.executable}\n{body}", encoding="utf-8")
+    script.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+
+def test_git_error_redacts_url_userinfo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_fake_git(
+        monkeypatch,
+        tmp_path,
+        "import sys\n"
+        "sys.stderr.write('fatal: https://alice:secret@example.com/owner/repo')\n"
+        "raise SystemExit(1)\n",
+    )
+
+    with pytest.raises(GitError) as error:
+        GitClient(tmp_path).resolve_ref("HEAD")
+
+    assert "secret" not in str(error.value)
+    assert "alice" not in str(error.value)
+    assert "example.com" in str(error.value)
+
+
+def test_git_client_terminates_timeout_descendants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent_pid_file = tmp_path / "parent.pid"
+    child_pid_file = tmp_path / "child.pid"
+    child_term_file = tmp_path / "child.term"
+    monkeypatch.setenv("AWF_PARENT_PID_FILE", str(parent_pid_file))
+    monkeypatch.setenv("AWF_CHILD_PID_FILE", str(child_pid_file))
+    monkeypatch.setenv("AWF_CHILD_TERM_FILE", str(child_term_file))
+    _install_fake_git(
+        monkeypatch,
+        tmp_path,
+        "import os\n"
+        "import pathlib\n"
+        "import signal\n"
+        "import subprocess\n"
+        "import sys\n"
+        "import time\n"
+        "child = subprocess.Popen([sys.executable, '-c', "
+        "'import os, pathlib, signal, time; "
+        "pathlib.Path(os.environ[\\\"AWF_CHILD_PID_FILE\\\"]).write_text(str(os.getpid())); "
+        "signal.signal(signal.SIGTERM, lambda *_: pathlib.Path("
+        "os.environ[\\\"AWF_CHILD_TERM_FILE\\\"]).write_text(\\\"terminated\\\")); "
+        "time.sleep(60)'])\n"
+        "pathlib.Path(os.environ['AWF_PARENT_PID_FILE']).write_text(str(os.getpid()))\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "while True:\n"
+        "    time.sleep(1)\n",
+    )
+
+    with pytest.raises(GitError, match="timed out"):
+        GitClient(tmp_path, timeout=0.5).resolve_ref("HEAD")
+
+    child_pid = int(child_pid_file.read_text(encoding="utf-8"))
+    try:
+        assert child_term_file.read_text(encoding="utf-8") == "terminated"
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("timed-out Git descendant remained alive")
+    finally:
+        try:
+            os.kill(child_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def test_repository_lock_closes_descriptor_when_unlock_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock_path = tmp_path / "locks" / "repo.lock"
+    actual_flock = locking_module.fcntl.flock
+    actual_close = locking_module.os.close
+    closed: list[int] = []
+    unlock_descriptors: list[int] = []
+
+    def failing_unlock(descriptor: int, operation: int) -> None:
+        if operation == locking_module.fcntl.LOCK_UN:
+            unlock_descriptors.append(descriptor)
+            raise OSError("unlock failed")
+        actual_flock(descriptor, operation)
+
+    def tracking_close(descriptor: int) -> None:
+        closed.append(descriptor)
+        actual_close(descriptor)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(locking_module.fcntl, "flock", failing_unlock)
+        patch.setattr(locking_module.os, "close", tracking_close)
+        with pytest.raises(OSError, match="unlock failed"):
+            with repository_lock(lock_path):
+                pass
+
+    try:
+        assert closed == unlock_descriptors
+    finally:
+        if unlock_descriptors and not closed:
+            actual_close(unlock_descriptors[0])
+
+    with repository_lock(lock_path, blocking=False):
+        pass

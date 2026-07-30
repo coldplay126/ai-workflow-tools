@@ -19,5 +19,7 @@ def repository_lock(path: Path, *, blocking: bool = True) -> Iterator[None]:
         os.write(descriptor, f"{os.getpid()}\n".encode())
         yield
     finally:
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
-        os.close(descriptor)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)

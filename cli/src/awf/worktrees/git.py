@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import signal
 import re
 import subprocess
 from dataclasses import dataclass
@@ -37,7 +39,8 @@ class GitClient:
         self.timeout = timeout
 
     def repository_root(self) -> Path:
-        return Path(self._text(self._run("rev-parse", "--show-toplevel").stdout)).resolve()
+        output = self._run("rev-parse", "--show-toplevel").stdout
+        return Path(_path_from_line(output)).resolve()
 
     def repository_name(self) -> str:
         return self.repository_root().name
@@ -121,33 +124,48 @@ class GitClient:
     ) -> GitCompleted:
         command = args[0] if args else "git"
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 ["git", *args],
                 cwd=str((cwd or self.cwd).resolve()),
-                input=input_bytes,
-                capture_output=True,
-                text=False,
-                check=False,
-                timeout=self.timeout,
+                stdin=subprocess.PIPE if input_bytes is not None else None,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+            stdout, stderr = process.communicate(
+                input=input_bytes, timeout=self.timeout
             )
         except subprocess.TimeoutExpired as exc:
-            detail = _bounded_stderr(exc.stderr)
+            stdout, stderr = _stop_process_group(process)
+            detail = _bounded_stderr(stderr or exc.stderr)
             suffix = f": {detail}" if detail else ""
             raise GitError(
                 f"git {command} timed out after {self.timeout:g} seconds{suffix}"
             ) from exc
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             raise GitError(f"git {command} failed to launch: {exc}") from exc
-        if completed.returncode != 0:
-            detail = _bounded_stderr(completed.stderr)
+        if process.returncode != 0:
+            detail = _bounded_stderr(stderr)
             if "not a git repository" in detail.lower():
                 detail = f"not a Git repository: {detail}"
-            raise GitError(f"git {command} failed ({completed.returncode}): {detail}")
-        return GitCompleted(completed.returncode, completed.stdout, completed.stderr)
+            raise GitError(f"git {command} failed ({process.returncode}): {detail}")
+        return GitCompleted(process.returncode, stdout, stderr)
 
     @staticmethod
     def _text(value: bytes) -> str:
         return value.decode("utf-8", errors="replace").strip()
+
+
+_URL_USERINFO = re.compile(
+    r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<userinfo>[^/@\s]*@)"
+)
+_PROCESS_TERMINATION_GRACE_SECONDS = 0.2
+
+
+def _path_from_line(value: bytes) -> str:
+    if value.endswith(b"\n"):
+        value = value[:-1]
+    return os.fsdecode(value)
 
 
 def _normalize_remote_url(url: str) -> str:
@@ -157,21 +175,42 @@ def _normalize_remote_url(url: str) -> str:
     if re.match(r"^[^/@:\s]+@[^/:\s]+:.+$", normalized):
         user_and_host, path = normalized.split(":", 1)
         normalized = f"ssh://{user_and_host}/{path}"
-    return normalized
+    return _URL_USERINFO.sub(r"\g<scheme>", normalized)
 
 
 def _bounded_stderr(value: bytes | None) -> str:
     if not value:
         return ""
-    return value.decode("utf-8", errors="replace")[:512].strip()
+    redacted = _redact_url_userinfo(value.decode("utf-8", errors="replace"))
+    return _truncate_utf8(redacted.strip(), 512)
+
+
+def _redact_url_userinfo(value: str) -> str:
+    return _URL_USERINFO.sub(r"\g<scheme><redacted>@", value)
+
+
+def _truncate_utf8(value: str, maximum_bytes: int) -> str:
+    return value.encode("utf-8")[:maximum_bytes].decode("utf-8", errors="ignore")
+
+
+def _stop_process_group(process: subprocess.Popen[bytes]) -> tuple[bytes, bytes]:
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=_PROCESS_TERMINATION_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    return process.communicate()
 
 
 def _nul_records(value: bytes) -> tuple[str, ...]:
-    return tuple(
-        record.decode("utf-8", errors="replace")
-        for record in value.split(b"\0")
-        if record
-    )
+    return tuple(os.fsdecode(record) for record in value.split(b"\0") if record)
 
 
 def _parse_worktrees(value: bytes) -> tuple[GitWorktree, ...]:
@@ -188,9 +227,14 @@ def _parse_worktrees(value: bytes) -> tuple[GitWorktree, ...]:
         if field == "worktree" and fields:
             worktrees.append(_worktree_from_fields(fields))
             fields = {}
-        fields[field] = (
-            raw_value.decode("utf-8", errors="replace") if separator else True
-        )
+        if separator:
+            fields[field] = (
+                os.fsdecode(raw_value)
+                if field == "worktree"
+                else raw_value.decode("utf-8", errors="replace")
+            )
+        else:
+            fields[field] = "" if field in {"locked", "prunable"} else True
     if fields:
         worktrees.append(_worktree_from_fields(fields))
     return tuple(worktrees)
