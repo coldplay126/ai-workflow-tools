@@ -360,10 +360,12 @@ def test_imported_worktree_pr_cleanup_lifecycle_smoke(smoke: SmokeHarness) -> No
     assert all(
         worktree.path != legacy_path for worktree in smoke.git.list_worktrees()
     )
-    assert git_command(smoke.repo, "branch", "--list", legacy_branch) == ""
+    assert legacy_branch in git_command(
+        smoke.repo, "branch", "--list", legacy_branch
+    )
     assert (
         git_command(smoke.repo.parent / "origin.git", "branch", "--list", legacy_branch)
-        == ""
+        == legacy_branch
     )
     assert unrelated_path.exists()
     assert any(

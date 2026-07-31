@@ -1444,7 +1444,11 @@ class WorktreeService:
         actions: list[dict[str, object]],
         warnings: list[dict[str, str]],
     ) -> GitRemoteError | None:
-        if not self._is_cleanup_managed(lease) or not lease.branch.startswith("awf/"):
+        if (
+            not lease.managed
+            or lease.owner_kind != "awf"
+            or not lease.branch.startswith("awf/")
+        ):
             return None
         try:
             self.git.delete_branch_if_at(lease.branch, expected_sha)
