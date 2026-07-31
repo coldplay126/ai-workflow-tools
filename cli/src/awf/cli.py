@@ -55,6 +55,18 @@ from awf.core.router import route_natural_language
 KNOWN_COMMANDS = {"agents", "chat", "analyze", "wf", "config", "skills", "mcp", "doctor", "ready", "scan", "init", "cmux", "wiki", "dashboard", "wt"}
 
 
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "value must be a positive integer"
+        ) from error
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be a positive integer")
+    return parsed
+
+
 def _should_skip_execution_confirmation(args: argparse.Namespace) -> bool:
     if getattr(args, "non_interactive", False):
         return True
@@ -802,6 +814,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--lease",
         required=True,
         help="Existing imported lease id.",
+    )
+    wt_adopt_parser.add_argument(
+        "--pr",
+        type=_positive_int,
+        help="Already-merged pull request to link while adopting the lease.",
     )
     wt_adopt_parser.add_argument(
         "--apply",
