@@ -20,6 +20,30 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 MATRIX_PATH = REPO_ROOT / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json"
 SKILLS_ROOT = REPO_ROOT / "claude" / "skills"
 AGENT_CARD_ROOT = SKILLS_ROOT / "wf-orchestrator" / "templates"
+EXPECTED_AGENT_CARD_STEMS = {
+    "plan",
+    "review",
+    "approve",
+    "impl",
+    "verify",
+    "test",
+    "done",
+}
+EXPECTED_SUCCESSOR_BY_PHASE = {
+    "plan": "review",
+    "review": "approve",
+    "approve": "impl",
+    "impl": "verify",
+    "verify": "test",
+    "test": "done",
+    "done": None,
+}
+EXPECTED_NULLABLE_AGENT_CARD_PATHS = {
+    "approve.gate.on_fail.rejected.next_phase",
+    "done.gate.id",
+    "done.gate.on_pass.next_phase",
+    "verify.input.optional_context.1.path",
+}
 FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---", re.DOTALL)
 YAML_NON_STRING_SCALAR_RE = re.compile(
     r"""(?ix)
@@ -330,25 +354,72 @@ def test_every_skill_frontmatter_identity_and_conditions_are_semantic() -> None:
             )
 
 
-def test_every_phase_agent_card_matches_declared_schema() -> None:
+def _load_agent_cards() -> dict[str, object]:
+    return {
+        path.stem: json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted((AGENT_CARD_ROOT / "agent-cards").glob("*.json"))
+    }
+
+
+def _agent_card_schema_errors(cards: dict[str, object]) -> list[str]:
     schema = json.loads((AGENT_CARD_ROOT / "agent-card.schema.json").read_text())
     validator = Draft202012Validator(schema)
     invalid: list[str] = []
-    for path in sorted((AGENT_CARD_ROOT / "agent-cards").glob("*.json")):
-        card = json.loads(path.read_text())
+    for name, card in sorted(cards.items()):
         for error in validator.iter_errors(card):
             location = ".".join(str(part) for part in error.path)
-            invalid.append(f"{path.name}:{location}: {error.message}")
+            invalid.append(f"{name}.json:{location}: {error.message}")
+    return invalid
 
-    assert invalid == []
+
+def _assert_agent_cards_match_declared_schema(cards: dict[str, object]) -> None:
+    assert _agent_card_schema_errors(cards) == []
 
 
-def test_nullable_agent_card_fields_have_only_documented_semantics() -> None:
-    cards = {
-        path.stem: json.loads(path.read_text())
-        for path in (AGENT_CARD_ROOT / "agent-cards").glob("*.json")
-    }
+def _null_paths(value: object, path: tuple[str, ...] = ()) -> set[str]:
+    if value is None:
+        return {".".join(path)}
+    if isinstance(value, dict):
+        return {
+            null_path
+            for key, nested_value in value.items()
+            for null_path in _null_paths(nested_value, (*path, str(key)))
+        }
+    if isinstance(value, list):
+        return {
+            null_path
+            for index, nested_value in enumerate(value)
+            for null_path in _null_paths(nested_value, (*path, str(index)))
+        }
+    return set()
 
+
+def _assert_agent_card_state_machine(cards: dict[str, object]) -> None:
+    assert set(cards) == EXPECTED_AGENT_CARD_STEMS
+    assert {
+        phase: cards[phase]["gate"]["on_pass"]["next_phase"]
+        for phase in EXPECTED_AGENT_CARD_STEMS
+    } == EXPECTED_SUCCESSOR_BY_PHASE
+    assert {
+        f"{phase}.{null_path}"
+        for phase, card in cards.items()
+        for null_path in _null_paths(card)
+    } == EXPECTED_NULLABLE_AGENT_CARD_PATHS
+    for card in cards.values():
+        for failure_route in card["gate"]["on_fail"].values():
+            next_phase = failure_route.get("next_phase")
+            if next_phase is not None:
+                assert next_phase in EXPECTED_AGENT_CARD_STEMS
+
+
+def test_every_phase_agent_card_matches_declared_schema() -> None:
+    _assert_agent_cards_match_declared_schema(_load_agent_cards())
+
+
+def test_agent_card_state_machine_matches_documented_semantics() -> None:
+    cards = _load_agent_cards()
+
+    _assert_agent_card_state_machine(cards)
     assert cards["done"]["gate"] == {
         "id": None,
         "pass_conditions": ["user confirms"],
@@ -358,3 +429,25 @@ def test_nullable_agent_card_fields_have_only_documented_semantics() -> None:
     assert cards["approve"]["gate"]["on_fail"]["rejected"]["next_phase"] is None
     assert cards["verify"]["input"]["optional_context"][1]["key"] == "git_diff"
     assert cards["verify"]["input"]["optional_context"][1]["path"] is None
+
+
+def test_agent_card_contract_rejects_invalid_mutations() -> None:
+    cards = _load_agent_cards()
+    del cards["done"]
+    with pytest.raises(AssertionError):
+        _assert_agent_card_state_machine(cards)
+
+    cards = _load_agent_cards()
+    cards["plan"]["gate"]["on_pass"]["next_phase"] = None
+    with pytest.raises(AssertionError):
+        _assert_agent_card_state_machine(cards)
+
+    cards = _load_agent_cards()
+    cards["plan"]["gate"]["on_fail"]["missing_artifact"]["next_phase"] = "plna"
+    with pytest.raises(AssertionError):
+        _assert_agent_card_state_machine(cards)
+
+    cards = _load_agent_cards()
+    del cards["plan"]["gate"]["on_pass"]["next_phase"]
+    with pytest.raises(AssertionError):
+        _assert_agent_cards_match_declared_schema(cards)
