@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,9 +29,11 @@ from awf.core.skill_pressure import (  # noqa: E402
     compare_pair,
     evaluate_response,
     load_skill_matrix,
+    _sensitive_labels,
     sha256_skill,
     sha256_text,
     write_pressure_report,
+    pressure_report_path,
 )
 from awf.providers.base import ProviderResult  # noqa: E402
 
@@ -39,9 +43,11 @@ class PairRun:
     evaluation: PairEvaluation
     baseline_result: ProviderResult
     with_skill_result: ProviderResult
+    skill_sha256: str
 
 
 ProcessRunner = Callable[..., ProviderResult]
+SAFE_BATCH_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 RESPONSE_SHAPE = {
     "selected_skill": "skill-name",
     "decision": "PROCEED|STOP|REPORT|ASK_USER|DELEGATE",
@@ -129,15 +135,18 @@ def probe_omp(
     return version
 
 
+def _blocked_evaluation(failure: str) -> Evaluation:
+    return Evaluation(
+        verdict=Verdict.BLOCKED,
+        failures=(failure,),
+        criteria=(CriterionResult("provider_exit", Verdict.BLOCKED, failure),),
+        parsed=None,
+    )
+
+
 def _evaluation(case: SkillCase, result: ProviderResult) -> Evaluation:
     if result.returncode != 0:
-        failure = f"provider_exit:{result.returncode}"
-        return Evaluation(
-            verdict=Verdict.BLOCKED,
-            failures=(failure,),
-            criteria=(CriterionResult("provider_exit", Verdict.BLOCKED, failure),),
-            parsed=None,
-        )
+        return _blocked_evaluation(f"provider_exit:{result.returncode}")
     return evaluate_response(case.scenario, result.stdout.strip())
 
 
@@ -156,6 +165,45 @@ def _evaluation_payload(evaluation: Evaluation) -> dict[str, object]:
     }
 
 
+def validate_skill_source(repo_root: Path, case: SkillCase) -> Path:
+    if Path(case.name).parts != (case.name,) or case.name in {".", ".."}:
+        raise ValueError(f"invalid Skill name: {case.name!r}")
+
+    canonical_repo_root = repo_root.resolve()
+    claude_root = canonical_repo_root / "claude"
+    skill_root = claude_root / "skills"
+    if claude_root.is_symlink() or skill_root.is_symlink():
+        raise ValueError("Skill root symlink is not allowed")
+    if not skill_root.is_dir():
+        raise ValueError("Skill root is not a directory")
+
+    canonical_skill_root = skill_root.resolve(strict=True)
+    candidate = skill_root / case.name
+    if candidate.is_symlink():
+        raise ValueError("Skill source symlink is not allowed")
+    try:
+        source = candidate.resolve(strict=True)
+    except FileNotFoundError:
+        raise ValueError("Skill source is not a directory") from None
+    if not source.is_relative_to(canonical_skill_root):
+        raise ValueError("Skill source escapes the Skill root")
+    if not source.is_dir():
+        raise ValueError("Skill source is not a directory")
+
+    skill_definition = source / "SKILL.md"
+    if skill_definition.is_symlink() or not skill_definition.is_file():
+        raise ValueError("Skill source must contain a regular SKILL.md")
+    if any(path.is_symlink() for path in source.rglob("*")):
+        raise ValueError("Skill source symlink is not allowed")
+    return source
+
+
+def _snapshot_skill(source: Path, skill_root: Path, case: SkillCase) -> Path:
+    snapshot = skill_root / case.name
+    shutil.copytree(source, snapshot)
+    return snapshot
+
+
 def execute_pair(
     case: SkillCase,
     *,
@@ -165,13 +213,15 @@ def execute_pair(
     timeout_sec: int,
     run_process: ProcessRunner = _run_process,
 ) -> PairRun:
+    repo_root = repo_root.resolve()
+    source = validate_skill_source(repo_root, case)
     prompt = build_prompt(case.scenario)
     with tempfile.TemporaryDirectory(prefix="awf-skill-pressure-") as tmp:
         omp_dir = Path(tmp) / "omp-agent"
         skill_root = omp_dir / "skills"
         skill_root.mkdir(parents=True)
-        source = repo_root / "claude" / "skills" / case.name
-        (skill_root / case.name).symlink_to(source.resolve(), target_is_directory=True)
+        snapshot = _snapshot_skill(source, skill_root, case)
+        snapshot_sha256 = sha256_skill(snapshot)
         env = {**os.environ, "PI_CODING_AGENT_DIR": str(omp_dir)}
         common = [
             omp_command,
@@ -185,30 +235,58 @@ def execute_pair(
         baseline_result = run_process(
             [*common, "--no-skills", prompt], cwd=repo_root, env=env, timeout=timeout_sec
         )
-        with_skill_result = run_process(
-            [*common, f"--skills={case.name}", prompt],
-            cwd=repo_root,
-            env=env,
-            timeout=timeout_sec,
-        )
+        baseline = _evaluation(case, baseline_result)
+        if sha256_skill(snapshot) != snapshot_sha256:
+            with_skill_result = ProviderResult(
+                returncode=125,
+                stdout="",
+                stderr="skill_snapshot_changed",
+                provider_name="omp",
+            )
+            with_skill = _blocked_evaluation("skill_snapshot_changed")
+        else:
+            with_skill_result = run_process(
+                [*common, f"--skills={case.name}", prompt],
+                cwd=repo_root,
+                env=env,
+                timeout=timeout_sec,
+            )
+            with_skill = _evaluation(case, with_skill_result)
+            if sha256_skill(snapshot) != snapshot_sha256:
+                with_skill = _blocked_evaluation("skill_snapshot_changed")
     return PairRun(
-        evaluation=compare_pair(
-            _evaluation(case, baseline_result),
-            _evaluation(case, with_skill_result),
-        ),
+        evaluation=compare_pair(baseline, with_skill),
         baseline_result=baseline_result,
         with_skill_result=with_skill_result,
+        skill_sha256=snapshot_sha256,
     )
+
+
+def _validate_batch_id(batch_id: str) -> None:
+    labels = _sensitive_labels(batch_id)
+    if labels:
+        raise ValueError(f"sensitive batch-id: {','.join(labels)}")
+    if SAFE_BATCH_ID_RE.fullmatch(batch_id) is None:
+        raise ValueError("invalid batch-id")
+
+
+def _new_report_run_id() -> str:
+    return f"run-{uuid.uuid4().hex}"
 
 
 def select_cases(
     matrix: object, selected: list[str] | None, *, select_all: bool
 ) -> list[SkillCase]:
+    if select_all and selected:
+        raise ValueError("select either --all or --skill")
     skills = matrix.skills
     names = sorted(skills) if select_all else list(selected or [])
-    unknown = [name for name in names if name not in skills]
     if not names:
         raise ValueError("select at least one Skill")
+    duplicate_names = sorted({name for name in names if names.count(name) > 1})
+    if duplicate_names:
+        raise ValueError(f"duplicate Skills: {','.join(duplicate_names)}")
+    unknown = [name for name in names if name not in skills]
     if unknown:
         raise ValueError(f"unknown Skills: {','.join(unknown)}")
     return [skills[name] for name in names]
@@ -233,8 +311,9 @@ def main(argv: list[str] | None = None) -> int:
         "--matrix",
         default=str(REPO_ROOT / "cli/tests/fixtures/skill-validation-matrix.v1.json"),
     )
-    parser.add_argument("--skill", action="append", dest="skills")
-    parser.add_argument("--all", action="store_true")
+    selection = parser.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--skill", action="append", dest="skills")
+    selection.add_argument("--all", action="store_true")
     parser.add_argument("--omp-command", default="omp")
     parser.add_argument("--batch-id", required=True)
     parser.add_argument("--model", required=True)
@@ -245,13 +324,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.timeout_sec <= 0:
         parser.error("--timeout-sec must be positive")
 
-    matrix = load_skill_matrix(args.matrix)
+    repo_root = Path(args.repo_root).resolve()
     try:
-        selected_cases = select_cases(matrix, args.skills, select_all=args.all)
+        _validate_batch_id(args.batch_id)
     except ValueError as exc:
         parser.error(str(exc))
 
-    repo_root = Path(args.repo_root).resolve()
+    matrix = load_skill_matrix(args.matrix)
+    try:
+        selected_cases = select_cases(matrix, args.skills, select_all=args.all)
+        for case in selected_cases:
+            validate_skill_source(repo_root, case)
+    except ValueError as exc:
+        parser.error(str(exc))
+
     preflight = probe_omp(args.omp_command, repo_root=repo_root)
     if preflight.returncode != 0:
         blocked = {
@@ -305,7 +391,7 @@ def main(argv: list[str] | None = None) -> int:
                 Verdict.BLOCKED: "blocked",
             }[pair.verdict],
             "prompt_sha256": sha256_text(prompt),
-            "skill_sha256": sha256_skill(repo_root / "claude" / "skills" / name),
+            "skill_sha256": run.skill_sha256,
             "verdict": pair.verdict.value,
             "baseline": _evaluation_payload(pair.baseline),
             "with_skill": _evaluation_payload(pair.with_skill),
@@ -322,7 +408,7 @@ def main(argv: list[str] | None = None) -> int:
         if pair.verdict in {Verdict.FAIL, Verdict.BLOCKED}:
             exit_code = 1
         if args.write_result:
-            run_id = f"{args.batch_id}-{case.scenario.id}-{repetition}-{uuid.uuid4().hex[:8]}"
+            run_id = _new_report_run_id()
             try:
                 write_pressure_report(
                     repo_root,
@@ -332,6 +418,7 @@ def main(argv: list[str] | None = None) -> int:
                     with_skill=run.with_skill_result.stdout,
                 )
             except SensitiveDataError:
+                report_written = pressure_report_path(repo_root, run_id).is_file()
                 record = {
                     **record,
                     "remediation_state": "blocked_sensitive_data",
@@ -346,13 +433,39 @@ def main(argv: list[str] | None = None) -> int:
                         "evidence": "redacted_sensitive_data",
                     },
                     "persistence": {
-                        "status": "BLOCKED",
+                        "status": "REDACTED" if report_written else "REJECTED",
                         "run_id": run_id,
-                        "diagnostic": "sensitive_data_redacted",
+                        "report_written": report_written,
+                        "diagnostic": (
+                            "sensitive_data_redacted"
+                            if report_written
+                            else "report_rejected"
+                        ),
                     },
                 }
                 records[-1] = record
                 exit_code = 1
+            except ValueError:
+                record = {
+                    **record,
+                    "remediation_state": "blocked_persistence",
+                    "behavioral_delta": "blocked",
+                    "verdict": Verdict.BLOCKED.value,
+                    "persistence": {
+                        "status": "REJECTED",
+                        "run_id": run_id,
+                        "report_written": False,
+                        "diagnostic": "run_id_rejected",
+                    },
+                }
+                records[-1] = record
+                exit_code = 1
+            else:
+                record["persistence"] = {
+                    "status": "COMPLETE",
+                    "run_id": run_id,
+                    "report_written": True,
+                }
 
     output = {"schema": "awf_skill_pressure_run_v1", "results": records}
     if args.json:

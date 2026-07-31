@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import hashlib
 from pathlib import Path
+import shutil
+from dataclasses import replace
 
 import pytest
 
@@ -19,6 +21,7 @@ from awf.core.skill_pressure import (
     write_pressure_report,
 )
 from awf.providers.base import ProviderResult
+import run_skill_pressure
 from run_skill_pressure import (
     build_prompt,
     execute_pair,
@@ -516,3 +519,346 @@ def test_probe_omp_rejects_unsupported_skill_selection_flags() -> None:
 
     assert result.returncode == 78
     assert "unsupported_omp_flags" in result.stderr
+
+
+def _successful_wf_status_result() -> ProviderResult:
+    return ProviderResult(
+        0,
+        json.dumps(
+            {
+                "selected_skill": "wf-status",
+                "decision": "REPORT",
+                "reason_codes": ["workflow_not_initialized"],
+                "sections": [],
+                "commands": [],
+            }
+        ),
+        "",
+        provider_name="omp",
+    )
+
+
+def _copied_wf_status_repo(tmp_path: Path) -> tuple[Path, Path]:
+    repo_root = tmp_path / "repo"
+    source = repo_root / "claude" / "skills" / "wf-status"
+    shutil.copytree(REPO_ROOT / "claude" / "skills" / "wf-status", source)
+    return repo_root, source
+
+
+def test_execute_pair_uses_private_materialized_skill_snapshot() -> None:
+    calls: list[tuple[list[str], dict[str, str]]] = []
+    source = REPO_ROOT / "claude" / "skills" / "wf-status"
+    source_hash = sha256_skill(source)
+
+    def fake_run(
+        argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int
+    ) -> ProviderResult:
+        calls.append((argv, env))
+        snapshot = Path(env["PI_CODING_AGENT_DIR"]) / "skills" / "wf-status"
+        assert snapshot.is_dir()
+        assert not snapshot.is_symlink()
+        assert snapshot != source
+        assert sha256_skill(snapshot) == source_hash
+        assert [path.name for path in snapshot.parent.iterdir()] == ["wf-status"]
+        return _successful_wf_status_result()
+
+    run = execute_pair(
+        MATRIX.skills["wf-status"],
+        repo_root=REPO_ROOT,
+        omp_command="omp",
+        model="test-model",
+        timeout_sec=30,
+        run_process=fake_run,
+    )
+
+    assert len(calls) == 2
+    assert calls[0][1]["PI_CODING_AGENT_DIR"] == calls[1][1]["PI_CODING_AGENT_DIR"]
+    assert run.skill_sha256 == source_hash
+
+
+@pytest.mark.parametrize(
+    ("case", "repo_builder", "error"),
+    [
+        (
+            replace(MATRIX.skills["wf-status"], name="missing-skill"),
+            lambda tmp_path: (tmp_path / "repo", tmp_path / "repo" / "missing"),
+            "Skill source is not a directory",
+        ),
+        (
+            replace(MATRIX.skills["wf-status"], name="../escape"),
+            lambda tmp_path: (tmp_path / "repo", tmp_path / "repo" / "escape"),
+            "invalid Skill name",
+        ),
+    ],
+)
+def test_execute_pair_rejects_missing_or_escaping_skill_source_before_process(
+    case: object,
+    repo_builder: object,
+    error: str,
+    tmp_path: Path,
+) -> None:
+    repo_root, outside = repo_builder(tmp_path)  # type: ignore[operator]
+    (repo_root / "claude" / "skills").mkdir(parents=True)
+    outside.mkdir(parents=True, exist_ok=True)
+    (outside / "SKILL.md").write_text("outside")
+    calls: list[list[str]] = []
+
+    def fake_run(
+        argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int
+    ) -> ProviderResult:
+        calls.append(argv)
+        return _successful_wf_status_result()
+
+    with pytest.raises(ValueError, match=error):
+        execute_pair(
+            case,  # type: ignore[arg-type]
+            repo_root=repo_root,
+            omp_command="omp",
+            model="test-model",
+            timeout_sec=30,
+            run_process=fake_run,
+        )
+
+    assert calls == []
+
+
+def test_execute_pair_rejects_symlinked_skill_source_before_process(tmp_path: Path) -> None:
+    repo_root, source = _copied_wf_status_repo(tmp_path)
+    target = repo_root / "claude" / "skills" / "real-wf-status"
+    source.rename(target)
+    source.symlink_to(target, target_is_directory=True)
+    calls: list[list[str]] = []
+
+    def fake_run(
+        argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int
+    ) -> ProviderResult:
+        calls.append(argv)
+        return _successful_wf_status_result()
+
+    with pytest.raises(ValueError, match="symlink"):
+        execute_pair(
+            MATRIX.skills["wf-status"],
+            repo_root=repo_root,
+            omp_command="omp",
+            model="test-model",
+            timeout_sec=30,
+            run_process=fake_run,
+        )
+
+    assert calls == []
+
+
+def test_execute_pair_blocks_snapshot_mutation_without_changing_source(tmp_path: Path) -> None:
+    repo_root, source = _copied_wf_status_repo(tmp_path)
+    original = (source / "SKILL.md").read_text()
+
+    def fake_run(
+        argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int
+    ) -> ProviderResult:
+        if "--skills=wf-status" in argv:
+            snapshot = Path(env["PI_CODING_AGENT_DIR"]) / "skills" / "wf-status"
+            (snapshot / "SKILL.md").write_text("mutated snapshot")
+        return _successful_wf_status_result()
+
+    run = execute_pair(
+        MATRIX.skills["wf-status"],
+        repo_root=repo_root,
+        omp_command="omp",
+        model="test-model",
+        timeout_sec=30,
+        run_process=fake_run,
+    )
+
+    assert (source / "SKILL.md").read_text() == original
+    assert run.evaluation.verdict is Verdict.BLOCKED
+
+
+
+def test_execute_pair_does_not_run_selected_skill_after_baseline_snapshot_mutation(
+    tmp_path: Path,
+) -> None:
+    repo_root, _ = _copied_wf_status_repo(tmp_path)
+    calls: list[list[str]] = []
+
+    def fake_run(
+        argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int
+    ) -> ProviderResult:
+        calls.append(argv)
+        snapshot = Path(env["PI_CODING_AGENT_DIR"]) / "skills" / "wf-status"
+        (snapshot / "SKILL.md").write_text("mutated baseline snapshot")
+        return _successful_wf_status_result()
+
+    run = execute_pair(
+        MATRIX.skills["wf-status"],
+        repo_root=repo_root,
+        omp_command="omp",
+        model="test-model",
+        timeout_sec=30,
+        run_process=fake_run,
+    )
+
+    assert len(calls) == 1
+    assert run.evaluation.verdict is Verdict.BLOCKED
+    assert run.with_skill_result.returncode == 125
+
+def test_case_selection_rejects_duplicate_skill_names() -> None:
+    with pytest.raises(ValueError, match="duplicate Skills: wf-status"):
+        select_cases(MATRIX, ["wf-status", "wf-status"], select_all=False)
+
+
+def test_main_rejects_mixed_selection_before_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preflight_calls: list[object] = []
+
+    def fake_probe(*args: object, **kwargs: object) -> ProviderResult:
+        preflight_calls.append((args, kwargs))
+        return ProviderResult(78, "", "should not run", provider_name="omp")
+
+    monkeypatch.setattr(run_skill_pressure, "probe_omp", fake_probe)
+
+    with pytest.raises(SystemExit) as error:
+        run_skill_pressure.main(
+            [
+                "--batch-id",
+                "batch-1",
+                "--model",
+                "test-model",
+                "--all",
+                "--skill",
+                "wf-status",
+            ]
+        )
+
+    assert error.value.code == 2
+    assert preflight_calls == []
+
+
+def test_main_rejects_duplicate_selection_before_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preflight_calls: list[object] = []
+
+    def fake_probe(*args: object, **kwargs: object) -> ProviderResult:
+        preflight_calls.append((args, kwargs))
+        return ProviderResult(78, "", "should not run", provider_name="omp")
+
+    monkeypatch.setattr(run_skill_pressure, "probe_omp", fake_probe)
+
+    with pytest.raises(SystemExit) as error:
+        run_skill_pressure.main(
+            [
+                "--batch-id",
+                "batch-1",
+                "--model",
+                "test-model",
+                "--skill",
+                "wf-status",
+                "--skill",
+                "wf-status",
+            ]
+        )
+
+    assert error.value.code == 2
+    assert preflight_calls == []
+
+
+@pytest.mark.parametrize(
+    ("batch_id", "diagnostic"),
+    [
+        ("../escape", "invalid batch-id"),
+        ("person@example.com", "sensitive batch-id"),
+    ],
+)
+def test_main_rejects_unsafe_batch_id_before_preflight(
+    batch_id: str,
+    diagnostic: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    preflight_calls: list[object] = []
+
+    def fake_probe(*args: object, **kwargs: object) -> ProviderResult:
+        preflight_calls.append((args, kwargs))
+        return ProviderResult(78, "", "should not run", provider_name="omp")
+
+    monkeypatch.setattr(run_skill_pressure, "probe_omp", fake_probe)
+
+    with pytest.raises(SystemExit) as error:
+        run_skill_pressure.main(
+            ["--batch-id", batch_id, "--model", "test-model", "--all"]
+        )
+
+    assert error.value.code == 2
+    assert preflight_calls == []
+    assert diagnostic in capsys.readouterr().err
+
+
+def test_main_records_redacted_report_with_opaque_run_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo_root, source = _copied_wf_status_repo(tmp_path)
+
+    def fake_probe(*args: object, **kwargs: object) -> ProviderResult:
+        return ProviderResult(0, "omp test", "", provider_name="omp")
+
+    def fake_execute(
+        case: object, **kwargs: object
+    ) -> run_skill_pressure.PairRun:
+        baseline = Evaluation(Verdict.FAIL, ("baseline_failure",), (), None)
+        with_skill = Evaluation(Verdict.PASS, (), (), None)
+        return run_skill_pressure.PairRun(
+            evaluation=compare_pair(baseline, with_skill),
+            baseline_result=ProviderResult(
+                0,
+                '{"contact":"person@example.com"}',
+                "",
+                provider_name="omp",
+            ),
+            with_skill_result=_successful_wf_status_result(),
+            skill_sha256=sha256_skill(source),
+        )
+
+    monkeypatch.setattr(run_skill_pressure, "probe_omp", fake_probe)
+    monkeypatch.setattr(run_skill_pressure, "execute_pair", fake_execute)
+
+    assert (
+        run_skill_pressure.main(
+            [
+                "--repo-root",
+                str(repo_root),
+                "--matrix",
+                str(
+                    REPO_ROOT
+                    / "cli"
+                    / "tests"
+                    / "fixtures"
+                    / "skill-validation-matrix.v1.json"
+                ),
+                "--batch-id",
+                "batch-1",
+                "--model",
+                "test-model",
+                "--skill",
+                "wf-status",
+                "--write-result",
+                "--json",
+            ]
+        )
+        == 1
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    persistence = output["results"][0]["persistence"]
+    run_id = persistence["run_id"]
+    assert persistence["status"] == "REDACTED"
+    assert persistence["report_written"] is True
+    assert run_id.startswith("run-")
+    assert "workflow" not in run_id
+    assert "batch-1" not in run_id
+    assert output["results"][0]["verdict"] == Verdict.BLOCKED.value
+    report_path = pressure_report_path(repo_root, run_id)
+    assert report_path.exists()
+    assert json.loads(report_path.read_text())["persistence_status"] == "BLOCKED"
