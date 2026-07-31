@@ -625,6 +625,13 @@ def test_canonical_imported_pr_cleanup_docs_share_ordered_safety_contract() -> N
         "must install the cli and skill from a stable merged-main checkout",
         "verify that installed `awf` and every skill link no longer resolve to "
         "the source worktree",
+        "accepts only an already-merged pr whose number, branch, and head sha "
+        "exactly match the imported lease",
+        "same linked pr returns `reuse`",
+        "different pr, a dirty worktree, or any git/pr branch or head mismatch "
+        "is `blocked`",
+        "a github external failure is exit code `4`",
+        "import preserves the local and remote branch",
     )
     for path in paths:
         text = path.read_text(encoding="utf-8")

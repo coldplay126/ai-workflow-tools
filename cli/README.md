@@ -197,7 +197,7 @@ same linked PR returns `reuse`; a different PR, a dirty worktree, or any
 Git/PR branch or head mismatch is `blocked`. A GitHub external failure is exit
 code `4`; stop on every blocker or external error.
 
-Import preserves the branch. `finish` removes only the explicitly linked
+Import preserves the local and remote branch. `finish` removes only the explicitly linked
 worktree through its normal merged-PR, clean-worktree, and deployment-health
 gates. MUST NOT use direct Git or filesystem cleanup.
 
