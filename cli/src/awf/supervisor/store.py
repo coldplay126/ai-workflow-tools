@@ -8,7 +8,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from types import MappingProxyType
-from typing import Any, Iterator, Mapping, Optional, Tuple, Union
+from typing import Any, Callable, Iterator, Mapping, Optional, Tuple, Union
 
 from awf.supervisor.contracts import SupervisorEvent, validate_contract
 
@@ -124,37 +124,75 @@ class SupervisorStore:
         generation = _require_non_negative_integer(generation, "generation")
 
         with self._transaction("BEGIN IMMEDIATE") as connection:
-            row = connection.execute(
-                """
-                SELECT next_sequence
-                FROM job_sequence
-                WHERE job_id = ? AND generation = ?
-                """,
-                (job_id, generation),
-            ).fetchone()
-            if row is None:
-                sequence = 1
-                connection.execute(
-                    """
-                    INSERT INTO job_sequence (job_id, generation, next_sequence)
-                    VALUES (?, ?, ?)
-                    """,
-                    (job_id, generation, sequence + 1),
-                )
-                return sequence
+            return self._allocate_sequence(connection, job_id, generation)
 
-            sequence = row["next_sequence"]
-            if type(sequence) is not int or sequence < 1:
-                raise ValueError("stored next_sequence must be a positive integer")
+    def enqueue_next_event(
+        self,
+        job_id: str,
+        generation: int,
+        factory: Callable[[int], SupervisorEvent],
+    ) -> SupervisorEvent:
+        """Construct, validate, and enqueue the next event in one transaction."""
+        job_id = _require_identifier(job_id, "job_id")
+        generation = _require_non_negative_integer(generation, "generation")
+        if not callable(factory):
+            raise ValueError("event factory must be callable")
+
+        with self._transaction("BEGIN IMMEDIATE") as connection:
+            sequence = self._allocate_sequence(connection, job_id, generation)
+            event = factory(sequence)
+            payload, event_job_id, event_generation, event_sequence = self._event_payload(event)
+            if (event_job_id, event_generation, event_sequence) != (
+                job_id,
+                generation,
+                sequence,
+            ):
+                raise ValueError("event factory returned a mismatched event identity")
+            payload_json = _encode_json(payload, "event payload")
             connection.execute(
                 """
-                UPDATE job_sequence
-                SET next_sequence = ?
-                WHERE job_id = ? AND generation = ?
+                INSERT INTO event_outbox (
+                    job_id, generation, sequence, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?)
                 """,
-                (sequence + 1, job_id, generation),
+                (job_id, generation, sequence, payload_json, _now()),
+            )
+            return event
+
+    def _allocate_sequence(
+        self, connection: sqlite3.Connection, job_id: str, generation: int
+    ) -> int:
+        row = connection.execute(
+            """
+            SELECT next_sequence
+            FROM job_sequence
+            WHERE job_id = ? AND generation = ?
+            """,
+            (job_id, generation),
+        ).fetchone()
+        if row is None:
+            sequence = 1
+            connection.execute(
+                """
+                INSERT INTO job_sequence (job_id, generation, next_sequence)
+                VALUES (?, ?, ?)
+                """,
+                (job_id, generation, sequence + 1),
             )
             return sequence
+
+        sequence = row["next_sequence"]
+        if type(sequence) is not int or sequence < 1:
+            raise ValueError("stored next_sequence must be a positive integer")
+        connection.execute(
+            """
+            UPDATE job_sequence
+            SET next_sequence = ?
+            WHERE job_id = ? AND generation = ?
+            """,
+            (sequence + 1, job_id, generation),
+        )
+        return sequence
 
     def enqueue_event(self, event: SupervisorEvent) -> None:
         """Validate and append an event to the durable outbox."""
@@ -216,6 +254,25 @@ class SupervisorStore:
                 ) VALUES (?, ?, ?, 'claimed', NULL, ?)
                 """,
                 (command_id, job_id, generation, _now()),
+            )
+            return cursor.rowcount == 1
+
+    def release_command_claim(
+        self, command_id: str, job_id: str, generation: int
+    ) -> bool:
+        """Delete exactly the still-claimed ledger row created for a retryable receipt."""
+        command_id = _require_identifier(command_id, "command_id")
+        job_id = _require_identifier(job_id, "job_id")
+        generation = _require_non_negative_integer(generation, "generation")
+
+        with self._transaction("BEGIN IMMEDIATE") as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM command_ledger
+                WHERE command_id = ? AND job_id = ? AND generation = ?
+                  AND status = 'claimed'
+                """,
+                (command_id, job_id, generation),
             )
             return cursor.rowcount == 1
 

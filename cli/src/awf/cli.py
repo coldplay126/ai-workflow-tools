@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 from typing import Optional
 
 from awf.commands.agents import run_agents_followup_omp, run_agents_sync_omp
@@ -28,6 +29,14 @@ from awf.commands.supervisor import (
     run_supervisor_status,
     run_supervisor_submit,
     run_supervisor_watch,
+)
+from awf.commands.supervisor_agent import (
+    run_supervisor_agent_doctor,
+    run_supervisor_agent_enroll,
+    run_supervisor_agent_idle_status,
+    run_supervisor_agent_install_launchd,
+    run_supervisor_agent_run,
+    run_supervisor_agent_uninstall_launchd,
 )
 from awf.commands.wf_apply import run_wf_apply_result
 from awf.commands.wf_pr import run_wf_pr
@@ -718,6 +727,81 @@ def build_parser() -> argparse.ArgumentParser:
     )
     supervisor_agents_parser.add_argument("--json", action="store_true")
     supervisor_agents_parser.set_defaults(handler=run_supervisor_agents)
+    supervisor_agent_parser = supervisor_subparsers.add_parser(
+        "agent",
+        help="Enroll, run, and operate a durable Supervisor agent.",
+    )
+    supervisor_agent_subparsers = supervisor_agent_parser.add_subparsers(
+        dest="supervisor_agent_command",
+        required=True,
+    )
+
+    supervisor_agent_enroll_parser = supervisor_agent_subparsers.add_parser(
+        "enroll",
+        help="Enroll a local agent and save its refresh credential in Keychain.",
+    )
+    supervisor_agent_enroll_parser.add_argument("--agent-id", required=True)
+    supervisor_agent_enroll_parser.add_argument("--json", action="store_true")
+    supervisor_agent_enroll_parser.set_defaults(handler=run_supervisor_agent_enroll)
+
+    supervisor_agent_run_parser = supervisor_agent_subparsers.add_parser(
+        "run",
+        help="Run the durable Supervisor agent loop.",
+    )
+    supervisor_agent_run_parser.add_argument("--agent-id", required=True)
+    supervisor_agent_run_parser.add_argument(
+        "--environment", required=True, choices=["local", "aws"]
+    )
+    supervisor_agent_run_parser.add_argument(
+        "--transport", required=True, choices=["http", "sqs"]
+    )
+    supervisor_agent_run_parser.add_argument("--state-dir", type=Path)
+    supervisor_agent_run_parser.add_argument("--active-lease-path", type=Path)
+    supervisor_agent_run_parser.add_argument("--repo-root", type=Path)
+    supervisor_agent_run_parser.set_defaults(handler=run_supervisor_agent_run)
+
+    supervisor_agent_doctor_parser = supervisor_agent_subparsers.add_parser(
+        "doctor",
+        help="Check non-secret Supervisor agent prerequisites.",
+    )
+    supervisor_agent_doctor_parser.add_argument("--agent-id", required=True)
+    supervisor_agent_doctor_parser.add_argument(
+        "--environment", required=True, choices=["local", "aws"]
+    )
+    supervisor_agent_doctor_parser.add_argument("--state-dir", type=Path)
+    supervisor_agent_doctor_parser.add_argument("--active-lease-path", type=Path)
+    supervisor_agent_doctor_parser.add_argument("--repo-root", type=Path)
+    supervisor_agent_doctor_parser.add_argument("--json", action="store_true")
+    supervisor_agent_doctor_parser.set_defaults(handler=run_supervisor_agent_doctor)
+
+    supervisor_agent_idle_parser = supervisor_agent_subparsers.add_parser(
+        "idle-status",
+        help="Return whether shared agent state permits an idle host shutdown.",
+    )
+    supervisor_agent_idle_parser.add_argument(
+        "--environment", required=True, choices=["local", "aws"]
+    )
+    supervisor_agent_idle_parser.add_argument("--state-dir", type=Path)
+    supervisor_agent_idle_parser.add_argument("--active-lease-path", type=Path)
+    supervisor_agent_idle_parser.add_argument("--repo-root", type=Path)
+    supervisor_agent_idle_parser.add_argument("--json", action="store_true")
+    supervisor_agent_idle_parser.set_defaults(handler=run_supervisor_agent_idle_status)
+
+    supervisor_agent_install_parser = supervisor_agent_subparsers.add_parser(
+        "install-launchd",
+        help="Install the local Supervisor agent as a user launchd service.",
+    )
+    supervisor_agent_install_parser.add_argument("--agent-id", required=True)
+    supervisor_agent_install_parser.add_argument("--repo-root", type=Path)
+    supervisor_agent_install_parser.set_defaults(handler=run_supervisor_agent_install_launchd)
+
+    supervisor_agent_uninstall_parser = supervisor_agent_subparsers.add_parser(
+        "uninstall-launchd",
+        help="Boot out and remove the local Supervisor launchd service.",
+    )
+    supervisor_agent_uninstall_parser.add_argument("--agent-id", required=True)
+    supervisor_agent_uninstall_parser.set_defaults(handler=run_supervisor_agent_uninstall_launchd)
+
 
     dashboard_parser = subparsers.add_parser(
         "dashboard",

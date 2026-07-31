@@ -191,20 +191,56 @@
     },
     {
       "if": {
-        "properties": {
-          "data": {"not": {"required": ["terminal_status"]}}
-        }
+        "allOf": [
+          {"properties": {"type": {"const": "PROGRESS_UPDATE"}}},
+          {
+            "properties": {
+              "data": {
+                "required": ["status_code"],
+                "properties": {"status_code": {"const": "RECOVERY_REQUIRED"}}
+              }
+            }
+          }
+        ]
       },
       "then": {
         "properties": {
           "data": {
+            "required": ["status_code", "error_code", "stopped_at", "cleanup_completed"],
+            "properties": {
+              "error_code": {"const": "UNSAFE_RECOVERY"},
+              "cleanup_completed": {"const": false}
+            },
             "not": {
               "anyOf": [
                 {"required": ["terminal_status"]},
                 {"required": ["retryable"]},
-                {"required": ["stopped_at"]},
-                {"required": ["cleanup_completed"]}
+                {"required": ["artifact_uri"]},
+                {"required": ["artifact_sha256"]},
+                {"required": ["provenance_uri"]},
+                {"required": ["provenance_sha256"]}
               ]
+            }
+          }
+        }
+      },
+      "else": {
+        "if": {
+          "properties": {
+            "data": {"not": {"required": ["terminal_status"]}}
+          }
+        },
+        "then": {
+          "properties": {
+            "data": {
+              "not": {
+                "anyOf": [
+                  {"required": ["terminal_status"]},
+                  {"required": ["retryable"]},
+                  {"required": ["stopped_at"]},
+                  {"required": ["cleanup_completed"]}
+                ]
+              }
             }
           }
         }

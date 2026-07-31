@@ -282,6 +282,19 @@ def terminal_cancelled_event_fixture(**updates: Any) -> Dict[str, Any]:
     payload.update(updates)
     return payload
 
+def recovery_required_event_fixture(**updates: Any) -> Dict[str, Any]:
+    payload = event_fixture(
+        type="PROGRESS_UPDATE",
+        data={
+            "status_code": "RECOVERY_REQUIRED",
+            "error_code": "UNSAFE_RECOVERY",
+            "stopped_at": NOW,
+            "cleanup_completed": False,
+        },
+    )
+    payload.update(updates)
+    return payload
+
 
 def assert_rejected(kind: str, payload: Mapping[str, Any]) -> None:
     with pytest.raises(ValueError):
@@ -830,6 +843,66 @@ def test_event_cancelled_requires_stop_cleanup_and_forbids_error_code() -> None:
     with_error = terminal_cancelled_event_fixture()
     with_error["data"]["error_code"] = "TERMINAL_EXECUTION"
     assert_rejected("event", with_error)
+
+def test_event_recovery_required_progress_requires_exact_stop_proof() -> None:
+    validate_contract("event", recovery_required_event_fixture())
+
+    for required_field in (
+        "status_code",
+        "error_code",
+        "stopped_at",
+        "cleanup_completed",
+    ):
+        payload = recovery_required_event_fixture()
+        payload["data"].pop(required_field)
+        assert_rejected("event", payload)
+
+    for field, invalid_value in (
+        ("error_code", "TERMINAL_EXECUTION"),
+        ("cleanup_completed", True),
+    ):
+        payload = recovery_required_event_fixture()
+        payload["data"][field] = invalid_value
+        assert_rejected("event", payload)
+
+    for field, invalid_value in (
+        ("type", "TASK_STARTED"),
+        ("status_code", "RUNNING"),
+    ):
+        payload = recovery_required_event_fixture()
+        if field == "type":
+            payload[field] = invalid_value
+        else:
+            payload["data"][field] = invalid_value
+        assert_rejected("event", payload)
+
+    for extra_fields in (
+        {"retryable": False},
+        {
+            "artifact_uri": artifact_uri("redacted-results"),
+            "artifact_sha256": DIGEST_A,
+        },
+        {
+            "provenance_uri": artifact_uri("provenance"),
+            "provenance_sha256": DIGEST_A,
+        },
+    ):
+        payload = recovery_required_event_fixture()
+        payload["data"].update(extra_fields)
+        assert_rejected("event", payload)
+
+    with_terminal_status = recovery_required_event_fixture()
+    with_terminal_status["data"].update(
+        {
+            "terminal_status": "SUCCEEDED",
+            "return_code": 0,
+            "artifact_uri": artifact_uri("redacted-results"),
+            "artifact_sha256": DIGEST_A,
+            "provenance_uri": artifact_uri("provenance"),
+            "provenance_sha256": DIGEST_A,
+        }
+    )
+    assert_rejected("event", with_terminal_status)
 
 
 @pytest.mark.parametrize(

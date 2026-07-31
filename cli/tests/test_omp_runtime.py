@@ -856,6 +856,7 @@ def test_native_timeout_reaps_descendant_processes(tmp_path: Path):
         ),
         timeout_sec=1,
     )
+    assert results[0].returncode == 124
     assert results[0].timed_out is True
     child_pid = int(child_pid_path.read_text())
     for _ in range(20):

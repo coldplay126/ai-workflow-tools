@@ -42,6 +42,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 "awf.supervisor.schemas" = ["*.json"]
 "awf.supervisor.fixtures" = ["*.json"]
+"awf.resources.launchd" = ["*.plist"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -11,7 +11,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Protocol, Sequence, Union
+from typing import Any, Literal, Optional, Protocol, Sequence, Union
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
@@ -101,6 +101,14 @@ class OmpCurrentHostBridge(Protocol):
         model: str | None,
         timeout_sec: int,
     ) -> OmpExecutionResult: ...
+
+
+class OmpRunControl(Protocol):
+    """Cooperative cancellation hook for external OMP coordinator processes."""
+
+    poll_interval_sec: float
+
+    def on_tick(self) -> Optional[str]: ...
 
 
 @dataclass(frozen=True)
@@ -646,17 +654,19 @@ def _terminate_process_group(
 def _run_omp_native_host(
     prompt: str,
     *,
-    cwd: str | None,
+    cwd: Optional[str],
     config: OmpRunnerConfig,
-    model: str | None,
+    model: Optional[str],
     timeout_sec: int,
     isolate_tasks: bool = False,
-    resume_session_id: str | None = None,
+    resume_session_id: Optional[str] = None,
+    control: Optional[OmpRunControl] = None,
 ) -> OmpExecutionResult:
     started = time.monotonic()
     prompt_path: Path | None = None
     settings_path: Path | None = None
     process: subprocess.Popen[str] | None = None
+    termination_reason: Optional[str] = None
     try:
         with tempfile.NamedTemporaryFile(
             prefix="awf-omp-coordinator-",
@@ -710,19 +720,50 @@ def _run_omp_native_host(
             },
             start_new_session=os.name == "posix",
         )
-        try:
-            stdout, stderr = process.communicate(timeout=timeout_sec)
-            returncode = process.returncode
-            timed_out = False
-        except subprocess.TimeoutExpired as exc:
-            stdout, stderr = _terminate_process_group(
-                process,
-                config.termination_grace_sec,
-            )
-            stdout = stdout or _as_text(exc.stdout)
-            stderr = stderr or _as_text(exc.stderr)
-            returncode = 124
-            timed_out = True
+        if control is None:
+            try:
+                stdout, stderr = process.communicate(timeout=timeout_sec)
+                returncode = process.returncode
+                timed_out = False
+            except subprocess.TimeoutExpired as exc:
+                stdout, stderr = _terminate_process_group(
+                    process,
+                    config.termination_grace_sec,
+                )
+                stdout = stdout or _as_text(exc.stdout)
+                stderr = stderr or _as_text(exc.stderr)
+                returncode = 124
+                timed_out = True
+        else:
+            poll_interval_sec = max(0.01, float(control.poll_interval_sec))
+            deadline = time.monotonic() + timeout_sec
+            while True:
+                remaining_sec = deadline - time.monotonic()
+                if remaining_sec <= 0:
+                    stdout, stderr = _terminate_process_group(
+                        process,
+                        config.termination_grace_sec,
+                    )
+                    returncode = 124
+                    timed_out = True
+                    break
+                try:
+                    stdout, stderr = process.communicate(
+                        timeout=min(poll_interval_sec, remaining_sec)
+                    )
+                    returncode = process.returncode
+                    timed_out = False
+                    break
+                except subprocess.TimeoutExpired:
+                    termination_reason = control.on_tick()
+                    if termination_reason is not None:
+                        stdout, stderr = _terminate_process_group(
+                            process,
+                            config.termination_grace_sec,
+                        )
+                        returncode = 130
+                        timed_out = False
+                        break
     except FileNotFoundError:
         return OmpExecutionResult(
             returncode=127,
@@ -764,6 +805,8 @@ def _run_omp_native_host(
         execution_mode="external_host",
         resumed_session_id=resume_session_id,
     )
+    if termination_reason is not None:
+        metadata["termination_reason"] = termination_reason
     stderr = stderr.strip()
     if timed_out:
         message = (
@@ -1433,11 +1476,12 @@ def _capacity_failures(
 def run_omp_native_batch(
     workers: Sequence[OmpWorkerTask],
     *,
-    cwd: str | None = None,
-    config: OmpRunnerConfig | None = None,
-    model: str | None = None,
-    timeout_sec: int | None = None,
-    host_bridge: OmpCurrentHostBridge | None = None,
+    cwd: Optional[str] = None,
+    config: Optional[OmpRunnerConfig] = None,
+    model: Optional[str] = None,
+    timeout_sec: Optional[int] = None,
+    host_bridge: Optional[OmpCurrentHostBridge] = None,
+    control: Optional[OmpRunControl] = None,
 ) -> list[AgentResult]:
     """Run one native OMP batch with fail-closed durable recovery."""
     if not workers:
@@ -1454,6 +1498,15 @@ def run_omp_native_batch(
     recovery_session_id: str | None = None
 
     if cfg.execution_mode == "current_host":
+        if control is not None:
+            return _native_failures(
+                workers,
+                (
+                    "omp_same_host_control_unsupported: execution_mode=current_host "
+                    "cannot run supervised control"
+                ),
+                execution_mode=cfg.execution_mode,
+            )
         if host_bridge is None:
             return _native_failures(
                 workers,
@@ -1558,6 +1611,7 @@ def run_omp_native_batch(
             timeout_sec=effective_timeout,
             isolate_tasks=any(worker.isolated is True for worker in workers),
             resume_session_id=recovery_session_id,
+            control=control,
         )
 
     progress = execution.metadata.get("task_progress", [])

@@ -70,6 +70,55 @@ def test_sequence_allocation_is_monotonic_per_job_and_generation(tmp_path: Path)
     assert reopened.allocate_sequence("job-1", 2) == 3
 
 
+def test_atomic_enqueue_does_not_burn_a_sequence_when_factory_raises(
+    tmp_path: Path,
+) -> None:
+    store = SupervisorStore(tmp_path / "supervisor.db")
+
+    def broken_factory(_sequence: int) -> SupervisorEvent:
+        raise RuntimeError("event construction failed")
+
+    with pytest.raises(RuntimeError, match="construction"):
+        store.enqueue_next_event("job-1", 2, broken_factory)
+
+    event = store.enqueue_next_event(
+        "job-1", 2, lambda sequence: event_fixture(sequence=sequence)
+    )
+    assert event.sequence == 1
+    assert store.pending_events(limit=10) == [event]
+
+
+def test_atomic_enqueue_does_not_burn_a_sequence_when_insert_fails(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "supervisor.db"
+    store = SupervisorStore(db)
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER reject_event_outbox_insert
+            BEFORE INSERT ON event_outbox
+            BEGIN
+                SELECT RAISE(ABORT, 'simulated insert failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="simulated insert failure"):
+        store.enqueue_next_event(
+            "job-1", 2, lambda sequence: event_fixture(sequence=sequence)
+        )
+
+    with sqlite3.connect(db) as connection:
+        connection.execute("DROP TRIGGER reject_event_outbox_insert")
+
+    event = store.enqueue_next_event(
+        "job-1", 2, lambda sequence: event_fixture(sequence=sequence)
+    )
+    assert event.sequence == 1
+    assert store.pending_events(limit=10) == [event]
+
+
 def test_duplicate_event_rolls_back_without_corrupting_sequence_or_outbox(
     tmp_path: Path,
 ) -> None:
@@ -101,6 +150,24 @@ def test_command_claim_is_idempotent_across_store_instances(tmp_path: Path) -> N
     assert record["status"] == "claimed"
     assert record["result"] is None
 
+
+
+def test_release_command_claim_deletes_only_the_matching_unfinished_claim(
+    tmp_path: Path,
+) -> None:
+    store = SupervisorStore(tmp_path / "supervisor.db")
+    assert store.claim_command("cmd-1", "job-1", 3) is True
+
+    assert store.release_command_claim("cmd-1", "job-1", 2) is False
+    assert store.get_command("cmd-1")["status"] == "claimed"
+
+    assert store.release_command_claim("cmd-1", "job-1", 3) is True
+    assert store.get_command("cmd-1") is None
+
+    assert store.claim_command("cmd-1", "job-1", 3) is True
+    store.complete_command("cmd-1", {"outcome": "completed"})
+    assert store.release_command_claim("cmd-1", "job-1", 3) is False
+    assert store.get_command("cmd-1")["status"] == "completed"
 
 @pytest.mark.parametrize(
     ("record_method", "overwrite_method", "expected_status"),

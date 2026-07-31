@@ -103,6 +103,32 @@ awf supervisor agents
 
 `--idempotency-key`는 운영자 재시도 옵션이 아니다. deterministic E2E harness에서만 `AWF_SUPERVISOR_E2E_HARNESS=1`일 때 canonical lowercase UUID4를 지정할 수 있다.
 
+#### Supervisor Agent / `awf supervisor agent`
+
+The durable agent has explicit environments; it never infers AWS from a hostname. Enroll the macOS agent through the IAM-protected admin API, then keep the returned refresh credential only in the macOS Keychain:
+
+```bash
+aws sso login --profile awf-supervisor
+awf supervisor agent enroll --agent-id local-mac-01 --json
+awf supervisor agent doctor --agent-id local-mac-01 --environment local --repo-root "$HOME/Documents/GitHub" --json
+awf supervisor agent install-launchd --agent-id local-mac-01 --repo-root "$HOME/Documents/GitHub"
+```
+
+`install-launchd` resolves `awf` to an absolute, executable console script outside the checkout/worktree, validates an atomic user plist at `~/Library/LaunchAgents/com.awf.supervisor-agent.plist`, then runs `launchctl bootout`, `bootstrap`, and `print`. It never puts a bearer, refresh, or access token in argv, the plist, logs, or status JSON. Re-running installation is safe. Remove only this service with:
+
+```bash
+awf supervisor agent uninstall-launchd --agent-id local-mac-01
+```
+
+`run` requires both `--environment` and its matching `--transport`: `local` requires `http`; `aws` requires `sqs`. The same resolved paths are used by the store, runtime marker, workspace, heartbeat repository discovery, and `idle-status`. Each path has the precedence CLI option, environment variable, then default:
+
+| Environment | State database | Active-lease marker | Repository root |
+| --- | --- | --- | --- |
+| local | `~/Library/Application Support/AWF/supervisor/supervisor.db` | `~/Library/Application Support/AWF/supervisor/active-lease.json` | `~/Documents/GitHub` |
+| aws | `/workspace/.awf-supervisor/supervisor.db` | `/var/lib/aws-agent/supervisor-active-lease.json` | `/workspace/repos` |
+
+AWS configuration can provide `AWF_SUPERVISOR_STATE_DIR`, `AWF_SUPERVISOR_ACTIVE_LEASE_PATH`, and `AWF_SUPERVISOR_REPO_ROOT`; the SQS worker also requires `AWF_SUPERVISOR_SQS_QUEUE_URL`. Use `doctor --json` for a redacted prerequisite check. `idle-status --environment local|aws --json` returns `0` only when the active-lease marker is absent and the verified production outbox is empty, `3` when work/recovery is pending, and `4` for malformed markers, locked/corrupt/missing state, or any query failure. Exit `4` is fail-closed: do not stop the host; recover the durable marker/outbox and rerun the command.
+
 ### Operations wiki / `awf wiki` (English summary)
 
 `awf wiki` manages the project-scoped knowledge layer under `.awf-operations/`:
