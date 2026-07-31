@@ -3075,7 +3075,42 @@ uv run --project cli python cli/tests/run_skill_discovery.py \
 
 Expected: one new `awf_skill_install_report_v1` with 45 unique `PASS` records and one new `awf_skill_discovery_report_v1` with 45 unique `PASS` records, both carrying the current `$AWF_SKILL_BATCH_ID`. A host unavailable due to executable, credentials, timeout, or unsupported discovery interface is recorded as `BLOCKED`; CI may retain that result, but project-workstation completion and any three-runtime support claim require all 45 discovery records to pass. Keep both exact printed paths for Step 11; never replace them with an older report.
 
+### Task 10B: Restore required source H1 discovery metadata
+
+**Files:**
+- Modify: `claude/skills/phase-approve/SKILL.md`
+- Modify: `claude/skills/phase-done/SKILL.md`
+- Modify: `claude/skills/wf-reset/SKILL.md`
+- Modify: `claude/skills/wf-status/SKILL.md`
+- Modify: `cli/tests/test_skill_pressure_harness.py`
+
+- [ ] **Step 1: Retain the reproduced failure**
+
+The current-batch discovery report `discovery-6240ced9-b189-46a8-a4e0-6fe2624a19dc.json` contains `canonical_source_metadata_invalid` for exactly these four Skills because they have no Markdown H1 body heading. Add a focused test:
+
+```text
+cli/tests/test_skill_pressure_harness.py::test_all_canonical_skills_expose_discovery_h1
+```
+
+Expected RED: the assertion reports exactly `phase-approve`, `phase-done`, `wf-reset`, and `wf-status`.
+
+- [ ] **Step 2: Make the minimal source correction**
+
+Add one descriptive Markdown H1 immediately after frontmatter in each implicated `SKILL.md`. Do not alter frontmatter, routing, commands, or phase behavior.
+
+- [ ] **Step 3: Verify and commit**
+
+```bash
+uv run --project cli pytest cli/tests/test_skill_pressure_harness.py::test_all_canonical_skills_expose_discovery_h1 -q
+uv run --project cli pytest cli/tests/test_skill_contract_matrix.py::test_matrix_locks_exact_first_party_skill_inventory -q
+git add claude/skills/phase-approve/SKILL.md claude/skills/phase-done/SKILL.md claude/skills/wf-reset/SKILL.md claude/skills/wf-status/SKILL.md cli/tests/test_skill_pressure_harness.py docs/superpowers/plans/2026-07-30-awf-skill-validation.md
+git commit -m "fix: expose canonical skill discovery headings"
+```
+
+Expected GREEN: both focused commands pass. Rerun Task 10 and Task 10A with a new retained batch because source hashes changed; never reuse the superseded reports.
+
 ---
+
 
 ### Task 11: Run real OMP pressure pairs and generate evidence
 
