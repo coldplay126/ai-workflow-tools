@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from awf.core.skill_pressure import (
     HIGH_RISK_SKILLS,
@@ -18,6 +19,7 @@ from awf.core.skill_pressure import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MATRIX_PATH = REPO_ROOT / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json"
 SKILLS_ROOT = REPO_ROOT / "claude" / "skills"
+AGENT_CARD_ROOT = SKILLS_ROOT / "wf-orchestrator" / "templates"
 FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---", re.DOTALL)
 YAML_NON_STRING_SCALAR_RE = re.compile(
     r"""(?ix)
@@ -326,3 +328,33 @@ def test_every_skill_frontmatter_identity_and_conditions_are_semantic() -> None:
                 "managed deployment worktree creation or reuse" in trigger
                 for trigger in triggers
             )
+
+
+def test_every_phase_agent_card_matches_declared_schema() -> None:
+    schema = json.loads((AGENT_CARD_ROOT / "agent-card.schema.json").read_text())
+    validator = Draft202012Validator(schema)
+    invalid: list[str] = []
+    for path in sorted((AGENT_CARD_ROOT / "agent-cards").glob("*.json")):
+        card = json.loads(path.read_text())
+        for error in validator.iter_errors(card):
+            location = ".".join(str(part) for part in error.path)
+            invalid.append(f"{path.name}:{location}: {error.message}")
+
+    assert invalid == []
+
+
+def test_nullable_agent_card_fields_have_only_documented_semantics() -> None:
+    cards = {
+        path.stem: json.loads(path.read_text())
+        for path in (AGENT_CARD_ROOT / "agent-cards").glob("*.json")
+    }
+
+    assert cards["done"]["gate"] == {
+        "id": None,
+        "pass_conditions": ["user confirms"],
+        "on_pass": {"next_phase": None},
+        "on_fail": {},
+    }
+    assert cards["approve"]["gate"]["on_fail"]["rejected"]["next_phase"] is None
+    assert cards["verify"]["input"]["optional_context"][1]["key"] == "git_diff"
+    assert cards["verify"]["input"]["optional_context"][1]["path"] is None
