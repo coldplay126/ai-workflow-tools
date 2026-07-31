@@ -10,7 +10,7 @@ import pytest
 from awf.worktrees.config import WorktreeConfig
 from awf.worktrees.git import GitClient
 from awf.worktrees.github import PullRequest
-from awf.worktrees.models import DeploymentState, Purpose
+from awf.worktrees.models import DeploymentState, LeaseState, Purpose
 from awf.worktrees.registry import WorktreeRegistry
 from awf.worktrees.service import WorktreeService
 from worktree_fixtures import git as git_command
@@ -233,3 +233,176 @@ def test_release_worktree_lifecycle_smoke(smoke: SmokeHarness) -> None:
         ("deployment-status",),
         ("deployment-status",),
     ]
+
+
+def test_imported_worktree_pr_cleanup_lifecycle_smoke(smoke: SmokeHarness) -> None:
+    legacy_branch = "awf/legacy-release-129"
+    legacy_path = smoke.repo.parent / "legacy-release-129"
+    unrelated_branch = "user/unrelated-release"
+    unrelated_path = smoke.repo.parent / "unrelated-release"
+    main_base_sha = smoke.git.resolve_ref("main")
+
+    git_command(
+        smoke.repo,
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        legacy_branch,
+        str(legacy_path),
+        "main",
+    )
+    (legacy_path / "legacy-release.txt").write_text(
+        "legacy release\n", encoding="utf-8"
+    )
+    git_command(legacy_path, "add", "legacy-release.txt")
+    git_command(legacy_path, "commit", "-q", "-m", "legacy release")
+    legacy_head_sha = smoke.git.head_sha(legacy_path)
+    git_command(legacy_path, "push", "-q", "-u", "origin", legacy_branch)
+
+    git_command(smoke.repo, "checkout", "-q", "main")
+    git_command(smoke.repo, "merge", "--squash", "-q", legacy_branch)
+    git_command(smoke.repo, "commit", "-q", "-m", "squash legacy release")
+    squash_merge_sha = smoke.git.head_sha(smoke.repo)
+    git_command(smoke.repo, "push", "-q", "origin", "main")
+    git_command(smoke.repo, "checkout", "-q", "staging")
+
+    git_command(
+        smoke.repo,
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        unrelated_branch,
+        str(unrelated_path),
+        "main",
+    )
+    (unrelated_path / "unrelated.txt").write_text(
+        "unrelated release\n", encoding="utf-8"
+    )
+    git_command(unrelated_path, "add", "unrelated.txt")
+    git_command(unrelated_path, "commit", "-q", "-m", "unrelated release")
+    git_command(unrelated_path, "push", "-q", "-u", "origin", unrelated_branch)
+
+    import_preview = smoke.service.import_root(smoke.repo.parent, apply=False)
+    preview_lease = next(
+        lease for lease in import_preview.leases if lease.worktree_path == legacy_path
+    )
+    assert import_preview.decision == "preview"
+    assert preview_lease.managed is False
+    assert preview_lease.owner_kind == "imported"
+    assert smoke.registry.get_lease(preview_lease.id) is None
+
+    imported_result = smoke.service.import_root(smoke.repo.parent, apply=True)
+    imported = next(
+        lease for lease in imported_result.leases if lease.worktree_path == legacy_path
+    )
+    assert imported.managed is False
+    assert imported.owner_kind == "imported"
+    assert imported.branch == legacy_branch
+    assert imported.head_sha == legacy_head_sha
+
+    assert legacy_head_sha != squash_merge_sha
+    assert main_base_sha != squash_merge_sha
+    assert smoke.git.resolve_ref("main") == squash_merge_sha
+    smoke.github.prs[129] = PullRequest(
+        number=129,
+        state="CLOSED",
+        base_ref="main",
+        base_sha=squash_merge_sha,
+        head_ref=imported.branch,
+        head_sha=imported.head_sha,
+        merge_commit_sha=squash_merge_sha,
+        review_decision="APPROVED",
+        checks_passed=True,
+        changed_paths=("legacy-release.txt",),
+        url="https://github.example/acme/repo/pull/129",
+    )
+
+    before_adoption = smoke.registry.get_lease(imported.id)
+    assert before_adoption is not None
+    before_events = smoke.registry.list_events(imported.id)
+    adoption_preview = smoke.service.adopt(imported.id, pr_number=129, apply=False)
+    assert adoption_preview.decision == "preview"
+    assert len(adoption_preview.actions) == 1
+    assert adoption_preview.actions[0]["kind"] == "link_pr"
+    assert smoke.registry.get_lease(imported.id) == before_adoption
+    assert smoke.registry.list_events(imported.id) == before_events
+
+    adopted = smoke.service.adopt(imported.id, pr_number=129, apply=True)
+    assert adopted.decision == "ready"
+    assert adopted.lease is not None
+    assert adopted.lease.managed is True
+    assert adopted.lease.target_pr == 129
+
+    refreshed_result = smoke.service.status(refresh=True)
+    refreshed = next(
+        lease for lease in refreshed_result.leases if lease.id == imported.id
+    )
+    assert refreshed.state is LeaseState.CLEANABLE
+    assert refreshed.deployment_state is DeploymentState.NOT_REQUIRED
+    assert smoke.deployment_calls == []
+
+    before_finish_preview = smoke.registry.get_lease(imported.id)
+    assert before_finish_preview is not None
+    before_finish_events = smoke.registry.list_events(imported.id)
+    before_finish_reservation = smoke.registry.get_cleanup_reservation(imported.id)
+    assert before_finish_reservation is None
+    legacy_local_ref = smoke.git.resolve_ref(legacy_branch)
+    legacy_remote_ref = git_command(
+        smoke.repo.parent / "origin.git",
+        "rev-parse",
+        f"refs/heads/{legacy_branch}",
+    )
+    finish_preview = smoke.service.finish(pr_number=129, apply=False)
+    assert finish_preview.decision == "preview"
+    assert finish_preview.blockers == ()
+    assert smoke.registry.get_lease(imported.id) == before_finish_preview
+    assert smoke.registry.list_events(imported.id) == before_finish_events
+    assert (
+        smoke.registry.get_cleanup_reservation(imported.id)
+        == before_finish_reservation
+    )
+    assert smoke.git.resolve_ref(legacy_branch) == legacy_local_ref
+    assert (
+        git_command(
+            smoke.repo.parent / "origin.git",
+            "rev-parse",
+            f"refs/heads/{legacy_branch}",
+        )
+        == legacy_remote_ref
+    )
+    assert legacy_path.exists()
+    assert any(
+        worktree.path == legacy_path for worktree in smoke.git.list_worktrees()
+    )
+
+    removed = smoke.service.finish(pr_number=129, apply=True)
+    assert removed.decision == "removed"
+    assert removed.lease is not None
+    assert removed.lease.state is LeaseState.REMOVED
+    assert smoke.registry.get_lease(imported.id) == removed.lease
+    assert not legacy_path.exists()
+    assert all(
+        worktree.path != legacy_path for worktree in smoke.git.list_worktrees()
+    )
+    assert legacy_branch in git_command(
+        smoke.repo, "branch", "--list", legacy_branch
+    )
+    assert (
+        git_command(smoke.repo.parent / "origin.git", "branch", "--list", legacy_branch)
+        == legacy_branch
+    )
+    assert unrelated_path.exists()
+    assert any(
+        worktree.path == unrelated_path for worktree in smoke.git.list_worktrees()
+    )
+    assert unrelated_branch in git_command(
+        smoke.repo, "branch", "--list", unrelated_branch
+    )
+    assert (
+        git_command(
+            smoke.repo.parent / "origin.git", "branch", "--list", unrelated_branch
+        )
+        == unrelated_branch
+    )

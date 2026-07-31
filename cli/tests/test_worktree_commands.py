@@ -12,7 +12,7 @@ import pytest
 from awf.commands.wt import _emit
 from awf.cli import build_parser, main
 from awf.worktrees.git import GitClient, GitError, GitRemoteError
-from awf.worktrees.github import PullRequest
+from awf.worktrees.github import ExternalServiceError, PullRequest
 from awf.worktrees.models import (
     CommandResult,
     DeploymentState,
@@ -86,11 +86,11 @@ def register_cleanable_worktree_lease(
     )
 
 
-def merged_pull_request(lease: Lease) -> PullRequest:
+def merged_pull_request(lease: Lease, *, number: int = 42) -> PullRequest:
     return PullRequest(
-        number=42,
+        number=number,
         state="MERGED",
-        base_ref="staging",
+        base_ref=lease.base_ref,
         base_sha=lease.head_sha,
         head_ref=lease.branch,
         head_sha=lease.head_sha,
@@ -98,7 +98,46 @@ def merged_pull_request(lease: Lease) -> PullRequest:
         review_decision="APPROVED",
         checks_passed=True,
         changed_paths=(),
-        url="https://github.example/acme/repo/pull/42",
+        url=f"https://github.example/acme/repo/pull/{number}",
+    )
+
+
+def create_adoptable_imported_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Lease:
+    repo = make_repository(tmp_path)
+    external = tmp_path / "legacy-release"
+    subprocess.run(
+        [
+            "git",
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "legacy-release",
+            str(external),
+            "staging",
+        ],
+        cwd=repo,
+        check=True,
+    )
+    db = tmp_path / "state" / "worktrees.sqlite3"
+    monkeypatch.setenv("AWF_WORKTREE_STATE_DB", str(db))
+    git = GitClient(external)
+    return WorktreeRegistry(db).create_lease(
+        Lease.new(
+            repository_id=git.repository_id(),
+            repository_name=git.repository_name(),
+            repository_root=git.repository_root(),
+            worktree_path=external,
+            initiative="import-legacy-release-12345678",
+            purpose=Purpose.SCRATCH,
+            branch="legacy-release",
+            base_ref="legacy-release",
+            head_sha=git.head_sha(),
+            managed=False,
+            owner_kind="imported",
+        )
     )
 
 
@@ -743,6 +782,162 @@ def test_wt_adopt_promotes_imported_lease_without_repo_argument(
     assert payload["decision"] == "ready"
     assert payload["lease"]["managed"] is True
     assert payload["lease"]["owner_kind"] == "imported"
+
+
+def test_wt_adopt_apply_transition_conflict_is_registry_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = create_adoptable_imported_lease(tmp_path, monkeypatch)
+
+    def fail_transition(*_args: object, **_kwargs: object) -> Lease:
+        raise RuntimeError("registry temporarily unavailable")
+
+    monkeypatch.setattr(WorktreeRegistry, "transition", fail_transition)
+
+    rc, stdout, stderr = capture_main(
+        ["wt", "adopt", "--lease", lease.id, "--apply", "--json"]
+    )
+
+    payload = json.loads(stdout)
+    current = WorktreeRegistry(tmp_path / "state" / "worktrees.sqlite3").get_lease(
+        lease.id
+    )
+    assert rc == 5
+    assert stderr == ""
+    assert payload["command"] == "wt.adopt"
+    assert payload["status"] == "error"
+    assert payload["blockers"][0]["code"] == "registry_conflict"
+    assert current == lease
+
+
+def test_wt_adopt_with_merged_pr_previews_link_action(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = create_adoptable_imported_lease(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "awf.worktrees.github.GhClient.view_pr",
+        lambda _self, _number: merged_pull_request(lease, number=129),
+    )
+
+    rc, stdout, stderr = capture_main(
+        ["wt", "adopt", "--lease", lease.id, "--pr", "129", "--json"]
+    )
+
+    payload = json.loads(stdout)
+    assert rc == 0
+    assert stderr == ""
+    assert payload["command"] == "wt.adopt"
+    assert payload["decision"] == "preview"
+    assert payload["actions"][0]["pr_number"] == 129
+
+
+def test_wt_adopt_with_merged_pr_applies_then_reuses_exact_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = create_adoptable_imported_lease(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "awf.worktrees.github.GhClient.view_pr",
+        lambda _self, _number: merged_pull_request(lease, number=129),
+    )
+    args = [
+        "wt",
+        "adopt",
+        "--lease",
+        lease.id,
+        "--pr",
+        "129",
+        "--apply",
+        "--json",
+    ]
+
+    first_rc, first_stdout, first_stderr = capture_main(args)
+    repeat_rc, repeat_stdout, repeat_stderr = capture_main(args)
+
+    first = json.loads(first_stdout)
+    repeat = json.loads(repeat_stdout)
+    assert first_rc == 0
+    assert first_stderr == ""
+    assert first["command"] == "wt.adopt"
+    assert first["decision"] == "ready"
+    assert first["lease"]["target_pr"] == 129
+    assert first["lease"]["managed"] is True
+    assert repeat_rc == 0
+    assert repeat_stderr == ""
+    assert repeat["command"] == "wt.adopt"
+    assert repeat["decision"] == "reuse"
+    assert repeat["lease"]["target_pr"] == 129
+    assert repeat["lease"]["managed"] is True
+
+
+@pytest.mark.parametrize("value", ("0", "-1", "not-a-number"))
+def test_wt_adopt_rejects_invalid_pr_values_without_json_envelope(value: str) -> None:
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    with (
+        redirect_stdout(stdout),
+        redirect_stderr(stderr),
+        pytest.raises(SystemExit) as exited,
+    ):
+        main(
+            [
+                "wt",
+                "adopt",
+                "--lease",
+                "lease-id",
+                "--pr",
+                value,
+                "--json",
+            ]
+        )
+
+    assert exited.value.code == 2
+    assert stdout.getvalue() == ""
+    assert "value must be a positive integer" in stderr.getvalue()
+
+
+def test_wt_adopt_pr_maps_github_provider_failure_to_external_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = create_adoptable_imported_lease(tmp_path, monkeypatch)
+
+    def github_failure(_self: object, _number: int) -> PullRequest:
+        raise ExternalServiceError("gh authentication required")
+
+    monkeypatch.setattr("awf.worktrees.github.GhClient.view_pr", github_failure)
+
+    rc, stdout, stderr = capture_main(
+        ["wt", "adopt", "--lease", lease.id, "--pr", "129", "--json"]
+    )
+
+    payload = json.loads(stdout)
+    assert rc == 4
+    assert stderr == ""
+    assert payload["status"] == "error"
+    assert payload["blockers"][0]["code"] == "github_adopt_failed"
+
+
+def test_wt_adopt_pr_blocks_provenance_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = create_adoptable_imported_lease(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "awf.worktrees.github.GhClient.view_pr",
+        lambda _self, _number: replace(
+            merged_pull_request(lease, number=129),
+            head_ref="different-branch",
+        ),
+    )
+
+    rc, stdout, stderr = capture_main(
+        ["wt", "adopt", "--lease", lease.id, "--pr", "129", "--json"]
+    )
+
+    payload = json.loads(stdout)
+    assert rc == 3
+    assert stderr == ""
+    assert payload["status"] == "blocked"
+    assert payload["blockers"][0]["code"] == "pr_branch_mismatch"
 
 
 def test_wt_finish_parser_surface() -> None:

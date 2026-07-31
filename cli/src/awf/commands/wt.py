@@ -10,6 +10,7 @@ from pathlib import Path
 from awf.core.paths import find_repo_root
 from awf.worktrees.config import ConfigError, load_worktree_config
 from awf.worktrees.git import GitClient, GitError, GitRemoteError
+from awf.worktrees.github import GhClient
 from awf.worktrees.models import CommandResult, Purpose
 from awf.worktrees.registry import WorktreeRegistry
 from awf.worktrees.service import WorktreeService, state_db_path
@@ -211,8 +212,14 @@ def run_wt_adopt(args: argparse.Namespace) -> int:
                 ),
             )
         else:
-            service = WorktreeService(registry, GitClient(lease.repository_root))
-            result = service.adopt(args.lease, apply=args.apply)
+            service = WorktreeService(
+                registry,
+                GitClient(lease.repository_root),
+                github=GhClient(lease.repository_root) if args.pr is not None else None,
+            )
+            result = service.adopt(
+                args.lease, pr_number=args.pr, apply=args.apply
+            )
     except (ConfigError, FileNotFoundError) as error:
         result = CommandResult.error(
             "wt.adopt",

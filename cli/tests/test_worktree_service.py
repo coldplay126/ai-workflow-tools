@@ -227,6 +227,52 @@ class Harness:
         assert lease is not None
         return lease
 
+
+def matching_adoption_pr(
+    harness: Harness, lease: Lease, number: int = 129
+) -> PullRequest:
+    return replace(
+        merged_pr(number=number, head_sha=lease.head_sha),
+        head_ref=lease.branch,
+    )
+
+
+def adopted_imported_release_worktree(
+    harness: Harness, root: Path, *, branch: str = "awf/imported-release"
+) -> Lease:
+    root.mkdir()
+    external = root / "legacy-release"
+    git_command(
+        harness.repo,
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        branch,
+        str(external),
+        "staging",
+    )
+    (external / "legacy-release.txt").write_text(
+        "legacy release\n", encoding="utf-8"
+    )
+    git_command(external, "add", "legacy-release.txt")
+    git_command(external, "commit", "-q", "-m", "legacy release")
+    git_command(external, "push", "-q", "-u", "origin", branch)
+
+    imported_result = harness.service.import_root(root, apply=True)
+    imported = next(
+        lease for lease in imported_result.leases if lease.worktree_path == external
+    )
+    harness.github.prs[129] = matching_adoption_pr(harness, imported)
+    adopted = harness.service.adopt(imported.id, pr_number=129, apply=True)
+    assert adopted.decision == "ready"
+    harness.service.status(refresh=True)
+    current = harness.registry.get_lease(imported.id)
+    assert current is not None
+    assert current.state is LeaseState.CLEANABLE
+    return current
+
+
 @dataclass
 class PromotionHarness:
     repo: Path
@@ -1626,15 +1672,21 @@ def test_import_dry_run_writes_nothing(harness: Harness) -> None:
     assert harness.registry.list_leases() == []
 
 
-def test_adopt_refuses_dirty_imported_worktree(harness: Harness) -> None:
+def test_adopt_pr_refuses_dirty_imported_worktree(harness: Harness) -> None:
     imported = harness.import_external("legacy-release")
+    harness.github.prs[129] = matching_adoption_pr(harness, imported)
     (imported.worktree_path / "dirty.txt").write_text("dirty", encoding="utf-8")
+    before = harness.registry.get_lease(imported.id)
+    assert before is not None
+    before_events = harness.registry.list_events(imported.id)
 
-    result = harness.service.adopt(imported.id, apply=True)
+    result = harness.service.adopt(imported.id, pr_number=129, apply=True)
 
     assert result.status == "blocked"
     assert result.blockers[0]["code"] == "dirty_worktree"
-    assert harness.registry.get_lease(imported.id).managed is False
+    assert harness.registry.get_lease(imported.id) == before
+    assert harness.registry.list_events(imported.id) == before_events
+    assert harness.github.view_calls == []
 
 
 def test_adopt_marks_clean_imported_worktree_managed(harness: Harness) -> None:
@@ -1740,6 +1792,468 @@ def test_adopt_preview_does_not_create_lock_or_registry_state(
     assert result.actions[0]["kind"] == "adopt"
     assert not harness.lock_dir.exists()
     assert harness.registry.get_lease(lease.id).version == lease.version
+
+
+def test_adopt_preview_links_matching_merged_pr_without_mutation(
+    harness: Harness,
+) -> None:
+    external = harness.make_external_worktree("legacy-release")
+    imported = harness.registry.create_lease(
+        Lease.new(
+            repository_id=harness.git.repository_id(),
+            repository_name=harness.git.repository_name(),
+            repository_root=harness.git.repository_root(),
+            worktree_path=external,
+            initiative="import-legacy-release-12345678",
+            purpose=Purpose.SCRATCH,
+            branch="legacy-release",
+            base_ref="legacy-release",
+            head_sha=harness.git.head_sha(external),
+            managed=False,
+            owner_kind="imported",
+        )
+    )
+    harness.github.prs[129] = PullRequest(
+        number=129,
+        state="MERGED",
+        base_ref="staging",
+        base_sha=harness.git.head_sha(),
+        head_ref=imported.branch,
+        head_sha=imported.head_sha,
+        merge_commit_sha=harness.git.head_sha(),
+        review_decision="APPROVED",
+        checks_passed=True,
+        changed_paths=(),
+        url="https://github.example/acme/repo/pull/129",
+    )
+    before = harness.registry.get_lease(imported.id)
+    assert before is not None
+    before_version = before.version
+    before_events = harness.registry.list_events(imported.id)
+    assert not harness.lock_dir.exists()
+
+    result = harness.service.adopt(imported.id, pr_number=129, apply=False)
+
+    assert result.decision == "preview"
+    assert result.actions == (
+        {
+            "kind": "link_pr",
+            "lease_id": imported.id,
+            "path": str(imported.worktree_path),
+            "pr_number": 129,
+            "head_sha": imported.head_sha,
+        },
+    )
+    after = harness.registry.get_lease(imported.id)
+    assert after == before
+    assert after.version == before_version
+    assert harness.registry.list_events(imported.id) == before_events
+    assert harness.github.view_calls == [129]
+    assert not harness.lock_dir.exists()
+
+
+@pytest.mark.parametrize("pr_state", ("MERGED", "CLOSED"))
+def test_adopt_links_matching_completed_pr_atomically(
+    harness: Harness, pr_state: str
+) -> None:
+    external = harness.make_external_worktree("legacy-release")
+    imported = harness.registry.create_lease(
+        Lease.new(
+            repository_id=harness.git.repository_id(),
+            repository_name=harness.git.repository_name(),
+            repository_root=harness.git.repository_root(),
+            worktree_path=external,
+            initiative="import-legacy-release-12345678",
+            purpose=Purpose.SCRATCH,
+            branch="legacy-release",
+            base_ref="legacy-release",
+            head_sha=harness.git.head_sha(external),
+            managed=False,
+            owner_kind="imported",
+        )
+    )
+    harness.github.prs[129] = PullRequest(
+        number=129,
+        state=pr_state,
+        base_ref="staging",
+        base_sha=harness.git.head_sha(),
+        head_ref=imported.branch,
+        head_sha=imported.head_sha,
+        merge_commit_sha=harness.git.head_sha(),
+        review_decision="APPROVED",
+        checks_passed=True,
+        changed_paths=(),
+        url="https://github.example/acme/repo/pull/129",
+    )
+
+    result = harness.service.adopt(imported.id, pr_number=129, apply=True)
+
+    assert result.decision == "ready"
+    assert result.lease is not None
+    assert result.lease.managed is True
+    assert result.lease.target_pr == 129
+    assert result.lease.state is imported.state
+    stored = harness.registry.get_lease(imported.id)
+    assert stored == result.lease
+    event = harness.registry.list_events(imported.id)[-1]
+    assert event.event_type == "imported_lease_pr_linked"
+    assert event.from_state is imported.state
+    assert event.to_state is imported.state
+    assert event.observed_head_sha == imported.head_sha
+    assert event.pr_number == 129
+    assert harness.github.view_calls == [129, 129]
+
+
+@pytest.mark.parametrize(
+    ("pr_number", "failure", "expected_code", "expected_calls"),
+    (
+        (0, "invalid_number", "invalid_pr_number", ()),
+        (-1, "invalid_number", "invalid_pr_number", ()),
+        (True, "invalid_number", "invalid_pr_number", ()),
+        (129, "open", "pr_not_merged", (129,)),
+        (129, "closed_without_merge", "pr_not_merged", (129,)),
+        (129, "number_mismatch", "pr_number_mismatch", (129,)),
+        (129, "branch_mismatch", "pr_branch_mismatch", (129,)),
+        (129, "head_mismatch", "pr_head_mismatch", (129,)),
+    ),
+)
+def test_adopt_pr_failure_matrix_leaves_imported_lease_unchanged(
+    harness: Harness,
+    pr_number: int,
+    failure: str,
+    expected_code: str,
+    expected_calls: tuple[int, ...],
+) -> None:
+    imported = harness.import_external("legacy-release")
+    matching = matching_adoption_pr(harness, imported)
+    if failure == "open":
+        harness.github.prs[129] = replace(
+            matching, state="OPEN", merge_commit_sha=None
+        )
+    elif failure == "closed_without_merge":
+        harness.github.prs[129] = replace(
+            matching, state="CLOSED", merge_commit_sha=None
+        )
+    elif failure == "number_mismatch":
+        harness.github.prs[129] = replace(matching, number=130)
+    elif failure == "branch_mismatch":
+        harness.github.prs[129] = replace(matching, head_ref="other-branch")
+    elif failure == "head_mismatch":
+        harness.github.prs[129] = replace(matching, head_sha="0" * 40)
+    before = harness.registry.get_lease(imported.id)
+    assert before is not None
+    before_events = harness.registry.list_events(imported.id)
+
+    result = harness.service.adopt(imported.id, pr_number=pr_number, apply=True)
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == expected_code
+    stored = harness.registry.get_lease(imported.id)
+    assert stored == before
+    assert stored.managed is False
+    assert stored.version == before.version
+    assert harness.registry.list_events(imported.id) == before_events
+    assert harness.github.view_calls == list(expected_calls)
+
+
+def test_adopt_pr_provider_failure_is_external_and_leaves_no_mutation(
+    harness: Harness,
+) -> None:
+    imported = harness.import_external("legacy-release")
+    before = harness.registry.get_lease(imported.id)
+    assert before is not None
+    before_events = harness.registry.list_events(imported.id)
+    harness.github.error = ExternalServiceError("gh auth required")
+
+    result = harness.service.adopt(imported.id, pr_number=129, apply=True)
+
+    assert result.command == "wt.adopt"
+    assert result.status == "error"
+    assert result.exit_code == 4
+    assert result.blockers[0]["code"] == "github_adopt_failed"
+    assert harness.registry.get_lease(imported.id) == before
+    assert harness.registry.list_events(imported.id) == before_events
+    assert harness.github.view_calls == [129]
+
+
+@pytest.mark.parametrize(
+    ("safety_failure", "expected_code"),
+    (
+        ("repository", "repository_mismatch"),
+        ("orphaned", "orphaned_lease"),
+        ("detached", "branch_mismatch"),
+        ("branch", "branch_mismatch"),
+        ("head", "head_mismatch"),
+    ),
+)
+def test_adopt_pr_preserves_imported_git_safety_blockers(
+    tmp_path: Path,
+    safety_failure: str,
+    expected_code: str,
+) -> None:
+    worktree_path = tmp_path / "registered"
+    worktree_path.mkdir()
+    head_sha = "1234567890abcdef1234567890abcdef12345678"
+
+    class FakeGit:
+        def repository_id(self) -> str:
+            return (
+                "other-repository"
+                if safety_failure == "repository"
+                else "repository-id"
+            )
+
+        def list_worktrees(self) -> tuple[GitWorktree, ...]:
+            if safety_failure == "orphaned":
+                return ()
+            if safety_failure == "detached":
+                return (
+                    GitWorktree(
+                        worktree_path, head_sha, None, detached=True
+                    ),
+                )
+            if safety_failure == "branch":
+                return (
+                    GitWorktree(worktree_path, head_sha, "other-branch"),
+                )
+            if safety_failure == "head":
+                return (
+                    GitWorktree(
+                        worktree_path, "0" * 40, "topic/release"
+                    ),
+                )
+            return (GitWorktree(worktree_path, head_sha, "topic/release"),)
+
+        def head_sha(self, cwd: Path) -> str:
+            return head_sha
+
+        def status_porcelain(self, cwd: Path) -> tuple[str, ...]:
+            return ()
+
+    registry = WorktreeRegistry(tmp_path / "state" / "worktrees.sqlite3")
+    lease = registry.create_lease(
+        Lease.new(
+            repository_id="repository-id",
+            repository_name="repo",
+            repository_root=tmp_path,
+            worktree_path=worktree_path,
+            initiative="import-topic-release-12345678",
+            purpose=Purpose.SCRATCH,
+            branch="topic/release",
+            base_ref="topic/release",
+            head_sha=head_sha,
+            managed=False,
+            owner_kind="imported",
+        )
+    )
+    github = FakeGitHub()
+    service = WorktreeService(
+        registry,
+        FakeGit(),
+        config=WorktreeConfig(),
+        github=github,
+        lock_dir=tmp_path / "locks",
+    )
+    before_events = registry.list_events(lease.id)
+
+    result = service.adopt(lease.id, pr_number=129, apply=True)
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == expected_code
+    assert registry.get_lease(lease.id) == lease
+    assert registry.list_events(lease.id) == before_events
+    assert github.view_calls == []
+
+
+def test_adopt_pr_reuses_exact_link_without_registry_mutation(
+    harness: Harness,
+) -> None:
+    imported = harness.import_external("legacy-release")
+    harness.github.prs[129] = matching_adoption_pr(harness, imported)
+
+    adopted = harness.service.adopt(imported.id, pr_number=129, apply=True)
+
+    assert adopted.decision == "ready"
+    before = harness.registry.get_lease(imported.id)
+    assert before is not None
+    before_events = harness.registry.list_events(imported.id)
+    lock_path = harness.lock_dir / f"{before.repository_id}.lock"
+    assert lock_path.is_file()
+    lock_path.unlink()
+    harness.lock_dir.rmdir()
+
+    preview = harness.service.adopt(imported.id, pr_number=129, apply=False)
+
+    assert preview.decision == "reuse"
+    assert preview.lease == before
+    assert not harness.lock_dir.exists()
+    assert harness.registry.get_lease(imported.id) == before
+    assert harness.registry.list_events(imported.id) == before_events
+
+    applied = harness.service.adopt(imported.id, pr_number=129, apply=True)
+
+    assert applied.decision == "reuse"
+    assert applied.lease == before
+    assert harness.registry.get_lease(imported.id) == before
+    assert harness.registry.list_events(imported.id) == before_events
+    assert harness.github.view_calls == [129, 129, 129, 129, 129]
+    assert lock_path.is_file()
+
+
+def test_adopt_pr_rejects_different_link_without_provider_inference(
+    harness: Harness,
+) -> None:
+    imported = harness.import_external("legacy-release")
+    harness.github.prs[129] = matching_adoption_pr(harness, imported)
+    adopted = harness.service.adopt(imported.id, pr_number=129, apply=True)
+    assert adopted.decision == "ready"
+    before = harness.registry.get_lease(imported.id)
+    assert before is not None
+    before_events = harness.registry.list_events(imported.id)
+
+    result = harness.service.adopt(imported.id, pr_number=130, apply=True)
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "pr_link_mismatch"
+    assert result.lease == before
+    assert harness.registry.get_lease(imported.id) == before
+    assert harness.registry.list_events(imported.id) == before_events
+    assert harness.github.view_calls == [129, 129]
+
+
+def test_adopt_without_pr_still_blocks_a_second_adoption(
+    harness: Harness,
+) -> None:
+    imported = harness.import_external("legacy-release")
+    adopted = harness.service.adopt(imported.id, apply=True)
+    assert adopted.decision == "ready"
+    before = harness.registry.get_lease(imported.id)
+    assert before is not None
+    before_events = harness.registry.list_events(imported.id)
+
+    result = harness.service.adopt(imported.id, apply=True)
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "already_adopted"
+    assert result.lease == before
+    assert harness.registry.get_lease(imported.id) == before
+    assert harness.registry.list_events(imported.id) == before_events
+
+
+def test_adopt_pr_apply_revalidates_provider_inside_repository_lock(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    imported = harness.import_external("legacy-release")
+    matching = matching_adoption_pr(harness, imported)
+    mismatched = replace(matching, head_sha="0" * 40)
+    view_calls: list[int] = []
+
+    def view_pr(number: int) -> PullRequest:
+        view_calls.append(number)
+        return matching if len(view_calls) == 1 else mismatched
+
+    monkeypatch.setattr(harness.github, "view_pr", view_pr)
+    before = harness.registry.get_lease(imported.id)
+    assert before is not None
+    before_events = harness.registry.list_events(imported.id)
+
+    result = harness.service.adopt(imported.id, pr_number=129, apply=True)
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "pr_head_mismatch"
+    assert harness.registry.get_lease(imported.id) == before
+    assert harness.registry.list_events(imported.id) == before_events
+    assert view_calls == [129, 129]
+
+
+@pytest.mark.parametrize(
+    "already_linked",
+    (False, True),
+    ids=("initial_adoption", "exact_link_reuse"),
+)
+def test_adopt_pr_apply_revalidates_git_after_locked_provider_call(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    already_linked: bool,
+) -> None:
+    imported = harness.import_external("legacy-release")
+    matching = matching_adoption_pr(harness, imported)
+    harness.github.prs[129] = matching
+    if already_linked:
+        adopted = harness.service.adopt(imported.id, pr_number=129, apply=True)
+        assert adopted.decision == "ready"
+    before = harness.registry.get_lease(imported.id)
+    assert before is not None
+    before_events = harness.registry.list_events(imported.id)
+    view_calls: list[int] = []
+
+    def view_pr(number: int) -> PullRequest:
+        view_calls.append(number)
+        if len(view_calls) == 2:
+            git_command(
+                imported.worktree_path,
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "mutate HEAD during provider validation",
+            )
+        return matching
+
+    monkeypatch.setattr(harness.github, "view_pr", view_pr)
+
+    result = harness.service.adopt(imported.id, pr_number=129, apply=True)
+
+    assert result.status == "blocked"
+    assert result.decision == "blocked"
+    assert result.blockers[0]["code"] == "head_mismatch"
+    assert harness.registry.get_lease(imported.id) == before
+    assert harness.registry.list_events(imported.id) == before_events
+    assert view_calls == [129, 129]
+
+@pytest.mark.parametrize(
+    "error_type",
+    (RuntimeError, sqlite3.OperationalError),
+    ids=("runtime_error", "sqlite_error"),
+)
+@pytest.mark.parametrize(
+    "pr_number",
+    (None, 129),
+    ids=("without_pr", "with_pr"),
+)
+def test_adopt_apply_reports_registry_transition_conflicts(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    pr_number: int | None,
+    error_type: type[Exception],
+) -> None:
+    imported = harness.import_external("legacy-release")
+    if pr_number is not None:
+        harness.github.prs[pr_number] = replace(
+            merged_pr(number=pr_number, head_sha=imported.head_sha),
+            head_ref=imported.branch,
+        )
+    before = harness.registry.get_lease(imported.id)
+    assert before is not None
+    before_events = harness.registry.list_events(imported.id)
+
+    def fail_transition(*args: object, **kwargs: object) -> Lease:
+        raise error_type("registry temporarily unavailable")
+
+    monkeypatch.setattr(harness.registry, "transition", fail_transition)
+    keyword_args = {} if pr_number is None else {"pr_number": pr_number}
+
+    result = harness.service.adopt(imported.id, apply=True, **keyword_args)
+
+    assert result.command == "wt.adopt"
+    assert result.status == "error"
+    assert result.exit_code == 5
+    assert result.blockers[0]["code"] == "registry_conflict"
+    assert result.lease == before
+    assert harness.registry.get_lease(imported.id) == before
+    assert harness.registry.list_events(imported.id) == before_events
+    assert harness.github.view_calls == ([] if pr_number is None else [pr_number, pr_number])
 
 
 def test_import_keeps_exact_initiative_and_skips_identity_collisions(
@@ -1859,18 +2373,23 @@ def test_adopt_blocks_branch_checked_out_at_another_registered_path(
             owner_kind="imported",
         )
     )
+    github = FakeGitHub()
     service = WorktreeService(
         registry,
         FakeGit(),
         config=WorktreeConfig(),
+        github=github,
         lock_dir=tmp_path / "locks",
     )
+    before_events = registry.list_events(lease.id)
 
-    result = service.adopt(lease.id, apply=True)
+    result = service.adopt(lease.id, pr_number=129, apply=True)
 
     assert result.status == "blocked"
     assert result.blockers[0]["code"] == "branch_conflict"
     assert registry.get_lease(lease.id).managed is False
+    assert registry.list_events(lease.id) == before_events
+    assert github.view_calls == []
 
 
 def test_import_uses_non_bare_worktree_metadata_when_primary_is_bare(
@@ -3125,6 +3644,92 @@ def test_finish_rejects_a_symlinked_lease_path_component_before_git_inspection(
     assert "unsafe_worktree_path" in {item["code"] for item in result.blockers}
     assert promotion_harness.cache_dir.is_symlink()
     assert lease.worktree_path.is_dir()
+
+
+@pytest.mark.parametrize("substitution", ("leaf", "parent"))
+def test_finish_blocks_adopted_imported_worktree_symlink_substitution(
+    harness: Harness, tmp_path: Path, substitution: str
+) -> None:
+    lease = adopted_imported_release_worktree(harness, tmp_path / "import-root")
+    assert lease.target_pr is not None
+    expected_path = lease.worktree_path
+    if substitution == "leaf":
+        relocated = tmp_path / "relocated-legacy-release"
+        expected_path.rename(relocated)
+        expected_path.symlink_to(relocated, target_is_directory=True)
+        assert expected_path.is_symlink()
+    else:
+        relocated = tmp_path / "relocated-import-root"
+        expected_path.parent.rename(relocated)
+        expected_path.parent.symlink_to(relocated, target_is_directory=True)
+        assert expected_path.parent.is_symlink()
+
+    before = harness.registry.get_lease(lease.id)
+    assert before is not None
+    before_events = harness.registry.list_events(lease.id)
+    before_reservation = harness.registry.get_cleanup_reservation(lease.id)
+    assert before_reservation is None
+
+    for apply in (False, True):
+        result = harness.service.finish(pr_number=lease.target_pr, apply=apply)
+
+        assert result.status == "blocked"
+        assert "unsafe_worktree_path" in {
+            item["code"] for item in result.blockers
+        }
+        assert harness.registry.get_lease(lease.id) == before
+        assert harness.registry.list_events(lease.id) == before_events
+        assert harness.registry.get_cleanup_reservation(lease.id) == before_reservation
+
+    assert any(
+        worktree.path == expected_path for worktree in harness.git.list_worktrees()
+    )
+    assert harness.git.resolve_ref(lease.branch) == lease.head_sha
+    assert (
+        git_command(
+            harness.repo.parent / "origin.git",
+            "rev-parse",
+            f"refs/heads/{lease.branch}",
+        )
+        == lease.head_sha
+    )
+
+
+def test_finish_does_not_recover_adopted_import_through_a_symlink(
+    harness: Harness, tmp_path: Path
+) -> None:
+    lease = adopted_imported_release_worktree(harness, tmp_path / "import-root")
+    assert lease.target_pr is not None
+    reservation = harness.registry.reserve_cleanup(
+        lease.id,
+        expected_version=lease.version,
+        branch_sha=lease.head_sha,
+    )
+    reserved = harness.registry.get_lease(lease.id)
+    assert reserved is not None
+    reserved_events = harness.registry.list_events(lease.id)
+    relocated = tmp_path / "relocated-legacy-release"
+    lease.worktree_path.rename(relocated)
+    lease.worktree_path.symlink_to(relocated, target_is_directory=True)
+
+    result = harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.status == "blocked"
+    assert "unsafe_worktree_path" in {item["code"] for item in result.blockers}
+    assert harness.registry.get_lease(lease.id) == reserved
+    assert harness.registry.list_events(lease.id) == reserved_events
+    assert harness.registry.get_cleanup_reservation(lease.id) == reservation
+    assert lease.worktree_path.is_symlink()
+    assert relocated.is_dir()
+    assert harness.git.resolve_ref(lease.branch) == lease.head_sha
+    assert (
+        git_command(
+            harness.repo.parent / "origin.git",
+            "rev-parse",
+            f"refs/heads/{lease.branch}",
+        )
+        == lease.head_sha
+    )
 
 
 def test_finish_releases_reservation_when_removal_fails_after_refresh_race(

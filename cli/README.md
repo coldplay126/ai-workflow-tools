@@ -79,7 +79,7 @@ eight subcommands are:
 | `awf wt finish` | Preview or remove one proven-safe managed lease for a merged PR. |
 | `awf wt gc` | Preview or remove stale, proven-safe merged leases; `--merged` is required. |
 | `awf wt import` | Inventory existing direct-child repository worktrees and optionally register them as imported leases. |
-| `awf wt adopt` | Preview or mark one clean imported lease as managed. |
+| `awf wt adopt` | Preview or link a clean imported lease to an explicitly supplied, already-merged PR. |
 | `awf wt status` | Read registered leases, optionally refreshing PR and deployment state. |
 | `awf wt doctor` | Read-only report of registry and local Git-worktree mismatches. |
 
@@ -88,8 +88,9 @@ after inspecting that preview; `gc` also accepts explicit `--dry-run`. `status`
 and `doctor` never mutate Git worktrees. Plain `status` and `doctor` are
 registry reads; `status --refresh` records observed provider/deployment state
 and lease transitions in the registry, so it needs a writable state database.
-`import` records discovered worktrees as unmanaged, so an imported worktree
-remains unmanaged until an explicit `awf wt adopt --lease <id> --apply`.
+`import` records discovered worktrees as unmanaged. For PR-linked cleanup, an
+imported worktree remains unmanaged until an explicit `awf wt adopt --lease
+<id> --pr <merged-pr> --apply`. MUST NOT infer a PR automatically.
 
 With `--json`, stdout is one versioned result envelope; diagnostics stay on
 stderr:
@@ -161,6 +162,44 @@ awf wt acquire --initiative reward-widget --purpose feature \
   --base staging --owner-id "$USER" --apply --json
 awf wt status --repo-root . --initiative reward-widget --json
 ```
+
+Imported worktree PR-link and finish flow:
+
+In this example, `<root>` is the parent directory whose direct-child
+repositories and worktrees are inventoried, `<id>` is the selected imported
+lease ID, `<merged-pr>` is its already-merged PR number, and `<repo-root>` is
+that repository's root.
+Before running this sequence, identify only the source worktree to remove.
+Before removing a source worktree backing installed CLI or Skill links, MUST
+install the CLI and Skill from a stable merged-main checkout. Verify that
+installed `awf` and every Skill link no longer resolve to the source worktree
+and instead resolve to that checkout. Do not remove unrelated imported
+worktrees or branches.
+
+```bash
+# Inventory first; then register only the reviewed imported worktrees.
+awf wt import --root <root> --dry-run --json
+awf wt import --root <root> --apply --json
+
+# Link one imported lease only to its exact already-merged PR.
+awf wt adopt --lease <id> --pr <merged-pr> --json
+awf wt adopt --lease <id> --pr <merged-pr> --apply --json
+
+# Refresh the linked PR and deployment state before finishing.
+awf wt status --repo-root <repo-root> --refresh --json
+awf wt finish --repo-root <repo-root> --pr <merged-pr> --json
+awf wt finish --repo-root <repo-root> --pr <merged-pr> --apply --json
+```
+
+`adopt --pr` accepts only an already-merged PR whose number, branch, and head
+SHA exactly match the imported lease. Preview precedes apply. Repeating the
+same linked PR returns `reuse`; a different PR, a dirty worktree, or any
+Git/PR branch or head mismatch is `blocked`. A GitHub external failure is exit
+code `4`; stop on every blocker or external error.
+
+Import preserves the local and remote branch. `finish` removes only the explicitly linked
+worktree through its normal merged-PR, clean-worktree, and deployment-health
+gates. MUST NOT use direct Git or filesystem cleanup.
 
 Promotion and finish flow:
 

@@ -35,6 +35,57 @@ PYTHON_FENCE_RE = re.compile(
     r"^[ \t]*```python\s*\n(.*?)\n[ \t]*```", re.DOTALL | re.MULTILINE
 )
 URL_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
+PARTIAL_PLAN_PYTHON_FENCES = {
+    "docs/superpowers/plans/2026-07-30-imported-worktree-pr-link.md": frozenset(
+        {
+            (
+                "def adopt(\n"
+                "    self,\n"
+                "    lease_id: str,\n"
+                "    *,\n"
+                "    pr_number: int | None = None,\n"
+                "    apply: bool,\n"
+                ") -> CommandResult:"
+            ),
+            (
+                "with repository_lock(self.lock_dir / f\"{imported.repository_id}.lock\"):\n"
+                "    imported = self.registry.get_lease(lease_id)\n"
+                "    blocker = self._adoption_blocker(imported)\n"
+                "    if blocker is not None:\n"
+                "        return blocker\n"
+                "    validated = self._validate_adoption_pr(imported, pr_number)\n"
+                "    if isinstance(validated, CommandResult):\n"
+                "        return validated\n"
+                "    adopted = self.registry.transition(\n"
+                "        imported.id,\n"
+                "        imported.state,\n"
+                "        expected_version=imported.version,\n"
+                "        event_type=\"imported_lease_pr_linked\",\n"
+                "        summary=f\"imported lease linked to merged PR #{pr_number}\",\n"
+                "        observed_head_sha=validated.head_sha,\n"
+                "        pr_number=validated.number,\n"
+                "        managed=True,\n"
+                "    )"
+            ),
+            (
+                "if imported.managed and pr_number is not None:\n"
+                "    if imported.target_pr != pr_number:\n"
+                "        return self._adopt_blocked(\n"
+                "            \"pr_link_mismatch\",\n"
+                "            (\n"
+                "                f\"lease {imported.id} is linked to PR #{imported.target_pr}, \"\n"
+                "                f\"not PR #{pr_number}\"\n"
+                "            ),\n"
+                "            lease=imported,\n"
+                "        )\n"
+                "    validated = self._validate_linked_adoption(imported, pr_number)\n"
+                "    if isinstance(validated, CommandResult):\n"
+                "        return validated\n"
+                "    return CommandResult.ok(\"wt.adopt\", decision=\"reuse\", lease=imported)"
+            ),
+        }
+    ),
+}
 
 
 @lru_cache(maxsize=1)
@@ -102,7 +153,7 @@ def _bash_logical_lines(block: str, start_line: int) -> list[tuple[int, str]]:
 
 
 def _awf_argv_from_bash_line(line: str) -> list[str] | None:
-    sanitized = re.sub(r"<([A-Za-z0-9_.-]+)>", r"\1", line)
+    sanitized = re.sub(r"<([A-Za-z0-9_.-]+)>", "1", line)
     try:
         tokens = shlex.split(sanitized, comments=True)
     except ValueError:
@@ -261,10 +312,19 @@ def test_markdown_toml_fences_are_parseable_when_not_placeholders() -> None:
 def test_markdown_python_fences_are_parseable_when_not_placeholders() -> None:
     invalid: list[str] = []
     for path in _markdown_files():
+        relative_path = path.relative_to(REPO_ROOT).as_posix()
+        expected_partial_fences = PARTIAL_PLAN_PYTHON_FENCES.get(
+            relative_path, frozenset()
+        )
+        found_partial_fences: set[str] = set()
         text = path.read_text(encoding="utf-8")
         for match in PYTHON_FENCE_RE.finditer(text):
             block = match.group(1)
             if "..." in block or "<" in block:
+                continue
+            if block in expected_partial_fences:
+                assert block not in found_partial_fences
+                found_partial_fences.add(block)
                 continue
 
             line = _line_number(text, match.start())
@@ -272,5 +332,6 @@ def test_markdown_python_fences_are_parseable_when_not_placeholders() -> None:
                 compile(textwrap.dedent(block), str(path), "exec")
             except SyntaxError as exc:
                 invalid.append(f"{path.relative_to(REPO_ROOT)}:{line} {exc.msg}")
+        assert found_partial_fences == expected_partial_fences
 
     assert invalid == []

@@ -6,6 +6,8 @@ import re
 import shlex
 from pathlib import Path, PurePosixPath
 
+import pytest
+
 from awf.cli import KNOWN_COMMANDS, build_parser
 from awf.core.config import AwfConfig
 from awf.core.state import PHASE_GATE, PHASE_ORDER
@@ -82,6 +84,18 @@ def _shell_fenced_awf_commands(text: str) -> tuple[str, ...]:
     if continued:
         commands.append(continued)
     return tuple(commands)
+
+
+def _raw_contiguous_command_slice(
+    displayed_commands: tuple[str, ...],
+    expected_commands: tuple[str, ...],
+) -> tuple[str, ...]:
+    command_count = len(expected_commands)
+    for start in range(len(displayed_commands) - command_count + 1):
+        candidate = displayed_commands[start : start + command_count]
+        if candidate == expected_commands:
+            return candidate
+    return ()
 
 
 def _skill_files() -> tuple[Path, ...]:
@@ -502,6 +516,10 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
     expected_commands = {
         "status": ("wt", "status"),
         "doctor": ("wt", "doctor"),
+        "import_preview": ("wt", "import"),
+        "import_apply": ("wt", "import"),
+        "adopt_preview": ("wt", "adopt"),
+        "adopt_apply": ("wt", "adopt"),
         "acquire_preview": ("wt", "acquire"),
         "acquire_apply": ("wt", "acquire"),
         "promote_preview": ("wt", "promote"),
@@ -519,6 +537,13 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
 
     assert "--refresh" in commands["status"]
     assert "--json" in commands["status"]
+    assert "--dry-run" in commands["import_preview"]
+    assert "--apply" not in commands["import_preview"]
+    assert "--apply" in commands["import_apply"]
+    assert "--pr" in commands["adopt_preview"]
+    assert "--apply" not in commands["adopt_preview"]
+    assert "--pr" in commands["adopt_apply"]
+    assert "--apply" in commands["adopt_apply"]
     assert "--apply" not in commands["acquire_preview"]
     assert "--apply" in commands["acquire_apply"]
     assert "--apply" not in commands["promote_preview"]
@@ -536,9 +561,20 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
     assert safety["promotion_scope"] == "source_pr_delta_only"
     assert safety["deployment_health"] == "repository_rollout_evidence"
     assert safety["blocked_action"] == "preserve_worktree_report_code_message"
+    assert safety["imported_pr_lifecycle"] == {
+        "pr_provenance": "already_merged_exact_branch_and_head",
+        "same_pr": "reuse",
+        "different_pr": "blocked",
+        "github_external_failure": "exit_4",
+        "runtime_source_before_removal": (
+            "install_cli_and_skill_from_stable_merged_main_and_verify_links"
+        ),
+    }
     assert safety["preview_before_apply"] == [
         "acquire",
         "promote",
+        "import",
+        "adopt",
         "finish",
         "gc",
     ]
@@ -572,6 +608,90 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "removed": "report_completion",
         "blocked": "preserve_worktree_report_code_message",
     }
+
+
+def test_canonical_imported_pr_cleanup_docs_share_ordered_safety_contract() -> None:
+    paths = (
+        REPO_ROOT / "claude" / "skills" / "release-worktree-lifecycle" / "SKILL.md",
+        CLI_README,
+    )
+    expected_commands = (
+        "awf wt import --root <root> --dry-run --json",
+        "awf wt import --root <root> --apply --json",
+        "awf wt adopt --lease <id> --pr <merged-pr> --json",
+        "awf wt adopt --lease <id> --pr <merged-pr> --apply --json",
+        "awf wt status --repo-root <repo-root> --refresh --json",
+        "awf wt finish --repo-root <repo-root> --pr <merged-pr> --json",
+        "awf wt finish --repo-root <repo-root> --pr <merged-pr> --apply --json",
+    )
+    expected_argv = tuple(_argv_from_skill_command(command) for command in expected_commands)
+
+
+    required_prose = (
+        "parent directory whose direct-child repositories and worktrees are inventoried",
+        "must not infer a pr automatically",
+        "must not use direct git or filesystem cleanup",
+        "before removing a source worktree backing installed cli or skill links, "
+        "must install the cli and skill from a stable merged-main checkout",
+        "verify that installed `awf` and every skill link no longer resolve to "
+        "the source worktree",
+        "accepts only an already-merged pr whose number, branch, and head sha "
+        "exactly match the imported lease",
+        "same linked pr returns `reuse`",
+        "different pr, a dirty worktree, or any git/pr branch or head mismatch "
+        "is `blocked`",
+        "a github external failure is exit code `4`",
+        "import preserves the local and remote branch",
+    )
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        displayed_commands = _shell_fenced_awf_commands(text)
+        raw_slice = _raw_contiguous_command_slice(
+            displayed_commands, expected_commands
+        )
+        assert raw_slice == expected_commands
+
+        normalized_argv = tuple(
+            _argv_from_skill_command(command) for command in raw_slice
+        )
+        assert normalized_argv == expected_argv
+        parser = build_parser()
+        for argv in normalized_argv:
+            parsed = parser.parse_args(argv)
+            assert parsed.command == "wt"
+
+        prose = " ".join(text.lower().split())
+        for requirement in required_prose:
+            assert requirement in prose
+
+
+def test_imported_pr_cleanup_raw_sequence_rejects_placeholder_role_swaps() -> None:
+    expected_commands = (
+        "awf wt import --root <root> --dry-run --json",
+        "awf wt import --root <root> --apply --json",
+        "awf wt adopt --lease <id> --pr <merged-pr> --json",
+        "awf wt adopt --lease <id> --pr <merged-pr> --apply --json",
+        "awf wt status --repo-root <repo-root> --refresh --json",
+        "awf wt finish --repo-root <repo-root> --pr <merged-pr> --json",
+        "awf wt finish --repo-root <repo-root> --pr <merged-pr> --apply --json",
+    )
+    role_swapped_commands = tuple(
+        command.replace("<root>", "<temporary>")
+        .replace("<id>", "<root>")
+        .replace("<temporary>", "<id>")
+        for command in expected_commands
+    )
+
+    assert tuple(
+        _argv_from_skill_command(command) for command in role_swapped_commands
+    ) == tuple(_argv_from_skill_command(command) for command in expected_commands)
+    with pytest.raises(AssertionError):
+        assert (
+            _raw_contiguous_command_slice(
+                role_swapped_commands, expected_commands
+            )
+            == expected_commands
+        )
 
 
 def test_release_worktree_lifecycle_shell_examples_match_contract() -> None:
