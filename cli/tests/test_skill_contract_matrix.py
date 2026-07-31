@@ -84,8 +84,12 @@ def _condition_values(frontmatter: str, key: str) -> tuple[str, ...]:
         item = re.fullmatch(r"    -\s*(.*)", line)
         if item is not None:
             assert current_key is not None, "condition list item has no owning key"
-            value = item.group(1).strip().strip("\"'")
+            raw_value = item.group(1).strip()
+            value = raw_value.strip("\"'")
             assert value, "condition values must be nonempty"
+            assert raw_value[0] not in "[{" and not re.match(
+                r"[^:\s][^:]*:\s", raw_value
+            ), "condition list item must be a string"
             conditions[current_key].append(value)
             continue
 
@@ -217,6 +221,18 @@ def test_matrix_skills_mapping_is_read_only() -> None:
         (
             "conditions:\n  trigger:\n    - \n  skip: valid",
             "condition values must be nonempty",
+        ),
+        (
+            "conditions:\n  trigger:\n    - []\n  skip: valid",
+            "condition list item must be a string",
+        ),
+        (
+            "conditions:\n  trigger:\n    - {}\n  skip: valid",
+            "condition list item must be a string",
+        ),
+        (
+            "conditions:\n  trigger:\n    - key: value\n  skip: valid",
+            "condition list item must be a string",
         ),
         (
             "conditions:\n  trigger:\n    - valid\n    skip:\n      - invalid",
