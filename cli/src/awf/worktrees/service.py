@@ -2058,13 +2058,16 @@ class WorktreeService:
                     )
             return CommandResult.ok("wt.adopt", decision="ready", lease=adopted)
 
-        blocker = self._adoption_blocker(imported)
-        if blocker is not None:
-            return blocker
-        pull_request = self._adoption_pr(imported, pr_number)
+        pull_request = self._validate_pr_adoption(imported, pr_number)
         if isinstance(pull_request, CommandResult):
             return pull_request
         if not apply:
+            if imported.managed:
+                return CommandResult.ok(
+                    "wt.adopt",
+                    decision="reuse",
+                    lease=imported,
+                )
             return CommandResult.ok(
                 "wt.adopt",
                 decision="preview",
@@ -2087,12 +2090,15 @@ class WorktreeService:
                     "unknown_lease",
                     f"lease {lease_id} does not exist",
                 )
-            blocker = self._adoption_blocker(imported)
-            if blocker is not None:
-                return blocker
-            pull_request = self._adoption_pr(imported, pr_number)
+            pull_request = self._validate_pr_adoption(imported, pr_number)
             if isinstance(pull_request, CommandResult):
                 return pull_request
+            if imported.managed:
+                return CommandResult.ok(
+                    "wt.adopt",
+                    decision="reuse",
+                    lease=imported,
+                )
             try:
                 adopted = self.registry.transition(
                     imported.id,
@@ -2110,9 +2116,29 @@ class WorktreeService:
                 )
         return CommandResult.ok("wt.adopt", decision="ready", lease=adopted)
 
-    def _adoption_pr(
+    def _validate_pr_adoption(
         self, imported: Lease, pr_number: int
     ) -> PullRequest | CommandResult:
+        number_blocker = self._adoption_pr_number_blocker(imported, pr_number)
+        if number_blocker is not None:
+            return number_blocker
+        allow_managed = imported.managed
+        if allow_managed and imported.target_pr != pr_number:
+            return self._adopt_blocked(
+                "pr_link_mismatch",
+                f"lease {imported.id} is linked to pull request #{imported.target_pr}",
+                lease=imported,
+            )
+        blocker = self._adoption_blocker(
+            imported, allow_managed=allow_managed
+        )
+        if blocker is not None:
+            return blocker
+        return self._adoption_pr(imported, pr_number)
+
+    def _adoption_pr_number_blocker(
+        self, imported: Lease, pr_number: object
+    ) -> CommandResult | None:
         if (
             not isinstance(pr_number, int)
             or isinstance(pr_number, bool)
@@ -2123,6 +2149,11 @@ class WorktreeService:
                 "pull request number must be a positive integer",
                 lease=imported,
             )
+        return None
+
+    def _adoption_pr(
+        self, imported: Lease, pr_number: int
+    ) -> PullRequest | CommandResult:
         try:
             pull_request = (
                 self.github or GhClient(imported.repository_root)
@@ -2166,7 +2197,9 @@ class WorktreeService:
             )
         return pull_request
 
-    def _adoption_blocker(self, imported: Lease) -> CommandResult | None:
+    def _adoption_blocker(
+        self, imported: Lease, *, allow_managed: bool = False
+    ) -> CommandResult | None:
         if imported.state is LeaseState.REMOVED:
             return self._adopt_blocked(
                 "removed_lease",
@@ -2179,7 +2212,7 @@ class WorktreeService:
                 f"lease {imported.id} was not imported",
                 lease=imported,
             )
-        if imported.managed:
+        if imported.managed and not allow_managed:
             return self._adopt_blocked(
                 "already_adopted",
                 f"lease {imported.id} is already managed",
