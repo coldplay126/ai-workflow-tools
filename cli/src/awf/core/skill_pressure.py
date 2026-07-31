@@ -214,3 +214,139 @@ def load_skill_matrix(path: str | Path) -> SkillMatrix:
             scenario=scenario,
         )
     return SkillMatrix(schema=MATRIX_SCHEMA, skills=MappingProxyType(skills))
+
+
+@dataclass(frozen=True)
+class CriterionResult:
+    id: str
+    verdict: Verdict
+    evidence: str
+
+
+@dataclass(frozen=True)
+class Evaluation:
+    verdict: Verdict
+    failures: tuple[str, ...]
+    criteria: tuple[CriterionResult, ...]
+    parsed: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class PairEvaluation:
+    verdict: Verdict
+    baseline: Evaluation
+    with_skill: Evaluation
+
+
+def _command_matches(command: str, expected_prefix: str) -> bool:
+    return command == expected_prefix or command.startswith(f"{expected_prefix} ")
+
+
+def evaluate_response(scenario: FieldScenario, raw: str) -> Evaluation:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        criterion = CriterionResult("response_json", Verdict.FAIL, "malformed_json")
+        return Evaluation(Verdict.FAIL, ("malformed_json",), (criterion,), None)
+    if not isinstance(parsed, dict):
+        criterion = CriterionResult("response_object", Verdict.FAIL, "response_not_object")
+        return Evaluation(Verdict.FAIL, ("response_not_object",), (criterion,), None)
+
+    failures: list[str] = []
+    criteria: list[CriterionResult] = []
+
+    def check(identifier: str, condition: bool, failure: str) -> None:
+        criteria.append(
+            CriterionResult(
+                identifier,
+                Verdict.PASS if condition else Verdict.FAIL,
+                "satisfied" if condition else failure,
+            )
+        )
+        if not condition:
+            failures.append(failure)
+
+    check(
+        "selected_skill",
+        parsed.get("selected_skill") == scenario.skill,
+        f"selected_skill:{parsed.get('selected_skill')!r}",
+    )
+    check(
+        "decision",
+        parsed.get("decision") in scenario.expected.decisions,
+        f"decision:{parsed.get('decision')!r}",
+    )
+
+    reasons = parsed.get("reason_codes")
+    reasons_valid = isinstance(reasons, list) and all(isinstance(item, str) for item in reasons)
+    check("reason_codes_type", reasons_valid, "reason_codes_not_string_list")
+    reasons = reasons if reasons_valid else []
+    for required in scenario.expected.required_reason_codes:
+        check(
+            f"required_reason:{required}",
+            required in reasons,
+            f"missing_reason_code:{required}",
+        )
+
+    sections = parsed.get("sections")
+    sections_valid = isinstance(sections, list) and all(
+        isinstance(item, str) for item in sections
+    )
+    check("sections_type", sections_valid, "sections_not_string_list")
+    sections = sections if sections_valid else []
+    for required in scenario.expected.required_sections:
+        check(
+            f"required_section:{required}",
+            required in sections,
+            f"missing_section:{required}",
+        )
+
+    commands = parsed.get("commands")
+    commands_valid = isinstance(commands, list) and all(isinstance(item, str) for item in commands)
+    check("commands_type", commands_valid, "commands_not_string_list")
+    commands = commands if commands_valid else []
+    for required in scenario.expected.required_commands:
+        check(
+            f"required_command:{required}",
+            any(_command_matches(command, required) for command in commands),
+            f"missing_command:{required}",
+        )
+    for forbidden in scenario.expected.forbidden_commands:
+        check(
+            f"forbidden_command:{forbidden}",
+            not any(_command_matches(command, forbidden) for command in commands),
+            f"forbidden_command:{forbidden}",
+        )
+
+    ordered = scenario.expected.ordered_commands
+    if ordered:
+        positions = [
+            next(
+                (
+                    index
+                    for index, command in enumerate(commands)
+                    if _command_matches(command, prefix)
+                ),
+                -1,
+            )
+            for prefix in ordered
+        ]
+        present = [position for position in positions if position >= 0]
+        check("command_order", len(present) <= 1 or present == sorted(present), "command_order")
+
+    return Evaluation(
+        Verdict.FAIL if failures else Verdict.PASS,
+        tuple(failures),
+        tuple(criteria),
+        parsed,
+    )
+
+
+def compare_pair(baseline: Evaluation, with_skill: Evaluation) -> PairEvaluation:
+    if Verdict.BLOCKED in {baseline.verdict, with_skill.verdict}:
+        return PairEvaluation(Verdict.BLOCKED, baseline, with_skill)
+    if with_skill.verdict is not Verdict.PASS:
+        return PairEvaluation(Verdict.FAIL, baseline, with_skill)
+    if baseline.verdict is Verdict.PASS:
+        return PairEvaluation(Verdict.UNPROVEN, baseline, with_skill)
+    return PairEvaluation(Verdict.PASS, baseline, with_skill)
