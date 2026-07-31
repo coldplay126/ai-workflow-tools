@@ -884,10 +884,12 @@ Add immediately after `_shell_fenced_awf_commands`:
 
 ```python
 def test_shell_fenced_command_extractor_includes_non_worktree_awf_commands() -> None:
-    text = """```bash
-awf ready --repo-root . --json
-awf wf status --repo-root .
-```"""
+    text = (
+        "```bash\n"
+        "awf ready --repo-root . --json\n"
+        "awf wf status --repo-root .\n"
+        "```"
+    )
 
     assert _shell_fenced_awf_commands(text) == (
         "awf ready --repo-root . --json",
@@ -1036,7 +1038,9 @@ Expected failures:
 Change the schema properties to:
 
 ```json
-"path": { "type": ["string", "null"] }
+{
+  "path": { "type": ["string", "null"] }
+}
 ```
 
 for `input.optional_context[].path` only; keep required and output artifact paths string-only.
@@ -1044,17 +1048,21 @@ for `input.optional_context[].path` only; keep required and output artifact path
 Change gate ID to:
 
 ```json
-"id": {
-  "type": ["string", "null"],
-  "pattern": "^G[1-6]$",
-  "description": "G1-G6 for gated phases; null only for the terminal done phase"
+{
+  "id": {
+    "type": ["string", "null"],
+    "pattern": "^G[1-6]$",
+    "description": "G1-G6 for gated phases; null only for the terminal done phase"
+  }
 }
 ```
 
 Change both `gate.on_pass.next_phase` and `gate.on_fail.*.next_phase` to:
 
 ```json
-"next_phase": { "type": ["string", "null"] }
+{
+  "next_phase": { "type": ["string", "null"] }
+}
 ```
 
 Do not weaken unrelated fields or enable arbitrary additional types.

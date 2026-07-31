@@ -26,6 +26,7 @@ fi
 
 skill_name=${source_dir##*/}
 
+blocked=0
 for skill_root in "$@"; do
   mkdir -p "$skill_root"
   target=$skill_root/$skill_name
@@ -38,7 +39,8 @@ for skill_root in "$@"; do
     rm "$target"
     printf 'updated: %s -> %s\n' "$target" "$source_dir"
   elif [ -e "$target" ]; then
-    printf 'preserved: existing file or directory at %s\n' "$target" >&2
+    printf 'AWF_SKILL_INSTALL_RESULT\tBLOCKED\t%s\tuser_owned\n' "$target" >&2
+    blocked=1
     continue
   else
     printf 'installed: %s -> %s\n' "$target" "$source_dir"
@@ -46,3 +48,9 @@ for skill_root in "$@"; do
 
   ln -s "$source_dir" "$target"
 done
+
+if [ "$blocked" -ne 0 ]; then
+  exit 3
+fi
+
+exit 0
