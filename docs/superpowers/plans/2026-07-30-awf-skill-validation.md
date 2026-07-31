@@ -3267,3 +3267,35 @@ Report:
 - any `BLOCKED` or `UNPROVEN` claims
 
 Do not create or merge a PR, repoint global runtime links, or clean the worktree until the user separately approves integration.
+
+---
+
+### Task 12A: Classify operational Skill runners as manual
+
+**Files:**
+- Modify: `cli/tests/test_fixture_runner_scripts.py`
+
+- [ ] **Step 1: Retain the reproduced full-suite failure**
+
+The complete AWF suite fails at:
+
+```text
+cli/tests/test_fixture_runner_scripts.py::test_aggregate_fixture_scripts_include_all_python_runners
+```
+
+Expected RED: `run_skill_deterministic.py`, `run_skill_discovery.py`, and `run_skill_pressure.py` are reported as absent from aggregate fixture scripts.
+
+- [ ] **Step 2: Apply the minimal classification correction**
+
+Add exactly those three operational, append-only/manual runners to `MANUAL_FIELD_RUNNERS`. Do not invoke them from aggregate fixture scripts: discovery and pressure runners can call live providers, and all three create batch-scoped operational evidence.
+
+- [ ] **Step 3: Verify and commit**
+
+```bash
+uv run --project cli pytest cli/tests/test_fixture_runner_scripts.py::test_aggregate_fixture_scripts_include_all_python_runners -q
+uv run --project cli pytest cli/tests
+git add cli/tests/test_fixture_runner_scripts.py docs/superpowers/plans/2026-07-30-awf-skill-validation.md
+git commit -m "test: classify manual skill validation runners"
+```
+
+Expected GREEN: the focused invariant and complete AWF suite pass with only repository-declared skips/deselections.

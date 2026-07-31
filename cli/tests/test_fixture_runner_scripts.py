@@ -11,6 +11,9 @@ AGGREGATE_FIXTURE_SCRIPTS = (
 )
 MANUAL_FIELD_RUNNERS = {
     "run_pi_field_smoke.py",
+    "run_skill_deterministic.py",
+    "run_skill_discovery.py",
+    "run_skill_pressure.py",
 }
 RUNNER_REF_RE = re.compile(r"cli/tests/(run_[A-Za-z0-9_]+\.py)")
 
