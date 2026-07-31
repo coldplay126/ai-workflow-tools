@@ -24,7 +24,8 @@ ANGLE_TEMPLATE_ARG_RE = re.compile(r"<[^>]+>")
 FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---", re.DOTALL)
 TOP_LEVEL_SCALAR_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*):\s*(.*?)\s*$")
 STALE_WF_ALIAS_RE = re.compile(r"/wf(?:\.|\b(?!-))")
-SHELL_FENCE_RE = re.compile(r"```(?:bash|sh|shell)\n(.*?)\n```", re.DOTALL)
+FENCED_BLOCK_RE = re.compile(r"```[^\n]*\n(.*?)\n```", re.DOTALL)
+DISPLAYED_USAGE_SYNTAX_RE = re.compile(r"(?:^|\s)\[[^\]]+\](?=\s|$)")
 KNOWN_GATE_IDS = {gate for gate in PHASE_GATE.values() if gate is not None}
 
 
@@ -68,29 +69,42 @@ def _argv_from_displayed_command(command: str) -> list[str]:
     return argv[1:]
 
 
+def _is_displayed_awf_command(line: str) -> bool:
+    return line.startswith("awf ") and not DISPLAYED_USAGE_SYNTAX_RE.search(line)
+
+
+def _has_shell_continuation(raw_line: str) -> bool:
+    if not raw_line.endswith("\\"):
+        return False
+    trailing_backslashes = len(raw_line) - len(raw_line.rstrip("\\"))
+    return trailing_backslashes % 2 == 1
+
+
 def _shell_fenced_awf_commands(text: str) -> tuple[str, ...]:
     commands: list[str] = []
     continued = ""
-    for block in SHELL_FENCE_RE.findall(text):
+    for block in FENCED_BLOCK_RE.findall(text):
         for raw_line in block.splitlines():
             line = raw_line.strip()
+            continues = _has_shell_continuation(raw_line)
             if continued:
-                fragment = line.removesuffix("\\").strip()
+                fragment = line.removesuffix("\\").strip() if continues else line
                 continued = f"{continued} {fragment}"
-                if line.endswith("\\"):
+                if continues:
                     continue
                 commands.append(continued)
                 continued = ""
                 continue
-            if not line.startswith("awf "):
+            if not _is_displayed_awf_command(line):
                 continue
-            if line.endswith("\\"):
+            if continues:
                 continued = line.removesuffix("\\").strip()
                 continue
             commands.append(line)
     if continued:
         commands.append(continued)
     return tuple(commands)
+
 
 def test_shell_fenced_command_extractor_includes_non_worktree_awf_commands() -> None:
     text = """```bash
@@ -101,6 +115,49 @@ awf wf status --repo-root .
     assert _shell_fenced_awf_commands(text) == (
         "awf ready --repo-root . --json",
         "awf wf status --repo-root .",
+    )
+
+
+def test_shell_fenced_command_extractor_includes_unlabelled_and_text_fence_commands() -> None:
+    expected = (
+        (
+            REPO_ROOT / "claude" / "skills" / "analysis" / "SKILL.md",
+            "awf analyze {service} --check        # drift detection",
+        ),
+        (
+            REPO_ROOT / "claude" / "skills" / "wf" / "SKILL.md",
+            'awf wf init "<concept>" --repo-root .',
+        ),
+    )
+
+    for path, command in expected:
+        assert command in _shell_fenced_awf_commands(path.read_text(encoding="utf-8"))
+
+
+def test_shell_fenced_command_extractor_excludes_usage_syntax() -> None:
+    path = REPO_ROOT / "claude" / "skills" / "analysis" / "SKILL.md"
+
+    assert (
+        "awf analyze {service} {unit} [--mode cross] [--all]"
+        not in _shell_fenced_awf_commands(path.read_text(encoding="utf-8"))
+    )
+
+
+def test_shell_fenced_command_extractor_joins_only_valid_continuations() -> None:
+    backslash = "\\"
+    text = f"""```bash
+awf ready --repo-root . {backslash} 
+--json
+awf wf status --repo-root . {backslash}{backslash}
+--json
+awf scan . {backslash}
+--no-ai
+```"""
+
+    assert _shell_fenced_awf_commands(text) == (
+        f"awf ready --repo-root . {backslash}",
+        f"awf wf status --repo-root . {backslash}{backslash}",
+        "awf scan . --no-ai",
     )
 
 
