@@ -46,6 +46,13 @@ class MatrixError(ValueError):
     pass
 
 
+class _DuplicateJsonKeyError(ValueError):
+    def __init__(self, key: str) -> None:
+        super().__init__(key)
+        self.key = key
+
+
+
 @dataclass(frozen=True)
 class ScenarioExpectation:
     decisions: tuple[str, ...]
@@ -242,9 +249,27 @@ def _command_matches(command: str, expected_prefix: str) -> bool:
     return command == expected_prefix or command.startswith(f"{expected_prefix} ")
 
 
+def _object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateJsonKeyError(key)
+        result[key] = value
+    return result
+
+
+def _has_shell_control(command: str) -> bool:
+    return any(control in command for control in ";&|\r\n")
+
+
+
 def evaluate_response(scenario: FieldScenario, raw: str) -> Evaluation:
     try:
-        parsed = json.loads(raw)
+        parsed = json.loads(raw, object_pairs_hook=_object_without_duplicate_keys)
+    except _DuplicateJsonKeyError as exc:
+        failure = f"duplicate_json_key:{exc.key}"
+        criterion = CriterionResult("response_json", Verdict.FAIL, failure)
+        return Evaluation(Verdict.FAIL, (failure,), (criterion,), None)
     except json.JSONDecodeError:
         criterion = CriterionResult("response_json", Verdict.FAIL, "malformed_json")
         return Evaluation(Verdict.FAIL, ("malformed_json",), (criterion,), None)
@@ -305,6 +330,12 @@ def evaluate_response(scenario: FieldScenario, raw: str) -> Evaluation:
     commands_valid = isinstance(commands, list) and all(isinstance(item, str) for item in commands)
     check("commands_type", commands_valid, "commands_not_string_list")
     commands = commands if commands_valid else []
+    for command in commands:
+        check(
+            "command_shell_control",
+            not _has_shell_control(command),
+            "shell_control_command",
+        )
     for required in scenario.expected.required_commands:
         check(
             f"required_command:{required}",
