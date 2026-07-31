@@ -270,8 +270,8 @@ def _validate_batch_id(batch_id: str) -> None:
         raise ValueError("invalid batch-id")
 
 
-def _new_report_run_id() -> str:
-    return f"run-{uuid.uuid4().hex}"
+def _new_report_run_id(batch_id: str) -> str:
+    return f"{batch_id}-run-{uuid.uuid4().hex}"
 
 
 def select_cases(
@@ -408,7 +408,7 @@ def main(argv: list[str] | None = None) -> int:
         if pair.verdict in {Verdict.FAIL, Verdict.BLOCKED}:
             exit_code = 1
         if args.write_result:
-            run_id = _new_report_run_id()
+            run_id = _new_report_run_id(args.batch_id)
             try:
                 write_pressure_report(
                     repo_root,

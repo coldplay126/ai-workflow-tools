@@ -20,6 +20,7 @@ from awf.core.skill_pressure import (
     sha256_skill,
     write_pressure_report,
 )
+import awf.core.skill_pressure as pressure
 from awf.providers.base import ProviderResult
 import run_skill_pressure
 from run_skill_pressure import (
@@ -794,7 +795,7 @@ def test_main_rejects_unsafe_batch_id_before_preflight(
     assert diagnostic in capsys.readouterr().err
 
 
-def test_main_records_redacted_report_with_opaque_run_id(
+def test_main_records_redacted_report_with_batch_scoped_run_id(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -855,10 +856,315 @@ def test_main_records_redacted_report_with_opaque_run_id(
     run_id = persistence["run_id"]
     assert persistence["status"] == "REDACTED"
     assert persistence["report_written"] is True
-    assert run_id.startswith("run-")
+    assert run_id.startswith("batch-1-run-")
     assert "workflow" not in run_id
-    assert "batch-1" not in run_id
     assert output["results"][0]["verdict"] == Verdict.BLOCKED.value
     report_path = pressure_report_path(repo_root, run_id)
     assert report_path.exists()
     assert json.loads(report_path.read_text())["persistence_status"] == "BLOCKED"
+
+
+def _matrix_sha256() -> str:
+    return hashlib.sha256(
+        (
+            REPO_ROOT
+            / "cli"
+            / "tests"
+            / "fixtures"
+            / "skill-validation-matrix.v1.json"
+        ).read_bytes()
+    ).hexdigest()
+
+
+def passing_deterministic_report(tmp_path: Path, *, batch_id: str) -> Path:
+    return pressure.write_deterministic_report(
+        tmp_path,
+        batch_id=batch_id,
+        argv=["uv", "run", "--project", "cli", "pytest", "cli/tests/test_skill_pressure_harness.py", "-q"],
+        started_at="2026-07-30T00:00:00+00:00",
+        finished_at="2026-07-30T00:00:01+00:00",
+        elapsed_sec=1.0,
+        exit_status=0,
+        stdout="deterministic suite passed",
+        stderr="",
+        matrix_sha256=_matrix_sha256(),
+        sources={"cli/tests/test_skill_pressure_harness.py": "c" * 64},
+    )
+
+
+def passing_install_report(tmp_path: Path, matrix: object, *, batch_id: str) -> Path:
+    records = [
+        {
+            "runtime": runtime,
+            "skill": case.name,
+            "source_sha256": "d" * 64,
+            "target_root": f".{runtime}/skills",
+            "status": Verdict.PASS.value,
+            "diagnostic": "linked",
+        }
+        for runtime in ("claude", "agent-skills", "omp")
+        for case in matrix.skills.values()  # type: ignore[attr-defined]
+    ]
+    return pressure.write_install_report(
+        tmp_path,
+        batch_id=batch_id,
+        matrix_sha256=_matrix_sha256(),
+        isolated_home_id="tmp-home-1",
+        records=records,
+    )
+
+
+def passing_discovery_records(matrix: object) -> list[dict[str, object]]:
+    return [
+        {
+            "runtime": runtime,
+            "skill": case.name,
+            "source_sha256": "d" * 64,
+            "verdict": Verdict.PASS.value,
+            "diagnostic": "source fields match",
+        }
+        for runtime in ("claude", "agent-skills", "omp")
+        for case in matrix.skills.values()  # type: ignore[attr-defined]
+    ]
+
+
+def passing_discovery_report(tmp_path: Path, matrix: object, *, batch_id: str) -> Path:
+    path = (
+        tmp_path
+        / ".awf-operations"
+        / "skill-pressure"
+        / f"discovery-{batch_id}.json"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schema": "awf_skill_discovery_report_v1",
+                "batch_id": batch_id,
+                "matrix_sha256": _matrix_sha256(),
+                "records": passing_discovery_records(matrix),
+            }
+        )
+    )
+    return path
+
+
+def passing_field_records(matrix: object, *, batch_id: str = "batch-1") -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for case in matrix.skills.values():  # type: ignore[attr-defined]
+        for repetition in range(1, repetitions_for(case) + 1):
+            record = valid_field_record()
+            record.update(
+                {
+                    "batch_id": batch_id,
+                    "skill": case.name,
+                    "scenario_id": case.scenario.id,
+                    "repetition": repetition,
+                    "severity": case.severity,
+                    "baseline": {
+                        "verdict": Verdict.FAIL.value,
+                        "criteria": [
+                            {
+                                "id": "decision",
+                                "verdict": Verdict.PASS.value,
+                                "evidence": "baseline parsed",
+                            }
+                        ],
+                    },
+                    "with_skill": {
+                        "verdict": Verdict.PASS.value,
+                        "criteria": [
+                            {
+                                "id": "decision",
+                                "verdict": Verdict.PASS.value,
+                                "evidence": "with-skill parsed",
+                            }
+                        ],
+                    },
+                }
+            )
+            records.append(record)
+    return records
+
+
+def passing_field_report_paths(tmp_path: Path, matrix: object, *, batch_id: str) -> list[Path]:
+    paths: list[Path] = []
+    for record in passing_field_records(matrix, batch_id=batch_id):
+        paths.append(
+            write_pressure_report(
+                tmp_path,
+                run_id=f"{batch_id}-{record['skill']}-{record['repetition']}",
+                payload=record,
+                baseline="baseline safe",
+                with_skill="with-skill safe",
+            )
+        )
+    return paths
+
+
+def test_field_record_requires_complete_reproducibility_metadata() -> None:
+    with pytest.raises(pressure.EvidenceError, match="missing field record keys"):
+        pressure.validate_field_record({"matrix_schema": MATRIX.schema})
+
+
+def test_source_bundle_requires_current_hashed_deterministic_and_install_reports(
+    tmp_path: Path,
+) -> None:
+    deterministic = passing_deterministic_report(tmp_path, batch_id="batch-1")
+    install = passing_install_report(tmp_path, MATRIX, batch_id="batch-1")
+    pressure.validate_source_bundle(
+        batch_id="batch-1",
+        deterministic_path=deterministic,
+        install_path=install,
+        discovery_path=passing_discovery_report(tmp_path, MATRIX, batch_id="batch-1"),
+        field_paths=passing_field_report_paths(tmp_path, MATRIX, batch_id="batch-1"),
+    )
+    failed = json.loads(deterministic.read_text())
+    failed["exit_status"] = 1
+    deterministic.write_text(json.dumps(failed))
+    with pytest.raises(pressure.EvidenceError, match="deterministic"):
+        pressure.validate_source_bundle(
+            batch_id="batch-1",
+            deterministic_path=deterministic,
+            install_path=install,
+            discovery_path=passing_discovery_report(tmp_path, MATRIX, batch_id="batch-1"),
+            field_paths=passing_field_report_paths(tmp_path / "second", MATRIX, batch_id="batch-1"),
+        )
+
+
+def test_evidence_matrix_contains_exactly_15_by_9_unique_cells() -> None:
+    cells = pressure.build_evidence_matrix(
+        MATRIX,
+        deterministic_pass=True,
+        install_pass=True,
+        discovery=passing_discovery_records(MATRIX),
+        field=passing_field_records(MATRIX),
+    )
+    pressure.validate_evidence_matrix(MATRIX, cells)
+    assert len(cells) == 135
+    assert len({(cell.skill, cell.category) for cell in cells}) == 135
+
+
+def test_evidence_matrix_rejects_missing_duplicate_and_unjustified_na() -> None:
+    cells = list(
+        pressure.build_evidence_matrix(
+            MATRIX,
+            deterministic_pass=True,
+            install_pass=True,
+            discovery=passing_discovery_records(MATRIX),
+            field=passing_field_records(MATRIX),
+        )
+    )
+    with pytest.raises(pressure.EvidenceError, match="exactly 135"):
+        pressure.validate_evidence_matrix(MATRIX, cells[:-1])
+    with pytest.raises(pressure.EvidenceError, match="duplicate"):
+        pressure.validate_evidence_matrix(MATRIX, [*cells[:-1], cells[0]])
+    cells[0] = pressure.EvidenceCell(
+        skill=cells[0].skill,
+        category=cells[0].category,
+        layer=cells[0].layer,
+        verdict=Verdict.NOT_APPLICABLE,
+        evidence="not applicable",
+        na_reason=None,
+    )
+    with pytest.raises(pressure.EvidenceError, match="N/A requires"):
+        pressure.validate_evidence_matrix(MATRIX, cells)
+
+
+def test_main_redacts_sensitive_persistence_and_continues_next_case(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo_root = tmp_path / "repo"
+    for name in ("wf-status", "analysis"):
+        shutil.copytree(REPO_ROOT / "claude" / "skills" / name, repo_root / "claude" / "skills" / name)
+    calls: list[str] = []
+
+    def fake_probe(*args: object, **kwargs: object) -> ProviderResult:
+        return ProviderResult(0, "omp fake", "", provider_name="omp")
+
+    def fake_execute(case: object, **kwargs: object) -> run_skill_pressure.PairRun:
+        name = case.name  # type: ignore[attr-defined]
+        calls.append(name)
+        baseline = Evaluation(Verdict.FAIL, ("baseline_failure",), (), None)
+        with_skill = Evaluation(Verdict.PASS, (), (), None)
+        return run_skill_pressure.PairRun(
+            evaluation=compare_pair(baseline, with_skill),
+            baseline_result=ProviderResult(
+                0,
+                '{"contact":"person@example.com"}' if name == "wf-status" else "safe baseline",
+                "",
+                provider_name="omp",
+            ),
+            with_skill_result=ProviderResult(0, "safe with-skill", "", provider_name="omp"),
+            skill_sha256="b" * 64,
+        )
+
+    run_ids = iter(("run-sensitive", "run-safe"))
+    monkeypatch.setattr(run_skill_pressure, "probe_omp", fake_probe)
+    monkeypatch.setattr(run_skill_pressure, "execute_pair", fake_execute)
+    monkeypatch.setattr(
+        run_skill_pressure,
+        "_new_report_run_id",
+        lambda *args: f"{args[0]}-{next(run_ids)}" if args else next(run_ids),
+    )
+
+    assert run_skill_pressure.main(
+        [
+            "--repo-root",
+            str(repo_root),
+            "--matrix",
+            str(REPO_ROOT / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json"),
+            "--batch-id",
+            "batch-1",
+            "--model",
+            "test-model",
+            "--skill",
+            "wf-status",
+            "--skill",
+            "analysis",
+            "--write-result",
+            "--json",
+        ]
+    ) == 1
+
+    output = json.loads(capsys.readouterr().out)
+    first, second = output["results"]
+    assert calls == ["wf-status", "analysis"]
+    assert first["verdict"] == Verdict.BLOCKED.value
+    assert first["behavioral_delta"] == "blocked"
+    assert first["remediation_state"] == "blocked_sensitive_data"
+    assert first["persistence"] == {
+        "status": "REDACTED",
+        "run_id": "batch-1-run-sensitive",
+        "report_written": True,
+        "diagnostic": "sensitive_data_redacted",
+    }
+    assert second["verdict"] == Verdict.PASS.value
+
+    redacted_path = pressure_report_path(repo_root, "batch-1-run-sensitive")
+    redacted = json.loads(redacted_path.read_text())
+    assert set(redacted) == {
+        "schema",
+        "recorded_at",
+        "run_id",
+        "persistence_status",
+        "diagnostics",
+        "field_identity",
+    }
+    assert "payload" not in redacted
+    assert "transcripts" not in redacted
+    cells = pressure.build_evidence_matrix(
+        MATRIX,
+        deterministic_pass=True,
+        install_pass=True,
+        discovery=passing_discovery_records(MATRIX),
+        field=[redacted],
+    )
+    blocked = next(
+        cell
+        for cell in cells
+        if cell.skill == "wf-status" and cell.category == "without_skill_baseline"
+    )
+    assert blocked.verdict is Verdict.BLOCKED
