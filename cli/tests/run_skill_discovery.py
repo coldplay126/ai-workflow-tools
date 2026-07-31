@@ -242,9 +242,59 @@ def _unquote_scalar(value: str, *, field: str) -> str:
         raise ValueError(f"invalid {field} frontmatter")
     if value.startswith("'") and value.endswith("'"):
         return value[1:-1].replace("''", "'")
-    if not value:
-        raise ValueError(f"missing {field} frontmatter")
+    if not value or value in {"|", "|-", "|+", ">", ">-", ">+"}:
+        raise ValueError(f"invalid {field} frontmatter")
+    if re.fullmatch(r"[-+]?(?:\d+|\d+\.\d+)|true|false|null|~", value, re.IGNORECASE):
+        raise ValueError(f"{field} frontmatter must be a string")
     return value
+
+
+def _literal_scalar(
+    lines: list[str], start: int, *, field: str, indicator: str
+) -> tuple[str, int]:
+    block: list[str] = []
+    index = start
+    while index < len(lines):
+        line = lines[index]
+        if line and not line.startswith((" ", "\t")):
+            break
+        block.append(line)
+        index += 1
+    indents = [len(line) - len(line.lstrip(" ")) for line in block if line.strip()]
+    if not indents:
+        raise ValueError(f"invalid {field} frontmatter")
+    indent = min(indents)
+    if any(line.strip() and len(line) - len(line.lstrip(" ")) < indent for line in block):
+        raise ValueError(f"invalid {field} frontmatter")
+    value = "\n".join(line[indent:] if line else "" for line in block)
+    if indicator != "|-":
+        value += "\n"
+    return value, index
+
+
+def _identity_frontmatter(lines: list[str]) -> dict[str, str]:
+    frontmatter: dict[str, str] = {}
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if not line or line.startswith((" ", "\t", "#")) or ":" not in line:
+            index += 1
+            continue
+        key, value = line.split(":", 1)
+        if key not in {"name", "description"}:
+            index += 1
+            continue
+        if key in frontmatter:
+            raise ValueError(f"duplicate {key} frontmatter")
+        value = value.strip()
+        if key == "description" and value in {"|", "|-", "|+"}:
+            frontmatter[key], index = _literal_scalar(
+                lines, index + 1, field=key, indicator=value
+            )
+        else:
+            frontmatter[key] = _unquote_scalar(value, field=key)
+            index += 1
+    return frontmatter
 
 
 def _source_metadata(skill_file: Path) -> tuple[str, str, str]:
@@ -257,13 +307,7 @@ def _source_metadata(skill_file: Path) -> tuple[str, str, str]:
         closing = lines.index("---", 1)
     except ValueError as exc:
         raise ValueError(f"unterminated frontmatter: {skill_file}") from exc
-    frontmatter: dict[str, str] = {}
-    for line in lines[1:closing]:
-        if ":" not in line or line.startswith((" ", "\t", "#")):
-            continue
-        key, value = line.split(":", 1)
-        if key in {"name", "description"}:
-            frontmatter[key] = _unquote_scalar(value, field=key)
+    frontmatter = _identity_frontmatter(lines[1:closing])
     try:
         name = frontmatter["name"]
         description = frontmatter["description"]
@@ -366,39 +410,90 @@ def _preflight(
         return HostPreflight(runtime, binary, "", False, version.error_kind, version.returncode)
     if version.returncode != 0:
         return HostPreflight(
-            runtime, binary, "", False, f"preflight_version_exit:{version.returncode}", version.returncode
+            runtime,
+            binary,
+            "",
+            False,
+            f"preflight_version_exit:{version.returncode}",
+            version.returncode,
         )
-    help_result = _invoke(
+    version_text = version.stdout.strip()
+    top_level_help = _invoke(
         process_runner,
         [binary, "--help"],
         cwd=repo_root,
         env=env,
         timeout=10,
     )
-    if help_result.error_kind is not None:
-        return HostPreflight(
-            runtime, binary, version.stdout.strip(), False, help_result.error_kind, help_result.returncode
-        )
-    if help_result.returncode != 0:
+    if top_level_help.error_kind is not None:
         return HostPreflight(
             runtime,
             binary,
-            version.stdout.strip(),
+            version_text,
             False,
-            f"preflight_help_exit:{help_result.returncode}",
-            help_result.returncode,
+            top_level_help.error_kind,
+            top_level_help.returncode,
         )
-    missing = [flag for flag in required_flags(runtime) if not _help_has_flag(help_result.stdout, flag)]
+    if top_level_help.returncode != 0:
+        return HostPreflight(
+            runtime,
+            binary,
+            version_text,
+            False,
+            f"preflight_help_exit:{top_level_help.returncode}",
+            top_level_help.returncode,
+        )
+    if runtime == "agent-skills":
+        if not _help_has_flag(top_level_help.stdout, "exec"):
+            return HostPreflight(
+                runtime,
+                binary,
+                version_text,
+                False,
+                "unsupported_required_flags:exec",
+                78,
+            )
+        scoped_help = _invoke(
+            process_runner,
+            [binary, "exec", "--help"],
+            cwd=repo_root,
+            env=env,
+            timeout=10,
+        )
+        if scoped_help.error_kind is not None:
+            return HostPreflight(
+                runtime,
+                binary,
+                version_text,
+                False,
+                scoped_help.error_kind,
+                scoped_help.returncode,
+            )
+        if scoped_help.returncode != 0:
+            return HostPreflight(
+                runtime,
+                binary,
+                version_text,
+                False,
+                f"preflight_exec_help_exit:{scoped_help.returncode}",
+                scoped_help.returncode,
+            )
+        help_text = scoped_help.stdout
+        flags = tuple(flag for flag in required_flags(runtime) if flag != "exec")
+    else:
+        help_text = top_level_help.stdout
+        flags = required_flags(runtime)
+    missing = [flag for flag in flags if not _help_has_flag(help_text, flag)]
     if missing:
         return HostPreflight(
             runtime,
             binary,
-            version.stdout.strip(),
+            version_text,
             False,
             f"unsupported_required_flags:{','.join(missing)}",
             78,
         )
-    return HostPreflight(runtime, binary, version.stdout.strip(), True, "", 0)
+    return HostPreflight(runtime, binary, version_text, True, "", 0)
 
 
 def _verify_link(target: Path, source: Path) -> bool:

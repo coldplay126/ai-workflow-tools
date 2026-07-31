@@ -1507,6 +1507,14 @@ class _FakeDiscoveryProcess:
             if self.failure == (runtime, "preflight", "timeout"):
                 raise subprocess.TimeoutExpired(argv, 1)
             return DiscoveryProcessResult(0, f"{runtime} fake 1.0", "", 0.01)
+        if runtime == "agent-skills" and argv[1:] == ["--help"]:
+            output = "" if self.failure == (runtime, "preflight", "missing-exec") else "exec"
+            return DiscoveryProcessResult(0, output, "", 0.01)
+        if runtime == "agent-skills" and argv[1:] == ["exec", "--help"]:
+            flags = [flag for flag in required_flags(runtime) if flag != "exec"]
+            if self.failure == (runtime, "preflight", "missing-exec-flag"):
+                flags.pop()
+            return DiscoveryProcessResult(0, " ".join(flags), "", 0.01)
         if argv[1:] == ["--help"]:
             flags = list(required_flags(runtime))
             if self.failure == (runtime, "preflight", "missing-flag"):
@@ -1625,6 +1633,44 @@ def test_skill_discovery_preflight_requires_exact_long_option_tokens(
     } == {"BLOCKED"}
 
 
+def test_agent_skills_preflight_reads_top_level_and_exec_scoped_help(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, fake, _ = _run_fake_discovery(
+        tmp_path, monkeypatch, failure=("agent-skills", "preflight", "missing-exec-flag")
+    )
+
+    agent_calls = [argv for argv, _ in fake.calls if argv[0] == "fake-agent"]
+    assert agent_calls[:3] == [
+        ["fake-agent", "--version"],
+        ["fake-agent", "--help"],
+        ["fake-agent", "exec", "--help"],
+    ]
+    assert {
+        record["verdict"]
+        for record in result.discovery_records
+        if record["runtime"] == "agent-skills"
+    } == {"BLOCKED"}
+
+
+def test_agent_skills_preflight_blocks_when_top_level_exec_is_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, fake, _ = _run_fake_discovery(
+        tmp_path, monkeypatch, failure=("agent-skills", "preflight", "missing-exec")
+    )
+
+    assert [argv for argv, _ in fake.calls if argv[0] == "fake-agent"][:2] == [
+        ["fake-agent", "--version"],
+        ["fake-agent", "--help"],
+    ]
+    assert {
+        record["verdict"]
+        for record in result.discovery_records
+        if record["runtime"] == "agent-skills"
+    } == {"BLOCKED"}
+
+
 def test_skill_discovery_uses_exact_safe_host_argv() -> None:
     prompt = "describe the skill"
     assert claude_argv("claude", "sonnet", "analysis", prompt) == [
@@ -1712,6 +1758,26 @@ def test_skill_discovery_uses_the_first_h1_after_frontmatter_not_a_leading_h2(
     )
 
     assert expected["analysis"].body_heading == "# /analysis — 소스코드 분석 파이프라인"
+
+
+def test_skill_discovery_parses_wf_discovery_literal_description_exactly(
+    tmp_path: Path,
+) -> None:
+    repo_root = _copy_discovery_repo(tmp_path)
+    expected = load_expected_skills(
+        repo_root,
+        repo_root / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json",
+    )
+
+    assert expected["wf-discovery"].description == (
+        "워크플로우 프로젝트 디스커버리. 기능 설명을 분석하여 관련 프로젝트를 식별하고 추천.\n"
+        "TRIGGER when: /wf-discovery 실행 시,\n"
+        "             사용자가 어느 프로젝트에서 작업해야 할지 질문할 때,\n"
+        "             기능 요구사항이 여러 레포에 걸칠 수 있을 때.\n"
+        "DO NOT TRIGGER when: 이미 프로젝트가 결정된 상태,\n"
+        "                    wf pipeline 진행 중,\n"
+        "                    단순 코드 질문.\n"
+    )
 
 
 @pytest.mark.parametrize(
@@ -1838,7 +1904,9 @@ def test_skill_discovery_keeps_successful_roots_when_one_root_is_blocked(
         if record["runtime"] == "agent-skills"
     } == {"BLOCKED"}
     assert not any(
-        argv[0] == "fake-agent" and len(argv) > 2 for argv, _ in fake.calls
+        argv[0] == "fake-agent"
+        and argv[1:] not in (["--version"], ["--help"], ["exec", "--help"])
+        for argv, _ in fake.calls
     )
 
 
