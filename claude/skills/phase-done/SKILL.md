@@ -21,6 +21,8 @@ contract_template: "repo/claude/skills/wf-orchestrator/templates/agent-cards/don
 runtime_contract: ".workflow/agent-cards/done.json"
 ---
 
+# /phase-done — Phase 7 최종확인
+
 ## Deterministic Phase Preflight
 
 수동으로 이 phase를 실행할 때도 [wf-orchestrator/reference/deterministic-preflight.md](../wf-orchestrator/reference/deterministic-preflight.md)의

@@ -15,6 +15,8 @@ cli:
   command: "awf wf reset"
 ---
 
+# /wf-reset — 워크플로우 초기화/폐기
+
 ## User Input
 
 ```text

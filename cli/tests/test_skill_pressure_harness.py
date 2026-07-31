@@ -1966,3 +1966,11 @@ def test_skill_discovery_missing_canonical_skill_file_still_writes_45_blocked_re
         for record in result.discovery_records
         if record["skill"] == "analysis"
     } == {"BLOCKED"}
+
+def test_all_canonical_skills_expose_discovery_h1() -> None:
+    expected = load_expected_skills(
+        REPO_ROOT,
+        REPO_ROOT / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json",
+    )
+
+    assert sorted(skill for skill, metadata in expected.items() if not metadata.body_heading) == []
