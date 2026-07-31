@@ -596,9 +596,11 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
     }
 
 
-def test_release_worktree_lifecycle_skill_orders_imported_pr_cleanup() -> None:
-    path = REPO_ROOT / "claude" / "skills" / "release-worktree-lifecycle" / "SKILL.md"
-    text = path.read_text(encoding="utf-8")
+def test_canonical_imported_pr_cleanup_docs_share_ordered_safety_contract() -> None:
+    paths = (
+        REPO_ROOT / "claude" / "skills" / "release-worktree-lifecycle" / "SKILL.md",
+        CLI_README,
+    )
     expected_commands = (
         "awf wt import --root <root> --dry-run --json",
         "awf wt import --root <root> --apply --json",
@@ -608,26 +610,34 @@ def test_release_worktree_lifecycle_skill_orders_imported_pr_cleanup() -> None:
         "awf wt finish --repo-root <repo-root> --pr <merged-pr> --json",
         "awf wt finish --repo-root <repo-root> --pr <merged-pr> --apply --json",
     )
+    expected_argv = tuple(_argv_from_skill_command(command) for command in expected_commands)
 
     parser = build_parser()
-    for command in expected_commands:
-        parsed = parser.parse_args(_argv_from_skill_command(command))
+    for argv in expected_argv:
+        parsed = parser.parse_args(argv)
         assert parsed.command == "wt"
 
-    displayed_commands = _shell_fenced_awf_commands(text)
-    start = displayed_commands.index(expected_commands[0])
-    assert displayed_commands[start : start + len(expected_commands)] == expected_commands
-
-    prose = " ".join(text.lower().split())
     required_prose = (
+        "parent directory whose direct-child repositories and worktrees are inventoried",
         "must not infer a pr automatically",
         "must not use direct git or filesystem cleanup",
         "before removing a source worktree backing installed cli or skill links, "
-        "must install the cli and skill from a stable merged-main checkout and "
-        "verify every cli and skill link resolves from that checkout",
+        "must install the cli and skill from a stable merged-main checkout",
+        "verify that installed `awf` and every skill link no longer resolve to "
+        "the source worktree",
     )
-    for requirement in required_prose:
-        assert requirement in prose
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        displayed_argv = tuple(
+            _argv_from_skill_command(command)
+            for command in _shell_fenced_awf_commands(text)
+        )
+        start = displayed_argv.index(expected_argv[0])
+        assert displayed_argv[start : start + len(expected_argv)] == expected_argv
+
+        prose = " ".join(text.lower().split())
+        for requirement in required_prose:
+            assert requirement in prose
 
 
 def test_release_worktree_lifecycle_shell_examples_match_contract() -> None:

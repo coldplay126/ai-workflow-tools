@@ -90,7 +90,7 @@ registry reads; `status --refresh` records observed provider/deployment state
 and lease transitions in the registry, so it needs a writable state database.
 `import` records discovered worktrees as unmanaged. For PR-linked cleanup, an
 imported worktree remains unmanaged until an explicit `awf wt adopt --lease
-<id> --pr <merged-pr> --apply`; AWF does not infer a PR automatically.
+<id> --pr <merged-pr> --apply`. MUST NOT infer a PR automatically.
 
 With `--json`, stdout is one versioned result envelope; diagnostics stay on
 stderr:
@@ -165,9 +165,16 @@ awf wt status --repo-root . --initiative reward-widget --json
 
 Imported worktree PR-link and finish flow:
 
-In this example, `<root>` is the direct-child repository root to inventory,
-`<id>` is the selected imported lease ID, `<merged-pr>` is its already-merged
-PR number, and `<repo-root>` is that repository's root.
+In this example, `<root>` is the parent directory whose direct-child
+repositories and worktrees are inventoried, `<id>` is the selected imported
+lease ID, `<merged-pr>` is its already-merged PR number, and `<repo-root>` is
+that repository's root.
+Before running this sequence, identify only the source worktree to remove.
+Before removing a source worktree backing installed CLI or Skill links, MUST
+install the CLI and Skill from a stable merged-main checkout. Verify that
+installed `awf` and every Skill link no longer resolve to the source worktree
+and instead resolve to that checkout. Do not remove unrelated imported
+worktrees or branches.
 
 ```bash
 # Inventory first; then register only the reviewed imported worktrees.
@@ -192,7 +199,7 @@ code `4`; stop on every blocker or external error.
 
 Import preserves the branch. `finish` removes only the explicitly linked
 worktree through its normal merged-PR, clean-worktree, and deployment-health
-gates; do not use unmanaged direct Git or filesystem cleanup.
+gates. MUST NOT use direct Git or filesystem cleanup.
 
 Promotion and finish flow:
 

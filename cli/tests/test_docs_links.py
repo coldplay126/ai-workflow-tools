@@ -35,6 +35,11 @@ PYTHON_FENCE_RE = re.compile(
     r"^[ \t]*```python\s*\n(.*?)\n[ \t]*```", re.DOTALL | re.MULTILINE
 )
 URL_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
+PARTIAL_PLAN_PYTHON_FENCE_LINES = {
+    "docs/superpowers/plans/2026-07-30-imported-worktree-pr-link.md": frozenset(
+        {82, 157, 295}
+    ),
+}
 
 
 @lru_cache(maxsize=1)
@@ -261,9 +266,7 @@ def test_markdown_toml_fences_are_parseable_when_not_placeholders() -> None:
 def test_markdown_python_fences_are_parseable_when_not_placeholders() -> None:
     invalid: list[str] = []
     for path in _markdown_files():
-        # Implementation plans intentionally include partial code fragments.
-        if path.parent == REPO_ROOT / "docs" / "superpowers" / "plans":
-            continue
+        relative_path = path.relative_to(REPO_ROOT).as_posix()
         text = path.read_text(encoding="utf-8")
         for match in PYTHON_FENCE_RE.finditer(text):
             block = match.group(1)
@@ -271,6 +274,8 @@ def test_markdown_python_fences_are_parseable_when_not_placeholders() -> None:
                 continue
 
             line = _line_number(text, match.start())
+            if line in PARTIAL_PLAN_PYTHON_FENCE_LINES.get(relative_path, frozenset()):
+                continue
             try:
                 compile(textwrap.dedent(block), str(path), "exec")
             except SyntaxError as exc:

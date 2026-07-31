@@ -69,16 +69,17 @@ After the production PR merges, MUST use the repository's existing CI and rollou
 
 Use this pressure-safe procedure only for an imported worktree whose source
 branch must be preserved until its exact merged PR has been linked and the
-normal finish gates pass. In this section, `<root>` is the direct-child
-repository root to inventory, `<id>` is the selected imported lease ID,
-`<merged-pr>` is its already-merged PR number, and `<repo-root>` is that
-repository's root.
+normal finish gates pass. In this section, `<root>` is the parent directory
+whose direct-child repositories and worktrees are inventoried, `<id>` is the
+selected imported lease ID, `<merged-pr>` is its already-merged PR number, and
+`<repo-root>` is that repository's root.
 
 Before this procedure, identify only the source worktree to remove. Before
 removing a source worktree backing installed CLI or Skill links, MUST install
-the CLI and Skill from a stable merged-main checkout and verify every CLI and
-Skill link resolves from that checkout, including the installed `awf` command.
-Do not remove unrelated imported worktrees or branches.
+the CLI and Skill from a stable merged-main checkout. Verify that installed
+`awf` and every Skill link no longer resolve to the source worktree and instead
+resolve to that checkout. Do not remove unrelated imported worktrees or
+branches.
 
 ```sh
 awf wt import --root <root> --dry-run --json
