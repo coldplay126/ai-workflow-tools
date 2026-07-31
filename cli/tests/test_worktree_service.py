@@ -1848,6 +1848,44 @@ def test_adopt_links_matching_merged_pr_atomically(harness: Harness) -> None:
     assert event.pr_number == 129
     assert harness.github.view_calls == [129, 129]
 
+
+@pytest.mark.parametrize(
+    "pr_number",
+    (None, 129),
+    ids=("without_pr", "with_pr"),
+)
+def test_adopt_apply_reports_registry_transition_conflicts(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    pr_number: int | None,
+) -> None:
+    imported = harness.import_external("legacy-release")
+    if pr_number is not None:
+        harness.github.prs[pr_number] = replace(
+            merged_pr(number=pr_number, head_sha=imported.head_sha),
+            head_ref=imported.branch,
+        )
+    before = harness.registry.get_lease(imported.id)
+    assert before is not None
+    before_events = harness.registry.list_events(imported.id)
+
+    def fail_transition(*args: object, **kwargs: object) -> Lease:
+        raise RuntimeError("registry temporarily unavailable")
+
+    monkeypatch.setattr(harness.registry, "transition", fail_transition)
+    keyword_args = {} if pr_number is None else {"pr_number": pr_number}
+
+    result = harness.service.adopt(imported.id, apply=True, **keyword_args)
+
+    assert result.command == "wt.adopt"
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "registry_conflict"
+    assert result.lease == before
+    assert harness.registry.get_lease(imported.id) == before
+    assert harness.registry.list_events(imported.id) == before_events
+    assert harness.github.view_calls == ([] if pr_number is None else [pr_number, pr_number])
+
+
 def test_import_keeps_exact_initiative_and_skips_identity_collisions(
     tmp_path: Path,
 ) -> None:

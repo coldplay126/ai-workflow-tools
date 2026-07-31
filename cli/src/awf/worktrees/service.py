@@ -2044,13 +2044,18 @@ class WorktreeService:
                 blocker = self._adoption_blocker(imported)
                 if blocker is not None:
                     return blocker
-                adopted = self.registry.transition(
-                    imported.id,
-                    imported.state,
-                    expected_version=imported.version,
-                    managed=True,
-                    summary="imported lease adopted",
-                )
+                try:
+                    adopted = self.registry.transition(
+                        imported.id,
+                        imported.state,
+                        expected_version=imported.version,
+                        managed=True,
+                        summary="imported lease adopted",
+                    )
+                except (RuntimeError, sqlite3.Error) as error:
+                    return self._adopt_blocked(
+                        "registry_conflict", str(error), lease=imported
+                    )
             return CommandResult.ok("wt.adopt", decision="ready", lease=adopted)
 
         blocker = self._adoption_blocker(imported)
@@ -2088,16 +2093,21 @@ class WorktreeService:
             pull_request = self._adoption_pr(imported, pr_number)
             if isinstance(pull_request, CommandResult):
                 return pull_request
-            adopted = self.registry.transition(
-                imported.id,
-                imported.state,
-                expected_version=imported.version,
-                event_type="imported_lease_pr_linked",
-                summary=f"imported lease linked to pull request #{pull_request.number}",
-                observed_head_sha=pull_request.head_sha,
-                pr_number=pull_request.number,
-                managed=True,
-            )
+            try:
+                adopted = self.registry.transition(
+                    imported.id,
+                    imported.state,
+                    expected_version=imported.version,
+                    event_type="imported_lease_pr_linked",
+                    summary=f"imported lease linked to pull request #{pull_request.number}",
+                    observed_head_sha=pull_request.head_sha,
+                    pr_number=pull_request.number,
+                    managed=True,
+                )
+            except (RuntimeError, sqlite3.Error) as error:
+                return self._adopt_blocked(
+                    "registry_conflict", str(error), lease=imported
+                )
         return CommandResult.ok("wt.adopt", decision="ready", lease=adopted)
 
     def _adoption_pr(
