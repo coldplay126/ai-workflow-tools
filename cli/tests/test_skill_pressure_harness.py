@@ -8,6 +8,7 @@ import pytest
 
 from awf.core.skill_pressure import (
     Evaluation,
+    HIGH_RISK_SKILLS,
     SensitiveDataError,
     Verdict,
     compare_pair,
@@ -16,6 +17,15 @@ from awf.core.skill_pressure import (
     pressure_report_path,
     sha256_skill,
     write_pressure_report,
+)
+from awf.providers.base import ProviderResult
+from run_skill_pressure import (
+    build_prompt,
+    execute_pair,
+    expanded_runs,
+    probe_omp,
+    repetitions_for,
+    select_cases,
 )
 
 
@@ -385,3 +395,124 @@ def test_partial_failure_removes_new_transcript_without_overwriting_existing_fil
     assert not (transcript_root / "baseline.txt").exists()
     assert preexisting.read_text() == "prior evidence"
     assert not pressure_report_path(tmp_path, run_id).exists()
+
+
+
+def test_prompt_requires_one_strict_json_object() -> None:
+    scenario = MATRIX.skills["wf-status"].scenario
+    prompt = build_prompt(scenario)
+
+    assert '"selected_skill"' in prompt
+    assert '"decision"' in prompt
+    assert "Do not run commands" in prompt
+    assert scenario.task in prompt
+
+
+def test_execute_pair_uses_no_skills_then_exact_skill() -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(
+        argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int
+    ) -> ProviderResult:
+        calls.append(argv)
+        selected = "wf-status" if "--skills=wf-status" in argv else "wf-status"
+        return ProviderResult(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "selected_skill": selected,
+                    "decision": "REPORT",
+                    "reason_codes": ["workflow_not_initialized"],
+                    "sections": [],
+                    "commands": [],
+                }
+            ),
+            stderr="",
+            provider_name="omp",
+            model="test-model",
+        )
+
+    run = execute_pair(
+        MATRIX.skills["wf-status"],
+        repo_root=REPO_ROOT,
+        omp_command="omp",
+        model="test-model",
+        timeout_sec=30,
+        run_process=fake_run,
+    )
+
+    assert "--no-skills" in calls[0]
+    assert "--skills=wf-status" in calls[1]
+    assert run.evaluation.with_skill.verdict is Verdict.PASS
+    assert run.with_skill_result.stdout
+
+
+def test_execute_pair_maps_provider_timeout_to_blocked() -> None:
+    def timed_out(
+        argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int
+    ) -> ProviderResult:
+        return ProviderResult(
+            returncode=124,
+            stdout="",
+            stderr="provider_timeout",
+            provider_name="omp",
+        )
+
+    run = execute_pair(
+        MATRIX.skills["wf-status"],
+        repo_root=REPO_ROOT,
+        omp_command="omp",
+        model="test-model",
+        timeout_sec=30,
+        run_process=timed_out,
+    )
+
+    assert run.evaluation.verdict is Verdict.BLOCKED
+    assert run.evaluation.with_skill.verdict is Verdict.BLOCKED
+
+
+def test_case_selection_rejects_unknown_skill() -> None:
+    with pytest.raises(ValueError, match="unknown Skills: missing"):
+        select_cases(MATRIX, ["missing"], select_all=False)
+
+
+def test_high_risk_skills_repeat_three_times() -> None:
+    assert repetitions_for(MATRIX.skills["release-worktree-lifecycle"]) == 3
+    assert repetitions_for(MATRIX.skills["wf-status"]) == 1
+
+
+def test_all_selection_expands_to_exact_27_unique_pairs() -> None:
+    selected = select_cases(MATRIX, None, select_all=True)
+    identities = [(case.name, repetition) for case, repetition in expanded_runs(selected)]
+
+    assert len(identities) == 27
+    assert len(set(identities)) == 27
+    assert {name for name, _ in identities} == set(MATRIX.skills)
+    assert {
+        name for name in MATRIX.skills if sum(pair[0] == name for pair in identities) == 3
+    } == HIGH_RISK_SKILLS
+
+
+def test_probe_omp_preserves_timeout_as_blocked_preflight() -> None:
+    def timed_out(
+        argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int
+    ) -> ProviderResult:
+        return ProviderResult(124, "", "provider_timeout", provider_name="omp")
+
+    result = probe_omp("omp", repo_root=REPO_ROOT, run_process=timed_out)
+
+    assert result.returncode == 124
+    assert result.stderr == "provider_timeout"
+
+
+def test_probe_omp_rejects_unsupported_skill_selection_flags() -> None:
+    def missing_flags(
+        argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int
+    ) -> ProviderResult:
+        stdout = "omp v1" if "--version" in argv else "--no-tools --no-session"
+        return ProviderResult(0, stdout, "", provider_name="omp")
+
+    result = probe_omp("omp", repo_root=REPO_ROOT, run_process=missing_flags)
+
+    assert result.returncode == 78
+    assert "unsupported_omp_flags" in result.stderr
