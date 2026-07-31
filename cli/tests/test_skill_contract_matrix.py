@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -14,6 +14,7 @@ from awf.core.skill_pressure import (
     MatrixError,
     load_skill_matrix,
 )
+from awf.core.state import PHASE_GATE, PHASE_ORDER
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -451,3 +452,195 @@ def test_agent_card_contract_rejects_invalid_mutations() -> None:
     del cards["plan"]["gate"]["on_pass"]["next_phase"]
     with pytest.raises(AssertionError):
         _assert_agent_cards_match_declared_schema(cards)
+
+PHASE_CONTRACTS = {
+    "plan": {
+        "predecessor": None,
+        "gate": "G1",
+        "next": "review",
+        "retry": 3,
+        "fail_next": {
+            "missing_artifact": "plan",
+            "clarification_needed": "plan",
+            "fr_coverage_gap": "plan",
+        },
+        "hil": False,
+        "modes": {"inline", "delegated"},
+    },
+    "review": {
+        "predecessor": "plan",
+        "gate": "G2",
+        "next": "approve",
+        "retry": 2,
+        "fail_next": {"critical_found": "plan", "high_only": None},
+        "hil": False,
+        "modes": {"inline", "delegated"},
+    },
+    "approve": {
+        "predecessor": "review",
+        "gate": "G3",
+        "next": "impl",
+        "retry": 1,
+        "fail_next": {"revision": "plan", "rejected": None},
+        "hil": True,
+        "modes": {"inline"},
+    },
+    "impl": {
+        "predecessor": "approve",
+        "gate": "G4",
+        "next": "verify",
+        "retry": 5,
+        "fail_next": {"incomplete_tasks": "impl"},
+        "hil": False,
+        "modes": {"inline", "delegated"},
+    },
+    "verify": {
+        "predecessor": "impl",
+        "gate": "G5",
+        "next": "test",
+        "retry": 2,
+        "fail_next": {
+            "scope_violation": "approve",
+            "impl_bug": "impl",
+            "arch_issue": "plan",
+        },
+        "hil": False,
+        "modes": {"inline", "delegated"},
+    },
+    "test": {
+        "predecessor": "verify",
+        "gate": "G6",
+        "next": "done",
+        "retry": 3,
+        "fail_next": {"regression_failure": "impl"},
+        "hil": False,
+        "modes": {"inline", "delegated"},
+    },
+    "done": {
+        "predecessor": "test",
+        "gate": None,
+        "next": None,
+        "retry": 0,
+        "fail_next": {},
+        "hil": True,
+        "modes": {"inline"},
+    },
+}
+
+
+def _skill_frontmatter(path: Path) -> dict[str, str | None]:
+    match = FRONTMATTER_RE.match(path.read_text(encoding="utf-8"))
+    assert match is not None
+    block = match.group(1)
+    return {
+        key: _top_level_value(block, key)
+        for key in ("name", "phase", "gate")
+    }
+
+
+def test_phase_cards_match_state_machine_skill_metadata_and_routes() -> None:
+    assert PHASE_ORDER == ["plan", "review", "approve", "impl", "verify", "test", "done"]
+    for index, (phase, expected) in enumerate(PHASE_CONTRACTS.items()):
+        assert expected["predecessor"] == (PHASE_ORDER[index - 1] if index else None)
+        assert PHASE_GATE.get(phase) == expected["gate"]
+        card = json.loads((AGENT_CARD_ROOT / "agent-cards" / f"{phase}.json").read_text())
+        metadata = _skill_frontmatter(SKILLS_ROOT / f"phase-{phase}" / "SKILL.md")
+        assert card["name"] == metadata["name"] == f"phase-{phase}"
+        assert metadata["phase"] == phase
+        assert metadata.get("gate") == expected["gate"]
+        assert card["gate"]["id"] == expected["gate"]
+        assert card["gate"]["on_pass"]["next_phase"] == expected["next"]
+        assert {
+            key: route.get("next_phase")
+            for key, route in card["gate"]["on_fail"].items()
+        } == expected["fail_next"]
+        assert card["retry"]["max"] == expected["retry"]
+        assert card["hil"] is expected["hil"]
+        assert set(card["capabilities"]["execution_modes"]) == expected["modes"]
+
+
+OUTCOME_TOKENS = {
+    "analysis": ("allow", "dry_run_only"),
+    "multi-agent": ("PASS", "FAIL", "ESCALATE"),
+    "release-worktree-lifecycle": (
+        "reuse",
+        "preview",
+        "ready",
+        "removed",
+        "blocked",
+        "exit code `4`",
+    ),
+    "wf": ("unknown", "dry-run"),
+    "wf-orchestrator": ("allow", "dry_run_only", "nonzero"),
+    "wf-reset": ("archive", "rollback"),
+    "wf-status": ("provider_status", ".workflow"),
+}
+
+
+def test_skills_retain_required_outcome_vocabulary() -> None:
+    missing: list[str] = []
+    for skill, tokens in OUTCOME_TOKENS.items():
+        text = (SKILLS_ROOT / skill / "SKILL.md").read_text(encoding="utf-8")
+        for token in tokens:
+            if token not in text:
+                missing.append(f"{skill}:{token}")
+    assert missing == []
+
+
+EXTENSIONS = {
+    "json": ".json",
+    "md": ".md",
+    "yaml": ".yaml",
+    "yml": ".yml",
+    "txt": ".txt",
+}
+
+
+def test_manifests_match_identity_and_every_declared_resource() -> None:
+    for manifest_path in sorted(SKILLS_ROOT.glob("*/manifest.json")):
+        skill_dir = manifest_path.parent
+        manifest = json.loads(manifest_path.read_text())
+        skill_text = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+        assert manifest["skill"] == skill_dir.name
+        assert manifest["version"] == _top_level_value(skill_text, "version")
+        assert manifest["categories"]
+        for category, declaration in manifest["categories"].items():
+            assert declaration["type"] in EXTENSIONS
+            relative = PurePosixPath(declaration.get("path", category))
+            assert not relative.is_absolute() and ".." not in relative.parts
+            resource_dir = skill_dir / relative
+            extension = EXTENSIONS[declaration["type"]]
+            resources = sorted(resource_dir.rglob(f"*{extension}"))
+            assert resource_dir.is_dir(), f"missing resource dir: {resource_dir}"
+            assert resources, f"empty resource category: {skill_dir.name}/{category}"
+            for resource in resources:
+                assert resource.is_file()
+                if extension == ".json":
+                    json.loads(resource.read_text())
+
+
+def test_workflow_artifact_paths_are_workflow_relative() -> None:
+    for card_path in sorted((AGENT_CARD_ROOT / "agent-cards").glob("*.json")):
+        card = json.loads(card_path.read_text())
+        declarations = (
+            card["input"].get("required_artifacts", [])
+            + card["output"].get("artifacts", [])
+        )
+        for declaration in declarations:
+            relative = PurePosixPath(declaration["path"])
+            assert not relative.is_absolute()
+            assert ".." not in relative.parts
+
+
+def test_wf_slash_dispatcher_exposes_only_supported_routes() -> None:
+    text = (SKILLS_ROOT / "wf" / "SKILL.md").read_text(encoding="utf-8")
+    route_section = text.split("## Ownership", 1)[0]
+    routes = set(re.findall(r"(?m)^- `(/wf[^`]*)`", route_section))
+    assert routes == {
+        "/wf",
+        "/wf init <concept>",
+        "/wf resume",
+        "/wf status",
+        "/wf reset <action>",
+    }
+    assert "/wf ship" not in routes

@@ -61,7 +61,7 @@ awf ready --gate workflow-run --repo-root . --json
 
 - exit code `0` (`decision: "allow"`)일 때만 `.workflow/` 생성 또는 Phase 실행으로 진행합니다.
 - exit code `10` (`decision: "dry_run_only"`)이면 provider 호출 없이 `awf wf next --dry-run` 또는 상태 점검까지만 수행합니다.
-- 그 외 non-zero는 오케스트레이션을 중단하고 `gate.recommended_next`의 명령만 제안합니다.
+- 그 외 nonzero는 오케스트레이션을 중단하고 `gate.recommended_next`의 명령만 제안합니다.
 - `awf wf next --dry-run --output-format json` 결과에서 다음 phase, provider prompt, artifact 경로가 이해되지 않으면 provider-backed 실행으로 넘어가지 않습니다.
 
 `awf wf init`과 provider-backed `awf wf next`도 같은 gate를 내부에서 다시 확인합니다. 상위 wrapper가 이미 같은 판정을 수행한 경우에만 `--no-ready-gate`를 사용합니다.
