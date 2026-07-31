@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import sys
 from collections import Counter
@@ -18,14 +17,14 @@ from awf.core.skill_pressure import (  # noqa: E402
     deterministic_report_path,
     discovery_report_path,
     install_report_path,
-    load_skill_matrix,
+    source_bundle_snapshots,
     validate_evidence_matrix,
     validate_source_bundle,
+    verify_source_bundle_unchanged,
     write_evidence_summary,
 )
 
 
-MATRIX_RELATIVE_PATH = Path("cli/tests/fixtures/skill-validation-matrix.v1.json")
 
 
 def _read_object(path: Path, *, label: str) -> Mapping[str, Any]:
@@ -38,28 +37,6 @@ def _read_object(path: Path, *, label: str) -> Mapping[str, Any]:
     return payload
 
 
-def _read_source_snapshot(
-    reference: object, *, label: str
-) -> Mapping[str, Any]:
-    if not isinstance(reference, Mapping):
-        raise EvidenceError(f"invalid {label} source reference")
-    path_value = reference.get("path")
-    expected_sha256 = reference.get("sha256")
-    if not isinstance(path_value, str) or not isinstance(expected_sha256, str):
-        raise EvidenceError(f"invalid {label} source reference")
-    try:
-        raw = Path(path_value).read_bytes()
-    except OSError as exc:
-        raise EvidenceError(f"{label} source could not be loaded") from exc
-    if hashlib.sha256(raw).hexdigest() != expected_sha256:
-        raise EvidenceError(f"{label} source hash mismatch")
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise EvidenceError(f"{label} source could not be loaded") from exc
-    if not isinstance(payload, Mapping):
-        raise EvidenceError(f"{label} source must be an object")
-    return payload
 
 
 def _field_batch_id(report: Mapping[str, Any]) -> object:
@@ -90,44 +67,52 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo-root", required=True)
     args = parser.parse_args(argv)
 
-    repo_root = Path(args.repo_root).resolve()
-    matrix_path = repo_root / MATRIX_RELATIVE_PATH
+    repo_root = Path(args.repo_root).absolute()
     try:
-        matrix = load_skill_matrix(matrix_path)
         deterministic_path = deterministic_report_path(repo_root, args.batch_id)
         install_path = install_report_path(repo_root, args.batch_id)
         discovery_path = discovery_report_path(repo_root, args.batch_id)
         field_paths = _field_paths(repo_root, args.batch_id)
         sources = validate_source_bundle(
+            repo_root=repo_root,
             batch_id=args.batch_id,
             deterministic_path=deterministic_path,
             install_path=install_path,
             discovery_path=discovery_path,
             field_paths=field_paths,
         )
-        _read_source_snapshot(sources["deterministic"], label="deterministic")
-        _read_source_snapshot(sources["install"], label="install")
-        discovery = _read_source_snapshot(sources["discovery"], label="discovery")
-        field_references = sources["field"]
-        if not isinstance(field_references, tuple):
-            raise EvidenceError("invalid field source references")
-        field = [
-            _read_source_snapshot(reference, label="field")
-            for reference in field_references
-        ]
+        snapshots = source_bundle_snapshots(sources)
+        deterministic = snapshots["deterministic"]
+        install = snapshots["install"]
+        discovery = snapshots["discovery"]
+        field = snapshots["field"]
+        if (
+            not isinstance(deterministic, Mapping)
+            or not isinstance(install, Mapping)
+            or not isinstance(discovery, Mapping)
+            or not isinstance(field, tuple)
+        ):
+            raise EvidenceError("invalid validated source snapshots")
         discovery_records = discovery.get("records")
+        install_records = install.get("records")
         if not isinstance(discovery_records, list) or not all(
             isinstance(record, Mapping) for record in discovery_records
         ):
             raise EvidenceError("discovery report records must be a list")
+        if not isinstance(install_records, list) or not all(
+            isinstance(record, Mapping) for record in install_records
+        ):
+            raise EvidenceError("install report records must be a list")
+        matrix = sources.matrix
         cells = build_evidence_matrix(
             matrix,
-            deterministic_pass=True,
-            install_pass=True,
+            deterministic_pass=deterministic.get("exit_status") == 0,
+            install_pass=all(record.get("status") == Verdict.PASS.value for record in install_records),
             discovery=discovery_records,
             field=field,
         )
         validate_evidence_matrix(matrix, cells)
+        verify_source_bundle_unchanged(sources)
         if any(cell.verdict in {Verdict.FAIL, Verdict.BLOCKED} for cell in cells):
             raise EvidenceError("current-batch evidence contains FAIL or BLOCKED")
         summary = write_evidence_summary(

@@ -878,10 +878,15 @@ def _matrix_sha256() -> str:
 
 
 def _provision_matrix(repo_root: Path) -> None:
-    matrix_path = repo_root / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json"
-    matrix_path.parent.mkdir(parents=True, exist_ok=True)
-    matrix_path.write_bytes(
-        (REPO_ROOT / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json").read_bytes()
+    for relative in pressure.DETERMINISTIC_SOURCE_FILES:
+        source = REPO_ROOT / relative
+        target = repo_root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    shutil.copytree(
+        REPO_ROOT / "claude" / "skills",
+        repo_root / "claude" / "skills",
+        dirs_exist_ok=True,
     )
 
 
@@ -890,7 +895,7 @@ def passing_deterministic_report(tmp_path: Path, *, batch_id: str) -> Path:
     return pressure.write_deterministic_report(
         tmp_path,
         batch_id=batch_id,
-        argv=["uv", "run", "--project", "cli", "pytest", "cli/tests/test_skill_pressure_harness.py", "-q"],
+        argv=pressure.DETERMINISTIC_PYTEST_ARGV,
         started_at="2026-07-30T00:00:00+00:00",
         finished_at="2026-07-30T00:00:01+00:00",
         elapsed_sec=1.0,
@@ -898,7 +903,10 @@ def passing_deterministic_report(tmp_path: Path, *, batch_id: str) -> Path:
         stdout="deterministic suite passed",
         stderr="",
         matrix_sha256=_matrix_sha256(),
-        sources={"cli/tests/test_skill_pressure_harness.py": "c" * 64},
+        sources={
+            relative: pressure.sha256_file(tmp_path / relative)
+            for relative in pressure.DETERMINISTIC_SOURCE_FILES
+        },
     )
 
 
@@ -998,8 +1006,16 @@ def passing_field_records(matrix: object, *, batch_id: str = "batch-1") -> list[
 
 
 def passing_field_report_paths(tmp_path: Path, matrix: object, *, batch_id: str) -> list[Path]:
+    _provision_matrix(tmp_path)
     paths: list[Path] = []
     for record in passing_field_records(matrix, batch_id=batch_id):
+        case = matrix.skills[record["skill"]]  # type: ignore[attr-defined]
+        record["prompt_sha256"] = pressure.sha256_text(
+            pressure.build_field_prompt(case.scenario)
+        )
+        record["skill_sha256"] = pressure.sha256_skill(
+            tmp_path / "claude" / "skills" / case.name
+        )
         paths.append(
             write_pressure_report(
                 tmp_path,
@@ -1023,6 +1039,7 @@ def test_source_bundle_requires_current_hashed_deterministic_and_install_reports
     deterministic = passing_deterministic_report(tmp_path, batch_id="batch-1")
     install = passing_install_report(tmp_path, MATRIX, batch_id="batch-1")
     pressure.validate_source_bundle(
+        repo_root=tmp_path,
         batch_id="batch-1",
         deterministic_path=deterministic,
         install_path=install,
@@ -1034,6 +1051,7 @@ def test_source_bundle_requires_current_hashed_deterministic_and_install_reports
     deterministic.write_text(json.dumps(failed))
     with pytest.raises(pressure.EvidenceError, match="deterministic"):
         pressure.validate_source_bundle(
+            repo_root=tmp_path,
             batch_id="batch-1",
             deterministic_path=deterministic,
             install_path=install,
@@ -1254,8 +1272,9 @@ def test_source_bundle_uses_current_matrix_to_reject_unknown_field_identity(
     first = json.loads(fields[0].read_text())
     first["payload"]["skill"] = "unknown-skill"
     fields[0].write_text(json.dumps(first))
-    with pytest.raises(pressure.EvidenceError, match="field identities"):
+    with pytest.raises(pressure.EvidenceError, match="current matrix"):
         pressure.validate_source_bundle(
+            repo_root=tmp_path,
             batch_id="batch-1",
             deterministic_path=deterministic,
             install_path=install,
@@ -1296,3 +1315,104 @@ def test_evidence_builder_rejects_source_mutation_after_validation(
     assert deterministic.exists()
     assert install.exists()
     assert len(fields) == 27
+
+
+def test_deterministic_writer_rejects_noncanonical_audit_inputs(tmp_path: Path) -> None:
+    with pytest.raises(pressure.EvidenceError, match="canonical deterministic argv"):
+        pressure.write_deterministic_report(
+            tmp_path,
+            batch_id="batch-2",
+            argv=["pytest"],
+            started_at="2026-07-30T00:00:00+00:00",
+            finished_at="2026-07-30T00:00:01+00:00",
+            elapsed_sec=1.0,
+            exit_status=0,
+            stdout="",
+            stderr="",
+            matrix_sha256=_matrix_sha256(),
+            sources={"cli/tests/test_skill_pressure_harness.py": "c" * 64},
+        )
+
+
+def test_skill_pressure_paths_reject_symlinked_operations_root(tmp_path: Path) -> None:
+    external = tmp_path / "external"
+    external.mkdir()
+    (tmp_path / ".awf-operations").symlink_to(external, target_is_directory=True)
+    with pytest.raises(pressure.EvidenceError, match="symlink"):
+        pressure.deterministic_report_path(tmp_path, "batch-1")
+
+
+def test_source_bundle_rejects_forged_complete_field_envelope(tmp_path: Path) -> None:
+    deterministic = passing_deterministic_report(tmp_path, batch_id="batch-1")
+    install = passing_install_report(tmp_path, MATRIX, batch_id="batch-1")
+    discovery = passing_discovery_report(tmp_path, MATRIX, batch_id="batch-1")
+    fields = passing_field_report_paths(tmp_path, MATRIX, batch_id="batch-1")
+    forged = json.loads(fields[0].read_text())
+    forged["forged"] = True
+    fields[0].write_text(json.dumps(forged))
+    with pytest.raises(pressure.EvidenceError, match="field COMPLETE envelope"):
+        pressure.validate_source_bundle(
+            repo_root=tmp_path,
+            batch_id="batch-1",
+            deterministic_path=deterministic,
+            install_path=install,
+            discovery_path=discovery,
+            field_paths=fields,
+        )
+
+
+def test_source_bundle_binds_field_prompt_hash_to_current_matrix(tmp_path: Path) -> None:
+    deterministic = passing_deterministic_report(tmp_path, batch_id="batch-1")
+    install = passing_install_report(tmp_path, MATRIX, batch_id="batch-1")
+    discovery = passing_discovery_report(tmp_path, MATRIX, batch_id="batch-1")
+    fields = passing_field_report_paths(tmp_path, MATRIX, batch_id="batch-1")
+    forged = json.loads(fields[0].read_text())
+    forged["payload"]["prompt_sha256"] = "0" * 64
+    fields[0].write_text(json.dumps(forged))
+    with pytest.raises(pressure.EvidenceError, match="field prompt hash mismatch"):
+        pressure.validate_source_bundle(
+            repo_root=tmp_path,
+            batch_id="batch-1",
+            deterministic_path=deterministic,
+            install_path=install,
+            discovery_path=discovery,
+            field_paths=fields,
+        )
+
+
+def test_evidence_builder_rechecks_validated_source_hashes_before_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    batch_id = "batch-1"
+    passing_deterministic_report(tmp_path, batch_id=batch_id)
+    passing_install_report(tmp_path, MATRIX, batch_id=batch_id)
+    discovery = passing_discovery_report(tmp_path, MATRIX, batch_id=batch_id)
+    passing_field_report_paths(tmp_path, MATRIX, batch_id=batch_id)
+    passing_cells = tuple(
+        pressure.EvidenceCell(
+            skill=skill,
+            category=category,
+            layer=pressure.EVIDENCE_LAYERS[category],
+            verdict=Verdict.PASS,
+            evidence="fake deterministic evidence",
+        )
+        for skill in MATRIX.skills
+        for category in pressure.REQUIRED_CATEGORIES
+    )
+
+    def build_then_mutate(*args: object, **kwargs: object) -> tuple[pressure.EvidenceCell, ...]:
+        payload = json.loads(discovery.read_text())
+        payload["records"][0]["diagnostic"] = "mutated after validation"
+        discovery.write_text(json.dumps(payload))
+        return passing_cells
+
+    monkeypatch.setattr(build_skill_evidence, "build_evidence_matrix", build_then_mutate)
+    assert (
+        build_skill_evidence.main(
+            ["--batch-id", batch_id, "--repo-root", str(tmp_path)]
+        )
+        == 1
+    )
+    assert "source hash mismatch" in capsys.readouterr().err

@@ -77,6 +77,43 @@ FIELD_RECORD_REQUIRED = {
     "elapsed_sec",
     "exit_status",
 }
+DETERMINISTIC_TEST_PATHS = (
+    "cli/tests/test_skill_contract_matrix.py",
+    "cli/tests/test_skill_runtime_install.py",
+    "cli/tests/test_skill_pressure_harness.py",
+    "cli/tests/test_docs_semantic_audit.py",
+    "cli/tests/test_analysis_spec.py",
+    "cli/tests/test_workflow_status.py",
+    "cli/tests/test_wf_commands.py",
+    "cli/tests/test_release_worktree_smoke.py",
+)
+DETERMINISTIC_PYTEST_ARGV = (
+    "uv",
+    "run",
+    "--project",
+    "cli",
+    "pytest",
+    *DETERMINISTIC_TEST_PATHS,
+    "-q",
+)
+DETERMINISTIC_SOURCE_FILES = (
+    *DETERMINISTIC_TEST_PATHS,
+    "cli/tests/fixtures/skill-validation-matrix.v1.json",
+    "cli/src/awf/core/skill_pressure.py",
+)
+SAFE_FIELD_IDENTITY_KEYS = frozenset(
+    {
+        "batch_id",
+        "matrix_schema",
+        "skill",
+        "scenario_id",
+        "repetition",
+        "provider",
+        "severity",
+        "prompt_sha256",
+        "skill_sha256",
+    }
+)
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 SENSITIVE_PATTERNS = {
     "email": re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
@@ -136,6 +173,25 @@ class FieldScenario:
     negative_criteria: tuple[str, ...]
     runtimes: tuple[str, ...]
     expected: ScenarioExpectation
+
+
+FIELD_RESPONSE_SHAPE = {
+    "selected_skill": "skill-name",
+    "decision": "PROCEED|STOP|REPORT|ASK_USER|DELEGATE",
+    "reason_codes": ["machine_readable_reason"],
+    "sections": ["section_name"],
+    "commands": ["command that would be proposed"],
+}
+
+
+def build_field_prompt(scenario: FieldScenario) -> str:
+    return (
+        "Return exactly one JSON object and no Markdown fence. "
+        f"Use this shape: {json.dumps(FIELD_RESPONSE_SHAPE, separators=(',', ':'))}. "
+        "Do not run commands, call tools, mutate files, deploy, delete, commit, or create a PR. "
+        "The commands array contains only commands you would propose. "
+        f"Task: {scenario.task}"
+    )
 
 
 @dataclass(frozen=True)
@@ -316,6 +372,30 @@ class EvidenceCell:
     evidence: str
     na_reason: str | None = None
 
+
+@dataclass(frozen=True)
+class _ReportSnapshot:
+    path: Path
+    sha256: str
+    payload: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class SourceBundle(Mapping[str, object]):
+    references: Mapping[str, object]
+    snapshots: Mapping[str, object]
+    matrix: SkillMatrix
+    reports: Mapping[str, object]
+
+    def __getitem__(self, key: str) -> object:
+        return self.references[key]
+
+    def __iter__(self):
+        return iter(self.references)
+
+    def __len__(self) -> int:
+        return len(self.references)
+
 def _command_matches(command: str, expected_prefix: str) -> bool:
     return command == expected_prefix or command.startswith(f"{expected_prefix} ")
 
@@ -479,7 +559,7 @@ def pressure_report_path(repo_root: str | Path, run_id: str) -> Path:
     labels = _sensitive_labels(run_id)
     if labels:
         raise SensitiveDataError(f"sensitive run_id blocked: {','.join(labels)}")
-    return operations_root(repo_root) / "skill-pressure" / f"{run_id}.json"
+    return _pressure_operations_root(repo_root) / f"{run_id}.json"
 
 
 def _publish_new(target: Path, content: str) -> None:
@@ -555,7 +635,9 @@ def write_pressure_report(
 
     validate_field_record(payload)
 
-    transcript_root = operations_root(repo_root) / "skill-pressure" / "transcripts" / run_id
+    root = _repository_root(repo_root)
+    transcript_root = _pressure_operations_root(root) / "transcripts" / run_id
+    _assert_no_symlink_components(root, transcript_root)
     baseline_path = transcript_root / "baseline.txt"
     with_skill_path = transcript_root / "with-skill.txt"
     created: list[Path] = []
@@ -608,8 +690,42 @@ def _require_mapping(value: object, *, field: str) -> Mapping[str, Any]:
     return value
 
 
+def _repository_root(repo_root: str | Path) -> Path:
+    root = Path(repo_root).absolute()
+    if root.is_symlink():
+        raise EvidenceError("repository root symlink is not allowed")
+    if not root.is_dir():
+        raise EvidenceError("repository root is not a directory")
+    return root
+
+
+def _assert_no_symlink_components(root: Path, target: Path) -> None:
+    if not target.is_relative_to(root):
+        raise EvidenceError("path escapes repository root")
+    relative = target.relative_to(root)
+    current = root
+    if current.is_symlink():
+        raise EvidenceError("repository path symlink is not allowed")
+    for part in relative.parts:
+        current = current / part
+        if current.exists() and current.is_symlink():
+            raise EvidenceError("repository path symlink is not allowed")
+
+
 def _pressure_operations_root(repo_root: str | Path) -> Path:
-    return operations_root(repo_root) / "skill-pressure"
+    root = _repository_root(repo_root)
+    operations = operations_root(root)
+    pressure = operations / "skill-pressure"
+    _assert_no_symlink_components(root, pressure)
+    return pressure
+
+
+def _confined_regular_file(root: Path, relative: str, *, label: str) -> Path:
+    path = root / relative
+    _assert_no_symlink_components(root, path)
+    if path.is_symlink() or not path.is_file():
+        raise EvidenceError(f"{label} must be a regular file")
+    return path
 
 
 def deterministic_report_path(repo_root: str | Path, batch_id: str) -> Path:
@@ -696,6 +812,22 @@ def _validate_sources(sources: Mapping[str, object]) -> dict[str, str]:
     return validated
 
 
+def _validated_deterministic_sources(
+    repo_root: str | Path, argv: Sequence[str], sources: Mapping[str, object]
+) -> dict[str, str]:
+    if tuple(argv) != DETERMINISTIC_PYTEST_ARGV:
+        raise EvidenceError("canonical deterministic argv mismatch")
+    validated = _validate_sources(sources)
+    if set(validated) != set(DETERMINISTIC_SOURCE_FILES):
+        raise EvidenceError("canonical deterministic source set mismatch")
+    root = _repository_root(repo_root)
+    for relative, expected_digest in validated.items():
+        source = _confined_regular_file(root, relative, label="deterministic source")
+        if sha256_file(source) != expected_digest:
+            raise EvidenceError(f"deterministic source hash mismatch: {relative}")
+    return validated
+
+
 def write_deterministic_report(
     repo_root: str | Path,
     *,
@@ -711,8 +843,15 @@ def write_deterministic_report(
     sources: Mapping[str, object],
 ) -> Path:
     safe_batch_id = _require_safe_batch_id(batch_id)
-    if not argv or not all(isinstance(item, str) and item for item in argv):
-        raise EvidenceError("deterministic argv must be a non-empty string sequence")
+    validated_sources = _validated_deterministic_sources(repo_root, argv, sources)
+    validated_matrix_sha256 = _require_sha256(matrix_sha256, field="matrix_sha256")
+    matrix_path = _confined_regular_file(
+        _repository_root(repo_root),
+        "cli/tests/fixtures/skill-validation-matrix.v1.json",
+        label="current matrix",
+    )
+    if sha256_file(matrix_path) != validated_matrix_sha256:
+        raise EvidenceError("current matrix hash mismatch")
     _validate_timestamp(started_at, field="started_at")
     _validate_timestamp(finished_at, field="finished_at")
     if not isinstance(elapsed_sec, (int, float)) or elapsed_sec < 0:
@@ -729,8 +868,8 @@ def write_deterministic_report(
         "exit_status": exit_status,
         "stdout_sha256": sha256_text(stdout),
         "stderr_sha256": sha256_text(stderr),
-        "matrix_sha256": _require_sha256(matrix_sha256, field="matrix_sha256"),
-        "sources": _validate_sources(sources),
+        "matrix_sha256": validated_matrix_sha256,
+        "sources": validated_sources,
     }
     target = deterministic_report_path(repo_root, safe_batch_id)
     _publish_new(target, json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
@@ -797,17 +936,35 @@ def write_install_report(
     return target
 
 
-def _load_json_report(path: str | Path, *, label: str) -> tuple[Path, Mapping[str, Any]]:
-    report_path = Path(path)
+def _load_json_snapshot(path: str | Path, *, label: str) -> _ReportSnapshot:
+    report_path = Path(path).absolute()
+    if report_path.is_symlink():
+        raise EvidenceError(f"{label} report symlink is not allowed")
     try:
-        raw = json.loads(report_path.read_text(encoding="utf-8"))
+        raw = report_path.read_bytes()
+        payload = json.loads(raw)
     except (OSError, json.JSONDecodeError) as exc:
         raise EvidenceError(f"{label} report could not be loaded") from exc
-    return report_path, _require_mapping(raw, field=f"{label} report")
+    return _ReportSnapshot(
+        report_path,
+        hashlib.sha256(raw).hexdigest(),
+        _require_mapping(payload, field=f"{label} report"),
+    )
 
 
-def _report_reference(path: Path) -> Mapping[str, str]:
-    return MappingProxyType({"path": str(path), "sha256": sha256_file(path)})
+def _report_reference(snapshot: _ReportSnapshot) -> Mapping[str, str]:
+    return MappingProxyType({"path": str(snapshot.path), "sha256": snapshot.sha256})
+
+
+def _verify_snapshot_current(snapshot: _ReportSnapshot, *, label: str) -> None:
+    if snapshot.path.is_symlink():
+        raise EvidenceError(f"{label} source hash mismatch")
+    try:
+        current = hashlib.sha256(snapshot.path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise EvidenceError(f"{label} source hash mismatch") from exc
+    if current != snapshot.sha256:
+        raise EvidenceError(f"{label} source hash mismatch")
 
 
 def _record_status(record: Mapping[str, Any]) -> Verdict | None:
@@ -916,16 +1073,110 @@ def _expect_exact_runtime_identities(
         raise EvidenceError(f"{label} identities do not cover every runtime")
 
 
+def _validate_blocked_field_identity(identity: Mapping[str, Any]) -> None:
+    if not set(identity).issubset(SAFE_FIELD_IDENTITY_KEYS):
+        raise EvidenceError("blocked field identity contains non-allowlisted key")
+    for key in ("skill", "scenario_id", "provider", "severity"):
+        value = identity.get(key)
+        if value is not None and (not isinstance(value, str) or not value):
+            raise EvidenceError(f"invalid blocked field identity {key}")
+    repetition = identity.get("repetition")
+    if repetition is not None and (not isinstance(repetition, int) or repetition < 1):
+        raise EvidenceError("invalid blocked field identity repetition")
+    for key in ("prompt_sha256", "skill_sha256"):
+        if key in identity:
+            _require_sha256(identity[key], field=f"blocked field identity {key}")
+
+
+def _validate_field_payload_binding(
+    root: Path, matrix: SkillMatrix, payload: Mapping[str, Any]
+) -> None:
+    skill = payload["skill"]
+    case = matrix.skills.get(skill)
+    if case is None or payload["scenario_id"] != case.scenario.id:
+        raise EvidenceError("field identity does not match current matrix")
+    if payload["severity"] != case.severity:
+        raise EvidenceError("field severity does not match current matrix")
+    if payload["prompt_sha256"] != sha256_text(build_field_prompt(case.scenario)):
+        raise EvidenceError("field prompt hash mismatch")
+    skill_root = root / "claude" / "skills" / skill
+    _assert_no_symlink_components(root, skill_root)
+    if skill_root.is_symlink() or not skill_root.is_dir():
+        raise EvidenceError("field Skill source is not a regular directory")
+    if any(path.is_symlink() for path in skill_root.rglob("*")):
+        raise EvidenceError("field Skill source symlink is not allowed")
+    if payload["skill_sha256"] != sha256_skill(skill_root):
+        raise EvidenceError("field Skill hash mismatch")
+
+
+def _validate_complete_transcripts(
+    transcripts: Mapping[str, Any], *, root: Path, run_id: str
+) -> None:
+    if set(transcripts) != {"baseline", "with_skill"}:
+        raise EvidenceError("field COMPLETE envelope transcripts mismatch")
+    transcript_root = _pressure_operations_root(root) / "transcripts" / run_id
+    _assert_no_symlink_components(root, transcript_root)
+    for name, filename in (("baseline", "baseline.txt"), ("with_skill", "with-skill.txt")):
+        transcript = _require_mapping(transcripts[name], field=f"{name} transcript")
+        if set(transcript) != {"path", "sha256"}:
+            raise EvidenceError("field COMPLETE envelope transcript keys mismatch")
+        expected_path = transcript_root / filename
+        path_value = transcript.get("path")
+        if not isinstance(path_value, str) or Path(path_value).absolute() != expected_path:
+            raise EvidenceError("field COMPLETE envelope transcript path mismatch")
+        _assert_no_symlink_components(root, expected_path)
+        if expected_path.is_symlink() or not expected_path.is_file():
+            raise EvidenceError("field COMPLETE envelope transcript is not a regular file")
+        if _require_sha256(transcript.get("sha256"), field=f"{name} transcript sha256") != sha256_file(expected_path):
+            raise EvidenceError("field COMPLETE envelope transcript hash mismatch")
+
+
 def _field_identity_from_report(
-    report: Mapping[str, Any], *, batch_id: str
+    report: Mapping[str, Any], *, root: Path, matrix: SkillMatrix, batch_id: str
 ) -> tuple[str, int]:
     if report.get("schema") != REPORT_SCHEMA:
         raise EvidenceError("field report schema mismatch")
-    if report.get("persistence_status") == "COMPLETE":
+    run_id = report.get("run_id")
+    if (
+        not isinstance(run_id, str)
+        or RUN_ID_RE.fullmatch(run_id) is None
+        or _sensitive_labels(run_id)
+        or not run_id.startswith(f"{batch_id}-")
+    ):
+        raise EvidenceError("field report run_id mismatch")
+    _validate_timestamp(report.get("recorded_at"), field="field recorded_at")
+    status = report.get("persistence_status")
+    if status == "COMPLETE":
+        if set(report) != {"schema", "recorded_at", "run_id", "persistence_status", "payload", "transcripts"}:
+            raise EvidenceError("field COMPLETE envelope keys mismatch")
         payload = _require_mapping(report.get("payload"), field="field payload")
         validate_field_record(dict(payload))
-    elif report.get("persistence_status") == "BLOCKED":
+        _validate_field_payload_binding(root, matrix, payload)
+        _validate_complete_transcripts(
+            _require_mapping(report.get("transcripts"), field="field transcripts"),
+            root=root,
+            run_id=run_id,
+        )
+    elif status == "BLOCKED":
+        if set(report) != {"schema", "recorded_at", "run_id", "persistence_status", "diagnostics", "field_identity"}:
+            raise EvidenceError("field BLOCKED envelope keys mismatch")
+        diagnostics = report.get("diagnostics")
+        if not isinstance(diagnostics, list) or len(diagnostics) != 1:
+            raise EvidenceError("field BLOCKED envelope diagnostics mismatch")
+        diagnostic = _require_mapping(diagnostics[0], field="blocked field diagnostic")
+        labels = diagnostic.get("labels")
+        if (
+            set(diagnostic) != {"code", "labels"}
+            or diagnostic.get("code") != "sensitive_content"
+            or not isinstance(labels, list)
+            or not labels
+            or labels != sorted(labels)
+            or len(labels) != len(set(labels))
+            or any(label not in SENSITIVE_PATTERNS for label in labels)
+        ):
+            raise EvidenceError("field BLOCKED envelope diagnostics mismatch")
         payload = _require_mapping(report.get("field_identity"), field="blocked field identity")
+        _validate_blocked_field_identity(payload)
     else:
         raise EvidenceError("field report persistence status mismatch")
     if payload.get("batch_id") != batch_id:
@@ -939,62 +1190,63 @@ def _field_identity_from_report(
     return skill, repetition
 
 
-def _load_current_bundle_matrix(
-    deterministic_file: Path, batch_id: str
-) -> tuple[Path, SkillMatrix, str]:
-    try:
-        repo_root = deterministic_file.resolve().parents[2]
-    except IndexError as exc:
-        raise EvidenceError("deterministic report path cannot identify repository") from exc
-    if deterministic_file.resolve() != deterministic_report_path(repo_root, batch_id).resolve():
-        raise EvidenceError("deterministic report path does not match current batch")
-    matrix_path = repo_root / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json"
-    try:
-        matrix = load_skill_matrix(matrix_path)
-        matrix_hash = sha256_file(matrix_path)
-    except (MatrixError, OSError) as exc:
-        raise EvidenceError("current matrix could not be loaded") from exc
-    return repo_root, matrix, matrix_hash
 
 
 def validate_source_bundle(
     *,
+    repo_root: str | Path,
     batch_id: str,
     deterministic_path: str | Path,
     install_path: str | Path,
     discovery_path: str | Path,
     field_paths: Sequence[str | Path],
-) -> Mapping[str, object]:
+) -> SourceBundle:
+    root = _repository_root(repo_root)
     safe_batch_id = _require_safe_batch_id(batch_id)
-    deterministic_file, deterministic = _load_json_report(
-        deterministic_path, label="deterministic"
+    expected_deterministic = deterministic_report_path(root, safe_batch_id)
+    if Path(deterministic_path).absolute() != expected_deterministic:
+        raise EvidenceError("deterministic report path does not match current batch")
+    _assert_no_symlink_components(root, expected_deterministic)
+    deterministic = _load_json_snapshot(expected_deterministic, label="deterministic")
+    matrix_path = _confined_regular_file(
+        root,
+        "cli/tests/fixtures/skill-validation-matrix.v1.json",
+        label="current matrix",
     )
-    repo_root, matrix, current_matrix_hash = _load_current_bundle_matrix(
-        deterministic_file, safe_batch_id
-    )
+    try:
+        matrix = load_skill_matrix(matrix_path)
+    except MatrixError as exc:
+        raise EvidenceError("current matrix could not be loaded") from exc
     deterministic_hash = _validate_report_header(
-        deterministic,
+        deterministic.payload,
         label="deterministic",
         schema=DETERMINISTIC_REPORT_SCHEMA,
         batch_id=safe_batch_id,
-        matrix_sha256=current_matrix_hash,
+        matrix_sha256=sha256_file(matrix_path),
     )
-    _validate_deterministic_report(deterministic)
-    if deterministic.get("exit_status") != 0:
+    _validate_deterministic_report(deterministic.payload)
+    _validated_deterministic_sources(
+        root,
+        deterministic.payload["argv"],
+        _require_mapping(deterministic.payload["sources"], field="deterministic sources"),
+    )
+    if deterministic.payload.get("exit_status") != 0:
         raise EvidenceError("deterministic report exit status is not zero")
 
-    install_file, install = _load_json_report(install_path, label="install")
-    if install_file.resolve() != install_report_path(repo_root, safe_batch_id).resolve():
+    expected_install = install_report_path(root, safe_batch_id)
+    if Path(install_path).absolute() != expected_install:
         raise EvidenceError("install report path does not match current batch")
+    _assert_no_symlink_components(root, expected_install)
+    install = _load_json_snapshot(expected_install, label="install")
     _validate_report_header(
-        install,
+        install.payload,
         label="install",
         schema=INSTALL_REPORT_SCHEMA,
         batch_id=safe_batch_id,
         matrix_sha256=deterministic_hash,
     )
-    _validate_install_report(install)
-    install_records = install.get("records")
+    _validate_install_report(install.payload)
+    install_records = install.payload.get("records")
     if not isinstance(install_records, list) or not all(
         isinstance(record, Mapping) for record in install_records
     ):
@@ -1004,17 +1256,19 @@ def validate_source_bundle(
     if any(_record_status(record) is not Verdict.PASS for record in install_records):
         raise EvidenceError("install report contains non-PASS record")
 
-    discovery_file, discovery = _load_json_report(discovery_path, label="discovery")
-    if discovery_file.resolve() != discovery_report_path(repo_root, safe_batch_id).resolve():
+    expected_discovery = discovery_report_path(root, safe_batch_id)
+    if Path(discovery_path).absolute() != expected_discovery:
         raise EvidenceError("discovery report path does not match current batch")
+    _assert_no_symlink_components(root, expected_discovery)
+    discovery = _load_json_snapshot(expected_discovery, label="discovery")
     _validate_report_header(
-        discovery,
+        discovery.payload,
         label="discovery",
         schema=DISCOVERY_REPORT_SCHEMA,
         batch_id=safe_batch_id,
         matrix_sha256=deterministic_hash,
     )
-    discovery_records = discovery.get("records")
+    discovery_records = discovery.payload.get("records")
     if not isinstance(discovery_records, list) or not all(
         isinstance(record, Mapping) for record in discovery_records
     ):
@@ -1024,22 +1278,31 @@ def validate_source_bundle(
 
     if len(field_paths) != 27:
         raise EvidenceError("field reports require exactly 27 paths")
-    field_references: list[Mapping[str, str]] = []
+    field_root = _pressure_operations_root(root)
+    field_snapshots: list[_ReportSnapshot] = []
     field_identities: list[tuple[str, int]] = []
     seen_paths: set[Path] = set()
-    field_root = _pressure_operations_root(repo_root).resolve()
     for field_path in field_paths:
-        field_file, field_report = _load_json_report(field_path, label="field")
+        candidate = Path(field_path).absolute()
         if (
-            field_file.resolve().parent != field_root
-            or not field_file.name.startswith(f"{safe_batch_id}-")
+            candidate.parent != field_root
+            or not candidate.name.startswith(f"{safe_batch_id}-")
         ):
             raise EvidenceError("field report path does not match current batch")
-        if field_file in seen_paths:
+        _assert_no_symlink_components(root, candidate)
+        if candidate in seen_paths:
             raise EvidenceError("duplicate field report path")
-        seen_paths.add(field_file)
-        field_identities.append(_field_identity_from_report(field_report, batch_id=safe_batch_id))
-        field_references.append(_report_reference(field_file))
+        seen_paths.add(candidate)
+        snapshot = _load_json_snapshot(candidate, label="field")
+        field_identities.append(
+            _field_identity_from_report(
+                snapshot.payload,
+                root=root,
+                matrix=matrix,
+                batch_id=safe_batch_id,
+            )
+        )
+        field_snapshots.append(snapshot)
     if len(set(field_identities)) != len(field_identities):
         raise EvidenceError("duplicate field report identity")
     expected_fields = {
@@ -1050,14 +1313,50 @@ def validate_source_bundle(
     if set(field_identities) != expected_fields:
         raise EvidenceError("field identities do not match current matrix")
 
-    return MappingProxyType(
+    references = MappingProxyType(
         {
-            "deterministic": _report_reference(deterministic_file),
-            "install": _report_reference(install_file),
-            "discovery": _report_reference(discovery_file),
-            "field": tuple(field_references),
+            "deterministic": _report_reference(deterministic),
+            "install": _report_reference(install),
+            "discovery": _report_reference(discovery),
+            "field": tuple(_report_reference(snapshot) for snapshot in field_snapshots),
         }
     )
+    snapshots = MappingProxyType(
+        {
+            "deterministic": deterministic.payload,
+            "install": install.payload,
+            "discovery": discovery.payload,
+            "field": tuple(snapshot.payload for snapshot in field_snapshots),
+        }
+    )
+    reports = MappingProxyType(
+        {
+            "deterministic": deterministic,
+            "install": install,
+            "discovery": discovery,
+            "field": tuple(field_snapshots),
+        }
+    )
+    return SourceBundle(references, snapshots, matrix, reports)
+
+
+def source_bundle_snapshots(bundle: SourceBundle) -> Mapping[str, object]:
+    return bundle.snapshots
+
+
+def verify_source_bundle_unchanged(bundle: SourceBundle) -> None:
+    for label in ("deterministic", "install", "discovery"):
+        report = bundle.reports[label]
+        if not isinstance(report, _ReportSnapshot):
+            raise EvidenceError("invalid source snapshot")
+        _verify_snapshot_current(report, label=label)
+    fields = bundle.reports["field"]
+    if not isinstance(fields, tuple):
+        raise EvidenceError("invalid field source snapshots")
+    for report in fields:
+        if not isinstance(report, _ReportSnapshot):
+            raise EvidenceError("invalid field source snapshot")
+        _verify_snapshot_current(report, label="field")
 
 
 def _aggregate_verdict(values: Sequence[Verdict]) -> Verdict:

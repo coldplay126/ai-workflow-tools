@@ -72,7 +72,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.timeout_sec <= 0:
         parser.error("--timeout-sec must be positive")
 
-    repo_root = Path(args.repo_root).resolve()
+    repo_root = Path(args.repo_root).absolute()
     try:
         report_path = deterministic_report_path(repo_root, args.batch_id)
     except EvidenceError as exc:

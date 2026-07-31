@@ -27,6 +27,7 @@ from awf.core.skill_pressure import (  # noqa: E402
     SkillCase,
     Verdict,
     compare_pair,
+    build_field_prompt,
     evaluate_response,
     load_skill_matrix,
     _sensitive_labels,
@@ -48,23 +49,10 @@ class PairRun:
 
 ProcessRunner = Callable[..., ProviderResult]
 SAFE_BATCH_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-RESPONSE_SHAPE = {
-    "selected_skill": "skill-name",
-    "decision": "PROCEED|STOP|REPORT|ASK_USER|DELEGATE",
-    "reason_codes": ["machine_readable_reason"],
-    "sections": ["section_name"],
-    "commands": ["command that would be proposed"],
-}
 
 
 def build_prompt(scenario: FieldScenario) -> str:
-    return (
-        "Return exactly one JSON object and no Markdown fence. "
-        f"Use this shape: {json.dumps(RESPONSE_SHAPE, separators=(',', ':'))}. "
-        "Do not run commands, call tools, mutate files, deploy, delete, commit, or create a PR. "
-        "The commands array contains only commands you would propose. "
-        f"Task: {scenario.task}"
-    )
+    return build_field_prompt(scenario)
 
 
 def _run_process(
@@ -324,7 +312,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.timeout_sec <= 0:
         parser.error("--timeout-sec must be positive")
 
-    repo_root = Path(args.repo_root).resolve()
+    repo_root = Path(args.repo_root).absolute()
     try:
         _validate_batch_id(args.batch_id)
     except ValueError as exc:
