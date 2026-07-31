@@ -5,7 +5,7 @@ description: Use whenever handling deploy, production release, staging-to-main o
 type: deployment-safety
 conditions:
   trigger:
-    - handling deploy, production release, promotion, release PR, or merged worktree cleanup
+    - handling deploy, production release, promotion, release PR, managed deployment worktree creation or reuse, or merged worktree cleanup
   skip:
     - no release, deployment, promotion, or worktree lifecycle action is involved
 ---

@@ -52,21 +52,48 @@ def _top_level_value(frontmatter: str, key: str) -> str | None:
 
 
 def _condition_values(frontmatter: str, key: str) -> tuple[str, ...]:
-    match = re.search(rf"(?m)^  {key}:\s*(.*)$", frontmatter)
-    if match is None:
+    assert key in {"trigger", "skip"}
+    matches = list(re.finditer(r"(?m)^conditions:[ \t]*(.*)$", frontmatter))
+    if not matches:
         return ()
-    inline = match.group(1).strip().strip("\"'")
-    if inline:
-        return (inline,)
-    values: list[str] = []
-    tail = frontmatter[match.end():]
-    for line in tail.splitlines():
-        if line.startswith("    - "):
-            values.append(line[6:].strip().strip("\"'"))
+
+    assert len(matches) == 1, "conditions must be declared once"
+    assert not matches[0].group(1).strip(), "conditions must be a nested mapping"
+
+    conditions: dict[str, list[str]] = {}
+    current_key: str | None = None
+    for line in frontmatter[matches[0].end() :].splitlines():
+        if not line:
             continue
-        if line.strip() and not line.startswith("    "):
+        if not line.startswith((" ", "\t")):
             break
-    return tuple(values)
+
+        condition = re.fullmatch(r"  (trigger|skip):(?:\s*(.*))?", line)
+        if condition is not None:
+            condition_key, inline = condition.groups()
+            assert condition_key not in conditions, f"duplicate condition key: {condition_key}"
+            conditions[condition_key] = []
+            current_key = condition_key
+            if inline and inline.strip():
+                value = inline.strip().strip("\"'")
+                assert value and value[0] not in "[{", "condition value must be a string"
+                conditions[condition_key].append(value)
+                current_key = None
+            continue
+
+        item = re.fullmatch(r"    -\s*(.*)", line)
+        if item is not None:
+            assert current_key is not None, "condition list item has no owning key"
+            value = item.group(1).strip().strip("\"'")
+            assert value, "condition values must be nonempty"
+            conditions[current_key].append(value)
+            continue
+
+        raise AssertionError(f"unexpected nested conditions content: {line}")
+
+    for values in conditions.values():
+        assert values, "condition values must be nonempty"
+    return tuple(conditions.get(key, ()))
 
 
 def test_matrix_locks_exact_first_party_skill_inventory() -> None:
@@ -182,6 +209,28 @@ def test_matrix_skills_mapping_is_read_only() -> None:
         matrix.skills["chat"] = matrix.skills["analysis"]  # type: ignore[index]
 
 
+@pytest.mark.parametrize(
+    ("frontmatter", "message"),
+    [
+        ("conditions:\n  trigger: []\n  skip: valid", "condition value must be a string"),
+        ("conditions:\n  trigger: valid\n  skip: {}", "condition value must be a string"),
+        (
+            "conditions:\n  trigger:\n    - \n  skip: valid",
+            "condition values must be nonempty",
+        ),
+        (
+            "conditions:\n  trigger:\n    - valid\n    skip:\n      - invalid",
+            "unexpected nested conditions content",
+        ),
+    ],
+)
+def test_condition_values_reject_invalid_nested_shapes(
+    frontmatter: str, message: str
+) -> None:
+    with pytest.raises(AssertionError, match=message):
+        _condition_values(frontmatter, "trigger")
+
+
 def test_every_skill_frontmatter_identity_and_conditions_are_semantic() -> None:
     matrix = load_skill_matrix(MATRIX_PATH)
     for name, case in sorted(matrix.skills.items()):
@@ -199,3 +248,10 @@ def test_every_skill_frontmatter_identity_and_conditions_are_semantic() -> None:
         assert set(triggers).isdisjoint(skips)
         if case.entry_kind == "slash":
             assert any(f"/{name}" in trigger for trigger in triggers)
+        if name == "wf-discovery":
+            assert "an active workflow pipeline already owns the request" in skips
+        if name == "release-worktree-lifecycle":
+            assert any(
+                "managed deployment worktree creation or reuse" in trigger
+                for trigger in triggers
+            )

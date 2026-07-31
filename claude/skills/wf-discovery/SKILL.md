@@ -18,6 +18,7 @@ conditions:
     - a feature may span multiple repositories and no project is selected
   skip:
     - the project is already selected
+    - an active workflow pipeline already owns the request
     - the request is a simple code question
 ---
 
