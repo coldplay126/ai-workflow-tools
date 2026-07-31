@@ -83,8 +83,16 @@ def _write_payload(path: Path, payload: dict[str, object]) -> None:
 
 
 def _top_level_value(frontmatter: str, key: str) -> str | None:
-    match = re.search(rf"(?m)^{re.escape(key)}:\s*[\"']?([^\n\"']+)", frontmatter)
-    return match.group(1).strip() if match else None
+    value: str | None = None
+    for line in frontmatter.splitlines():
+        if line.startswith((" ", "\t")) or ":" not in line:
+            continue
+        raw_key, raw_value = line.split(":", maxsplit=1)
+        if raw_key.strip() != key:
+            continue
+        assert value is None, f"duplicate top-level contract key: {key}"
+        value = _condition_string(raw_value, f"{key} metadata")
+    return value
 
 
 def _condition_string(raw_value: str, label: str) -> str:
@@ -534,7 +542,7 @@ def _skill_frontmatter(path: Path) -> dict[str, str | None]:
     block = match.group(1)
     return {
         key: _top_level_value(block, key)
-        for key in ("name", "phase", "gate")
+        for key in ("name", "version", "phase", "gate")
     }
 
 
@@ -596,27 +604,143 @@ EXTENSIONS = {
 }
 
 
+def _normalized_relative_path(raw_path: str, label: str) -> PurePosixPath:
+    relative = PurePosixPath(raw_path)
+    assert raw_path == str(relative), f"invalid {label}: {raw_path}"
+    assert relative.parts and relative.parts != (".",), f"invalid {label}: {raw_path}"
+    assert not relative.is_absolute(), f"invalid {label}: {raw_path}"
+    assert ".." not in relative.parts, f"invalid {label}: {raw_path}"
+    return relative
+
+
+def _resource_mapping(line: str) -> tuple[int, str, str] | None:
+    if not line or line.lstrip().startswith("#") or ":" not in line:
+        return None
+    indentation = len(line) - len(line.lstrip(" "))
+    key, value = line.strip().split(":", maxsplit=1)
+    assert key, "resource declaration key must be nonempty"
+    return indentation, key.strip(), value.strip()
+
+
+def _resource_paths(
+    skill_text: str, manifest_categories: set[str]
+) -> dict[str, list[str]]:
+    match = FRONTMATTER_RE.match(skill_text)
+    assert match is not None
+    lines = match.group(1).splitlines()
+    declarations: dict[str, list[str]] = {}
+
+    def collect_section(start: int, section_indentation: int) -> tuple[int, list[str]]:
+        paths: list[str] = []
+        index = start
+        while index < len(lines):
+            mapping = _resource_mapping(lines[index])
+            if mapping is None:
+                index += 1
+                continue
+            indentation, _, value = mapping
+            if indentation <= section_indentation:
+                break
+            if value:
+                paths.append(_condition_string(value, "resource declaration"))
+            index += 1
+        return index, paths
+
+    def add_category(category: str, paths: list[str]) -> None:
+        assert category in manifest_categories, (
+            f"undeclared resource category: {category}"
+        )
+        assert category not in declarations, f"duplicate resource category: {category}"
+        assert paths, f"empty resource category declaration: {category}"
+        declarations[category] = paths
+
+    index = 0
+    while index < len(lines):
+        mapping = _resource_mapping(lines[index])
+        if mapping is None or mapping[0] != 0:
+            index += 1
+            continue
+        _, key, value = mapping
+        if key == "resources":
+            assert not value, "resources must be a nested mapping"
+            index += 1
+            while index < len(lines):
+                category_mapping = _resource_mapping(lines[index])
+                if category_mapping is None:
+                    index += 1
+                    continue
+                indentation, category, category_value = category_mapping
+                if indentation == 0:
+                    break
+                if indentation != 2:
+                    index += 1
+                    continue
+                assert not category_value, "resource categories must be nested mappings"
+                index, paths = collect_section(index + 1, indentation)
+                add_category(category, paths)
+            continue
+        if key in manifest_categories:
+            assert not value, "resource categories must be nested mappings"
+            index, paths = collect_section(index + 1, 0)
+            add_category(key, paths)
+            continue
+        index += 1
+
+    assert set(declarations) == manifest_categories
+    return declarations
+
+
+def _assert_manifest_resources(
+    skill_dir: Path, manifest: dict[str, object], skill_text: str
+) -> None:
+    manifest_categories = manifest["categories"]
+    assert isinstance(manifest_categories, dict)
+    assert manifest_categories
+    resource_paths = _resource_paths(skill_text, set(manifest_categories))
+
+    for category, declaration in manifest_categories.items():
+        assert isinstance(declaration, dict)
+        category_type = declaration["type"]
+        assert category_type in EXTENSIONS
+        category_path = declaration.get("path", category)
+        assert isinstance(category_path, str)
+        relative_category = _normalized_relative_path(
+            category_path, "resource category path"
+        )
+        resource_dir = skill_dir / relative_category
+        extension = EXTENSIONS[category_type]
+        assert resource_dir.is_dir(), f"missing resource dir: {resource_dir}"
+        resources = sorted(resource_dir.rglob(f"*{extension}"))
+        assert resources, f"empty resource category: {skill_dir.name}/{category}"
+        for resource in resources:
+            assert resource.is_file()
+            if extension == ".json":
+                json.loads(resource.read_text())
+
+        for raw_path in resource_paths[category]:
+            relative_resource = _normalized_relative_path(raw_path, "resource path")
+            assert relative_resource.parts[: len(relative_category.parts)] == (
+                relative_category.parts
+            ), f"resource path outside category: {raw_path}"
+            assert relative_resource.suffix == extension, (
+                f"resource extension mismatch: {raw_path}"
+            )
+            resource = skill_dir / relative_resource
+            assert resource.is_relative_to(skill_dir), (
+                f"resource path outside skill root: {raw_path}"
+            )
+            assert resource.is_file(), f"missing declared resource: {resource}"
+
+
 def test_manifests_match_identity_and_every_declared_resource() -> None:
     for manifest_path in sorted(SKILLS_ROOT.glob("*/manifest.json")):
         skill_dir = manifest_path.parent
         manifest = json.loads(manifest_path.read_text())
         skill_text = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
-        assert manifest["skill"] == skill_dir.name
-        assert manifest["version"] == _top_level_value(skill_text, "version")
-        assert manifest["categories"]
-        for category, declaration in manifest["categories"].items():
-            assert declaration["type"] in EXTENSIONS
-            relative = PurePosixPath(declaration.get("path", category))
-            assert not relative.is_absolute() and ".." not in relative.parts
-            resource_dir = skill_dir / relative
-            extension = EXTENSIONS[declaration["type"]]
-            resources = sorted(resource_dir.rglob(f"*{extension}"))
-            assert resource_dir.is_dir(), f"missing resource dir: {resource_dir}"
-            assert resources, f"empty resource category: {skill_dir.name}/{category}"
-            for resource in resources:
-                assert resource.is_file()
-                if extension == ".json":
-                    json.loads(resource.read_text())
+        metadata = _skill_frontmatter(skill_dir / "SKILL.md")
+        assert manifest["skill"] == metadata["name"] == skill_dir.name
+        assert manifest["version"] == metadata["version"]
+        _assert_manifest_resources(skill_dir, manifest, skill_text)
 
 
 def test_workflow_artifact_paths_are_workflow_relative() -> None:
@@ -644,3 +768,78 @@ def test_wf_slash_dispatcher_exposes_only_supported_routes() -> None:
         "/wf reset <action>",
     }
     assert "/wf ship" not in routes
+
+
+def _duplicate_frontmatter_key(text: str, key: str) -> str:
+    frontmatter_end = text.index("\n---", len("---"))
+    return f"{text[:frontmatter_end]}\n{key}: duplicate\n{text[frontmatter_end:]}"
+
+
+@pytest.mark.parametrize("key", ("name", "version", "phase", "gate"))
+def test_contract_metadata_rejects_duplicate_top_level_keys(key: str) -> None:
+    skill_text = (SKILLS_ROOT / "phase-plan" / "SKILL.md").read_text(encoding="utf-8")
+
+    with pytest.raises(
+        AssertionError,
+        match=rf"duplicate top-level contract key: {key}",
+    ):
+        _top_level_value(_duplicate_frontmatter_key(skill_text, key), key)
+
+
+def _write_manifest_skill_fixture(
+    tmp_path: Path, resource_category: str, resource_path: str
+) -> None:
+    skill_dir = tmp_path / "analysis"
+    resource_dir = skill_dir / "modes"
+    resource_dir.mkdir(parents=True)
+    (skill_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "skill": "analysis",
+                "version": "1.0.0",
+                "categories": {"modes": {"type": "json", "path": "modes"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (skill_dir / "SKILL.md").write_text(
+        "\n".join(
+            (
+                "---",
+                "name: analysis",
+                "version: 1.0.0",
+                "resources:",
+                f"  {resource_category}:",
+                f'    document: "{resource_path}"',
+                "---",
+            )
+        ),
+        encoding="utf-8",
+    )
+    (resource_dir / "other.json").write_text("{}", encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("resource_category", "resource_path", "message"),
+    [
+        ("modes", "modes/document.json", "missing declared resource"),
+        ("other", "other/document.json", "undeclared resource category"),
+        ("modes", "../outside.json", "invalid resource path"),
+        ("modes", "modes/document.md", "resource extension mismatch"),
+    ],
+)
+def test_manifest_resource_contract_rejects_invalid_declared_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    resource_category: str,
+    resource_path: str,
+    message: str,
+) -> None:
+    _write_manifest_skill_fixture(tmp_path, resource_category, resource_path)
+    monkeypatch.setattr(
+        "test_skill_contract_matrix.SKILLS_ROOT",
+        tmp_path,
+    )
+
+    with pytest.raises(AssertionError, match=message):
+        test_manifests_match_identity_and_every_declared_resource()
