@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from collections import Counter
@@ -18,7 +19,6 @@ from awf.core.skill_pressure import (  # noqa: E402
     discovery_report_path,
     install_report_path,
     load_skill_matrix,
-    sha256_file,
     validate_evidence_matrix,
     validate_source_bundle,
     write_evidence_summary,
@@ -35,6 +35,30 @@ def _read_object(path: Path, *, label: str) -> Mapping[str, Any]:
         raise EvidenceError(f"{label} report could not be loaded") from exc
     if not isinstance(payload, Mapping):
         raise EvidenceError(f"{label} report must be an object")
+    return payload
+
+
+def _read_source_snapshot(
+    reference: object, *, label: str
+) -> Mapping[str, Any]:
+    if not isinstance(reference, Mapping):
+        raise EvidenceError(f"invalid {label} source reference")
+    path_value = reference.get("path")
+    expected_sha256 = reference.get("sha256")
+    if not isinstance(path_value, str) or not isinstance(expected_sha256, str):
+        raise EvidenceError(f"invalid {label} source reference")
+    try:
+        raw = Path(path_value).read_bytes()
+    except OSError as exc:
+        raise EvidenceError(f"{label} source could not be loaded") from exc
+    if hashlib.sha256(raw).hexdigest() != expected_sha256:
+        raise EvidenceError(f"{label} source hash mismatch")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise EvidenceError(f"{label} source could not be loaded") from exc
+    if not isinstance(payload, Mapping):
+        raise EvidenceError(f"{label} source must be an object")
     return payload
 
 
@@ -80,11 +104,17 @@ def main(argv: list[str] | None = None) -> int:
             install_path=install_path,
             discovery_path=discovery_path,
             field_paths=field_paths,
-            matrix=matrix,
-            matrix_sha256=sha256_file(matrix_path),
         )
-        discovery = _read_object(discovery_path, label="discovery")
-        field = [_read_object(path, label="field") for path in field_paths]
+        _read_source_snapshot(sources["deterministic"], label="deterministic")
+        _read_source_snapshot(sources["install"], label="install")
+        discovery = _read_source_snapshot(sources["discovery"], label="discovery")
+        field_references = sources["field"]
+        if not isinstance(field_references, tuple):
+            raise EvidenceError("invalid field source references")
+        field = [
+            _read_source_snapshot(reference, label="field")
+            for reference in field_references
+        ]
         discovery_records = discovery.get("records")
         if not isinstance(discovery_records, list) or not all(
             isinstance(record, Mapping) for record in discovery_records

@@ -22,6 +22,7 @@ from awf.core.skill_pressure import (
 )
 import awf.core.skill_pressure as pressure
 from awf.providers.base import ProviderResult
+import build_skill_evidence
 import run_skill_pressure
 from run_skill_pressure import (
     build_prompt,
@@ -876,7 +877,16 @@ def _matrix_sha256() -> str:
     ).hexdigest()
 
 
+def _provision_matrix(repo_root: Path) -> None:
+    matrix_path = repo_root / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json"
+    matrix_path.parent.mkdir(parents=True, exist_ok=True)
+    matrix_path.write_bytes(
+        (REPO_ROOT / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json").read_bytes()
+    )
+
+
 def passing_deterministic_report(tmp_path: Path, *, batch_id: str) -> Path:
+    _provision_matrix(tmp_path)
     return pressure.write_deterministic_report(
         tmp_path,
         batch_id=batch_id,
@@ -1168,3 +1178,121 @@ def test_main_redacts_sensitive_persistence_and_continues_next_case(
         if cell.skill == "wf-status" and cell.category == "without_skill_baseline"
     )
     assert blocked.verdict is Verdict.BLOCKED
+
+
+def test_runtime_discovery_requires_all_three_runtime_passes() -> None:
+    discovery = passing_discovery_records(MATRIX)
+    next(
+        record
+        for record in discovery
+        if record["skill"] == "wf-status" and record["runtime"] == "agent-skills"
+    )["verdict"] = Verdict.NOT_APPLICABLE.value
+    cells = pressure.build_evidence_matrix(
+        MATRIX,
+        deterministic_pass=True,
+        install_pass=True,
+        discovery=discovery,
+        field=passing_field_records(MATRIX),
+    )
+    runtime = next(
+        cell
+        for cell in cells
+        if cell.skill == "wf-status" and cell.category == "runtime_discovery"
+    )
+    assert runtime.verdict is Verdict.FAIL
+
+
+def test_combined_pressure_prefers_fail_over_redacted_blocked_repetition() -> None:
+    field = passing_field_records(MATRIX)
+    for index, record in enumerate(field):
+        if record["skill"] != "wf-orchestrator":
+            continue
+        if record["repetition"] == 1:
+            field[index] = {
+                "schema": pressure.REPORT_SCHEMA,
+                "run_id": "batch-1-run-redacted",
+                "persistence_status": "BLOCKED",
+                "field_identity": {
+                    key: record[key]
+                    for key in (
+                        "batch_id",
+                        "matrix_schema",
+                        "skill",
+                        "scenario_id",
+                        "repetition",
+                        "provider",
+                        "severity",
+                        "prompt_sha256",
+                        "skill_sha256",
+                    )
+                },
+            }
+        elif record["repetition"] == 2:
+            record["verdict"] = Verdict.FAIL.value
+    cells = pressure.build_evidence_matrix(
+        MATRIX,
+        deterministic_pass=True,
+        install_pass=True,
+        discovery=passing_discovery_records(MATRIX),
+        field=field,
+    )
+    combined = next(
+        cell
+        for cell in cells
+        if cell.skill == "wf-orchestrator" and cell.category == "combined_pressure"
+    )
+    assert combined.verdict is Verdict.FAIL
+
+
+def test_source_bundle_uses_current_matrix_to_reject_unknown_field_identity(
+    tmp_path: Path,
+) -> None:
+    deterministic = passing_deterministic_report(tmp_path, batch_id="batch-1")
+    install = passing_install_report(tmp_path, MATRIX, batch_id="batch-1")
+    discovery = passing_discovery_report(tmp_path, MATRIX, batch_id="batch-1")
+    fields = passing_field_report_paths(tmp_path, MATRIX, batch_id="batch-1")
+    first = json.loads(fields[0].read_text())
+    first["payload"]["skill"] = "unknown-skill"
+    fields[0].write_text(json.dumps(first))
+    with pytest.raises(pressure.EvidenceError, match="field identities"):
+        pressure.validate_source_bundle(
+            batch_id="batch-1",
+            deterministic_path=deterministic,
+            install_path=install,
+            discovery_path=discovery,
+            field_paths=fields,
+        )
+
+
+def test_evidence_builder_rejects_source_mutation_after_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    batch_id = "batch-1"
+    deterministic = passing_deterministic_report(tmp_path, batch_id=batch_id)
+    install = passing_install_report(tmp_path, MATRIX, batch_id=batch_id)
+    discovery = passing_discovery_report(tmp_path, MATRIX, batch_id=batch_id)
+    fields = passing_field_report_paths(tmp_path, MATRIX, batch_id=batch_id)
+    original_validate = build_skill_evidence.validate_source_bundle
+
+    def validate_then_mutate(**kwargs: object) -> Mapping[str, object]:
+        sources = original_validate(**kwargs)  # type: ignore[arg-type]
+        payload = json.loads(discovery.read_text())
+        payload["records"][0]["verdict"] = Verdict.FAIL.value
+        discovery.write_text(json.dumps(payload))
+        return sources
+
+    monkeypatch.setattr(
+        build_skill_evidence, "validate_source_bundle", validate_then_mutate
+    )
+    assert (
+        build_skill_evidence.main(
+            ["--batch-id", batch_id, "--repo-root", str(tmp_path)]
+        )
+        == 1
+    )
+    assert "source hash mismatch" in capsys.readouterr().err
+    assert deterministic.exists()
+    assert install.exists()
+    assert len(fields) == 27

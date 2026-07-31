@@ -939,6 +939,24 @@ def _field_identity_from_report(
     return skill, repetition
 
 
+def _load_current_bundle_matrix(
+    deterministic_file: Path, batch_id: str
+) -> tuple[Path, SkillMatrix, str]:
+    try:
+        repo_root = deterministic_file.resolve().parents[2]
+    except IndexError as exc:
+        raise EvidenceError("deterministic report path cannot identify repository") from exc
+    if deterministic_file.resolve() != deterministic_report_path(repo_root, batch_id).resolve():
+        raise EvidenceError("deterministic report path does not match current batch")
+    matrix_path = repo_root / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json"
+    try:
+        matrix = load_skill_matrix(matrix_path)
+        matrix_hash = sha256_file(matrix_path)
+    except (MatrixError, OSError) as exc:
+        raise EvidenceError("current matrix could not be loaded") from exc
+    return repo_root, matrix, matrix_hash
+
+
 def validate_source_bundle(
     *,
     batch_id: str,
@@ -946,26 +964,28 @@ def validate_source_bundle(
     install_path: str | Path,
     discovery_path: str | Path,
     field_paths: Sequence[str | Path],
-    matrix: SkillMatrix | None = None,
-    matrix_sha256: str | None = None,
 ) -> Mapping[str, object]:
     safe_batch_id = _require_safe_batch_id(batch_id)
     deterministic_file, deterministic = _load_json_report(
         deterministic_path, label="deterministic"
+    )
+    repo_root, matrix, current_matrix_hash = _load_current_bundle_matrix(
+        deterministic_file, safe_batch_id
     )
     deterministic_hash = _validate_report_header(
         deterministic,
         label="deterministic",
         schema=DETERMINISTIC_REPORT_SCHEMA,
         batch_id=safe_batch_id,
-        matrix_sha256=matrix_sha256,
+        matrix_sha256=current_matrix_hash,
     )
     _validate_deterministic_report(deterministic)
     if deterministic.get("exit_status") != 0:
         raise EvidenceError("deterministic report exit status is not zero")
-    _validate_sources(_require_mapping(deterministic.get("sources"), field="deterministic sources"))
 
     install_file, install = _load_json_report(install_path, label="install")
+    if install_file.resolve() != install_report_path(repo_root, safe_batch_id).resolve():
+        raise EvidenceError("install report path does not match current batch")
     _validate_report_header(
         install,
         label="install",
@@ -985,6 +1005,8 @@ def validate_source_bundle(
         raise EvidenceError("install report contains non-PASS record")
 
     discovery_file, discovery = _load_json_report(discovery_path, label="discovery")
+    if discovery_file.resolve() != discovery_report_path(repo_root, safe_batch_id).resolve():
+        raise EvidenceError("discovery report path does not match current batch")
     _validate_report_header(
         discovery,
         label="discovery",
@@ -1005,8 +1027,14 @@ def validate_source_bundle(
     field_references: list[Mapping[str, str]] = []
     field_identities: list[tuple[str, int]] = []
     seen_paths: set[Path] = set()
+    field_root = _pressure_operations_root(repo_root).resolve()
     for field_path in field_paths:
         field_file, field_report = _load_json_report(field_path, label="field")
+        if (
+            field_file.resolve().parent != field_root
+            or not field_file.name.startswith(f"{safe_batch_id}-")
+        ):
+            raise EvidenceError("field report path does not match current batch")
         if field_file in seen_paths:
             raise EvidenceError("duplicate field report path")
         seen_paths.add(field_file)
@@ -1014,14 +1042,13 @@ def validate_source_bundle(
         field_references.append(_report_reference(field_file))
     if len(set(field_identities)) != len(field_identities):
         raise EvidenceError("duplicate field report identity")
-    if matrix is not None:
-        expected_fields = {
-            (case.name, repetition)
-            for case in matrix.skills.values()
-            for repetition in range(1, 4 if case.high_risk else 2)
-        }
-        if set(field_identities) != expected_fields:
-            raise EvidenceError("field identities do not match matrix")
+    expected_fields = {
+        (case.name, repetition)
+        for case in matrix.skills.values()
+        for repetition in range(1, 4 if case.high_risk else 2)
+    }
+    if set(field_identities) != expected_fields:
+        raise EvidenceError("field identities do not match current matrix")
 
     return MappingProxyType(
         {
@@ -1173,14 +1200,13 @@ def _with_skill_status(
 def _combined_status(
     observations: Sequence[_FieldObservation], malformed: bool, blocked: bool
 ) -> Verdict:
-    if blocked:
-        return Verdict.BLOCKED
     if malformed:
         return Verdict.FAIL
     verdicts: list[Verdict] = []
     for observation in observations:
         if observation.payload is None:
-            return Verdict.BLOCKED
+            verdicts.append(Verdict.BLOCKED)
+            continue
         verdict = _verdict(observation.payload.get("verdict"))
         if verdict is None:
             return Verdict.FAIL
@@ -1199,9 +1225,11 @@ def _runtime_discovery_status(skill: str, records: Sequence[Mapping[str, Any]]) 
     if len(matching) != len(SUPPORTED_RUNTIMES):
         return Verdict.FAIL
     verdicts = [_record_status(record) for record in matching]
-    if any(verdict is None for verdict in verdicts):
-        return Verdict.FAIL
-    return _aggregate_verdict([verdict for verdict in verdicts if verdict is not None])
+    if all(verdict is Verdict.PASS for verdict in verdicts):
+        return Verdict.PASS
+    if Verdict.BLOCKED in verdicts:
+        return Verdict.BLOCKED
+    return Verdict.FAIL
 
 
 def build_evidence_matrix(
