@@ -1408,16 +1408,18 @@ class WorktreeService:
         return tuple(blockers)
 
     def _cleanup_path_blocker(self, lease: Lease) -> dict[str, str] | None:
-        if self._is_pr_adopted_import(lease):
-            return None
         expected = self.cache_dir / lease.repository_name / lease.id
-        if lease.worktree_path != expected:
+        if (
+            not self._is_pr_adopted_import(lease)
+            and lease.worktree_path != expected
+        ):
             return {
                 "code": "unsafe_worktree_path",
                 "message": f"Lease {lease.id} does not use its managed cache path.",
             }
-        current = Path(expected.anchor)
-        for part in expected.parts[1:]:
+        worktree_path = lease.worktree_path
+        current = Path(worktree_path.anchor)
+        for part in worktree_path.parts[1:]:
             current /= part
             try:
                 current.lstat()
@@ -1426,14 +1428,12 @@ class WorktreeService:
             except OSError:
                 return {
                     "code": "unsafe_worktree_path",
-                    "message": f"Lease {lease.id} cache path could not be inspected.",
+                    "message": f"Lease {lease.id} worktree path could not be inspected.",
                 }
             if current.is_symlink():
                 return {
                     "code": "unsafe_worktree_path",
-                    "message": (
-                        f"Lease {lease.id} has a symlinked managed worktree path."
-                    ),
+                    "message": f"Lease {lease.id} has a symlinked worktree path.",
                 }
         return None
 

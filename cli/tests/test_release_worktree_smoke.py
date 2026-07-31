@@ -343,9 +343,35 @@ def test_imported_worktree_pr_cleanup_lifecycle_smoke(smoke: SmokeHarness) -> No
     assert refreshed.deployment_state is DeploymentState.NOT_REQUIRED
     assert smoke.deployment_calls == []
 
+    before_finish_preview = smoke.registry.get_lease(imported.id)
+    assert before_finish_preview is not None
+    before_finish_events = smoke.registry.list_events(imported.id)
+    before_finish_reservation = smoke.registry.get_cleanup_reservation(imported.id)
+    assert before_finish_reservation is None
+    legacy_local_ref = smoke.git.resolve_ref(legacy_branch)
+    legacy_remote_ref = git_command(
+        smoke.repo.parent / "origin.git",
+        "rev-parse",
+        f"refs/heads/{legacy_branch}",
+    )
     finish_preview = smoke.service.finish(pr_number=129, apply=False)
     assert finish_preview.decision == "preview"
     assert finish_preview.blockers == ()
+    assert smoke.registry.get_lease(imported.id) == before_finish_preview
+    assert smoke.registry.list_events(imported.id) == before_finish_events
+    assert (
+        smoke.registry.get_cleanup_reservation(imported.id)
+        == before_finish_reservation
+    )
+    assert smoke.git.resolve_ref(legacy_branch) == legacy_local_ref
+    assert (
+        git_command(
+            smoke.repo.parent / "origin.git",
+            "rev-parse",
+            f"refs/heads/{legacy_branch}",
+        )
+        == legacy_remote_ref
+    )
     assert legacy_path.exists()
     assert any(
         worktree.path == legacy_path for worktree in smoke.git.list_worktrees()

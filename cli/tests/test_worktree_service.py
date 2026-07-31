@@ -237,6 +237,42 @@ def matching_adoption_pr(
     )
 
 
+def adopted_imported_release_worktree(
+    harness: Harness, root: Path, *, branch: str = "awf/imported-release"
+) -> Lease:
+    root.mkdir()
+    external = root / "legacy-release"
+    git_command(
+        harness.repo,
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        branch,
+        str(external),
+        "staging",
+    )
+    (external / "legacy-release.txt").write_text(
+        "legacy release\n", encoding="utf-8"
+    )
+    git_command(external, "add", "legacy-release.txt")
+    git_command(external, "commit", "-q", "-m", "legacy release")
+    git_command(external, "push", "-q", "-u", "origin", branch)
+
+    imported_result = harness.service.import_root(root, apply=True)
+    imported = next(
+        lease for lease in imported_result.leases if lease.worktree_path == external
+    )
+    harness.github.prs[129] = matching_adoption_pr(harness, imported)
+    adopted = harness.service.adopt(imported.id, pr_number=129, apply=True)
+    assert adopted.decision == "ready"
+    harness.service.status(refresh=True)
+    current = harness.registry.get_lease(imported.id)
+    assert current is not None
+    assert current.state is LeaseState.CLEANABLE
+    return current
+
+
 @dataclass
 class PromotionHarness:
     repo: Path
@@ -3601,6 +3637,92 @@ def test_finish_rejects_a_symlinked_lease_path_component_before_git_inspection(
     assert "unsafe_worktree_path" in {item["code"] for item in result.blockers}
     assert promotion_harness.cache_dir.is_symlink()
     assert lease.worktree_path.is_dir()
+
+
+@pytest.mark.parametrize("substitution", ("leaf", "parent"))
+def test_finish_blocks_adopted_imported_worktree_symlink_substitution(
+    harness: Harness, tmp_path: Path, substitution: str
+) -> None:
+    lease = adopted_imported_release_worktree(harness, tmp_path / "import-root")
+    assert lease.target_pr is not None
+    expected_path = lease.worktree_path
+    if substitution == "leaf":
+        relocated = tmp_path / "relocated-legacy-release"
+        expected_path.rename(relocated)
+        expected_path.symlink_to(relocated, target_is_directory=True)
+        assert expected_path.is_symlink()
+    else:
+        relocated = tmp_path / "relocated-import-root"
+        expected_path.parent.rename(relocated)
+        expected_path.parent.symlink_to(relocated, target_is_directory=True)
+        assert expected_path.parent.is_symlink()
+
+    before = harness.registry.get_lease(lease.id)
+    assert before is not None
+    before_events = harness.registry.list_events(lease.id)
+    before_reservation = harness.registry.get_cleanup_reservation(lease.id)
+    assert before_reservation is None
+
+    for apply in (False, True):
+        result = harness.service.finish(pr_number=lease.target_pr, apply=apply)
+
+        assert result.status == "blocked"
+        assert "unsafe_worktree_path" in {
+            item["code"] for item in result.blockers
+        }
+        assert harness.registry.get_lease(lease.id) == before
+        assert harness.registry.list_events(lease.id) == before_events
+        assert harness.registry.get_cleanup_reservation(lease.id) == before_reservation
+
+    assert any(
+        worktree.path == expected_path for worktree in harness.git.list_worktrees()
+    )
+    assert harness.git.resolve_ref(lease.branch) == lease.head_sha
+    assert (
+        git_command(
+            harness.repo.parent / "origin.git",
+            "rev-parse",
+            f"refs/heads/{lease.branch}",
+        )
+        == lease.head_sha
+    )
+
+
+def test_finish_does_not_recover_adopted_import_through_a_symlink(
+    harness: Harness, tmp_path: Path
+) -> None:
+    lease = adopted_imported_release_worktree(harness, tmp_path / "import-root")
+    assert lease.target_pr is not None
+    reservation = harness.registry.reserve_cleanup(
+        lease.id,
+        expected_version=lease.version,
+        branch_sha=lease.head_sha,
+    )
+    reserved = harness.registry.get_lease(lease.id)
+    assert reserved is not None
+    reserved_events = harness.registry.list_events(lease.id)
+    relocated = tmp_path / "relocated-legacy-release"
+    lease.worktree_path.rename(relocated)
+    lease.worktree_path.symlink_to(relocated, target_is_directory=True)
+
+    result = harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.status == "blocked"
+    assert "unsafe_worktree_path" in {item["code"] for item in result.blockers}
+    assert harness.registry.get_lease(lease.id) == reserved
+    assert harness.registry.list_events(lease.id) == reserved_events
+    assert harness.registry.get_cleanup_reservation(lease.id) == reservation
+    assert lease.worktree_path.is_symlink()
+    assert relocated.is_dir()
+    assert harness.git.resolve_ref(lease.branch) == lease.head_sha
+    assert (
+        git_command(
+            harness.repo.parent / "origin.git",
+            "rev-parse",
+            f"refs/heads/{lease.branch}",
+        )
+        == lease.head_sha
+    )
 
 
 def test_finish_releases_reservation_when_removal_fails_after_refresh_race(
