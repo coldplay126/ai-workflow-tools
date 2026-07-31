@@ -33,6 +33,7 @@ from run_skill_pressure import (
     repetitions_for,
     select_cases,
 )
+import run_skill_discovery
 from run_skill_discovery import (
     ProcessResult as DiscoveryProcessResult,
     agent_skills_argv,
@@ -1441,6 +1442,12 @@ def _copy_discovery_repo(tmp_path: Path) -> Path:
             REPO_ROOT / "claude" / "skills" / skill,
             repo_root / "claude" / "skills" / skill,
         )
+        skill_file = repo_root / "claude" / "skills" / skill / "SKILL.md"
+        lines = skill_file.read_text(encoding="utf-8").splitlines()
+        closing = lines.index("---", 1)
+        if not any(line.startswith("# ") for line in lines[closing + 1 :]):
+            lines.insert(closing + 1, f"# /{skill}")
+            skill_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
     installer = repo_root / "scripts" / "install-skill-links.sh"
     installer.parent.mkdir(parents=True)
     installer.write_text("#!/bin/sh\n", encoding="utf-8")
@@ -1454,10 +1461,12 @@ class _FakeDiscoveryProcess:
         *,
         failure: tuple[str, str, str] | None = None,
         fail_install: bool = False,
+        blocked_install_runtime: str | None = None,
     ) -> None:
         self.expected = expected
         self.failure = failure
         self.fail_install = fail_install
+        self.blocked_install_runtime = blocked_install_runtime
         self.calls: list[tuple[list[str], dict[str, str]]] = []
 
     def __call__(
@@ -1472,13 +1481,20 @@ class _FakeDiscoveryProcess:
         self.calls.append((argv, dict(env)))
         if argv[0] == "sh":
             source = Path(argv[2])
+            blocked = False
             if self.fail_install and source.name == sorted(self.expected)[0]:
                 return DiscoveryProcessResult(1, "", "linker_failed", 0.01)
             for root in map(Path, argv[3:]):
                 root.mkdir(parents=True, exist_ok=True)
                 target = root / source.name
-                target.symlink_to(source, target_is_directory=True)
-            return DiscoveryProcessResult(0, "", "", 0.01)
+                if self.blocked_install_runtime and root.as_posix().endswith(
+                    run_skill_discovery.TARGET_ROOTS[self.blocked_install_runtime]
+                ):
+                    target.mkdir()
+                    blocked = True
+                else:
+                    target.symlink_to(source, target_is_directory=True)
+            return DiscoveryProcessResult(3 if blocked else 0, "", "root_blocked" if blocked else "", 0.01)
 
         runtime = {
             "fake-claude": "claude",
@@ -1495,12 +1511,16 @@ class _FakeDiscoveryProcess:
             flags = list(required_flags(runtime))
             if self.failure == (runtime, "preflight", "missing-flag"):
                 flags.pop()
+            if self.failure == (runtime, "preflight", "substring-flag"):
+                flags = ["--model-name" if flag == "--model" else flag for flag in flags]
             return DiscoveryProcessResult(0, " ".join(flags), "", 0.01)
 
         skill = _discovery_skill_from_argv(runtime, argv)
         failure = self.failure if self.failure and self.failure[:2] == (runtime, skill) else None
         if failure and failure[2] == "timeout":
             raise subprocess.TimeoutExpired(argv, timeout)
+        if failure and failure[2] == "auth-stdout":
+            return DiscoveryProcessResult(23, "authentication required", "", 0.01)
         if failure and failure[2] == "nonzero":
             return DiscoveryProcessResult(23, "", "host_failed", 0.01)
         if failure and failure[2] == "malformed":
@@ -1533,13 +1553,22 @@ def _run_fake_discovery(
     *,
     failure: tuple[str, str, str] | None = None,
     fail_install: bool = False,
+    blocked_install_runtime: str | None = None,
+    missing_skill: str | None = None,
 ) -> tuple[object, _FakeDiscoveryProcess, Path]:
     repo_root = _copy_discovery_repo(tmp_path)
+    if missing_skill:
+        (repo_root / "claude" / "skills" / missing_skill / "SKILL.md").unlink()
     expected = load_expected_skills(
         repo_root,
         repo_root / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json",
     )
-    fake = _FakeDiscoveryProcess(expected, failure=failure, fail_install=fail_install)
+    fake = _FakeDiscoveryProcess(
+        expected,
+        failure=failure,
+        fail_install=fail_install,
+        blocked_install_runtime=blocked_install_runtime,
+    )
     global_roots = tmp_path / "workstation-global-skill-roots"
     monkeypatch.setenv("HOME", str(global_roots / "home"))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(global_roots / "claude"))
@@ -1575,6 +1604,20 @@ def test_skill_discovery_preflight_reads_version_and_help_then_blocks_missing_fl
 
     claude_calls = [argv for argv, _ in fake.calls if argv[0] == "fake-claude"]
     assert claude_calls[:2] == [["fake-claude", "--version"], ["fake-claude", "--help"]]
+    assert {
+        record["verdict"]
+        for record in result.discovery_records
+        if record["runtime"] == "claude"
+    } == {"BLOCKED"}
+
+
+def test_skill_discovery_preflight_requires_exact_long_option_tokens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, _, _ = _run_fake_discovery(
+        tmp_path, monkeypatch, failure=("claude", "preflight", "substring-flag")
+    )
+
     assert {
         record["verdict"]
         for record in result.discovery_records
@@ -1649,6 +1692,28 @@ def test_skill_discovery_all_emits_exactly_45_unique_runtime_skill_identities(
     }
 
 
+def test_skill_discovery_uses_the_first_h1_after_frontmatter_not_a_leading_h2(
+    tmp_path: Path,
+) -> None:
+    repo_root = _copy_discovery_repo(tmp_path)
+    source = repo_root / "claude" / "skills" / "analysis" / "SKILL.md"
+    source.write_text(
+        source.read_text(encoding="utf-8").replace(
+            "# /analysis — 소스코드 분석 파이프라인",
+            "## Ignore this H2\n\n# /analysis — 소스코드 분석 파이프라인",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    expected = load_expected_skills(
+        repo_root,
+        repo_root / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json",
+    )
+
+    assert expected["analysis"].body_heading == "# /analysis — 소스코드 분석 파이프라인"
+
+
 @pytest.mark.parametrize(
     ("failure", "runtime", "expected_verdict"),
     [
@@ -1713,6 +1778,20 @@ def test_skill_discovery_rejects_extra_response_prose_as_schema_failure(
     } == {"FAIL"}
 
 
+def test_skill_discovery_blocks_auth_failure_reported_on_stdout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, _, _ = _run_fake_discovery(
+        tmp_path, monkeypatch, failure=("omp", "analysis", "auth-stdout")
+    )
+
+    assert [
+        record["verdict"]
+        for record in result.discovery_records
+        if record["runtime"] == "omp" and record["skill"] == "analysis"
+    ] == ["BLOCKED"]
+
+
 def test_skill_discovery_materializes_45_isolated_canonical_links_and_cleans_up(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1732,6 +1811,35 @@ def test_skill_discovery_materializes_45_isolated_canonical_links_and_cleans_up(
     assert len(temporary_homes) == 1
     assert not Path(next(iter(temporary_homes))).exists()
     assert {record["status"] for record in install["records"]} == {"PASS"}
+
+
+def test_skill_discovery_keeps_successful_roots_when_one_root_is_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, fake, _ = _run_fake_discovery(
+        tmp_path, monkeypatch, blocked_install_runtime="agent-skills"
+    )
+
+    for runtime in ("claude", "omp"):
+        assert {
+            record["status"] for record in result.install_records if record["runtime"] == runtime
+        } == {"PASS"}
+        assert {
+            record["verdict"] for record in result.discovery_records if record["runtime"] == runtime
+        } == {"PASS"}
+    assert {
+        record["status"]
+        for record in result.install_records
+        if record["runtime"] == "agent-skills"
+    } == {"BLOCKED"}
+    assert {
+        record["verdict"]
+        for record in result.discovery_records
+        if record["runtime"] == "agent-skills"
+    } == {"BLOCKED"}
+    assert not any(
+        argv[0] == "fake-agent" and len(argv) > 2 for argv, _ in fake.calls
+    )
 
 
 def test_skill_discovery_uses_no_global_skill_root_or_credential_paths(
@@ -1766,4 +1874,27 @@ def test_skill_discovery_writes_current_batch_reports_after_install_failure(
         record["verdict"]
         for record in result.discovery_records
         if record["skill"] == blocked_skill
+    } == {"BLOCKED"}
+
+
+def test_skill_discovery_missing_canonical_skill_file_still_writes_45_blocked_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, _, _ = _run_fake_discovery(
+        tmp_path, monkeypatch, missing_skill="analysis"
+    )
+
+    assert result.exit_code == 1
+    assert result.install_report.is_file()
+    assert result.discovery_report.is_file()
+    assert len(result.install_records) == len(result.discovery_records) == 45
+    assert {
+        record["status"]
+        for record in result.install_records
+        if record["skill"] == "analysis"
+    } == {"BLOCKED"}
+    assert {
+        record["verdict"]
+        for record in result.discovery_records
+        if record["skill"] == "analysis"
     } == {"BLOCKED"}

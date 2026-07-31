@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -87,6 +88,7 @@ class ExpectedSkill:
     body_heading: str
     source: Path
     source_sha256: str
+    source_error: str = ""
 
 
 @dataclass(frozen=True)
@@ -267,12 +269,9 @@ def _source_metadata(skill_file: Path) -> tuple[str, str, str]:
         description = frontmatter["description"]
     except KeyError as exc:
         raise ValueError(f"missing {exc.args[0]} frontmatter: {skill_file}") from exc
-    heading = next(
-        (line for line in lines[closing + 1 :] if re.fullmatch(r"#{1,6} .+", line)),
-        None,
-    )
+    heading = next((line for line in lines[closing + 1 :] if line.startswith("# ")), None)
     if heading is None:
-        raise ValueError(f"missing Markdown body heading: {skill_file}")
+        raise ValueError(f"missing Markdown H1: {skill_file}")
     return name, description, heading
 
 
@@ -280,21 +279,40 @@ def load_expected_skills(repo_root: Path, matrix_path: Path) -> dict[str, Expect
     root = Path(repo_root).resolve()
     matrix = load_skill_matrix(matrix_path)
     expected: dict[str, ExpectedSkill] = {}
+    empty_sha256 = hashlib.sha256(b"").hexdigest()
     for skill in sorted(matrix.skills):
         source = root / "claude" / "skills" / skill
+        source_error = ""
+        source_sha256 = empty_sha256
+        name = skill
+        description = ""
+        body_heading = ""
         if source.is_symlink() or not source.is_dir():
-            raise ValueError(f"invalid canonical Skill source: {skill}")
-        if any(path.is_symlink() for path in source.rglob("*")):
-            raise ValueError(f"canonical Skill source has symlink: {skill}")
-        name, description, body_heading = _source_metadata(source / "SKILL.md")
-        if name != skill:
-            raise ValueError(f"canonical Skill name mismatch: {skill}")
+            source_error = "canonical_source_invalid"
+        elif any(path.is_symlink() for path in source.rglob("*")):
+            source_error = "canonical_source_symlink"
+        else:
+            source_sha256 = sha256_skill(source)
+            try:
+                name, description, body_heading = _source_metadata(source / "SKILL.md")
+            except ValueError:
+                source_error = "canonical_source_metadata_invalid"
+                name = skill
+                description = ""
+                body_heading = ""
+            else:
+                if name != skill:
+                    source_error = "canonical_source_name_mismatch"
+                    name = skill
+                    description = ""
+                    body_heading = ""
         expected[skill] = ExpectedSkill(
             name=name,
             description=description,
             body_heading=body_heading,
             source=source,
-            source_sha256=sha256_skill(source),
+            source_sha256=source_sha256,
+            source_error=source_error,
         )
     if len(expected) != 15:
         raise ValueError("Skill matrix must identify exactly 15 Skills")
@@ -316,6 +334,19 @@ def _base_environment(isolated_home: Path, *, runtime: str | None) -> dict[str, 
     return env
 
 
+
+
+def _help_has_flag(help_text: str, flag: str) -> bool:
+    if flag == "exec":
+        return re.search(r"(?<![a-zA-Z0-9_-])exec(?![a-zA-Z0-9_-])", help_text) is not None
+    option = flag.split("=", 1)[0]
+    return (
+        re.search(
+            rf"(?<![a-zA-Z0-9_-]){re.escape(option)}(?=$|[\s=,;:)\]])",
+            help_text,
+        )
+        is not None
+    )
 def _preflight(
     runtime: str,
     binary: str,
@@ -357,7 +388,7 @@ def _preflight(
             f"preflight_help_exit:{help_result.returncode}",
             help_result.returncode,
         )
-    missing = [flag for flag in required_flags(runtime) if flag not in help_result.stdout]
+    missing = [flag for flag in required_flags(runtime) if not _help_has_flag(help_result.stdout, flag)]
     if missing:
         return HostPreflight(
             runtime,
@@ -389,6 +420,19 @@ def _install_records(
     records: list[dict[str, object]] = []
     installer_env = _base_environment(isolated_home, runtime=None)
     for skill, source in expected.items():
+        if source.source_error:
+            for runtime in RUNTIMES:
+                records.append(
+                    {
+                        "runtime": runtime,
+                        "skill": skill,
+                        "source_sha256": source.source_sha256,
+                        "target_root": TARGET_ROOTS[runtime],
+                        "status": "BLOCKED",
+                        "diagnostic": source.source_error,
+                    }
+                )
+            continue
         completed = _invoke(
             process_runner,
             [
@@ -402,7 +446,7 @@ def _install_records(
             timeout=30,
         )
         for runtime in RUNTIMES:
-            linked = completed.returncode == 0 and _verify_link(roots[runtime] / skill, source.source)
+            linked = _verify_link(roots[runtime] / skill, source.source)
             if linked:
                 status, diagnostic = "PASS", ""
             elif completed.error_kind is not None:
@@ -501,6 +545,9 @@ def _discovery_record(
         "source_description": expected.description,
         "source_body_heading": expected.body_heading,
     }
+    if expected.source_error:
+        record["diagnostic"] = expected.source_error
+        return record
     if not preflight.available:
         record["diagnostic"] = preflight.diagnostic
         return record
@@ -523,7 +570,7 @@ def _discovery_record(
         record["diagnostic"] = completed.error_kind
         return record
     if completed.returncode != 0:
-        if AUTH_FAILURE_RE.search(completed.stderr):
+        if AUTH_FAILURE_RE.search(f"{completed.stdout}\n{completed.stderr}"):
             record["diagnostic"] = "host_auth_unavailable"
         else:
             record["verdict"] = "FAIL"
