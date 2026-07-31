@@ -1238,11 +1238,28 @@ class WorktreeService:
             warnings=warnings,
         )
 
+    @staticmethod
+    def _is_pr_adopted_import(lease: Lease) -> bool:
+        return (
+            lease.managed
+            and lease.owner_kind == "imported"
+            and lease.target_pr is not None
+        )
+
+    def _is_cleanup_managed(self, lease: Lease) -> bool:
+        return (
+            lease.managed
+            and (
+                lease.owner_kind == "awf"
+                or self._is_pr_adopted_import(lease)
+            )
+        )
+
     def _cleanup_blockers(
         self, lease: Lease, pull_request: PullRequest
     ) -> tuple[dict[str, str], ...]:
         blockers: list[dict[str, str]] = []
-        if not lease.managed or lease.owner_kind != "awf":
+        if not self._is_cleanup_managed(lease):
             blockers.append(
                 {
                     "code": "unmanaged_lease",
@@ -1391,6 +1408,8 @@ class WorktreeService:
         return tuple(blockers)
 
     def _cleanup_path_blocker(self, lease: Lease) -> dict[str, str] | None:
+        if self._is_pr_adopted_import(lease):
+            return None
         expected = self.cache_dir / lease.repository_name / lease.id
         if lease.worktree_path != expected:
             return {
@@ -1425,7 +1444,7 @@ class WorktreeService:
         actions: list[dict[str, object]],
         warnings: list[dict[str, str]],
     ) -> GitRemoteError | None:
-        if lease.owner_kind != "awf" or not lease.branch.startswith("awf/"):
+        if not self._is_cleanup_managed(lease) or not lease.branch.startswith("awf/"):
             return None
         try:
             self.git.delete_branch_if_at(lease.branch, expected_sha)
