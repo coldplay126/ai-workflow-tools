@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import re
+import tempfile
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
+
+from awf.core.operational_metrics import operations_root
 
 
 MATRIX_SCHEMA = "awf_skill_validation_matrix_v1"
@@ -33,6 +40,16 @@ HIGH_RISK_SKILLS = frozenset(
     }
 )
 
+REPORT_SCHEMA = "awf_skill_pressure_report_v1"
+RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+SENSITIVE_PATTERNS = {
+    "email": re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
+    "phone": re.compile(r"(?<!\d)(?:\+?82[- ]?)?0?1[016789][- ]?\d{3,4}[- ]?\d{4}(?!\d)"),
+    "bearer_token": re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]{12,}=*"),
+    "openai_key": re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),
+    "aws_access_key": re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+}
+
 
 class Verdict(str, Enum):
     PASS = "PASS"
@@ -43,6 +60,10 @@ class Verdict(str, Enum):
 
 
 class MatrixError(ValueError):
+    pass
+
+
+class SensitiveDataError(ValueError):
     pass
 
 
@@ -381,3 +402,131 @@ def compare_pair(baseline: Evaluation, with_skill: Evaluation) -> PairEvaluation
     if baseline.verdict is Verdict.PASS:
         return PairEvaluation(Verdict.UNPROVEN, baseline, with_skill)
     return PairEvaluation(Verdict.PASS, baseline, with_skill)
+
+
+def sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def sha256_skill(skill_root: str | Path) -> str:
+    root = Path(skill_root)
+    digest = hashlib.sha256()
+    for path in sorted(path for path in root.rglob("*") if path.is_file()):
+        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _sensitive_labels(text: str) -> tuple[str, ...]:
+    return tuple(name for name, pattern in SENSITIVE_PATTERNS.items() if pattern.search(text))
+
+
+def pressure_report_path(repo_root: str | Path, run_id: str) -> Path:
+    if RUN_ID_RE.fullmatch(run_id) is None:
+        raise ValueError(f"invalid run_id: {run_id!r}")
+    return operations_root(repo_root) / "skill-pressure" / f"{run_id}.json"
+
+
+def _publish_new(target: Path, content: str) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=target.parent,
+        prefix=f".{target.name}.",
+        delete=False,
+    ) as handle:
+        handle.write(content)
+        temp_path = Path(handle.name)
+    try:
+        os.link(temp_path, target)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _safe_field_identity(payload: dict[str, object]) -> dict[str, object]:
+    identity: dict[str, object] = {}
+    token_fields = ("batch_id", "matrix_schema", "skill", "scenario_id", "provider", "severity")
+    for key in token_fields:
+        value = payload.get(key)
+        if (
+            isinstance(value, str)
+            and re.fullmatch(r"[a-z0-9_.-]+", value)
+            and not _sensitive_labels(value)
+        ):
+            identity[key] = value
+    repetition = payload.get("repetition")
+    if isinstance(repetition, int) and repetition > 0:
+        identity["repetition"] = repetition
+    for key in ("prompt_sha256", "skill_sha256"):
+        value = payload.get(key)
+        if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value):
+            identity[key] = value
+    return identity
+
+
+def write_pressure_report(
+    repo_root: str | Path,
+    *,
+    run_id: str,
+    payload: dict[str, Any],
+    baseline: str,
+    with_skill: str,
+) -> Path:
+    target = pressure_report_path(repo_root, run_id)
+    if target.exists():
+        raise FileExistsError(target)
+
+    recorded_at = datetime.now(timezone.utc).isoformat()
+    serialized_payload = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    labels = sorted(
+        set(
+            _sensitive_labels(serialized_payload)
+            + _sensitive_labels(baseline)
+            + _sensitive_labels(with_skill)
+        )
+    )
+    if labels:
+        blocked = {
+            "schema": REPORT_SCHEMA,
+            "recorded_at": recorded_at,
+            "run_id": run_id,
+            "persistence_status": "BLOCKED",
+            "diagnostics": [{"code": "sensitive_content", "labels": labels}],
+            "field_identity": _safe_field_identity(payload),
+        }
+        _publish_new(target, json.dumps(blocked, ensure_ascii=False, indent=2) + "\n")
+        raise SensitiveDataError(f"sensitive transcript blocked: {','.join(labels)}")
+
+    transcript_root = operations_root(repo_root) / "skill-pressure" / "transcripts" / run_id
+    baseline_path = transcript_root / "baseline.txt"
+    with_skill_path = transcript_root / "with-skill.txt"
+    created: list[Path] = []
+    try:
+        _publish_new(baseline_path, baseline)
+        created.append(baseline_path)
+        _publish_new(with_skill_path, with_skill)
+        created.append(with_skill_path)
+        envelope = {
+            "schema": REPORT_SCHEMA,
+            "recorded_at": recorded_at,
+            "run_id": run_id,
+            "persistence_status": "COMPLETE",
+            "payload": payload,
+            "transcripts": {
+                "baseline": {"path": str(baseline_path), "sha256": sha256_text(baseline)},
+                "with_skill": {"path": str(with_skill_path), "sha256": sha256_text(with_skill)},
+            },
+        }
+        _publish_new(target, json.dumps(envelope, ensure_ascii=False, indent=2) + "\n")
+    except BaseException:
+        for path in reversed(created):
+            path.unlink(missing_ok=True)
+        try:
+            transcript_root.rmdir()
+        except OSError:
+            pass
+        raise
+    return target

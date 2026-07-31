@@ -12,6 +12,7 @@ dist/
 .awf-operations/events/
 .awf-operations/log.md
 .awf-operations/.profile
+.awf-operations/skill-pressure/
 .awf-operations/wiki/operations/
 .idea/
 .serena/
