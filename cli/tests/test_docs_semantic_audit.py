@@ -61,6 +61,13 @@ def _argv_from_skill_command(command: str) -> list[str]:
     return argv
 
 
+def _argv_from_displayed_command(command: str) -> list[str]:
+    concrete = ANGLE_TEMPLATE_ARG_RE.sub("1", TEMPLATE_ARG_RE.sub("1", command))
+    argv = shlex.split(concrete, comments=True)
+    assert argv and argv[0] == "awf"
+    return argv[1:]
+
+
 def _shell_fenced_awf_commands(text: str) -> tuple[str, ...]:
     commands: list[str] = []
     continued = ""
@@ -75,7 +82,7 @@ def _shell_fenced_awf_commands(text: str) -> tuple[str, ...]:
                 commands.append(continued)
                 continued = ""
                 continue
-            if not line.startswith("awf wt "):
+            if not line.startswith("awf "):
                 continue
             if line.endswith("\\"):
                 continued = line.removesuffix("\\").strip()
@@ -84,6 +91,17 @@ def _shell_fenced_awf_commands(text: str) -> tuple[str, ...]:
     if continued:
         commands.append(continued)
     return tuple(commands)
+
+def test_shell_fenced_command_extractor_includes_non_worktree_awf_commands() -> None:
+    text = """```bash
+awf ready --repo-root . --json
+awf wf status --repo-root .
+```"""
+
+    assert _shell_fenced_awf_commands(text) == (
+        "awf ready --repo-root . --json",
+        "awf wf status --repo-root .",
+    )
 
 
 def _raw_contiguous_command_slice(
@@ -209,6 +227,23 @@ def test_skill_cli_command_templates_parse_with_current_cli() -> None:
                 invalid.append(
                     f"{path.relative_to(REPO_ROOT)}: awf {' '.join(argv)} "
                     f"(exit={exc.code})"
+                )
+
+    assert invalid == []
+
+
+def test_all_displayed_skill_awf_commands_parse_with_current_cli() -> None:
+    parser = build_parser()
+    invalid: list[str] = []
+    for path in _skill_files():
+        text = path.read_text(encoding="utf-8")
+        for command in _shell_fenced_awf_commands(text):
+            try:
+                parser.parse_args(_argv_from_displayed_command(command))
+            except (AssertionError, SystemExit, ValueError) as exc:
+                invalid.append(
+                    f"{path.relative_to(REPO_ROOT)}: {command!r} "
+                    f"({type(exc).__name__}: {exc})"
                 )
 
     assert invalid == []
