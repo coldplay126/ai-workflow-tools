@@ -426,6 +426,9 @@ def _sensitive_labels(text: str) -> tuple[str, ...]:
 def pressure_report_path(repo_root: str | Path, run_id: str) -> Path:
     if RUN_ID_RE.fullmatch(run_id) is None:
         raise ValueError(f"invalid run_id: {run_id!r}")
+    labels = _sensitive_labels(run_id)
+    if labels:
+        raise SensitiveDataError(f"sensitive run_id blocked: {','.join(labels)}")
     return operations_root(repo_root) / "skill-pressure" / f"{run_id}.json"
 
 

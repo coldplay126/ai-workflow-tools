@@ -337,6 +337,33 @@ def test_pressure_report_path_rejects_unsafe_run_ids(tmp_path: Path, run_id: str
         pressure_report_path(tmp_path, run_id)
 
 
+@pytest.mark.parametrize(
+    ("run_id", "label"),
+    [
+        ("AKIA1234567890ABCDEF", "aws_access_key"),
+        ("sk-abcdefghijklmnop", "openai_key"),
+    ],
+)
+def test_sensitive_run_ids_are_rejected_before_creating_artifacts(
+    tmp_path: Path,
+    run_id: str,
+    label: str,
+) -> None:
+    with pytest.raises(SensitiveDataError, match=label):
+        pressure_report_path(tmp_path, run_id)
+    assert list(tmp_path.iterdir()) == []
+
+    with pytest.raises(SensitiveDataError, match=label):
+        write_pressure_report(
+            tmp_path,
+            run_id=run_id,
+            payload=valid_field_record(),
+            baseline=response(decision="PROCEED", reason_codes=[]),
+            with_skill=response(),
+        )
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_partial_failure_removes_new_transcript_without_overwriting_existing_file(
     tmp_path: Path,
 ) -> None:
