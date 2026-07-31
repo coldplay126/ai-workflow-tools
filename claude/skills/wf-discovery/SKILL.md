@@ -12,6 +12,13 @@ description: |
 type: workflow-utility
 allowed-tools:
   - Agent
+conditions:
+  trigger:
+    - user asks which project or repository should own a feature
+    - a feature may span multiple repositories and no project is selected
+  skip:
+    - the project is already selected
+    - the request is a simple code question
 ---
 
 # wf-discovery: 프로젝트 디스커버리

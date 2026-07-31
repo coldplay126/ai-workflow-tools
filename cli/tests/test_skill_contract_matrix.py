@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from awf.core.skill_pressure import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MATRIX_PATH = REPO_ROOT / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json"
 SKILLS_ROOT = REPO_ROOT / "claude" / "skills"
+FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---", re.DOTALL)
 EXPECTED_SKILLS = {
     "analysis",
     "multi-agent",
@@ -42,6 +44,29 @@ def _matrix_payload() -> dict[str, object]:
 
 def _write_payload(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _top_level_value(frontmatter: str, key: str) -> str | None:
+    match = re.search(rf"(?m)^{re.escape(key)}:\s*[\"']?([^\n\"']+)", frontmatter)
+    return match.group(1).strip() if match else None
+
+
+def _condition_values(frontmatter: str, key: str) -> tuple[str, ...]:
+    match = re.search(rf"(?m)^  {key}:\s*(.*)$", frontmatter)
+    if match is None:
+        return ()
+    inline = match.group(1).strip().strip("\"'")
+    if inline:
+        return (inline,)
+    values: list[str] = []
+    tail = frontmatter[match.end():]
+    for line in tail.splitlines():
+        if line.startswith("    - "):
+            values.append(line[6:].strip().strip("\"'"))
+            continue
+        if line.strip() and not line.startswith("    "):
+            break
+    return tuple(values)
 
 
 def test_matrix_locks_exact_first_party_skill_inventory() -> None:
@@ -155,3 +180,22 @@ def test_matrix_skills_mapping_is_read_only() -> None:
 
     with pytest.raises(TypeError):
         matrix.skills["chat"] = matrix.skills["analysis"]  # type: ignore[index]
+
+
+def test_every_skill_frontmatter_identity_and_conditions_are_semantic() -> None:
+    matrix = load_skill_matrix(MATRIX_PATH)
+    for name, case in sorted(matrix.skills.items()):
+        path = SKILLS_ROOT / name / "SKILL.md"
+        match = FRONTMATTER_RE.match(path.read_text(encoding="utf-8"))
+        assert match is not None
+        frontmatter = match.group(1)
+        assert _top_level_value(frontmatter, "name") == name
+        assert re.fullmatch(r"\d+\.\d+\.\d+", _top_level_value(frontmatter, "version") or "")
+        assert _top_level_value(frontmatter, "type") == case.type
+        triggers = _condition_values(frontmatter, "trigger")
+        skips = _condition_values(frontmatter, "skip")
+        assert triggers, f"{name}: missing trigger"
+        assert skips, f"{name}: missing skip"
+        assert set(triggers).isdisjoint(skips)
+        if case.entry_kind == "slash":
+            assert any(f"/{name}" in trigger for trigger in triggers)

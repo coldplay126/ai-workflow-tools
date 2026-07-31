@@ -3,6 +3,11 @@ name: release-worktree-lifecycle
 version: 1.0.0
 description: Use whenever handling deploy, production release, staging-to-main or staging-to-master promotion, release PR creation or merge, deployment worktree creation/reuse, or merged branch/worktree cleanup. Requires awf wt status/acquire/promote/finish/gc and forbids bypassing CLI safety blockers.
 type: deployment-safety
+conditions:
+  trigger:
+    - handling deploy, production release, promotion, release PR, or merged worktree cleanup
+  skip:
+    - no release, deployment, promotion, or worktree lifecycle action is involved
 ---
 
 # Release Worktree Lifecycle
