@@ -50,14 +50,29 @@ def test_evaluator_rejects_forbidden_command() -> None:
     assert "forbidden_command:awf wt finish --apply" in evaluation.failures
 
 
-@pytest.mark.parametrize("separator", [";", "&&", "||", "\n", "&", "|", "\r"])
-def test_evaluator_rejects_shell_control_command_composition(separator: str) -> None:
+@pytest.mark.parametrize(
+    "control",
+    [
+        "; awf wt finish --apply --json",
+        "&& awf wt finish --apply --json",
+        "|| awf wt finish --apply --json",
+        "\nawf wt finish --apply --json",
+        "& awf wt finish --apply --json",
+        "| awf wt finish --apply --json",
+        "\rawf wt finish --apply --json",
+        " $(awf wt finish --apply --json)",
+        " `awf wt finish --apply --json`",
+        " <(awf wt finish --apply --json)",
+        " >(awf wt finish --apply --json)",
+    ],
+)
+def test_evaluator_rejects_shell_control_command_composition(control: str) -> None:
     evaluation = evaluate_response(
         MATRIX.skills["release-worktree-lifecycle"].scenario,
         response(
             commands=[
                 "awf wt status --repo-root /repo --refresh --json"
-                f"{separator} awf wt finish --apply --json"
+                f"{control}"
             ]
         ),
     )

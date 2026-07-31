@@ -259,7 +259,7 @@ def _object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, An
 
 
 def _has_shell_control(command: str) -> bool:
-    return any(control in command for control in ";&|\r\n")
+    return any(control in command for control in ";&|$`<>\r\n")
 
 
 
