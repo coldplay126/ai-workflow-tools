@@ -1239,6 +1239,13 @@ class WorktreeService:
         )
 
     @staticmethod
+    def _is_completed_pr(pull_request: PullRequest) -> bool:
+        return pull_request.state == "MERGED" or (
+            pull_request.state == "CLOSED"
+            and pull_request.merge_commit_sha is not None
+        )
+
+    @staticmethod
     def _is_pr_adopted_import(lease: Lease) -> bool:
         return (
             lease.managed
@@ -1280,7 +1287,7 @@ class WorktreeService:
                     "message": f"Lease {lease.id} does not match the refreshed pull request.",
                 }
             )
-        if pull_request.state != "MERGED" or not pull_request.merge_commit_sha:
+        if not self._is_completed_pr(pull_request):
             blockers.append(
                 {
                     "code": "pr_not_merged",
@@ -1646,13 +1653,7 @@ class WorktreeService:
                     LeaseState.PR_OPEN,
                     deployment_state=None,
                 )
-            elif (
-                pull_request.state == "MERGED"
-                or (
-                    pull_request.state == "CLOSED"
-                    and pull_request.merge_commit_sha is not None
-                )
-            ):
+            elif self._is_completed_pr(pull_request):
                 if current.purpose is Purpose.PROMOTE:
                     self._refresh_promotion(lease.id, pull_request, warnings)
                 else:
@@ -2076,8 +2077,12 @@ class WorktreeService:
                         summary="imported lease adopted",
                     )
                 except (RuntimeError, sqlite3.Error) as error:
-                    return self._adopt_blocked(
-                        "registry_conflict", str(error), lease=imported
+                    return CommandResult.error(
+                        "wt.adopt",
+                        code="registry_conflict",
+                        message=str(error),
+                        exit_code=5,
+                        lease=imported,
                     )
             return CommandResult.ok("wt.adopt", decision="ready", lease=adopted)
 
@@ -2137,8 +2142,12 @@ class WorktreeService:
                     managed=True,
                 )
             except (RuntimeError, sqlite3.Error) as error:
-                return self._adopt_blocked(
-                    "registry_conflict", str(error), lease=imported
+                return CommandResult.error(
+                    "wt.adopt",
+                    code="registry_conflict",
+                    message=str(error),
+                    exit_code=5,
+                    lease=imported,
                 )
         return CommandResult.ok("wt.adopt", decision="ready", lease=adopted)
 
@@ -2197,13 +2206,7 @@ class WorktreeService:
                 f"GitHub returned pull request #{pull_request.number} for #{pr_number}",
                 lease=imported,
             )
-        if not (
-            pull_request.state == "MERGED"
-            or (
-                pull_request.state == "CLOSED"
-                and pull_request.merge_commit_sha is not None
-            )
-        ):
+        if not self._is_completed_pr(pull_request):
             return self._adopt_blocked(
                 "pr_not_merged",
                 f"pull request #{pr_number} is {pull_request.state}",

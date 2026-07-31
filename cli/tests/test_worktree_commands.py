@@ -784,6 +784,32 @@ def test_wt_adopt_promotes_imported_lease_without_repo_argument(
     assert payload["lease"]["owner_kind"] == "imported"
 
 
+def test_wt_adopt_apply_transition_conflict_is_registry_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = create_adoptable_imported_lease(tmp_path, monkeypatch)
+
+    def fail_transition(*_args: object, **_kwargs: object) -> Lease:
+        raise RuntimeError("registry temporarily unavailable")
+
+    monkeypatch.setattr(WorktreeRegistry, "transition", fail_transition)
+
+    rc, stdout, stderr = capture_main(
+        ["wt", "adopt", "--lease", lease.id, "--apply", "--json"]
+    )
+
+    payload = json.loads(stdout)
+    current = WorktreeRegistry(tmp_path / "state" / "worktrees.sqlite3").get_lease(
+        lease.id
+    )
+    assert rc == 5
+    assert stderr == ""
+    assert payload["command"] == "wt.adopt"
+    assert payload["status"] == "error"
+    assert payload["blockers"][0]["code"] == "registry_conflict"
+    assert current == lease
+
+
 def test_wt_adopt_with_merged_pr_previews_link_action(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

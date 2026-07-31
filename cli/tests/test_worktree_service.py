@@ -2213,6 +2213,11 @@ def test_adopt_pr_apply_revalidates_git_after_locked_provider_call(
     assert view_calls == [129, 129]
 
 @pytest.mark.parametrize(
+    "error_type",
+    (RuntimeError, sqlite3.OperationalError),
+    ids=("runtime_error", "sqlite_error"),
+)
+@pytest.mark.parametrize(
     "pr_number",
     (None, 129),
     ids=("without_pr", "with_pr"),
@@ -2221,6 +2226,7 @@ def test_adopt_apply_reports_registry_transition_conflicts(
     harness: Harness,
     monkeypatch: pytest.MonkeyPatch,
     pr_number: int | None,
+    error_type: type[Exception],
 ) -> None:
     imported = harness.import_external("legacy-release")
     if pr_number is not None:
@@ -2233,7 +2239,7 @@ def test_adopt_apply_reports_registry_transition_conflicts(
     before_events = harness.registry.list_events(imported.id)
 
     def fail_transition(*args: object, **kwargs: object) -> Lease:
-        raise RuntimeError("registry temporarily unavailable")
+        raise error_type("registry temporarily unavailable")
 
     monkeypatch.setattr(harness.registry, "transition", fail_transition)
     keyword_args = {} if pr_number is None else {"pr_number": pr_number}
@@ -2241,7 +2247,8 @@ def test_adopt_apply_reports_registry_transition_conflicts(
     result = harness.service.adopt(imported.id, apply=True, **keyword_args)
 
     assert result.command == "wt.adopt"
-    assert result.status == "blocked"
+    assert result.status == "error"
+    assert result.exit_code == 5
     assert result.blockers[0]["code"] == "registry_conflict"
     assert result.lease == before
     assert harness.registry.get_lease(imported.id) == before

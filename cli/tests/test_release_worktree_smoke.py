@@ -307,7 +307,7 @@ def test_imported_worktree_pr_cleanup_lifecycle_smoke(smoke: SmokeHarness) -> No
     assert smoke.git.resolve_ref("main") == squash_merge_sha
     smoke.github.prs[129] = PullRequest(
         number=129,
-        state="MERGED",
+        state="CLOSED",
         base_ref="main",
         base_sha=squash_merge_sha,
         head_ref=imported.branch,
