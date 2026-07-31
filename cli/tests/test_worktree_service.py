@@ -1742,6 +1742,112 @@ def test_adopt_preview_does_not_create_lock_or_registry_state(
     assert harness.registry.get_lease(lease.id).version == lease.version
 
 
+def test_adopt_preview_links_matching_merged_pr_without_mutation(
+    harness: Harness,
+) -> None:
+    external = harness.make_external_worktree("legacy-release")
+    imported = harness.registry.create_lease(
+        Lease.new(
+            repository_id=harness.git.repository_id(),
+            repository_name=harness.git.repository_name(),
+            repository_root=harness.git.repository_root(),
+            worktree_path=external,
+            initiative="import-legacy-release-12345678",
+            purpose=Purpose.SCRATCH,
+            branch="legacy-release",
+            base_ref="legacy-release",
+            head_sha=harness.git.head_sha(external),
+            managed=False,
+            owner_kind="imported",
+        )
+    )
+    harness.github.prs[129] = PullRequest(
+        number=129,
+        state="MERGED",
+        base_ref="staging",
+        base_sha=harness.git.head_sha(),
+        head_ref=imported.branch,
+        head_sha=imported.head_sha,
+        merge_commit_sha=harness.git.head_sha(),
+        review_decision="APPROVED",
+        checks_passed=True,
+        changed_paths=(),
+        url="https://github.example/acme/repo/pull/129",
+    )
+    before = harness.registry.get_lease(imported.id)
+    assert before is not None
+    before_version = before.version
+    before_events = harness.registry.list_events(imported.id)
+    assert not harness.lock_dir.exists()
+
+    result = harness.service.adopt(imported.id, pr_number=129, apply=False)
+
+    assert result.decision == "preview"
+    assert result.actions == (
+        {
+            "kind": "link_pr",
+            "lease_id": imported.id,
+            "path": str(imported.worktree_path),
+            "pr_number": 129,
+            "head_sha": imported.head_sha,
+        },
+    )
+    after = harness.registry.get_lease(imported.id)
+    assert after == before
+    assert after.version == before_version
+    assert harness.registry.list_events(imported.id) == before_events
+    assert harness.github.view_calls == [129]
+    assert not harness.lock_dir.exists()
+
+
+def test_adopt_links_matching_merged_pr_atomically(harness: Harness) -> None:
+    external = harness.make_external_worktree("legacy-release")
+    imported = harness.registry.create_lease(
+        Lease.new(
+            repository_id=harness.git.repository_id(),
+            repository_name=harness.git.repository_name(),
+            repository_root=harness.git.repository_root(),
+            worktree_path=external,
+            initiative="import-legacy-release-12345678",
+            purpose=Purpose.SCRATCH,
+            branch="legacy-release",
+            base_ref="legacy-release",
+            head_sha=harness.git.head_sha(external),
+            managed=False,
+            owner_kind="imported",
+        )
+    )
+    harness.github.prs[129] = PullRequest(
+        number=129,
+        state="MERGED",
+        base_ref="staging",
+        base_sha=harness.git.head_sha(),
+        head_ref=imported.branch,
+        head_sha=imported.head_sha,
+        merge_commit_sha=harness.git.head_sha(),
+        review_decision="APPROVED",
+        checks_passed=True,
+        changed_paths=(),
+        url="https://github.example/acme/repo/pull/129",
+    )
+
+    result = harness.service.adopt(imported.id, pr_number=129, apply=True)
+
+    assert result.decision == "ready"
+    assert result.lease is not None
+    assert result.lease.managed is True
+    assert result.lease.target_pr == 129
+    assert result.lease.state is imported.state
+    stored = harness.registry.get_lease(imported.id)
+    assert stored == result.lease
+    event = harness.registry.list_events(imported.id)[-1]
+    assert event.event_type == "imported_lease_pr_linked"
+    assert event.from_state is imported.state
+    assert event.to_state is imported.state
+    assert event.observed_head_sha == imported.head_sha
+    assert event.pr_number == 129
+    assert harness.github.view_calls == [129, 129]
+
 def test_import_keeps_exact_initiative_and_skips_identity_collisions(
     tmp_path: Path,
 ) -> None:

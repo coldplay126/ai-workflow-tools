@@ -2007,26 +2007,70 @@ class WorktreeService:
             "purpose": lease.purpose.value,
         }
 
-    def adopt(self, lease_id: str, *, apply: bool) -> CommandResult:
+    def adopt(
+        self, lease_id: str, *, pr_number: int | None = None, apply: bool
+    ) -> CommandResult:
         imported = self.registry.get_lease_read_only(lease_id)
         if imported is None:
             return self._adopt_blocked(
                 "unknown_lease",
                 f"lease {lease_id} does not exist",
             )
+        if pr_number is None:
+            if not apply:
+                blocker = self._adoption_blocker(imported)
+                if blocker is not None:
+                    return blocker
+                return CommandResult.ok(
+                    "wt.adopt",
+                    decision="preview",
+                    lease=imported,
+                    actions=(
+                        {
+                            "kind": "adopt",
+                            "path": str(imported.worktree_path),
+                            "lease_id": imported.id,
+                        },
+                    ),
+                )
+
+            with repository_lock(self.lock_dir / f"{imported.repository_id}.lock"):
+                imported = self.registry.get_lease(lease_id)
+                if imported is None:
+                    return self._adopt_blocked(
+                        "unknown_lease",
+                        f"lease {lease_id} does not exist",
+                    )
+                blocker = self._adoption_blocker(imported)
+                if blocker is not None:
+                    return blocker
+                adopted = self.registry.transition(
+                    imported.id,
+                    imported.state,
+                    expected_version=imported.version,
+                    managed=True,
+                    summary="imported lease adopted",
+                )
+            return CommandResult.ok("wt.adopt", decision="ready", lease=adopted)
+
+        blocker = self._adoption_blocker(imported)
+        if blocker is not None:
+            return blocker
+        pull_request = self._adoption_pr(imported, pr_number)
+        if isinstance(pull_request, CommandResult):
+            return pull_request
         if not apply:
-            blocker = self._adoption_blocker(imported)
-            if blocker is not None:
-                return blocker
             return CommandResult.ok(
                 "wt.adopt",
                 decision="preview",
                 lease=imported,
                 actions=(
                     {
-                        "kind": "adopt",
-                        "path": str(imported.worktree_path),
+                        "kind": "link_pr",
                         "lease_id": imported.id,
+                        "path": str(imported.worktree_path),
+                        "pr_number": pull_request.number,
+                        "head_sha": pull_request.head_sha,
                     },
                 ),
             )
@@ -2041,14 +2085,76 @@ class WorktreeService:
             blocker = self._adoption_blocker(imported)
             if blocker is not None:
                 return blocker
+            pull_request = self._adoption_pr(imported, pr_number)
+            if isinstance(pull_request, CommandResult):
+                return pull_request
             adopted = self.registry.transition(
                 imported.id,
                 imported.state,
                 expected_version=imported.version,
+                event_type="imported_lease_pr_linked",
+                summary=f"imported lease linked to pull request #{pull_request.number}",
+                observed_head_sha=pull_request.head_sha,
+                pr_number=pull_request.number,
                 managed=True,
-                summary="imported lease adopted",
             )
         return CommandResult.ok("wt.adopt", decision="ready", lease=adopted)
+
+    def _adoption_pr(
+        self, imported: Lease, pr_number: int
+    ) -> PullRequest | CommandResult:
+        if (
+            not isinstance(pr_number, int)
+            or isinstance(pr_number, bool)
+            or pr_number <= 0
+        ):
+            return self._adopt_blocked(
+                "invalid_pr_number",
+                "pull request number must be a positive integer",
+                lease=imported,
+            )
+        try:
+            pull_request = (
+                self.github or GhClient(imported.repository_root)
+            ).view_pr(pr_number)
+        except ExternalServiceError as error:
+            return self._external_error(
+                "wt.adopt",
+                "github_adopt_failed",
+                f"Unable to validate pull request #{pr_number}: {error}",
+                lease=imported,
+            )
+        if pull_request.number != pr_number:
+            return self._adopt_blocked(
+                "pr_number_mismatch",
+                f"GitHub returned pull request #{pull_request.number} for #{pr_number}",
+                lease=imported,
+            )
+        if not (
+            pull_request.state == "MERGED"
+            or (
+                pull_request.state == "CLOSED"
+                and pull_request.merge_commit_sha is not None
+            )
+        ):
+            return self._adopt_blocked(
+                "pr_not_merged",
+                f"pull request #{pr_number} is {pull_request.state}",
+                lease=imported,
+            )
+        if pull_request.head_ref != imported.branch:
+            return self._adopt_blocked(
+                "pr_branch_mismatch",
+                f"pull request #{pr_number} does not match branch {imported.branch!r}",
+                lease=imported,
+            )
+        if pull_request.head_sha != imported.head_sha:
+            return self._adopt_blocked(
+                "pr_head_mismatch",
+                f"pull request #{pr_number} does not match lease HEAD",
+                lease=imported,
+            )
+        return pull_request
 
     def _adoption_blocker(self, imported: Lease) -> CommandResult | None:
         if imported.state is LeaseState.REMOVED:
