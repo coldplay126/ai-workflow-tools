@@ -102,7 +102,7 @@ def _bash_logical_lines(block: str, start_line: int) -> list[tuple[int, str]]:
 
 
 def _awf_argv_from_bash_line(line: str) -> list[str] | None:
-    sanitized = re.sub(r"<([A-Za-z0-9_.-]+)>", r"\1", line)
+    sanitized = re.sub(r"<([A-Za-z0-9_.-]+)>", "1", line)
     try:
         tokens = shlex.split(sanitized, comments=True)
     except ValueError:
@@ -261,6 +261,9 @@ def test_markdown_toml_fences_are_parseable_when_not_placeholders() -> None:
 def test_markdown_python_fences_are_parseable_when_not_placeholders() -> None:
     invalid: list[str] = []
     for path in _markdown_files():
+        # Implementation plans intentionally include partial code fragments.
+        if path.parent == REPO_ROOT / "docs" / "superpowers" / "plans":
+            continue
         text = path.read_text(encoding="utf-8")
         for match in PYTHON_FENCE_RE.finditer(text):
             block = match.group(1)

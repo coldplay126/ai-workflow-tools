@@ -502,6 +502,10 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
     expected_commands = {
         "status": ("wt", "status"),
         "doctor": ("wt", "doctor"),
+        "import_preview": ("wt", "import"),
+        "import_apply": ("wt", "import"),
+        "adopt_preview": ("wt", "adopt"),
+        "adopt_apply": ("wt", "adopt"),
         "acquire_preview": ("wt", "acquire"),
         "acquire_apply": ("wt", "acquire"),
         "promote_preview": ("wt", "promote"),
@@ -519,6 +523,13 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
 
     assert "--refresh" in commands["status"]
     assert "--json" in commands["status"]
+    assert "--dry-run" in commands["import_preview"]
+    assert "--apply" not in commands["import_preview"]
+    assert "--apply" in commands["import_apply"]
+    assert "--pr" in commands["adopt_preview"]
+    assert "--apply" not in commands["adopt_preview"]
+    assert "--pr" in commands["adopt_apply"]
+    assert "--apply" in commands["adopt_apply"]
     assert "--apply" not in commands["acquire_preview"]
     assert "--apply" in commands["acquire_apply"]
     assert "--apply" not in commands["promote_preview"]
@@ -536,9 +547,20 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
     assert safety["promotion_scope"] == "source_pr_delta_only"
     assert safety["deployment_health"] == "repository_rollout_evidence"
     assert safety["blocked_action"] == "preserve_worktree_report_code_message"
+    assert safety["imported_pr_lifecycle"] == {
+        "pr_provenance": "already_merged_exact_branch_and_head",
+        "same_pr": "reuse",
+        "different_pr": "blocked",
+        "github_external_failure": "exit_4",
+        "runtime_source_before_removal": (
+            "install_cli_and_skill_from_stable_merged_main_and_verify_links"
+        ),
+    }
     assert safety["preview_before_apply"] == [
         "acquire",
         "promote",
+        "import",
+        "adopt",
         "finish",
         "gc",
     ]
@@ -572,6 +594,40 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "removed": "report_completion",
         "blocked": "preserve_worktree_report_code_message",
     }
+
+
+def test_release_worktree_lifecycle_skill_orders_imported_pr_cleanup() -> None:
+    path = REPO_ROOT / "claude" / "skills" / "release-worktree-lifecycle" / "SKILL.md"
+    text = path.read_text(encoding="utf-8")
+    expected_commands = (
+        "awf wt import --root <root> --dry-run --json",
+        "awf wt import --root <root> --apply --json",
+        "awf wt adopt --lease <id> --pr <merged-pr> --json",
+        "awf wt adopt --lease <id> --pr <merged-pr> --apply --json",
+        "awf wt status --repo-root <repo-root> --refresh --json",
+        "awf wt finish --repo-root <repo-root> --pr <merged-pr> --json",
+        "awf wt finish --repo-root <repo-root> --pr <merged-pr> --apply --json",
+    )
+
+    parser = build_parser()
+    for command in expected_commands:
+        parsed = parser.parse_args(_argv_from_skill_command(command))
+        assert parsed.command == "wt"
+
+    displayed_commands = _shell_fenced_awf_commands(text)
+    start = displayed_commands.index(expected_commands[0])
+    assert displayed_commands[start : start + len(expected_commands)] == expected_commands
+
+    prose = " ".join(text.lower().split())
+    required_prose = (
+        "must not infer a pr automatically",
+        "must not use direct git or filesystem cleanup",
+        "before removing a source worktree backing installed cli or skill links, "
+        "must install the cli and skill from a stable merged-main checkout and "
+        "verify every cli and skill link resolves from that checkout",
+    )
+    for requirement in required_prose:
+        assert requirement in prose
 
 
 def test_release_worktree_lifecycle_shell_examples_match_contract() -> None:
