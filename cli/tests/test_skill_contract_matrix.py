@@ -19,6 +19,15 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 MATRIX_PATH = REPO_ROOT / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json"
 SKILLS_ROOT = REPO_ROOT / "claude" / "skills"
 FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---", re.DOTALL)
+YAML_NON_STRING_SCALAR_RE = re.compile(
+    r"""(?ix)
+    (?:
+        true | false | null | ~ | yes | no | on | off | \.(?:nan|inf)
+        | 0[xX][0-9a-f_]+ | 0[oO][0-7_]+ | 0[bB][01_]+
+        | [-+]?(?:[0-9][0-9_]*(?:\.[0-9_]*)?|\.[0-9_]+)(?:[eE][-+]?[0-9_]+)?
+    )
+    """
+)
 EXPECTED_SKILLS = {
     "analysis",
     "multi-agent",
@@ -51,6 +60,29 @@ def _top_level_value(frontmatter: str, key: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
+def _condition_string(raw_value: str, label: str) -> str:
+    raw_value = raw_value.strip()
+    assert raw_value, "condition values must be nonempty"
+    if raw_value[0] in {"'", '"'}:
+        quote = raw_value[0]
+        assert len(raw_value) > 1 and raw_value[-1] == quote, (
+            f"{label} must be a string"
+        )
+        value = raw_value[1:-1]
+        assert value.strip(), "condition values must be nonempty"
+        return value
+
+    assert raw_value[-1] not in {"'", '"'}, f"{label} must be a string"
+    assert raw_value[0] not in "[{", f"{label} must be a string"
+    assert not YAML_NON_STRING_SCALAR_RE.fullmatch(raw_value), (
+        f"{label} must be a string"
+    )
+    assert not re.match(r"[^:\s][^:]*:\s", raw_value), (
+        f"{label} must be a string"
+    )
+    return raw_value
+
+
 def _condition_values(frontmatter: str, key: str) -> tuple[str, ...]:
     assert key in {"trigger", "skip"}
     matches = list(re.finditer(r"(?m)^conditions:[ \t]*(.*)$", frontmatter))
@@ -75,8 +107,7 @@ def _condition_values(frontmatter: str, key: str) -> tuple[str, ...]:
             conditions[condition_key] = []
             current_key = condition_key
             if inline and inline.strip():
-                value = inline.strip().strip("\"'")
-                assert value and value[0] not in "[{", "condition value must be a string"
+                value = _condition_string(inline, "condition value")
                 conditions[condition_key].append(value)
                 current_key = None
             continue
@@ -84,12 +115,7 @@ def _condition_values(frontmatter: str, key: str) -> tuple[str, ...]:
         item = re.fullmatch(r"    -\s*(.*)", line)
         if item is not None:
             assert current_key is not None, "condition list item has no owning key"
-            raw_value = item.group(1).strip()
-            value = raw_value.strip("\"'")
-            assert value, "condition values must be nonempty"
-            assert raw_value[0] not in "[{" and not re.match(
-                r"[^:\s][^:]*:\s", raw_value
-            ), "condition list item must be a string"
+            value = _condition_string(item.group(1), "condition list item")
             conditions[current_key].append(value)
             continue
 
@@ -245,6 +271,35 @@ def test_condition_values_reject_invalid_nested_shapes(
 ) -> None:
     with pytest.raises(AssertionError, match=message):
         _condition_values(frontmatter, "trigger")
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["true", "TRUE", "false", "False", "null", "NULL", "~", "42", "-3.14", "1e3"],
+)
+@pytest.mark.parametrize(
+    "frontmatter_template",
+    [
+        "conditions:\n  trigger: {value}\n  skip: valid",
+        "conditions:\n  trigger:\n    - {value}\n  skip: valid",
+    ],
+)
+def test_condition_values_reject_unquoted_yaml_scalars(
+    value: str, frontmatter_template: str
+) -> None:
+    with pytest.raises(AssertionError, match="condition (value|list item) must be a string"):
+        _condition_values(frontmatter_template.format(value=value), "trigger")
+
+
+@pytest.mark.parametrize(
+    "frontmatter",
+    [
+        'conditions:\n  trigger: "key: value"\n  skip: valid',
+        'conditions:\n  trigger:\n    - "key: value"\n  skip: valid',
+    ],
+)
+def test_condition_values_accept_quoted_scalars_with_colons(frontmatter: str) -> None:
+    assert _condition_values(frontmatter, "trigger") == ("key: value",)
 
 
 def test_every_skill_frontmatter_identity_and_conditions_are_semantic() -> None:
