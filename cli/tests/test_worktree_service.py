@@ -2130,6 +2130,52 @@ def test_adopt_pr_apply_revalidates_provider_inside_repository_lock(
     assert harness.registry.list_events(imported.id) == before_events
     assert view_calls == [129, 129]
 
+
+@pytest.mark.parametrize(
+    "already_linked",
+    (False, True),
+    ids=("initial_adoption", "exact_link_reuse"),
+)
+def test_adopt_pr_apply_revalidates_git_after_locked_provider_call(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    already_linked: bool,
+) -> None:
+    imported = harness.import_external("legacy-release")
+    matching = matching_adoption_pr(harness, imported)
+    harness.github.prs[129] = matching
+    if already_linked:
+        adopted = harness.service.adopt(imported.id, pr_number=129, apply=True)
+        assert adopted.decision == "ready"
+    before = harness.registry.get_lease(imported.id)
+    assert before is not None
+    before_events = harness.registry.list_events(imported.id)
+    view_calls: list[int] = []
+
+    def view_pr(number: int) -> PullRequest:
+        view_calls.append(number)
+        if len(view_calls) == 2:
+            git_command(
+                imported.worktree_path,
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "mutate HEAD during provider validation",
+            )
+        return matching
+
+    monkeypatch.setattr(harness.github, "view_pr", view_pr)
+
+    result = harness.service.adopt(imported.id, pr_number=129, apply=True)
+
+    assert result.status == "blocked"
+    assert result.decision == "blocked"
+    assert result.blockers[0]["code"] == "head_mismatch"
+    assert harness.registry.get_lease(imported.id) == before
+    assert harness.registry.list_events(imported.id) == before_events
+    assert view_calls == [129, 129]
+
 @pytest.mark.parametrize(
     "pr_number",
     (None, 129),

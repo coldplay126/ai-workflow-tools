@@ -2093,6 +2093,9 @@ class WorktreeService:
             pull_request = self._validate_pr_adoption(imported, pr_number)
             if isinstance(pull_request, CommandResult):
                 return pull_request
+            blocker = self._adoption_git_safety_blocker(imported)
+            if blocker is not None:
+                return blocker
             if imported.managed:
                 return CommandResult.ok(
                     "wt.adopt",
@@ -2224,6 +2227,11 @@ class WorktreeService:
                 f"lease {imported.id} was closed without merging",
                 lease=imported,
             )
+        return self._adoption_git_safety_blocker(imported)
+
+    def _adoption_git_safety_blocker(
+        self, imported: Lease
+    ) -> CommandResult | None:
         if self.git is None or self.git.repository_id() != imported.repository_id:
             return self._adopt_blocked(
                 "repository_mismatch",
