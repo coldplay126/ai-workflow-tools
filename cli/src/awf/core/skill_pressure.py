@@ -4,7 +4,8 @@ import json
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Mapping
 
 
 MATRIX_SCHEMA = "awf_skill_validation_matrix_v1"
@@ -20,6 +21,7 @@ REQUIRED_CATEGORIES = {
     "regression_semantic_audit",
 }
 SUPPORTED_RUNTIMES = {"claude", "agent-skills", "omp"}
+SUPPORTED_DECISIONS = frozenset({"PROCEED", "STOP", "REPORT", "ASK_USER", "DELEGATE"})
 HIGH_RISK_SKILLS = frozenset(
     {
         "multi-agent",
@@ -83,7 +85,13 @@ class SkillCase:
 @dataclass(frozen=True)
 class SkillMatrix:
     schema: str
-    skills: dict[str, SkillCase]
+    skills: Mapping[str, SkillCase]
+
+
+def _required_string(value: Any, *, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise MatrixError(f"{field} must be a non-empty string")
+    return value
 
 
 def _string_tuple(value: Any, *, field: str) -> tuple[str, ...]:
@@ -103,6 +111,11 @@ def _scenario(raw: Any, *, skill: str, severity: str) -> FieldScenario:
     decisions = _string_tuple(expected.get("decisions"), field=f"{skill}.decisions")
     if not decisions:
         raise MatrixError(f"{skill}.decisions must not be empty")
+    unknown_decisions = set(decisions).difference(SUPPORTED_DECISIONS)
+    if unknown_decisions:
+        raise MatrixError(f"{skill}.decisions contains unknown decision")
+    if len(decisions) != len(set(decisions)):
+        raise MatrixError(f"{skill}.decisions contains duplicated decision")
     scenario_skill = raw.get("skill")
     if scenario_skill != skill:
         raise MatrixError(f"{skill}.scenario.skill must equal {skill!r}")
@@ -113,6 +126,8 @@ def _scenario(raw: Any, *, skill: str, severity: str) -> FieldScenario:
         raise MatrixError(f"{skill}.scenario.category is invalid")
     if raw.get("severity") != severity:
         raise MatrixError(f"{skill}.scenario.severity must equal Skill severity")
+    scenario_id = _required_string(raw.get("id"), field=f"{skill}.scenario.id")
+    task = _required_string(raw.get("task"), field=f"{skill}.scenario.task")
     positive = _string_tuple(raw.get("positive_criteria"), field=f"{skill}.positive_criteria")
     negative = _string_tuple(raw.get("negative_criteria"), field=f"{skill}.negative_criteria")
     runtimes = _string_tuple(raw.get("runtimes"), field=f"{skill}.scenario.runtimes")
@@ -121,12 +136,12 @@ def _scenario(raw: Any, *, skill: str, severity: str) -> FieldScenario:
     if not runtimes or not set(runtimes).issubset(SUPPORTED_RUNTIMES):
         raise MatrixError(f"{skill}.scenario.runtimes must be a non-empty supported subset")
     return FieldScenario(
-        id=str(raw.get("id") or ""),
+        id=scenario_id,
         skill=skill,
         layer="field",
         category=category,
         severity=severity,
-        task=str(raw.get("task") or ""),
+        task=task,
         positive_criteria=positive,
         negative_criteria=negative,
         runtimes=runtimes,
@@ -163,12 +178,15 @@ def load_skill_matrix(path: str | Path) -> SkillMatrix:
         raise MatrixError("matrix skills must be a list")
 
     skills: dict[str, SkillCase] = {}
+    scenario_ids: set[str] = set()
     for raw_case in rows:
         if not isinstance(raw_case, dict):
             raise MatrixError("matrix skill entries must be objects")
-        name = str(raw_case.get("name") or "")
-        if not name or name in skills:
-            raise MatrixError(f"matrix skill name is empty or duplicated: {name!r}")
+        name = _required_string(raw_case.get("name"), field="matrix skill name")
+        if name in skills:
+            raise MatrixError(f"matrix skill name is duplicated: {name!r}")
+        type_ = _required_string(raw_case.get("type"), field=f"{name}.type")
+        entry_kind = _required_string(raw_case.get("entry_kind"), field=f"{name}.entry_kind")
         categories = _string_tuple(raw_case.get("categories"), field=f"{name}.categories")
         if len(categories) != len(REQUIRED_CATEGORIES) or set(categories) != REQUIRED_CATEGORIES:
             raise MatrixError(f"{name}.categories must contain each required category exactly once")
@@ -181,14 +199,18 @@ def load_skill_matrix(path: str | Path) -> SkillMatrix:
         high_risk = raw_case.get("high_risk")
         if not isinstance(high_risk, bool) or high_risk != (name in HIGH_RISK_SKILLS):
             raise MatrixError(f"{name}.high_risk does not match the locked risk policy")
+        scenario = _scenario(raw_case.get("scenario"), skill=name, severity=severity)
+        if scenario.id in scenario_ids:
+            raise MatrixError(f"matrix scenario id is duplicated: {scenario.id!r}")
+        scenario_ids.add(scenario.id)
         skills[name] = SkillCase(
             name=name,
-            type=str(raw_case.get("type") or ""),
-            entry_kind=str(raw_case.get("entry_kind") or ""),
+            type=type_,
+            entry_kind=entry_kind,
             high_risk=high_risk,
             severity=severity,
             categories=categories,
             runtimes=runtimes,
-            scenario=_scenario(raw_case.get("scenario"), skill=name, severity=severity),
+            scenario=scenario,
         )
-    return SkillMatrix(schema=MATRIX_SCHEMA, skills=skills)
+    return SkillMatrix(schema=MATRIX_SCHEMA, skills=MappingProxyType(skills))

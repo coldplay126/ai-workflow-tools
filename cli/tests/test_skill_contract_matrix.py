@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path, PurePosixPath
+import json
+from pathlib import Path
 
 import pytest
 
@@ -35,6 +36,14 @@ EXPECTED_SKILLS = {
 }
 
 
+def _matrix_payload() -> dict[str, object]:
+    return json.loads(MATRIX_PATH.read_text(encoding="utf-8"))
+
+
+def _write_payload(path: Path, payload: dict[str, object]) -> None:
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
 def test_matrix_locks_exact_first_party_skill_inventory() -> None:
     matrix = load_skill_matrix(MATRIX_PATH)
     source_names = {
@@ -57,7 +66,7 @@ def test_every_skill_declares_all_categories_and_runtimes() -> None:
         assert case.scenario.skill == case.name
 
 
-def test_matrix_rejects_an_unknown_verdict_category(tmp_path: Path) -> None:
+def test_matrix_rejects_unknown_category(tmp_path: Path) -> None:
     path = tmp_path / "matrix.json"
     path.write_text(
         '{"schema":"awf_skill_validation_matrix_v1","skills":['
@@ -70,3 +79,79 @@ def test_matrix_rejects_an_unknown_verdict_category(tmp_path: Path) -> None:
 
     with pytest.raises(MatrixError, match="categories"):
         load_skill_matrix(path)
+
+
+@pytest.mark.parametrize(
+    ("decisions", "reason"),
+    [
+        (["UNKNOWN"], "unknown decision"),
+        (["REPORT", "REPORT"], "duplicated decision"),
+    ],
+)
+def test_matrix_rejects_unknown_or_duplicated_decisions(
+    tmp_path: Path,
+    decisions: list[str],
+    reason: str,
+) -> None:
+    payload = _matrix_payload()
+    payload["skills"][0]["scenario"]["expected"]["decisions"] = decisions
+    path = tmp_path / "matrix.json"
+    _write_payload(path, payload)
+
+    with pytest.raises(MatrixError, match=reason):
+        load_skill_matrix(path)
+
+
+@pytest.mark.parametrize(
+    ("field", "mutation", "value"),
+    [
+        ("type", "missing", None),
+        ("type", "non-string", 1),
+        ("type", "empty", ""),
+        ("entry_kind", "missing", None),
+        ("entry_kind", "non-string", 1),
+        ("entry_kind", "empty", ""),
+        ("scenario.id", "missing", None),
+        ("scenario.id", "non-string", 1),
+        ("scenario.id", "empty", ""),
+        ("scenario.task", "missing", None),
+        ("scenario.task", "non-string", 1),
+        ("scenario.task", "empty", ""),
+    ],
+)
+def test_matrix_rejects_missing_non_string_or_empty_required_scalars(
+    tmp_path: Path,
+    field: str,
+    mutation: str,
+    value: object,
+) -> None:
+    payload = _matrix_payload()
+    case = payload["skills"][0]
+    target = case["scenario"] if field.startswith("scenario.") else case
+    key = field.rsplit(".", maxsplit=1)[-1]
+    if mutation == "missing":
+        target.pop(key)
+    else:
+        target[key] = value
+    path = tmp_path / "matrix.json"
+    _write_payload(path, payload)
+
+    with pytest.raises(MatrixError, match=key):
+        load_skill_matrix(path)
+
+
+def test_matrix_rejects_duplicate_scenario_ids(tmp_path: Path) -> None:
+    payload = _matrix_payload()
+    payload["skills"][1]["scenario"]["id"] = payload["skills"][0]["scenario"]["id"]
+    path = tmp_path / "matrix.json"
+    _write_payload(path, payload)
+
+    with pytest.raises(MatrixError, match="scenario id"):
+        load_skill_matrix(path)
+
+
+def test_matrix_skills_mapping_is_read_only() -> None:
+    matrix = load_skill_matrix(MATRIX_PATH)
+
+    with pytest.raises(TypeError):
+        matrix.skills["chat"] = matrix.skills["analysis"]  # type: ignore[index]
