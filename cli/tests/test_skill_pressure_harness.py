@@ -332,6 +332,21 @@ def test_claude_discovery_shared_helpers_require_projection_and_preserve_no_tool
             metadata_projection=tmp_path / "metadata-projection.json",  # type: ignore[arg-type]
         )
 
+def test_evidence_validator_and_discovery_runner_share_claude_safety_flags() -> None:
+    expected = (
+        "-p",
+        "--output-format=text",
+        "--tools=",
+        "--no-session-persistence",
+        "--setting-sources=project",
+        "--append-system-prompt",
+    )
+
+    assert claude_discovery_safety_flags() == expected
+    assert pressure.DISCOVERY_RUNTIME_SAFETY_FLAGS["claude"] == expected
+    assert run_skill_discovery.SAFETY_FLAGS["claude"] == expected
+
+
 def test_pinned_subscription_models_reject_mutation() -> None:
     with pytest.raises(TypeError):
         PINNED_SUBSCRIPTION_MODELS["claude"] = "other"

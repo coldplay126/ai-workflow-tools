@@ -13,7 +13,10 @@ from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 from awf.core.operational_metrics import operations_root
-from awf.core.skill_subscription import PINNED_SUBSCRIPTION_MODELS
+from awf.core.skill_subscription import (
+    PINNED_SUBSCRIPTION_MODELS,
+    claude_discovery_safety_flags,
+)
 
 
 MATRIX_SCHEMA = "awf_skill_validation_matrix_v1"
@@ -94,13 +97,7 @@ OMP_FIELD_RUNNER_FLAGS = (
 
 DISCOVERY_RUNTIME_SAFETY_FLAGS = MappingProxyType(
     {
-        "claude": (
-            "-p",
-            "--output-format=text",
-            "--tools=",
-            "--no-session-persistence",
-            "--setting-sources=project",
-        ),
+        "claude": claude_discovery_safety_flags(),
         "agent-skills": (
             "exec",
             "--ephemeral",
