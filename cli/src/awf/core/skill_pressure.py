@@ -1442,6 +1442,41 @@ def _validate_discovery_records(records: Sequence[Mapping[str, Any]]) -> None:
             raise EvidenceError("invalid discovery diagnostic")
 
 
+def _canonical_skill_hashes(root: Path, matrix: SkillMatrix) -> dict[str, str]:
+    if len(matrix.skills) != 15:
+        raise EvidenceError("current matrix must identify exactly 15 Skills")
+    hashes: dict[str, str] = {}
+    for skill in matrix.skills:
+        if Path(skill).parts != (skill,) or skill in {".", ".."}:
+            raise EvidenceError("invalid current Skill name")
+        skill_root = root / "claude" / "skills" / skill
+        _assert_no_symlink_components(root, skill_root)
+        if skill_root.is_symlink() or not skill_root.is_dir():
+            raise EvidenceError("current Skill source is not a regular directory")
+        skill_file = skill_root / "SKILL.md"
+        if skill_file.is_symlink() or not skill_file.is_file():
+            raise EvidenceError("current Skill source must contain a regular SKILL.md")
+        for path in skill_root.rglob("*"):
+            if path.is_symlink():
+                raise EvidenceError("current Skill source symlink is not allowed")
+            if not path.is_dir() and not path.is_file():
+                raise EvidenceError("current Skill source contains a non-regular entry")
+        hashes[skill] = sha256_skill(skill_root)
+    return hashes
+
+
+def _validate_record_source_hashes(
+    records: Sequence[Mapping[str, object]],
+    *,
+    label: str,
+    canonical_skill_hashes: Mapping[str, str],
+) -> None:
+    for record in records:
+        skill = record["skill"]
+        if record["source_sha256"] != canonical_skill_hashes[skill]:
+            raise EvidenceError(f"{label} source_sha256 does not match current Skill")
+
+
 def _expect_exact_runtime_identities(
     records: Sequence[Mapping[str, Any]],
     *,
@@ -1641,6 +1676,8 @@ def validate_source_bundle(
     )
     if deterministic.payload.get("exit_status") != 0:
         raise EvidenceError("deterministic report exit status is not zero")
+    canonical_skill_hashes = _canonical_skill_hashes(root, matrix)
+
 
     expected_install = install_report_path(root, safe_batch_id)
     if Path(install_path).absolute() != expected_install:
@@ -1662,6 +1699,11 @@ def validate_source_bundle(
         raise EvidenceError("install report records must be a list")
     _validate_install_records(install_records)
     _expect_exact_runtime_identities(install_records, label="install", matrix=matrix)
+    _validate_record_source_hashes(
+        install_records,
+        label="install",
+        canonical_skill_hashes=canonical_skill_hashes,
+    )
     if any(_record_status(record) is not Verdict.PASS for record in install_records):
         raise EvidenceError("install report contains non-PASS record")
 
@@ -1684,6 +1726,11 @@ def validate_source_bundle(
         raise EvidenceError("discovery report records must be a list")
     _expect_exact_runtime_identities(discovery_records, label="discovery", matrix=matrix)
     _validate_discovery_records(discovery_records)
+    _validate_record_source_hashes(
+        discovery_records,
+        label="discovery",
+        canonical_skill_hashes=canonical_skill_hashes,
+    )
 
     if len(field_paths) != 27:
         raise EvidenceError("field reports require exactly 27 paths")

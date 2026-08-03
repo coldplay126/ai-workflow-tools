@@ -2043,7 +2043,9 @@ def passing_install_report(tmp_path: Path, matrix: object, *, batch_id: str) -> 
         {
             "runtime": runtime,
             "skill": case.name,
-            "source_sha256": "d" * 64,
+            "source_sha256": pressure.sha256_skill(
+                tmp_path / "claude" / "skills" / case.name
+            ),
             "target_root": f".{runtime}/skills",
             "status": Verdict.PASS.value,
             "diagnostic": "linked",
@@ -2060,12 +2062,16 @@ def passing_install_report(tmp_path: Path, matrix: object, *, batch_id: str) -> 
     )
 
 
-def passing_discovery_records(matrix: object) -> list[dict[str, object]]:
+def passing_discovery_records(
+    matrix: object, *, repo_root: Path = REPO_ROOT
+) -> list[dict[str, object]]:
     return [
         {
             "runtime": runtime,
             "skill": case.name,
-            "source_sha256": "d" * 64,
+            "source_sha256": pressure.sha256_skill(
+                repo_root / "claude" / "skills" / case.name
+            ),
             "auth_mode": "subscription",
             "argv_safety_flags": list(run_skill_discovery.SAFETY_FLAGS[runtime]),
             "verdict": Verdict.PASS.value,
@@ -2090,7 +2096,7 @@ def passing_discovery_report(tmp_path: Path, matrix: object, *, batch_id: str) -
                 "schema": "awf_skill_discovery_report_v1",
                 "batch_id": batch_id,
                 "matrix_sha256": _matrix_sha256(),
-                "records": passing_discovery_records(matrix),
+                "records": passing_discovery_records(matrix, repo_root=tmp_path),
             }
         )
     )
@@ -2277,6 +2283,60 @@ def test_source_bundle_rejects_discovery_record_without_safe_subscription_proven
         )
 
 
+def test_source_bundle_rejects_install_source_hash_not_matching_current_skill(
+    tmp_path: Path,
+) -> None:
+    deterministic = passing_deterministic_report(tmp_path, batch_id="batch-1")
+    install = passing_install_report(tmp_path, MATRIX, batch_id="batch-1")
+    discovery = passing_discovery_report(tmp_path, MATRIX, batch_id="batch-1")
+    fields = passing_field_report_paths(tmp_path, MATRIX, batch_id="batch-1")
+    forged = json.loads(install.read_text())
+    source_sha256 = forged["records"][0]["source_sha256"]
+    forged["records"][0]["source_sha256"] = (
+        ("0" if source_sha256[0] != "0" else "1") + source_sha256[1:]
+    )
+    install.write_text(json.dumps(forged))
+
+    with pytest.raises(
+        pressure.EvidenceError, match="install source_sha256 does not match current Skill"
+    ):
+        pressure.validate_source_bundle(
+            repo_root=tmp_path,
+            batch_id="batch-1",
+            deterministic_path=deterministic,
+            install_path=install,
+            discovery_path=discovery,
+            field_paths=fields,
+        )
+
+
+def test_source_bundle_rejects_discovery_source_hash_not_matching_current_skill(
+    tmp_path: Path,
+) -> None:
+    deterministic = passing_deterministic_report(tmp_path, batch_id="batch-1")
+    install = passing_install_report(tmp_path, MATRIX, batch_id="batch-1")
+    discovery = passing_discovery_report(tmp_path, MATRIX, batch_id="batch-1")
+    fields = passing_field_report_paths(tmp_path, MATRIX, batch_id="batch-1")
+    forged = json.loads(discovery.read_text())
+    source_sha256 = forged["records"][0]["source_sha256"]
+    forged["records"][0]["source_sha256"] = (
+        ("0" if source_sha256[0] != "0" else "1") + source_sha256[1:]
+    )
+    discovery.write_text(json.dumps(forged))
+
+    with pytest.raises(
+        pressure.EvidenceError, match="discovery source_sha256 does not match current Skill"
+    ):
+        pressure.validate_source_bundle(
+            repo_root=tmp_path,
+            batch_id="batch-1",
+            deterministic_path=deterministic,
+            install_path=install,
+            discovery_path=discovery,
+            field_paths=fields,
+        )
+
+
 def test_source_bundle_binds_field_file_hash_to_current_skill_file(tmp_path: Path) -> None:
     deterministic = passing_deterministic_report(tmp_path, batch_id="batch-1")
     install = passing_install_report(tmp_path, MATRIX, batch_id="batch-1")
@@ -2313,7 +2373,9 @@ def test_source_bundle_binds_full_skill_directory_hash_including_nested_resource
         / "nested-resource.md"
     ).write_text("mutated nested resource", encoding="utf-8")
 
-    with pytest.raises(pressure.EvidenceError, match="field Skill hash mismatch"):
+    with pytest.raises(
+        pressure.EvidenceError, match="install source_sha256 does not match current Skill"
+    ):
         pressure.validate_source_bundle(
             repo_root=tmp_path,
             batch_id="batch-1",
