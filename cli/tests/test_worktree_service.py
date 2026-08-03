@@ -2538,6 +2538,7 @@ def test_link_pr_makes_existing_finish_preview_available(
             "kind": "remove_worktree",
             "lease_id": lease.id,
             "path": str(lease.worktree_path),
+            "branch": lease.branch,
         },
     )
 
