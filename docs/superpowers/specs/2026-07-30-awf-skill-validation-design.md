@@ -376,3 +376,129 @@ The initiative is complete only when:
 - Executing deployment, deletion, database, or Git mutation during pressure tests
 - Inferring OMP discovery from Claude or AWF CLI discovery
 - Committing raw model transcripts
+
+## 15. Subscription-Backed Live Validation Amendment
+
+### 15.1 Problem
+
+The live probes must use the operator's existing Claude, ChatGPT/Codex, and OMP subscriptions. Replacing `HOME` and every runtime config directory with empty temporary directories also hides the OAuth credential stores, so the previous isolated-host design cannot produce live evidence.
+
+Authentication and Skill-source isolation are separate concerns:
+
+- subscription credential stores may be read from their existing locations
+- credential files must not be copied, linked, hashed, listed in reports, or modified directly by the validation harness
+- candidate Skills must still come only from the immutable source snapshot installed into a temporary project workspace
+- model sessions and mutation-capable tools remain disabled
+
+API keys are not a supported fallback for this validation.
+
+### 15.2 Shared live-run contract
+
+At process start, the runner captures the effective subscription config locations from the parent environment without reading credential contents. A live host adapter may expose only the minimum location required for that host to authenticate.
+
+Every live process must:
+
+- run from a newly created temporary project workspace
+- install only the immutable candidate Skill snapshot into the host's project-level Skill root
+- use a fresh model context with session persistence disabled
+- use a read-only sandbox where the host supports one
+- expose no mutation-capable tool
+- leave the credential store in place and perform no direct credential mutation
+- persist only normalized auth diagnostics, never raw auth status output, tokens, account identifiers, or credential paths
+
+The temporary workspace and Skill links are deleted after evidence is durably written. The original credential store and global Skill roots are never cleanup targets.
+
+The provider runtimes may still rotate an OAuth token or write their normal auth and usage bookkeeping while authenticating. This design treats credentials as read-only harness inputs; it does not promise filesystem-level immutability of provider-owned stores. A requirement for byte-for-byte immutable credential storage would instead block subscription-backed runs until a separately configured broker or provider-supported read-only credential interface exists.
+
+### 15.3 Host launch contracts
+
+#### Claude
+
+- Preserve the existing Claude subscription authentication context.
+- Install the candidate snapshot under `<workspace>/.claude/skills/<skill>`.
+- Start Claude in `<workspace>` with `--setting-sources project`.
+- Use `--tools ""` and `--no-session-persistence`.
+- Invoke the selected Skill explicitly as `/<skill>`.
+- Do not copy or link the existing Claude config directory into the workspace.
+
+#### Agent Skills through Codex
+
+- Set `HOME` to a temporary directory.
+- Set `CODEX_HOME` to the effective pre-run Codex home, defaulting to `<original-home>/.codex` when no explicit value exists.
+- Install the candidate snapshot under `<workspace>/.agents/skills/<skill>`.
+- Start Codex in `<workspace>` with `--ephemeral`, `--sandbox read-only`, and `--skip-git-repo-check`.
+- Use the ChatGPT-subscription model identifier `gpt-5.4`; do not pass the OMP registry identifier `openai-codex/gpt-5.6-sol` to Codex.
+- Invoke the selected Skill explicitly as `$<skill>`.
+
+#### OMP
+
+- Set `HOME` to a temporary directory.
+- Preserve only the effective existing `PI_CODING_AGENT_DIR` required for OMP subscription authentication.
+- Install the candidate snapshot under `<workspace>/.omp/skills/<skill>`.
+- Start OMP in `<workspace>` with `--no-session`, `--no-extensions`, and the pinned OMP model `openai-codex/gpt-5.6-sol`.
+- Do not use the OMP auth broker or API-key environment variables for this validation.
+
+### 15.4 OMP discovery and field execution
+
+OMP omits the Skill discovery prompt when no read tool is available. Therefore one OMP command shape cannot prove both host discovery and no-tool field behavior.
+
+OMP discovery probes must:
+
+- allow only the `read` tool
+- retain the single-Skill allowlist
+- ask the host to load the selected project Skill and return the exact name, description, and first Markdown H1
+- fail if any tool other than `read` is configured
+
+OMP field pairs must:
+
+- run both baseline and with-Skill arms with `--no-tools` and `--no-session`
+- run the baseline with `--no-skills` and no Skill injection
+- run the with-Skill arm with the immutable snapshot `SKILL.md` supplied through `--append-system-prompt`
+- record the full snapshot `skill_sha256`, the injected `SKILL.md` file's `skill_file_sha256`, and `injection_sha256`; require `injection_sha256 == skill_file_sha256`
+- fail closed if the injected file changes before launch or before evidence publication
+
+This split proves real project-root discovery separately from behavioral use of the exact Skill snapshot while preventing model-initiated filesystem access during pressure scenarios.
+
+### 15.5 Failure and reporting semantics
+
+The host adapter returns `BLOCKED`, not `FAIL`, for an unavailable or expired subscription. Unsupported model identifiers, missing project Skill selection, unexpected tool exposure, credential-copy attempts, and Skill hash mismatches are harness defects and return `FAIL`.
+
+Raw provider stderr is transient. Before any diagnostic is persisted, the runner maps it to an allowlisted reason code such as:
+
+- `host_auth_unavailable`
+- `host_subscription_expired`
+- `host_model_unsupported`
+- `host_timeout`
+- `host_provider_exit`
+
+Reports may record the host, model identifier, command safety flags, normalized reason code, exit status, elapsed time, and candidate Skill hashes. They must not record credential environment values, credential paths, auth-status JSON, provider account metadata, or unredacted stderr.
+
+### 15.6 Required regression coverage
+
+Focused tests must prove:
+
+1. credential locations are referenced but never copied, linked, hashed, serialized, or directly mutated by harness code
+2. each host runs from the temporary project workspace and selects the project Skill
+3. Claude disables user settings and mutation tools while preserving subscription authentication
+4. Codex receives `gpt-5.4`, an ephemeral session, a read-only sandbox, and the effective original `CODEX_HOME`
+5. OMP discovery exposes only `read`
+6. OMP baseline exposes neither Skills nor tools
+7. OMP with-Skill injects the exact immutable `SKILL.md`, verifies its file hash, and separately preserves the full Skill snapshot hash
+8. auth/provider errors are normalized before persistence
+9. cleanup can remove only paths created beneath the temporary validation root
+10. a changed source or snapshot between execution and publication blocks evidence
+
+Subscription-backed smoke tests are workstation acceptance tests, not default CI tests. Deterministic CI continues to use fake hosts and temporary credential-free homes.
+
+### 15.7 Acceptance evidence
+
+After implementing this amendment, create a new batch identifier and rerun:
+
+1. the deterministic fifteen-Skill audit
+2. all 45 host discovery probes
+3. all 27 OMP baseline/with-Skill pairs
+4. the 135-cell evidence summary
+5. the focused validation suites and complete AWF suite
+6. independent specification-conformance and quality/safety reviews against one final commit
+
+Prior `BLOCKED host_auth_unavailable` reports remain append-only historical evidence but must not be mixed into the new batch's aggregate verdict.
