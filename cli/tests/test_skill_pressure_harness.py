@@ -1673,11 +1673,19 @@ class _FakeDiscoveryProcess:
         failure: tuple[str, str, str] | None = None,
         fail_install: bool = False,
         blocked_install_runtime: str | None = None,
+        canonical_root: Path | None = None,
+        mutate_canonical_after_install: str | None = None,
+        read_workspace_skills: bool = False,
     ) -> None:
         self.expected = expected
         self.failure = failure
         self.fail_install = fail_install
         self.blocked_install_runtime = blocked_install_runtime
+        self.canonical_root = canonical_root
+        self.mutate_canonical_after_install = mutate_canonical_after_install
+        self.read_workspace_skills = read_workspace_skills
+        self.installed_sources: dict[str, tuple[str, tuple[str, str, str]]] = {}
+        self.workspace_skills: dict[tuple[str, str], tuple[str, tuple[str, str, str]]] = {}
         self.calls: list[tuple[list[str], Path, dict[str, str]]] = []
 
     def __call__(
@@ -1691,6 +1699,10 @@ class _FakeDiscoveryProcess:
         self.calls.append((argv, cwd, dict(env)))
         if argv[0] == "sh":
             source = Path(argv[2])
+            self.installed_sources[source.name] = (
+                sha256_skill(source),
+                run_skill_discovery._source_metadata(source / "SKILL.md"),
+            )
             blocked = False
             if self.fail_install and source.name == sorted(self.expected)[0]:
                 return DiscoveryProcessResult(1, "", "linker_failed", 0.01)
@@ -1704,6 +1716,17 @@ class _FakeDiscoveryProcess:
                     blocked = True
                 else:
                     target.symlink_to(source, target_is_directory=True)
+            if self.mutate_canonical_after_install == source.name:
+                assert self.canonical_root is not None
+                skill_file = self.canonical_root / "claude" / "skills" / source.name / "SKILL.md"
+                skill_file.write_text(
+                    skill_file.read_text(encoding="utf-8").replace(
+                        f"name: {source.name}",
+                        "name: mutated-after-install",
+                        1,
+                    ),
+                    encoding="utf-8",
+                )
             return DiscoveryProcessResult(3 if blocked else 0, "", "root_blocked" if blocked else "", 0.01)
 
         runtime = {
@@ -1749,12 +1772,22 @@ class _FakeDiscoveryProcess:
             return DiscoveryProcessResult(0, "{", "", 0.01)
         if failure and failure[2] == "unknown":
             return DiscoveryProcessResult(0, "unknown Skill requested", "", 0.01)
-        expected = self.expected[skill]
-        payload = {
-            "name": expected.name,
-            "description": expected.description,
-            "body_heading": expected.body_heading,
-        }
+        if self.read_workspace_skills:
+            source = cwd / run_skill_discovery.TARGET_ROOTS[runtime] / skill
+            metadata = run_skill_discovery._source_metadata(source / "SKILL.md")
+            self.workspace_skills[(runtime, skill)] = (sha256_skill(source), metadata)
+            payload = {
+                "name": metadata[0],
+                "description": metadata[1],
+                "body_heading": metadata[2],
+            }
+        else:
+            expected = self.expected[skill]
+            payload = {
+                "name": expected.name,
+                "description": expected.description,
+                "body_heading": expected.body_heading,
+            }
         if failure and failure[2].startswith("mismatch-"):
             field = failure[2].removeprefix("mismatch-")
             payload[field] = f"not-the-source-{field}"
@@ -1777,6 +1810,8 @@ def _run_fake_discovery(
     fail_install: bool = False,
     blocked_install_runtime: str | None = None,
     missing_skill: str | None = None,
+    mutate_canonical_after_install: str | None = None,
+    read_workspace_skills: bool = False,
 ) -> tuple[object, _FakeDiscoveryProcess, Path]:
     repo_root = _copy_discovery_repo(tmp_path)
     if missing_skill:
@@ -1790,6 +1825,9 @@ def _run_fake_discovery(
         failure=failure,
         fail_install=fail_install,
         blocked_install_runtime=blocked_install_runtime,
+        canonical_root=repo_root,
+        mutate_canonical_after_install=mutate_canonical_after_install,
+        read_workspace_skills=read_workspace_skills,
     )
     global_roots = tmp_path / "workstation-global-skill-roots"
     monkeypatch.setenv("HOME", str(global_roots / "home"))
@@ -2106,6 +2144,116 @@ def test_skill_discovery_blocks_auth_failure_reported_on_stdout(
         for record in result.discovery_records
         if record["runtime"] == "omp" and record["skill"] == "analysis"
     ] == ["BLOCKED"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("description", "A valid description mentioning unknown Skill."),
+        ("body_heading", "# A valid heading saying skill not found"),
+    ],
+)
+def test_skill_discovery_accepts_valid_json_metadata_with_unknown_skill_words(
+    field: str, value: str
+) -> None:
+    expected = replace(
+        load_expected_skills(
+            REPO_ROOT,
+            REPO_ROOT / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json",
+        )["analysis"],
+        **{field: value},
+    )
+    stdout = json.dumps(
+        {
+            "name": expected.name,
+            "description": expected.description,
+            "body_heading": expected.body_heading,
+        }
+    )
+
+    assert run_skill_discovery._response_diagnostic(stdout, expected) == ""
+
+
+def test_skill_discovery_persists_only_normalized_provider_stderr_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    baseline, fake, _ = _run_fake_discovery(tmp_path, monkeypatch)
+    original = fake.__call__
+    raw_detail = "unique-provider-stderr-detail"
+    raw_token = "sk-proj-unique-provider-token"
+    credential_path = tmp_path / "operator" / ".config" / "identity.json"
+
+    def with_provider_stderr(
+        argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int
+    ) -> DiscoveryProcessResult:
+        output = original(argv, cwd=cwd, env=env, timeout=timeout)
+        if argv[0] == "fake-omp" and "--skills=analysis" in argv:
+            return DiscoveryProcessResult(
+                23,
+                "",
+                f"{raw_detail} token={raw_token} path={credential_path}",
+                output.elapsed_sec,
+            )
+        return output
+
+    result = run_discovery(
+        repo_root=baseline.repo_root,
+        matrix_path=baseline.repo_root / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json",
+        batch_id="skill-discovery-provider-stderr",
+        binaries={"claude": "fake-claude", "agent-skills": "fake-agent", "omp": "fake-omp"},
+        models=dict(PINNED_SUBSCRIPTION_MODELS),
+        timeout_sec=7,
+        write_result=True,
+        process_runner=with_provider_stderr,
+    )
+    report = result.discovery_report.read_text(encoding="utf-8")
+    record = next(
+        record
+        for record in result.discovery_records
+        if record["runtime"] == "omp" and record["skill"] == "analysis"
+    )
+
+    assert record["diagnostic"] == "host_provider_exit"
+    assert raw_detail not in report
+    assert raw_token not in report
+    assert str(credential_path) not in report
+
+
+def test_skill_discovery_freezes_snapshot_before_canonical_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, fake, _ = _run_fake_discovery(
+        tmp_path,
+        monkeypatch,
+        mutate_canonical_after_install="analysis",
+        read_workspace_skills=True,
+    )
+    frozen_sha256, frozen_metadata = fake.installed_sources["analysis"]
+    canonical_skill = result.repo_root / "claude" / "skills" / "analysis" / "SKILL.md"
+    reports = (
+        result.install_report.read_text(encoding="utf-8")
+        + result.discovery_report.read_text(encoding="utf-8")
+    )
+
+    assert "name: mutated-after-install" in canonical_skill.read_text(encoding="utf-8")
+    assert {
+        record["status"] for record in result.install_records if record["skill"] == "analysis"
+    } == {"PASS"}
+    assert {
+        record["verdict"] for record in result.discovery_records if record["skill"] == "analysis"
+    } == {"PASS"}
+    for runtime in run_skill_discovery.RUNTIMES:
+        assert fake.workspace_skills[(runtime, "analysis")] == (frozen_sha256, frozen_metadata)
+    for record in result.discovery_records:
+        if record["skill"] == "analysis":
+            assert record["source_sha256"] == frozen_sha256
+            assert (
+                record["source_name"],
+                record["source_description"],
+                record["source_body_heading"],
+            ) == frozen_metadata
+    assert str(result.repo_root / "claude" / "skills") not in reports
+    assert "awf-skill-discovery-" not in reports
 
 
 def test_skill_discovery_materializes_45_isolated_canonical_links_and_cleans_up(

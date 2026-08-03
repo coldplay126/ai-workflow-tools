@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import stat
 import time
 import uuid
 from dataclasses import dataclass
@@ -74,6 +75,7 @@ UNKNOWN_SKILL_RE = re.compile(
     r"(?:unknown|unrecognized|unsupported)\s+(?:command|skill)|skill\s+.*(?:not found|unknown)",
     re.IGNORECASE,
 )
+EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 
 
 @dataclass(frozen=True)
@@ -330,7 +332,7 @@ def load_expected_skills(repo_root: Path, matrix_path: Path) -> dict[str, Expect
     root = Path(repo_root).resolve()
     matrix = load_skill_matrix(matrix_path)
     expected: dict[str, ExpectedSkill] = {}
-    empty_sha256 = hashlib.sha256(b"").hexdigest()
+    empty_sha256 = EMPTY_SHA256
     for skill in sorted(matrix.skills):
         source = root / "claude" / "skills" / skill
         source_error = ""
@@ -368,6 +370,132 @@ def load_expected_skills(repo_root: Path, matrix_path: Path) -> dict[str, Expect
     if len(expected) != 15:
         raise ValueError("Skill matrix must identify exactly 15 Skills")
     return expected
+
+
+def _regular_skill_paths(root: Path) -> list[Path]:
+    try:
+        root_mode = root.lstat().st_mode
+    except OSError as exc:
+        raise ValueError("unable to inspect Skill source") from exc
+    if stat.S_ISLNK(root_mode):
+        raise ValueError("Skill source is a symlink")
+    if not stat.S_ISDIR(root_mode):
+        raise ValueError("Skill source is not a directory")
+    try:
+        paths = [root, *sorted(root.rglob("*"))]
+    except OSError as exc:
+        raise ValueError("unable to inspect Skill source") from exc
+    for path in paths:
+        try:
+            mode = path.lstat().st_mode
+        except OSError as exc:
+            raise ValueError("unable to inspect Skill source") from exc
+        if stat.S_ISLNK(mode):
+            raise ValueError("Skill source contains a symlink")
+        if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+            raise ValueError("Skill source contains a non-regular entry")
+    return paths
+
+
+def _skill_state(root: Path) -> tuple[str, tuple[str, str, str], tuple[tuple[str, str], ...]]:
+    paths = _regular_skill_paths(root)
+    entries = tuple(
+        (
+            path.relative_to(root).as_posix(),
+            "directory" if stat.S_ISDIR(path.lstat().st_mode) else "file",
+        )
+        for path in paths
+    )
+    return sha256_skill(root), _source_metadata(root / "SKILL.md"), entries
+
+
+def _copy_regular_file(source: Path, destination: Path) -> None:
+    source_fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+    destination_fd: int | None = None
+    try:
+        source_mode = os.fstat(source_fd).st_mode
+        if not stat.S_ISREG(source_mode):
+            raise ValueError("Skill source contains a non-regular file")
+        destination_fd = os.open(
+            destination,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            source_mode & 0o777,
+        )
+        while data := os.read(source_fd, 65536):
+            written = 0
+            while written < len(data):
+                written += os.write(destination_fd, data[written:])
+    finally:
+        if destination_fd is not None:
+            os.close(destination_fd)
+        os.close(source_fd)
+
+
+def _copy_regular_skill_tree(source: Path, destination: Path) -> None:
+    source_paths = _regular_skill_paths(source)
+    destination.mkdir()
+    for path in source_paths[1:]:
+        target = destination / path.relative_to(source)
+        mode = path.lstat().st_mode
+        if stat.S_ISDIR(mode):
+            target.mkdir()
+        elif stat.S_ISREG(mode):
+            _copy_regular_file(path, target)
+        else:
+            raise ValueError("Skill source contains an unsupported entry")
+    _regular_skill_paths(destination)
+
+
+def _blocked_snapshot_skill(candidate: ExpectedSkill, diagnostic: str) -> ExpectedSkill:
+    return ExpectedSkill(
+        name=candidate.name,
+        description="",
+        body_heading="",
+        source=candidate.source,
+        source_sha256=EMPTY_SHA256,
+        source_error=diagnostic,
+    )
+
+
+def _materialize_expected_skills(
+    expected: Mapping[str, ExpectedSkill], snapshot_root: Path
+) -> dict[str, ExpectedSkill]:
+    snapshots: dict[str, ExpectedSkill] = {}
+    snapshot_root.mkdir()
+    for skill, candidate in expected.items():
+        if candidate.source_error:
+            snapshots[skill] = candidate
+            continue
+        snapshot = snapshot_root / skill
+        try:
+            before = _skill_state(candidate.source)
+            _copy_regular_skill_tree(candidate.source, snapshot)
+            materialized = _skill_state(snapshot)
+            after = _skill_state(candidate.source)
+        except (OSError, ValueError):
+            snapshots[skill] = _blocked_snapshot_skill(
+                candidate, "canonical_source_materialization_failed"
+            )
+            continue
+        if before != materialized or after != materialized:
+            snapshots[skill] = _blocked_snapshot_skill(
+                candidate, "canonical_source_mutated_during_snapshot"
+            )
+            continue
+        source_sha256, metadata, _ = materialized
+        if metadata[0] != skill:
+            snapshots[skill] = _blocked_snapshot_skill(
+                candidate, "canonical_source_name_mismatch"
+            )
+            continue
+        snapshots[skill] = ExpectedSkill(
+            name=metadata[0],
+            description=metadata[1],
+            body_heading=metadata[2],
+            source=snapshot,
+            source_sha256=source_sha256,
+        )
+    return snapshots
 
 
 
@@ -539,7 +667,7 @@ def _install_records(
                     completed.error_kind,
                 )
             else:
-                status, diagnostic = "BLOCKED", "installer_target_not_canonical"
+                status, diagnostic = "BLOCKED", "installer_target_not_snapshot"
             records.append(
                 {
                     "runtime": runtime,
@@ -592,11 +720,11 @@ def _json_object_no_duplicates(text: str) -> dict[str, object]:
 
 
 def _response_diagnostic(stdout: str, expected: ExpectedSkill) -> str:
-    if UNKNOWN_SKILL_RE.search(stdout):
-        return "unknown_skill_response"
     try:
         payload = _json_object_no_duplicates(stdout)
     except (ValueError, json.JSONDecodeError):
+        if UNKNOWN_SKILL_RE.search(stdout):
+            return "unknown_skill_response"
         return "malformed_json_response"
     required = {"name", "description", "body_heading"}
     if set(payload) != required or not all(isinstance(payload[key], str) for key in required):
@@ -733,6 +861,9 @@ def run_discovery(
         workspace = temporary_root / "workspace"
         temporary_home.mkdir()
         workspace.mkdir()
+        expected = _materialize_expected_skills(
+            expected, temporary_root / "skill-snapshots"
+        )
         base_environment = dict(os.environ)
         environments = {
             runtime: build_subscription_environment(
