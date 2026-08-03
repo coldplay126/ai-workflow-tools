@@ -704,11 +704,33 @@ def sha256_text(text: str) -> str:
 
 def skill_snapshot_bytes(skill_root: str | Path) -> bytes:
     root = Path(skill_root)
+    root_mode = root.lstat().st_mode
+    if stat.S_ISLNK(root_mode):
+        raise ValueError("skill root is a symlink")
+    if not stat.S_ISDIR(root_mode):
+        raise ValueError("skill root is not a directory")
+
     snapshot = bytearray()
-    for path in sorted(path for path in root.rglob("*") if path.is_file()):
-        relative = path.relative_to(root).as_posix()
-        snapshot.extend(f"\n\n<!-- awf-skill-snapshot:{relative} -->\n".encode("utf-8"))
-        snapshot.extend(path.read_bytes())
+    paths = sorted(root.rglob("*"), key=lambda path: path.relative_to(root).as_posix())
+    for path in paths:
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode):
+            raise ValueError("skill source contains a symlink")
+        if stat.S_ISDIR(mode):
+            snapshot.extend(b"D")
+            snapshot.extend(len(relative).to_bytes(8, byteorder="big"))
+            snapshot.extend(relative)
+            continue
+        if not stat.S_ISREG(mode):
+            raise ValueError("skill source contains a non-regular entry")
+
+        content = path.read_bytes()
+        snapshot.extend(b"F")
+        snapshot.extend(len(relative).to_bytes(8, byteorder="big"))
+        snapshot.extend(relative)
+        snapshot.extend(len(content).to_bytes(8, byteorder="big"))
+        snapshot.extend(content)
     return bytes(snapshot)
 
 
@@ -758,23 +780,44 @@ def _publication_directory_flags() -> int:
 
 def _open_publication_directory_component(parent_fd: int, component: str) -> int:
     flags = _publication_directory_flags()
+    created = False
     try:
         return os.open(component, flags, dir_fd=parent_fd)
     except FileNotFoundError:
         try:
-            os.mkdir(component, 0o777, dir_fd=parent_fd)
+            os.mkdir(component, 0o700, dir_fd=parent_fd)
+            created = True
         except FileExistsError:
             pass
         try:
-            return os.open(component, flags, dir_fd=parent_fd)
+            directory_fd = os.open(component, flags, dir_fd=parent_fd)
         except OSError as exc:
             raise EvidenceError("publication path changed") from exc
+        if created:
+            try:
+                os.fchmod(directory_fd, 0o700)
+            except OSError:
+                try:
+                    os.close(directory_fd)
+                except OSError:
+                    pass
+                raise
+        return directory_fd
     except OSError as exc:
         raise EvidenceError("publication path changed") from exc
 
 
 def _publication_directory_identity(directory_fd: int) -> tuple[int, int]:
-    metadata = os.fstat(directory_fd)
+    try:
+        metadata = os.fstat(directory_fd)
+    except OSError as exc:
+        raise EvidenceError("unsafe publication output directory") from exc
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or metadata.st_mode & 0o022
+    ):
+        raise EvidenceError("unsafe publication output directory")
     return metadata.st_dev, metadata.st_ino
 
 
@@ -789,6 +832,8 @@ def _verify_publication_directory_chain(
                 or (named.st_dev, named.st_ino) != expected_identity
             ):
                 raise EvidenceError("publication path changed")
+            if named.st_uid != os.geteuid() or named.st_mode & 0o022:
+                raise EvidenceError("unsafe publication output directory")
     except OSError as exc:
         raise EvidenceError("publication path changed") from exc
 
@@ -962,12 +1007,30 @@ def write_pressure_report(
     payload: dict[str, Any],
     baseline: str,
     with_skill: str,
+    before_publish: Callable[[], None] | None = None,
+    after_publish: Callable[[], None] | None = None,
+    blocked_diagnostic: str | None = None,
 ) -> Path:
     target = pressure_report_path(repo_root, run_id)
     if target.exists():
         raise FileExistsError(target)
 
     recorded_at = datetime.now(timezone.utc).isoformat()
+    if blocked_diagnostic is not None:
+        if blocked_diagnostic != "skill_snapshot_changed":
+            raise EvidenceError("invalid blocked diagnostic")
+        validate_field_record(payload)
+        blocked = {
+            "schema": REPORT_SCHEMA,
+            "recorded_at": recorded_at,
+            "run_id": run_id,
+            "persistence_status": "BLOCKED",
+            "diagnostics": [{"code": blocked_diagnostic}],
+            "field_identity": _safe_field_identity(payload),
+        }
+        _publish_new(target, json.dumps(blocked, ensure_ascii=False, indent=2) + "\n")
+        return target
+
     serialized_payload = json.dumps(
         _payload_for_sensitive_scan(payload), ensure_ascii=False, sort_keys=True
     )
@@ -987,7 +1050,12 @@ def write_pressure_report(
             "diagnostics": [{"code": "sensitive_content", "labels": labels}],
             "field_identity": _safe_field_identity(payload),
         }
-        _publish_new(target, json.dumps(blocked, ensure_ascii=False, indent=2) + "\n")
+        _publish_new(
+            target,
+            json.dumps(blocked, ensure_ascii=False, indent=2) + "\n",
+            before_publish=before_publish,
+            after_publish=after_publish,
+        )
         raise SensitiveDataError(f"sensitive transcript blocked: {','.join(labels)}")
 
     validate_field_record(payload)
@@ -1003,7 +1071,12 @@ def write_pressure_report(
             "with_skill": sha256_text(with_skill),
         },
     }
-    _publish_new(target, json.dumps(envelope, ensure_ascii=False, indent=2) + "\n")
+    _publish_new(
+        target,
+        json.dumps(envelope, ensure_ascii=False, indent=2) + "\n",
+        before_publish=before_publish,
+        after_publish=after_publish,
+    )
     return target
 
 
@@ -1268,6 +1341,7 @@ def write_deterministic_report(
     matrix_sha256: str,
     sources: Mapping[str, object],
     before_publish: Callable[[], None] | None = None,
+    after_publish: Callable[[], None] | None = None,
 ) -> Path:
     safe_batch_id = _require_safe_batch_id(batch_id)
     validated_sources = _validated_deterministic_sources(repo_root, argv, sources)
@@ -1303,6 +1377,7 @@ def write_deterministic_report(
         target,
         json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         before_publish=before_publish,
+        after_publish=after_publish,
     )
     return target
 

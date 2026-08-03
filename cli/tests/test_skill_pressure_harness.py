@@ -1185,6 +1185,101 @@ def test_publish_new_rejects_output_directory_symlink_swap_during_temp_creation(
     assert not (outside / target.name).exists()
     assert list(preserved_output.glob(f".{target.name}.*")) == []
 
+def test_publish_new_creates_private_output_directories_despite_permissive_umask(
+    tmp_path: Path,
+) -> None:
+    target = pressure_report_path(tmp_path, "publisher-private-umask")
+    prior_umask = os.umask(0)
+    try:
+        pressure._publish_new(target, "private report\n")
+    finally:
+        os.umask(prior_umask)
+
+    assert stat.S_IMODE((tmp_path / ".awf-operations").stat().st_mode) == 0o700
+    assert stat.S_IMODE(target.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize(
+    ("component_name", "mode"),
+    [(".awf-operations", 0o720), ("skill-pressure", 0o702)],
+)
+def test_publish_new_rejects_group_or_other_writable_output_component(
+    tmp_path: Path, component_name: str, mode: int
+) -> None:
+    target = pressure_report_path(tmp_path, "publisher-writable-component")
+    target.parent.mkdir(parents=True)
+    component = (
+        tmp_path / ".awf-operations"
+        if component_name == ".awf-operations"
+        else target.parent
+    )
+    component.chmod(mode)
+
+    with pytest.raises(pressure.EvidenceError, match="unsafe publication output directory"):
+        pressure._publish_new(target, "private report\n")
+
+    assert not target.exists()
+
+
+def test_publish_new_rejects_foreign_owned_output_component(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = pressure_report_path(tmp_path, "publisher-foreign-owner")
+    target.parent.mkdir(parents=True)
+    foreign_component_identity = (
+        target.parent.stat().st_dev,
+        target.parent.stat().st_ino,
+    )
+    original_fstat = pressure.os.fstat
+
+    def foreign_owner(directory_fd: int) -> os.stat_result:
+        metadata = original_fstat(directory_fd)
+        if (metadata.st_dev, metadata.st_ino) != foreign_component_identity:
+            return metadata
+        fields = list(metadata)
+        fields[4] = os.geteuid() + 1
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(pressure.os, "fstat", foreign_owner)
+
+    with pytest.raises(pressure.EvidenceError, match="unsafe publication output directory"):
+        pressure._publish_new(target, "private report\n")
+
+    assert not target.exists()
+
+
+def test_publish_new_accepts_owned_private_output_components(tmp_path: Path) -> None:
+    target = pressure_report_path(tmp_path, "publisher-private-components")
+    target.parent.mkdir(parents=True)
+    (tmp_path / ".awf-operations").chmod(0o700)
+    target.parent.chmod(0o700)
+
+    pressure._publish_new(target, "private report\n")
+
+    assert target.read_text(encoding="utf-8") == "private report\n"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+def test_publish_new_rejects_output_component_made_writable_before_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = pressure_report_path(tmp_path, "publisher-writable-race")
+    target.parent.mkdir(parents=True)
+    target.parent.chmod(0o700)
+    original_create = pressure._create_publication_temp
+
+    def make_output_writable(directory_fd: int, target_name: str) -> tuple[str, int]:
+        target.parent.chmod(0o702)
+        return original_create(directory_fd, target_name)
+
+    monkeypatch.setattr(pressure, "_create_publication_temp", make_output_writable)
+
+    with pytest.raises(pressure.EvidenceError, match="unsafe publication output directory"):
+        pressure._publish_new(target, "private report\n")
+
+    assert not target.exists()
+
 def test_sensitive_data_writes_redacted_blocker_without_raw_content(tmp_path: Path) -> None:
     raw = '{"contact":"person@example.com"}'
     with pytest.raises(SensitiveDataError, match="email"):
@@ -1246,6 +1341,58 @@ def test_skill_hash_covers_nested_relative_paths_and_content(tmp_path: Path) -> 
     original = sha256_skill(skill)
     (skill / "nested" / "prompt.md").write_text("changed")
     assert sha256_skill(skill) != original
+
+def test_skill_snapshot_bytes_distinguishes_delimiter_content_from_split_tree(
+    tmp_path: Path,
+) -> None:
+    single_file = tmp_path / "single-file"
+    split_tree = tmp_path / "split-tree"
+    single_file.mkdir()
+    split_tree.mkdir()
+    (single_file / "alpha").write_text(
+        "first\n\n<!-- awf-skill-snapshot:beta -->\nsecond", encoding="utf-8"
+    )
+    (split_tree / "alpha").write_text("first", encoding="utf-8")
+    (split_tree / "beta").write_text("second", encoding="utf-8")
+
+    assert pressure.skill_snapshot_bytes(single_file) != pressure.skill_snapshot_bytes(
+        split_tree
+    )
+    assert sha256_skill(single_file) != sha256_skill(split_tree)
+
+
+def test_skill_snapshot_bytes_includes_empty_directories(tmp_path: Path) -> None:
+    without_directory = tmp_path / "without-directory"
+    with_empty_directory = tmp_path / "with-empty-directory"
+    without_directory.mkdir()
+    with_empty_directory.mkdir()
+    (without_directory / "SKILL.md").write_text("skill", encoding="utf-8")
+    (with_empty_directory / "SKILL.md").write_text("skill", encoding="utf-8")
+    (with_empty_directory / "resources").mkdir()
+
+    assert pressure.skill_snapshot_bytes(
+        without_directory
+    ) != pressure.skill_snapshot_bytes(with_empty_directory)
+    assert sha256_skill(without_directory) != sha256_skill(with_empty_directory)
+
+
+def test_skill_snapshot_bytes_rejects_symlinked_entries(tmp_path: Path) -> None:
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (tmp_path / "outside").write_text("outside", encoding="utf-8")
+    (skill / "linked").symlink_to(tmp_path / "outside")
+
+    with pytest.raises(ValueError, match="symlink"):
+        pressure.skill_snapshot_bytes(skill)
+
+
+def test_skill_snapshot_bytes_rejects_non_regular_entries(tmp_path: Path) -> None:
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    os.mkfifo(skill / "pipe")
+
+    with pytest.raises(ValueError, match="non-regular"):
+        pressure.skill_snapshot_bytes(skill)
 
 
 @pytest.mark.parametrize("run_id", ["", "../escape", "nested/run", "space id"])
@@ -2158,6 +2305,117 @@ def test_field_main_omits_raw_provider_output_from_persisted_evidence(
     assert "awf-skill-pressure-" not in json.dumps(output)
     assert "transcripts" not in report
 
+@pytest.mark.parametrize("boundary", ("before_publish", "after_publish"))
+def test_field_main_blocks_report_when_canonical_skill_changes_during_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    boundary: str,
+) -> None:
+    repo_root, source = _copied_wf_status_repo(tmp_path)
+    source_hash = sha256_skill(source)
+    baseline_response = response()
+    original_write = run_skill_pressure.write_pressure_report
+    mutated = False
+
+    def fake_execute(
+        case: object, **kwargs: object
+    ) -> run_skill_pressure.PairRun:
+        baseline = Evaluation(Verdict.FAIL, ("decision",), (), None)
+        with_skill = Evaluation(Verdict.PASS, (), (), None)
+        return run_skill_pressure.PairRun(
+            evaluation=compare_pair(baseline, with_skill),
+            baseline_result=ProviderResult(0, baseline_response, "", provider_name="omp"),
+            with_skill_result=ProviderResult(
+                0, baseline_response, "", provider_name="omp"
+            ),
+            preflight_result=ProviderResult(0, "omp test", "", provider_name="omp"),
+            skill_sha256=source_hash,
+            skill_file_sha256=pressure.sha256_file(source / "SKILL.md"),
+            injection_sha256=pressure.sha256_file(source / "SKILL.md"),
+        )
+
+    def mutate_during_publication(*args: object, **kwargs: object) -> Path:
+        nonlocal mutated
+        callback = kwargs.get(boundary)
+        if not callable(callback):
+            if not mutated:
+                mutated = True
+                (source / "SKILL.md").write_text(
+                    "mutated during field report publication", encoding="utf-8"
+                )
+            return original_write(*args, **kwargs)
+
+        def mutate_then_verify() -> None:
+            nonlocal mutated
+            if not mutated:
+                mutated = True
+                (source / "SKILL.md").write_text(
+                    "mutated during field report publication", encoding="utf-8"
+                )
+            callback()
+
+        kwargs[boundary] = mutate_then_verify
+        return original_write(*args, **kwargs)
+
+    monkeypatch.setattr(run_skill_pressure, "execute_pair", fake_execute)
+    monkeypatch.setattr(
+        run_skill_pressure.SubscriptionAuthContext,
+        "capture",
+        lambda: _subscription_auth(tmp_path),
+    )
+    monkeypatch.setattr(
+        run_skill_pressure, "write_pressure_report", mutate_during_publication
+    )
+
+    assert (
+        run_skill_pressure.main(
+            [
+                "--repo-root",
+                str(repo_root),
+                "--matrix",
+                str(
+                    REPO_ROOT
+                    / "cli"
+                    / "tests"
+                    / "fixtures"
+                    / "skill-validation-matrix.v1.json"
+                ),
+                "--batch-id",
+                "publication-race",
+                "--model",
+                OMP_SUBSCRIPTION_MODEL,
+                "--skill",
+                "wf-status",
+                "--write-result",
+                "--json",
+            ]
+        )
+        == 1
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    result = output["results"][0]
+    persistence = result["persistence"]
+    report = json.loads(pressure_report_path(repo_root, persistence["run_id"]).read_text())
+    serialized = json.dumps({"output": output, "report": report})
+
+    assert result["skill_sha256"] == source_hash
+    assert result["verdict"] == Verdict.BLOCKED.value
+    assert persistence == {
+        "status": "BLOCKED",
+        "run_id": persistence["run_id"],
+        "report_written": True,
+        "diagnostic": "skill_snapshot_changed",
+    }
+    assert report["persistence_status"] == "BLOCKED"
+    assert report["diagnostics"] == [{"code": "skill_snapshot_changed"}]
+    assert report["field_identity"]["skill_sha256"] == source_hash
+    assert "payload" not in report
+    assert "response_hashes" not in report
+    assert baseline_response not in serialized
+    assert str(source) not in serialized
+
 
 def _matrix_sha256() -> str:
     return hashlib.sha256(
@@ -2188,13 +2446,15 @@ def test_deterministic_runner_publishes_unchanged_source_hashes(
 ) -> None:
     _provision_matrix(tmp_path)
 
-    monkeypatch.setattr(
-        run_skill_deterministic.subprocess,
-        "run",
-        lambda *args, **kwargs: subprocess.CompletedProcess(
+    observed_stdin: list[object] = []
+
+    def succeed(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        observed_stdin.append(kwargs["stdin"])
+        return subprocess.CompletedProcess(
             args[0], 0, stdout="deterministic suite passed", stderr=""
-        ),
-    )
+        )
+
+    monkeypatch.setattr(run_skill_deterministic.subprocess, "run", succeed)
 
     assert (
         run_skill_deterministic.main(
@@ -2210,6 +2470,7 @@ def test_deterministic_runner_publishes_unchanged_source_hashes(
         relative: pressure.sha256_file(tmp_path / relative)
         for relative in pressure.DETERMINISTIC_SOURCE_FILES
     }
+    assert observed_stdin == [subprocess.DEVNULL]
 
 
 def test_deterministic_runner_fails_closed_when_runner_mutates_during_pytest(
@@ -2384,6 +2645,68 @@ def test_deterministic_runner_persists_failed_evidence_for_callback_hash_race(
     )
 
     report_path = pressure.deterministic_report_path(tmp_path, "callback-race")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["exit_status"] == 1
+    assert report["sources"] == {
+        relative: pressure.sha256_file(tmp_path / relative)
+        for relative in pressure.DETERMINISTIC_SOURCE_FILES
+    }
+
+
+def test_deterministic_runner_retries_after_postlink_source_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _provision_matrix(tmp_path)
+    source = tmp_path / "cli/tests/test_analysis_spec.py"
+    original_write = run_skill_deterministic.write_deterministic_report
+    mutated = False
+
+    def mutate_once_after_publication_link(*args: object, **kwargs: object) -> Path:
+        nonlocal mutated
+        after_publish = kwargs.pop("after_publish")
+        assert callable(after_publish)
+
+        def mutate_then_verify_sources() -> None:
+            nonlocal mutated
+            if not mutated:
+                mutated = True
+                source.write_text(
+                    source.read_text(encoding="utf-8")
+                    + "\n# mutation after deterministic publication link\n",
+                    encoding="utf-8",
+                )
+            after_publish()
+
+        return original_write(*args, after_publish=mutate_then_verify_sources, **kwargs)
+
+    monkeypatch.setattr(
+        run_skill_deterministic,
+        "write_deterministic_report",
+        mutate_once_after_publication_link,
+    )
+    monkeypatch.setattr(
+        run_skill_deterministic.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, stdout="deterministic suite passed", stderr=""
+        ),
+    )
+
+    assert (
+        run_skill_deterministic.main(
+            [
+                "--batch-id",
+                "postlink-race",
+                "--repo-root",
+                str(tmp_path),
+                "--timeout-sec",
+                "1",
+            ]
+        )
+        == 1
+    )
+
+    report_path = pressure.deterministic_report_path(tmp_path, "postlink-race")
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["exit_status"] == 1
     assert report["sources"] == {
