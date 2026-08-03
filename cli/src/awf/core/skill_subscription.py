@@ -15,8 +15,39 @@ PINNED_SUBSCRIPTION_MODELS = MappingProxyType(
         "omp": "openai-codex/gpt-5.6-sol",
     }
 )
-API_KEY_ENV_KEYS = frozenset({"ANTHROPIC_API_KEY", "OPENAI_API_KEY"})
 CONFIG_ENV_KEYS = ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR")
+_CONFIG_ENV_KEY_CASEFOLDS = frozenset(key.casefold() for key in CONFIG_ENV_KEYS)
+_EXPLICIT_TOKEN_ENV_KEY_CASEFOLDS = frozenset(
+    key.casefold()
+    for key in (
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "NPM_TOKEN",
+        "CI_JOB_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    )
+)
+_CLOUD_CREDENTIAL_ENV_KEY_CASEFOLDS = frozenset(
+    key.casefold()
+    for key in (
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "AWS_WEB_IDENTITY_TOKEN_FILE",
+    )
+)
+_AUTH_BROKER_ENV_KEY_CASEFOLDS = frozenset(
+    key.casefold() for key in ("SSH_AUTH_SOCK", "GIT_ASKPASS", "SSH_ASKPASS")
+)
+_CLOUD_CREDENTIAL_ENV_PREFIXES = ("aws_container_credentials_",)
+_API_KEY_ENV_KEY_RE = re.compile(r"(?:^|_)api_key$")
+_TOKEN_ENV_KEY_RE = re.compile(
+    r"(?:^|_)(?:access|refresh|auth|id)_token$|(?:^|_)token$"
+)
+_PASSWORD_SECRET_CREDENTIAL_ENV_KEY_RE = re.compile(
+    r"(?:^|_)(?:password|secret|credentials?)(?:_|$)"
+)
 
 _CLAUDE_DISCOVERY_REQUIRED_FLAGS = (
     "-p",
@@ -158,6 +189,32 @@ def claude_discovery_safety_flags() -> tuple[str, ...]:
     return _CLAUDE_DISCOVERY_SAFETY_FLAGS
 
 
+def _is_credential_or_runtime_config_key(key: str) -> bool:
+    normalized_key = key.casefold()
+    return (
+        normalized_key in _CONFIG_ENV_KEY_CASEFOLDS
+        or normalized_key in _EXPLICIT_TOKEN_ENV_KEY_CASEFOLDS
+        or normalized_key in _CLOUD_CREDENTIAL_ENV_KEY_CASEFOLDS
+        or normalized_key in _AUTH_BROKER_ENV_KEY_CASEFOLDS
+        or normalized_key.startswith(_CLOUD_CREDENTIAL_ENV_PREFIXES)
+        or _API_KEY_ENV_KEY_RE.search(normalized_key) is not None
+        or _TOKEN_ENV_KEY_RE.search(normalized_key) is not None
+        or _PASSWORD_SECRET_CREDENTIAL_ENV_KEY_RE.search(normalized_key) is not None
+    )
+
+
+def sanitize_subscription_environment(
+    base_environment: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Remove inherited credentials and subscription runtime configuration."""
+    source = os.environ if base_environment is None else base_environment
+    return {
+        key: value
+        for key, value in source.items()
+        if not _is_credential_or_runtime_config_key(key)
+    }
+
+
 def build_subscription_environment(
     runtime: str,
     auth: SubscriptionAuthContext,
@@ -167,9 +224,7 @@ def build_subscription_environment(
     if runtime not in SUPPORTED_RUNTIMES:
         raise ValueError(f"unsupported runtime: {runtime}")
 
-    environment = dict(os.environ if base_environment is None else base_environment)
-    for key in (*CONFIG_ENV_KEYS, *API_KEY_ENV_KEYS):
-        environment.pop(key, None)
+    environment = sanitize_subscription_environment(base_environment)
 
     if runtime == "claude":
         environment["HOME"] = str(auth.original_home)

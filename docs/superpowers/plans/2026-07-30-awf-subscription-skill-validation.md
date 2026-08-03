@@ -4,7 +4,7 @@
 
 **Goal:** Run the existing 45 host-discovery probes and 27 OMP field pairs with the operator's Claude, ChatGPT/Codex, and OMP subscriptions while keeping candidate Skills project-isolated and credential data out of evidence.
 
-**Architecture:** Add one shared subscription-runtime contract that captures credential locations in memory, strips API-key fallbacks, builds per-host environments, pins subscription-compatible models, and normalizes provider failures. Discovery installs immutable candidate Skills into a temporary project workspace; OMP discovery gets only `read`, while OMP field pairs stay no-tool and inject the exact snapshot `SKILL.md` through `--append-system-prompt`. Evidence binds the full Skill directory hash separately from the injected file hash.
+**Architecture:** Add one shared subscription-runtime contract that captures credential locations in memory, sanitizes inherited child environments of credentials and auth brokers, preserves ordinary runtime variables such as `PATH`, locale, and proxy settings, keeps the existing per-runtime `HOME` behavior, and then adds only the captured approved runtime configuration location. The contract also pins subscription-compatible models and normalizes provider failures. Discovery installs immutable candidate Skills into a temporary project workspace; OMP discovery gets only `read`, while OMP field pairs stay no-tool and inject the exact snapshot `SKILL.md` through `--append-system-prompt`. Evidence binds the full Skill directory hash separately from the injected file hash.
 
 **Tech Stack:** Python 3.11+, pytest, subprocess, Claude CLI, Codex CLI, OMP CLI, JSON evidence reports.
 
@@ -27,7 +27,7 @@
 
 - [ ] **Step 1: Write failing tests for auth capture, environment isolation, model pinning, and diagnostic normalization**
 
-Add imports for `SubscriptionAuthContext`, `build_subscription_environment`, `normalize_host_diagnostic`, and `require_subscription_model`, then add focused cases with explicit fake paths:
+Add imports for `SubscriptionAuthContext`, `build_subscription_environment`, `normalize_host_diagnostic`, and `require_subscription_model`, then add focused cases with explicit fake paths. The environment cases must cover all runtimes and case-insensitive removal of `API_KEY`/`*_API_KEY`, terminal token variables (including the named provider tokens), password/secret/credential names, cloud credential names, and auth-broker variables; they must also retain unrelated `PATH`, locale, proxy, and `TOKENIZERS_PARALLELISM` entries.
 
 ```python
 def _subscription_auth(tmp_path: Path) -> SubscriptionAuthContext:
@@ -134,7 +134,6 @@ PINNED_SUBSCRIPTION_MODELS = MappingProxyType(
         "omp": "openai-codex/gpt-5.6-sol",
     }
 )
-API_KEY_ENV_KEYS = frozenset({"ANTHROPIC_API_KEY", "OPENAI_API_KEY"})
 CONFIG_ENV_KEYS = ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR")
 
 _EXPIRED_RE = re.compile(r"refresh token expired|subscription[^\n]*expired", re.IGNORECASE)
@@ -183,9 +182,7 @@ def build_subscription_environment(
 ) -> dict[str, str]:
     if runtime not in SUPPORTED_RUNTIMES:
         raise ValueError(f"unsupported runtime: {runtime}")
-    environment = dict(os.environ if base_environment is None else base_environment)
-    for key in (*CONFIG_ENV_KEYS, *API_KEY_ENV_KEYS):
-        environment.pop(key, None)
+    environment = sanitize_subscription_environment(base_environment)
     if runtime == "claude":
         environment["HOME"] = str(auth.original_home)
         environment["CLAUDE_CONFIG_DIR"] = str(auth.claude_config_dir)
