@@ -101,6 +101,7 @@ def _safe_criterion_id(identifier: str) -> str:
 
 ProcessRunner = Callable[..., ProviderResult]
 SAFE_BATCH_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+UUID_HEX_TO_ALPHA = str.maketrans("0123456789abcdef", "abcdefghijklmnop")
 
 
 def build_prompt(scenario: FieldScenario) -> str:
@@ -457,7 +458,8 @@ def _validate_batch_id(batch_id: str) -> None:
 
 
 def _new_report_run_id(batch_id: str) -> str:
-    return f"{batch_id}-run-{uuid.uuid4().hex}"
+    suffix = uuid.uuid4().hex.translate(UUID_HEX_TO_ALPHA)
+    return f"{batch_id}-run-{suffix}"
 
 
 def select_cases(

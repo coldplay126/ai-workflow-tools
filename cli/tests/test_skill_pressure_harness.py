@@ -1534,6 +1534,18 @@ def test_sensitive_run_ids_are_rejected_before_creating_artifacts(
     assert list(tmp_path.iterdir()) == []
 
 
+
+def test_generated_field_run_id_cannot_trigger_phone_detection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_uuid = type("FakeUuid", (), {"hex": "01012345678" + "a" * 21})()
+    monkeypatch.setattr(run_skill_pressure.uuid, "uuid4", lambda: fake_uuid)
+
+    run_id = run_skill_pressure._new_report_run_id("batch-safe")
+
+    assert pressure._sensitive_labels(run_id) == ()
+    assert pressure_report_path(tmp_path, run_id).name == f"{run_id}.json"
+
 def test_field_report_writer_never_creates_transcript_artifacts(
     tmp_path: Path,
 ) -> None:
