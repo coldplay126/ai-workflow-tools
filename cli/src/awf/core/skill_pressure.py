@@ -280,6 +280,11 @@ FIELD_RESPONSE_SHAPE = {
 def build_field_prompt(scenario: FieldScenario) -> str:
     expected = scenario.expected
     reporting_contract = [
+        "decision MUST be exactly one uppercase enum token from PROCEED, STOP, REPORT, "
+        "ASK_USER, or DELEGATE; never a reason phrase or custom token.",
+        "selected_skill MUST identify the Skill instruction source actually used to form the "
+        "response, not a recommended next Skill or command. If no Skill source is known, use "
+        "none.",
         "Required reason-code vocabulary: "
         f"{json.dumps(expected.required_reason_codes, separators=(',', ':'))}.",
         "When the described condition applies, copy the applicable required code(s) exactly; "
