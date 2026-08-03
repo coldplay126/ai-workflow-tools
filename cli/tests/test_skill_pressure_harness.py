@@ -2996,14 +2996,24 @@ def passing_discovery_records(
     return [
         {
             "runtime": runtime,
+            "host_binary": runtime,
+            "binary_version": hashlib.sha256(
+                f"{runtime}-version-marker".encode("utf-8")
+            ).hexdigest(),
+            "model": PINNED_SUBSCRIPTION_MODELS[runtime],
             "skill": case.name,
             "source_sha256": pressure.sha256_skill(
                 repo_root / "claude" / "skills" / case.name
             ),
             "auth_mode": "subscription",
             "argv_safety_flags": list(run_skill_discovery.SAFETY_FLAGS[runtime]),
+            "elapsed_sec": 0.0,
+            "exit_status": 0,
             "verdict": Verdict.PASS.value,
-            "diagnostic": "source fields match",
+            "diagnostic": "",
+            "source_name": case.name,
+            "source_description": "canonical-source-description",
+            "source_body_heading": "# canonical-source-heading",
         }
         for runtime in ("claude", "agent-skills", "omp")
         for case in matrix.skills.values()  # type: ignore[attr-defined]
@@ -3258,6 +3268,12 @@ def test_evidence_field_payload_binds_injection_hash_to_current_skill_snapshot(
     [
         ("auth_mode", "api_key", "discovery auth_mode"),
         ("argv_safety_flags", [], "discovery argv_safety_flags"),
+        ("host_binary", "/private/operator/bin/claude", "discovery host_binary"),
+        (
+            "binary_version",
+            "claude v9 account=production credential=do-not-persist",
+            "discovery binary_version",
+        ),
     ],
 )
 def test_source_bundle_rejects_discovery_record_without_safe_subscription_provenance(
@@ -5187,6 +5203,174 @@ def test_skill_discovery_persists_only_normalized_provider_stderr_diagnostic(
     assert raw_detail not in report
     assert raw_token not in report
     assert str(credential_path) not in report
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("host_binary", "/private/operator/bin/claude", "discovery host_binary"),
+        (
+            "binary_version",
+            "claude v9 account=production credential=do-not-persist",
+            "discovery binary_version",
+        ),
+    ],
+)
+def test_discovery_writer_rejects_noncanonical_host_evidence(
+    tmp_path: Path, field: str, value: object, message: str
+) -> None:
+    raw_binary = "/private/operator/bin/claude"
+    raw_version = "claude v9 account=production credential=do-not-persist"
+    expected = ExpectedSkill(
+        "analysis",
+        "canonical source description",
+        "# canonical source heading",
+        tmp_path / "SKILL.md",
+        "a" * 64,
+    )
+    record = run_skill_discovery._discovery_record(
+        runtime="claude",
+        preflight=run_skill_discovery.HostPreflight(
+            "claude", raw_binary, raw_version, False, "host_provider_exit", 78
+        ),
+        expected=expected,
+        model=PINNED_SUBSCRIPTION_MODELS["claude"],
+        install_status="PASS",
+        workspace=tmp_path,
+        env={},
+        timeout_sec=7,
+        process_runner=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("unavailable preflight must not execute a host")
+        ),
+    )
+    record[field] = value
+
+    with pytest.raises(pressure.EvidenceError, match=message):
+        run_skill_discovery._write_discovery_report(
+            tmp_path,
+            batch_id="noncanonical-host-evidence",
+            matrix_sha256="b" * 64,
+            records=[record],
+        )
+
+    assert not pressure.discovery_report_path(
+        tmp_path, "noncanonical-host-evidence"
+    ).exists()
+
+
+def test_discovery_writer_accepts_a_valid_version_digest_that_matches_sensitive_pattern(
+    tmp_path: Path,
+) -> None:
+    raw_version = "opaque-version-15"
+    expected = ExpectedSkill(
+        "analysis",
+        "canonical source description",
+        "# canonical source heading",
+        tmp_path / "SKILL.md",
+        "a" * 64,
+    )
+    record = run_skill_discovery._discovery_record(
+        runtime="claude",
+        preflight=run_skill_discovery.HostPreflight(
+            "claude", "claude", raw_version, False, "host_provider_exit", 78
+        ),
+        expected=expected,
+        model=PINNED_SUBSCRIPTION_MODELS["claude"],
+        install_status="PASS",
+        workspace=tmp_path,
+        env={},
+        timeout_sec=7,
+        process_runner=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("unavailable preflight must not execute a host")
+        ),
+    )
+
+    report_path = run_skill_discovery._write_discovery_report(
+        tmp_path,
+        batch_id="version-digest-scan",
+        matrix_sha256="b" * 64,
+        records=[record],
+    )
+
+    assert report_path.is_file()
+    assert hashlib.sha256(raw_version.encode("utf-8")).hexdigest() in report_path.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_skill_discovery_persists_only_canonical_host_version_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    baseline, fake, _ = _run_fake_discovery(tmp_path, monkeypatch)
+    raw_binary = "/private/operator/bin/claude"
+    raw_version = "claude v9 account=production credential=do-not-persist"
+    original = fake.__call__
+
+    def with_sensitive_version_stdout(
+        argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int
+    ) -> DiscoveryProcessResult:
+        translated = ["fake-claude", *argv[1:]] if argv[0] == raw_binary else argv
+        result = original(translated, cwd=cwd, env=env, timeout=timeout)
+        if argv[0] == raw_binary and argv[1:] == ["--version"]:
+            return DiscoveryProcessResult(0, raw_version, "", result.elapsed_sec)
+        return result
+
+    result = run_discovery(
+        repo_root=baseline.repo_root,
+        matrix_path=baseline.repo_root
+        / "cli"
+        / "tests"
+        / "fixtures"
+        / "skill-validation-matrix.v1.json",
+        batch_id="skill-discovery-canonical-host",
+        binaries={
+            "claude": raw_binary,
+            "agent-skills": "fake-agent",
+            "omp": "fake-omp",
+        },
+        models=dict(PINNED_SUBSCRIPTION_MODELS),
+        timeout_sec=7,
+        write_result=True,
+        process_runner=with_sensitive_version_stdout,
+    )
+    report = result.discovery_report.read_text(encoding="utf-8")
+    claude_records = [
+        record for record in result.discovery_records if record["runtime"] == "claude"
+    ]
+    expected_marker = hashlib.sha256(raw_version.encode("utf-8")).hexdigest()
+
+    assert len(claude_records) == 15
+    assert {record["host_binary"] for record in claude_records} == {"claude"}
+    assert {record["binary_version"] for record in claude_records} == {expected_marker}
+    assert raw_binary not in report
+    assert raw_version not in report
+    assert "account=production" not in report
+    assert "credential=do-not-persist" not in report
+    monkeypatch.setattr(run_skill_discovery, "run_discovery", lambda **_: result)
+    assert (
+        run_skill_discovery.main(
+            [
+                "--batch-id",
+                "skill-discovery-cli-json",
+                "--all",
+                "--claude-model",
+                PINNED_SUBSCRIPTION_MODELS["claude"],
+                "--agent-skills-model",
+                PINNED_SUBSCRIPTION_MODELS["agent-skills"],
+                "--omp-model",
+                PINNED_SUBSCRIPTION_MODELS["omp"],
+                "--json",
+            ]
+        )
+        == result.exit_code
+    )
+    cli_json = capsys.readouterr().out
+    assert raw_binary not in cli_json
+    assert raw_version not in cli_json
+    assert "account=production" not in cli_json
+    assert "credential=do-not-persist" not in cli_json
 
 def test_skill_discovery_normalizes_oauth_session_refresh_failure_without_raw_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

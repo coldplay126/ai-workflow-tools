@@ -85,6 +85,60 @@ FIELD_RECORD_REQUIRED = {
     "exit_status",
 }
 
+
+DISCOVERY_RECORD_REQUIRED = frozenset(
+    {
+        "runtime",
+        "host_binary",
+        "binary_version",
+        "model",
+        "skill",
+        "source_sha256",
+        "auth_mode",
+        "argv_safety_flags",
+        "elapsed_sec",
+        "exit_status",
+        "verdict",
+        "diagnostic",
+        "source_name",
+        "source_description",
+        "source_body_heading",
+    }
+)
+DISCOVERY_DIAGNOSTIC_CODES = frozenset(
+    {
+        "canonical_source_invalid",
+        "canonical_source_symlink",
+        "canonical_source_metadata_invalid",
+        "canonical_source_name_mismatch",
+        "canonical_source_materialization_failed",
+        "canonical_source_mutated_during_snapshot",
+        "claude_stream_malformed",
+        "claude_init_duplicate",
+        "claude_result_failed",
+        "claude_init_missing",
+        "claude_init_tools_not_empty",
+        "claude_init_invalid",
+        "claude_skill_not_registered",
+        "claude_result_missing",
+        "claude_result_not_terminal",
+        "unknown_skill_response",
+        "malformed_json_response",
+        "invalid_response_schema",
+        "source_metadata_mismatch",
+        "install_blocked",
+        "skill_snapshot_changed",
+        "host_timeout",
+        "host_subscription_expired",
+        "host_model_unsupported",
+        "host_auth_unavailable",
+        "host_provider_exit",
+    }
+)
+DISCOVERY_REQUIRED_FLAGS_DIAGNOSTIC_RE = re.compile(
+    r"unsupported_required_flags:[a-z0-9_-]+(?:,[a-z0-9_-]+)*"
+)
+
 OMP_FIELD_RUNNER_FLAGS = (
     "-p",
     "--mode=text",
@@ -1817,19 +1871,53 @@ def _validate_install_report(report: Mapping[str, Any]) -> None:
 
 def _validate_discovery_records(records: Sequence[Mapping[str, Any]]) -> None:
     for record in records:
-        _require_sha256(record.get("source_sha256"), field="discovery source_sha256")
-        if record.get("auth_mode") != "subscription":
+        if set(record) != DISCOVERY_RECORD_REQUIRED:
+            raise EvidenceError("invalid discovery record keys")
+        runtime = record["runtime"]
+        if runtime not in SUPPORTED_RUNTIMES:
+            raise EvidenceError("invalid discovery runtime")
+        if record["host_binary"] != runtime:
+            raise EvidenceError("invalid discovery host_binary")
+        _require_sha256(record["binary_version"], field="discovery binary_version")
+        if record["model"] != PINNED_SUBSCRIPTION_MODELS[runtime]:
+            raise EvidenceError("invalid discovery model")
+        if not isinstance(record["skill"], str) or not record["skill"]:
+            raise EvidenceError("invalid discovery skill")
+        _require_sha256(record["source_sha256"], field="discovery source_sha256")
+        if record["auth_mode"] != "subscription":
             raise EvidenceError("invalid discovery auth_mode")
-        runtime = record.get("runtime")
-        expected_flags = DISCOVERY_RUNTIME_SAFETY_FLAGS.get(runtime)
-        if expected_flags is None or record.get("argv_safety_flags") != list(
-            expected_flags
-        ):
+        expected_flags = DISCOVERY_RUNTIME_SAFETY_FLAGS[runtime]
+        if record["argv_safety_flags"] != list(expected_flags):
             raise EvidenceError("invalid discovery argv_safety_flags")
+        if (
+            not isinstance(record["elapsed_sec"], (int, float))
+            or isinstance(record["elapsed_sec"], bool)
+            or record["elapsed_sec"] < 0
+        ):
+            raise EvidenceError("invalid discovery elapsed_sec")
+        if not isinstance(record["exit_status"], int) or isinstance(
+            record["exit_status"], bool
+        ):
+            raise EvidenceError("invalid discovery exit_status")
         if _record_status(record) is None:
             raise EvidenceError("invalid discovery record verdict")
-        if not isinstance(record.get("diagnostic"), str):
+        diagnostic = record["diagnostic"]
+        if (
+            not isinstance(diagnostic, str)
+            or (
+                diagnostic
+                and diagnostic not in DISCOVERY_DIAGNOSTIC_CODES
+                and DISCOVERY_REQUIRED_FLAGS_DIAGNOSTIC_RE.fullmatch(diagnostic)
+                is None
+            )
+        ):
             raise EvidenceError("invalid discovery diagnostic")
+        if record["source_name"] != record["skill"]:
+            raise EvidenceError("invalid discovery source_name")
+        if not isinstance(record["source_description"], str) or not isinstance(
+            record["source_body_heading"], str
+        ):
+            raise EvidenceError("invalid discovery source metadata")
 
 
 def _canonical_skill_hashes(root: Path, matrix: SkillMatrix) -> dict[str, str]:

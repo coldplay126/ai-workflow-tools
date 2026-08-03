@@ -22,7 +22,9 @@ from awf.core.skill_pressure import (  # noqa: E402
     DISCOVERY_REPORT_SCHEMA,
     EvidenceError,
     _publish_new,
+    _require_sha256,
     _sensitive_labels,
+    _validate_discovery_records,
     discovery_report_path,
     load_skill_matrix,
     sha256_file,
@@ -865,8 +867,10 @@ def _discovery_record(
 ) -> dict[str, object]:
     record = {
         "runtime": runtime,
-        "host_binary": preflight.binary,
-        "binary_version": preflight.binary_version,
+        "host_binary": runtime,
+        "binary_version": hashlib.sha256(
+            preflight.binary_version.encode("utf-8")
+        ).hexdigest(),
         "model": model,
         "skill": expected.name,
         "source_sha256": expected.source_sha256,
@@ -954,14 +958,30 @@ def _write_discovery_report(
     before_publish: Callable[[], None] | None = None,
     after_publish: Callable[[], None] | None = None,
 ) -> Path:
+    _validate_discovery_records(records)
+    serialized_records = [dict(record) for record in records]
     report = {
         "schema": DISCOVERY_REPORT_SCHEMA,
         "batch_id": batch_id,
-        "matrix_sha256": matrix_sha256,
-        "records": [dict(record) for record in records],
+        "matrix_sha256": _require_sha256(matrix_sha256, field="matrix_sha256"),
+        "records": serialized_records,
     }
     content = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-    labels = _sensitive_labels(content)
+    sensitive_scan = {
+        **report,
+        "matrix_sha256": "<sha256>",
+        "records": [
+            {
+                **record,
+                "binary_version": "<sha256>",
+                "source_sha256": "<sha256>",
+            }
+            for record in serialized_records
+        ],
+    }
+    labels = _sensitive_labels(
+        json.dumps(sensitive_scan, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    )
     if labels:
         raise EvidenceError(f"sensitive discovery report blocked: {','.join(labels)}")
     target = discovery_report_path(repo_root, batch_id)
