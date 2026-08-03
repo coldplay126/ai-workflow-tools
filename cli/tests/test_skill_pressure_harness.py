@@ -466,14 +466,14 @@ def valid_field_record() -> dict[str, object]:
         "runner_flags": [
             "-p",
             "--mode=text",
-            "--tools=read",
+            "--no-tools",
             "--no-session",
             "--no-extensions",
-            "--skills=",
-            "--skills=release-worktree-lifecycle",
+            "--no-skills",
             "--append-system-prompt",
         ],
         "auth_mode": "subscription",
+        "skill_file_sha256": "b" * 64,
         "injection_sha256": "b" * 64,
         "severity": "critical",
         "remediation_state": "not_required",
@@ -576,7 +576,8 @@ def test_field_main_persists_minor_severity(
             with_skill_result=ProviderResult(0, "", "", provider_name="omp"),
             preflight_result=ProviderResult(0, "omp test", "", provider_name="omp"),
             skill_sha256=skill_hash,
-            injection_sha256=skill_hash,
+            skill_file_sha256=pressure.sha256_file(source / "SKILL.md"),
+            injection_sha256=pressure.sha256_file(source / "SKILL.md"),
         )
 
     monkeypatch.setattr(run_skill_pressure, "execute_pair", fake_execute)
@@ -636,7 +637,8 @@ def test_field_main_persists_unsupported_omp_flags_diagnostic(
             with_skill_result=ProviderResult(78, "", "", provider_name="omp"),
             preflight_result=ProviderResult(78, "", "", provider_name="omp"),
             skill_sha256=skill_hash,
-            injection_sha256=skill_hash,
+            skill_file_sha256=pressure.sha256_file(source / "SKILL.md"),
+            injection_sha256=pressure.sha256_file(source / "SKILL.md"),
         )
 
     monkeypatch.setattr(run_skill_pressure, "execute_pair", fake_execute)
@@ -730,6 +732,7 @@ def test_sensitive_data_writes_redacted_blocker_without_raw_content(tmp_path: Pa
         "severity": "critical",
         "prompt_sha256": "a" * 64,
         "skill_sha256": "b" * 64,
+        "skill_file_sha256": "b" * 64,
         "auth_mode": "subscription",
         "injection_sha256": "b" * 64,
     }
@@ -854,7 +857,7 @@ def test_field_execute_pair_uses_exact_snapshot_injection_and_subscription_envir
         if argv[1:] == ["--help"]:
             return ProviderResult(
                 0,
-                "-p --mode --skills --append-system-prompt --no-session --no-extensions --tools",
+                "-p --mode --no-tools --no-skills --append-system-prompt --no-session --no-extensions --model",
                 "",
                 provider_name="omp",
             )
@@ -863,10 +866,10 @@ def test_field_execute_pair_uses_exact_snapshot_injection_and_subscription_envir
         assert [path.name for path in snapshot.parent.iterdir()] == ["wf-status"]
         append_index = argv.index("--append-system-prompt") + 1 if "--append-system-prompt" in argv else None
         if append_index is not None:
-            append = Path(argv[append_index])
-            assert append == cwd / "APPEND_SYSTEM.md"
-            assert append.read_bytes()
-            assert hashlib.sha256(append.read_bytes()).hexdigest() == sha256_skill(snapshot)
+            injected = Path(argv[append_index])
+            assert injected == snapshot / "SKILL.md"
+            assert injected.is_file()
+            assert pressure.sha256_file(injected) == pressure.sha256_file(source / "SKILL.md")
         return _successful_wf_status_result()
 
     run = execute_pair(
@@ -897,20 +900,25 @@ def test_field_execute_pair_uses_exact_snapshot_injection_and_subscription_envir
         "omp",
         "-p",
         "--mode=text",
-        "--tools=read",
+        "--no-tools",
         "--no-session",
         "--no-extensions",
         f"--model={OMP_SUBSCRIPTION_MODEL}",
-        "--max-time=30",
     ]
-    assert baseline[0] == [*common, "--skills=", prompt]
+    assert baseline[0] == [*common, "--no-skills", prompt]
     assert with_skill[0] == [
         *common,
-        "--skills=wf-status",
+        "--no-skills",
         "--append-system-prompt",
-        str(with_skill[1] / "APPEND_SYSTEM.md"),
+        str(with_skill[1] / ".omp" / "skills" / "wf-status" / "SKILL.md"),
         prompt,
     ]
+    assert baseline[0][-1] == with_skill[0][-1] == prompt
+    assert all(
+        "--tools=read" not in argument and not argument.startswith("--skills=")
+        for argv, _, _ in (baseline, with_skill)
+        for argument in argv
+    )
     assert baseline[1] == with_skill[1]
     assert baseline[2]["HOME"] == str(with_skill[1].parent / "home")
     assert baseline[2]["PI_CODING_AGENT_DIR"] == str(auth.omp_agent_dir)
@@ -920,7 +928,8 @@ def test_field_execute_pair_uses_exact_snapshot_injection_and_subscription_envir
     assert "CLAUDE_CONFIG_DIR" not in baseline[2]
     assert "CODEX_HOME" not in baseline[2]
     assert run.skill_sha256 == sha256_skill(source)
-    assert run.injection_sha256 == run.skill_sha256
+    assert run.skill_file_sha256 == pressure.sha256_file(source / "SKILL.md")
+    assert run.injection_sha256 == run.skill_file_sha256
     assert not baseline[1].exists()
 
 
@@ -977,7 +986,7 @@ def test_field_omp_diagnostics_are_normalized_without_raw_host_output(
         if argv[1:] == ["--help"]:
             return ProviderResult(
                 0,
-                "-p --mode --skills --append-system-prompt --no-session --no-extensions --tools",
+                "-p --mode --no-tools --no-skills --append-system-prompt --no-session --no-extensions --model",
                 "",
                 provider_name="omp",
             )
@@ -1056,7 +1065,7 @@ def test_probe_omp_preserves_timeout_as_blocked_preflight() -> None:
     assert result.stderr == "provider_timeout"
 
 
-def test_probe_omp_rejects_unsupported_skill_selection_flags() -> None:
+def test_probe_omp_rejects_unsupported_no_tool_field_flags() -> None:
     def missing_flags(
         argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int
     ) -> ProviderResult:
@@ -1076,8 +1085,8 @@ def test_probe_omp_rejects_lookalike_required_options() -> None:
         stdout = (
             "omp v1"
             if "--version" in argv
-            else "-print --modelled --skills-extra --append-system-prompt-extra "
-            "--no-session-extra --no-extensions-extra --tools-extra"
+            else "-print --modelled --no-tools-extra --no-skills-extra "
+            "--append-system-prompt-extra --no-session-extra --no-extensions-extra"
         )
         return ProviderResult(0, stdout, "", provider_name="omp")
 
@@ -1158,7 +1167,7 @@ def test_execute_pair_uses_project_materialized_skill_snapshot(tmp_path: Path) -
         if argv[1:] == ["--help"]:
             return ProviderResult(
                 0,
-                "-p --mode --skills --append-system-prompt --no-session --no-extensions --tools",
+                "-p --mode --no-tools --no-skills --append-system-prompt --no-session --no-extensions --model",
                 "",
                 provider_name="omp",
             )
@@ -1183,7 +1192,8 @@ def test_execute_pair_uses_project_materialized_skill_snapshot(tmp_path: Path) -
 
     assert len(calls) == 4
     assert run.skill_sha256 == source_hash
-    assert run.injection_sha256 == source_hash
+    assert run.skill_file_sha256 == pressure.sha256_file(source / "SKILL.md")
+    assert run.injection_sha256 == run.skill_file_sha256
 
 
 @pytest.mark.parametrize(
@@ -1274,13 +1284,13 @@ def test_field_execute_pair_blocks_deleted_or_unreadable_injection_snapshot(
         if argv[1:] == ["--version"]:
             return ProviderResult(0, "omp test", "", provider_name="omp")
         if argv[1:] == ["--help"]:
-            append_system_prompt = cwd / "APPEND_SYSTEM.md"
-            append_system_prompt.unlink()
+            snapshot_file = cwd / ".omp" / "skills" / "wf-status" / "SKILL.md"
+            snapshot_file.unlink()
             if injection_hazard == "unreadable":
-                append_system_prompt.mkdir()
+                snapshot_file.mkdir()
             return ProviderResult(
                 0,
-                "-p --mode --skills --append-system-prompt --no-session --no-extensions --tools",
+                "-p --mode --no-tools --no-skills --append-system-prompt --no-session --no-extensions --model",
                 "",
                 provider_name="omp",
             )
@@ -1314,10 +1324,16 @@ def test_field_execute_pair_blocks_injection_materialization_hash_error(
         calls.append(argv)
         raise AssertionError("OMP must not start after injection materialization error")
 
-    def failing_snapshot_bytes(_: Path) -> bytes:
-        raise OSError("injection hash unavailable")
+    original_sha256_file = pressure.sha256_file
 
-    monkeypatch.setattr(run_skill_pressure, "skill_snapshot_bytes", failing_snapshot_bytes)
+    def failing_snapshot_file(path: Path) -> str:
+        if "workspace" in path.parts:
+            raise OSError("injection hash unavailable")
+        return original_sha256_file(path)
+
+    monkeypatch.setattr(
+        run_skill_pressure, "sha256_file", failing_snapshot_file, raising=False
+    )
 
     run = execute_pair(
         MATRIX.skills["wf-status"],
@@ -1347,13 +1363,13 @@ def test_field_execute_pair_blocks_injection_mutation_before_evidence(
         if argv[1:] == ["--help"]:
             return ProviderResult(
                 0,
-                "-p --mode --skills --append-system-prompt --no-session --no-extensions --tools",
+                "-p --mode --no-tools --no-skills --append-system-prompt --no-session --no-extensions --model",
                 "",
                 provider_name="omp",
             )
         if "--append-system-prompt" in argv:
-            append = Path(argv[argv.index("--append-system-prompt") + 1])
-            append.write_text("mutated injection")
+            injected = Path(argv[argv.index("--append-system-prompt") + 1])
+            injected.write_text("mutated injection")
         return _successful_wf_status_result()
 
     run = execute_pair(
@@ -1387,7 +1403,7 @@ def test_field_execute_pair_blocks_preflight_snapshot_mutation(
         if argv[1:] == ["--version"]:
             return ProviderResult(0, "omp test", "", provider_name="omp")
         if argv[1:] == ["--help"]:
-            (cwd / "APPEND_SYSTEM.md").write_text("preflight mutation")
+            (cwd / ".omp" / "skills" / "wf-status" / "SKILL.md").write_text("preflight mutation")
             return ProviderResult(1, "", "not logged in at /operator/private", provider_name="omp")
         raise AssertionError("field arm must not start after failed preflight")
 
@@ -1422,11 +1438,11 @@ def test_field_execute_pair_stops_after_canonical_source_mutation(
         if argv[1:] == ["--help"]:
             return ProviderResult(
                 0,
-                "-p --mode --skills --append-system-prompt --no-session --no-extensions --tools",
+                "-p --mode --no-tools --no-skills --append-system-prompt --no-session --no-extensions --model",
                 "",
                 provider_name="omp",
             )
-        if "--skills=" in argv:
+        if argv[-1] == build_prompt(MATRIX.skills["wf-status"].scenario):
             (source / "SKILL.md").write_text("mutated source snapshot")
         return _successful_wf_status_result()
 
@@ -1441,7 +1457,11 @@ def test_field_execute_pair_stops_after_canonical_source_mutation(
     )
 
     assert len(calls) == 3
-    assert all("--skills=wf-status" not in argv for argv in calls)
+    assert all(
+        "--tools=read" not in argument and not argument.startswith("--skills=")
+        for argv in calls
+        for argument in argv
+    )
     assert run.evaluation.verdict is Verdict.BLOCKED
     assert run.evaluation.baseline.failures == ("source_snapshot_changed",)
     assert run.evaluation.with_skill.failures == ("source_snapshot_changed",)
@@ -1573,7 +1593,8 @@ def test_field_main_omits_raw_provider_output_from_persisted_evidence(
             with_skill_result=ProviderResult(0, raw_output, "", provider_name="omp"),
             preflight_result=ProviderResult(0, "omp test", "", provider_name="omp"),
             skill_sha256=skill_hash,
-            injection_sha256=skill_hash,
+            skill_file_sha256=pressure.sha256_file(source / "SKILL.md"),
+            injection_sha256=pressure.sha256_file(source / "SKILL.md"),
         )
 
     monkeypatch.setattr(run_skill_pressure, "execute_pair", fake_execute)
@@ -1615,11 +1636,10 @@ def test_field_main_omits_raw_provider_output_from_persisted_evidence(
     assert field_record["runner_flags"] == [
         "-p",
         "--mode=text",
-        "--tools=read",
+        "--no-tools",
         "--no-session",
         "--no-extensions",
-        "--skills=",
-        "--skills=wf-status",
+        "--no-skills",
         "--append-system-prompt",
     ]
     persistence = output["results"][0]["persistence"]
@@ -1636,6 +1656,8 @@ def test_field_main_omits_raw_provider_output_from_persisted_evidence(
         "baseline": hashlib.sha256(b"").hexdigest(),
         "with_skill": hashlib.sha256(b"").hexdigest(),
     }
+    assert "APPEND_SYSTEM.md" not in json.dumps(output)
+    assert "awf-skill-pressure-" not in json.dumps(output)
     assert "transcripts" not in report
 
 
@@ -1712,6 +1734,8 @@ def passing_discovery_records(matrix: object) -> list[dict[str, object]]:
             "runtime": runtime,
             "skill": case.name,
             "source_sha256": "d" * 64,
+            "auth_mode": "subscription",
+            "argv_safety_flags": list(run_skill_discovery.SAFETY_FLAGS[runtime]),
             "verdict": Verdict.PASS.value,
             "diagnostic": "source fields match",
         }
@@ -1754,11 +1778,10 @@ def passing_field_records(matrix: object, *, batch_id: str = "batch-1") -> list[
                     "runner_flags": [
                         "-p",
                         "--mode=text",
-                        "--tools=read",
+                        "--no-tools",
                         "--no-session",
                         "--no-extensions",
-                        "--skills=",
-                        f"--skills={case.name}",
+                        "--no-skills",
                         "--append-system-prompt",
                     ],
                     "repetition": repetition,
@@ -1803,7 +1826,11 @@ def passing_field_report_paths(tmp_path: Path, matrix: object, *, batch_id: str)
             tmp_path / "claude" / "skills" / case.name
         )
         record["skill_sha256"] = source_hash
-        record["injection_sha256"] = source_hash
+        skill_file_hash = pressure.sha256_file(
+            tmp_path / "claude" / "skills" / case.name / "SKILL.md"
+        )
+        record["skill_file_sha256"] = skill_file_hash
+        record["injection_sha256"] = skill_file_hash
         paths.append(
             write_pressure_report(
                 tmp_path,
@@ -1825,6 +1852,7 @@ def test_field_record_requires_complete_reproducibility_metadata() -> None:
     ("field", "value", "message"),
     [
         ("auth_mode", "api_key", "auth_mode"),
+        ("skill_file_sha256", "not-a-hash", "skill_file_sha256"),
         ("injection_sha256", "c" * 64, "injection"),
         ("provider", "other", "provider"),
         ("model", "other", "model"),
@@ -1849,6 +1877,14 @@ def test_field_record_rejects_missing_subscription_auth() -> None:
         pressure.validate_field_record(record)
 
 
+def test_field_record_rejects_missing_skill_file_hash() -> None:
+    record = valid_field_record()
+    del record["skill_file_sha256"]
+
+    with pytest.raises(pressure.EvidenceError, match="skill_file_sha256"):
+        pressure.validate_field_record(record)
+
+
 def test_evidence_hashes_all_subscription_field_provenance_sources() -> None:
     assert {
         "cli/src/awf/core/skill_subscription.py",
@@ -1870,6 +1906,82 @@ def test_evidence_field_payload_binds_injection_hash_to_current_skill_snapshot(
     fields[0].write_text(json.dumps(forged))
 
     with pytest.raises(pressure.EvidenceError, match="field injection hash mismatch"):
+        pressure.validate_source_bundle(
+            repo_root=tmp_path,
+            batch_id="batch-1",
+            deterministic_path=deterministic,
+            install_path=install,
+            discovery_path=discovery,
+            field_paths=fields,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("auth_mode", "api_key", "discovery auth_mode"),
+        ("argv_safety_flags", [], "discovery argv_safety_flags"),
+    ],
+)
+def test_source_bundle_rejects_discovery_record_without_safe_subscription_provenance(
+    tmp_path: Path, field: str, value: object, message: str
+) -> None:
+    deterministic = passing_deterministic_report(tmp_path, batch_id="batch-1")
+    install = passing_install_report(tmp_path, MATRIX, batch_id="batch-1")
+    discovery = passing_discovery_report(tmp_path, MATRIX, batch_id="batch-1")
+    fields = passing_field_report_paths(tmp_path, MATRIX, batch_id="batch-1")
+    forged = json.loads(discovery.read_text())
+    forged["records"][0][field] = value
+    discovery.write_text(json.dumps(forged))
+
+    with pytest.raises(pressure.EvidenceError, match=message):
+        pressure.validate_source_bundle(
+            repo_root=tmp_path,
+            batch_id="batch-1",
+            deterministic_path=deterministic,
+            install_path=install,
+            discovery_path=discovery,
+            field_paths=fields,
+        )
+
+
+def test_source_bundle_binds_field_file_hash_to_current_skill_file(tmp_path: Path) -> None:
+    deterministic = passing_deterministic_report(tmp_path, batch_id="batch-1")
+    install = passing_install_report(tmp_path, MATRIX, batch_id="batch-1")
+    discovery = passing_discovery_report(tmp_path, MATRIX, batch_id="batch-1")
+    fields = passing_field_report_paths(tmp_path, MATRIX, batch_id="batch-1")
+    forged = json.loads(fields[0].read_text())
+    forged["payload"]["skill_file_sha256"] = "0" * 64
+    forged["payload"]["injection_sha256"] = "0" * 64
+    fields[0].write_text(json.dumps(forged))
+
+    with pytest.raises(pressure.EvidenceError, match="field Skill file hash mismatch"):
+        pressure.validate_source_bundle(
+            repo_root=tmp_path,
+            batch_id="batch-1",
+            deterministic_path=deterministic,
+            install_path=install,
+            discovery_path=discovery,
+            field_paths=fields,
+        )
+
+
+def test_source_bundle_binds_full_skill_directory_hash_including_nested_resources(
+    tmp_path: Path,
+) -> None:
+    deterministic = passing_deterministic_report(tmp_path, batch_id="batch-1")
+    install = passing_install_report(tmp_path, MATRIX, batch_id="batch-1")
+    discovery = passing_discovery_report(tmp_path, MATRIX, batch_id="batch-1")
+    fields = passing_field_report_paths(tmp_path, MATRIX, batch_id="batch-1")
+    (
+        tmp_path
+        / "claude"
+        / "skills"
+        / MATRIX.skills["release-worktree-lifecycle"].name
+        / "nested-resource.md"
+    ).write_text("mutated nested resource", encoding="utf-8")
+
+    with pytest.raises(pressure.EvidenceError, match="field Skill hash mismatch"):
         pressure.validate_source_bundle(
             repo_root=tmp_path,
             batch_id="batch-1",
@@ -2021,7 +2133,6 @@ def test_source_bundle_uses_current_matrix_to_reject_unknown_field_identity(
     fields = passing_field_report_paths(tmp_path, MATRIX, batch_id="batch-1")
     first = json.loads(fields[0].read_text())
     first["payload"]["skill"] = "unknown-skill"
-    first["payload"]["runner_flags"][-2] = "--skills=unknown-skill"
     fields[0].write_text(json.dumps(first))
     with pytest.raises(pressure.EvidenceError, match="current matrix"):
         pressure.validate_source_bundle(

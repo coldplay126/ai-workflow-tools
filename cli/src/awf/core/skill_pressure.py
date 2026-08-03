@@ -72,6 +72,7 @@ FIELD_RECORD_REQUIRED = {
     "behavioral_delta",
     "prompt_sha256",
     "skill_sha256",
+    "skill_file_sha256",
     "verdict",
     "auth_mode",
     "injection_sha256",
@@ -84,10 +85,36 @@ FIELD_RECORD_REQUIRED = {
 OMP_FIELD_RUNNER_FLAGS = (
     "-p",
     "--mode=text",
-    "--tools=read",
+    "--no-tools",
     "--no-session",
     "--no-extensions",
-    "--skills=",
+    "--no-skills",
+    "--append-system-prompt",
+)
+
+DISCOVERY_RUNTIME_SAFETY_FLAGS = MappingProxyType(
+    {
+        "claude": (
+            "-p",
+            "--output-format=text",
+            "--tools=",
+            "--no-session-persistence",
+            "--setting-sources=project",
+        ),
+        "agent-skills": (
+            "exec",
+            "--ephemeral",
+            "--sandbox=read-only",
+            "--skip-git-repo-check",
+        ),
+        "omp": (
+            "-p",
+            "--mode=text",
+            "--tools=read",
+            "--no-session",
+            "--no-extensions",
+        ),
+    }
 )
 
 FIELD_EVALUATION_CRITERIA = frozenset(
@@ -175,6 +202,7 @@ SAFE_FIELD_IDENTITY_KEYS = frozenset(
         "severity",
         "prompt_sha256",
         "skill_sha256",
+        "skill_file_sha256",
         "auth_mode",
         "injection_sha256",
     }
@@ -669,11 +697,35 @@ def _safe_field_identity(payload: dict[str, object]) -> dict[str, object]:
     repetition = payload.get("repetition")
     if isinstance(repetition, int) and repetition > 0:
         identity["repetition"] = repetition
-    for key in ("prompt_sha256", "skill_sha256", "injection_sha256"):
+    for key in (
+        "prompt_sha256",
+        "skill_sha256",
+        "skill_file_sha256",
+        "injection_sha256",
+    ):
         value = payload.get(key)
         if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value):
             identity[key] = value
     return identity
+
+
+def _payload_for_sensitive_scan(payload: Mapping[str, Any]) -> dict[str, Any]:
+    hash_keys = {
+        "prompt_sha256",
+        "skill_sha256",
+        "skill_file_sha256",
+        "injection_sha256",
+    }
+    return {
+        key: (
+            "<sha256>"
+            if key in hash_keys
+            and isinstance(value, str)
+            and re.fullmatch(r"[0-9a-f]{64}", value)
+            else value
+        )
+        for key, value in payload.items()
+    }
 
 
 def write_pressure_report(
@@ -689,7 +741,9 @@ def write_pressure_report(
         raise FileExistsError(target)
 
     recorded_at = datetime.now(timezone.utc).isoformat()
-    serialized_payload = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    serialized_payload = json.dumps(
+        _payload_for_sensitive_scan(payload), ensure_ascii=False, sort_keys=True
+    )
     labels = sorted(
         set(
             _sensitive_labels(serialized_payload)
@@ -879,7 +933,12 @@ def validate_field_record(record: dict[str, Any]) -> None:
     if record["matrix_schema"] != MATRIX_SCHEMA:
         raise EvidenceError("field record matrix schema mismatch")
     _require_safe_batch_id(record["batch_id"])
-    for key in ("prompt_sha256", "skill_sha256", "injection_sha256"):
+    for key in (
+        "prompt_sha256",
+        "skill_sha256",
+        "skill_file_sha256",
+        "injection_sha256",
+    ):
         _require_sha256(record[key], field=key)
     for key in ("skill", "scenario_id", "provider_version"):
         if not isinstance(record[key], str) or not record[key]:
@@ -904,12 +963,7 @@ def validate_field_record(record: dict[str, Any]) -> None:
         isinstance(flag, str) and flag for flag in record["runner_flags"]
     ):
         raise EvidenceError("invalid field record runner_flags")
-    expected_runner_flags = [
-        *OMP_FIELD_RUNNER_FLAGS,
-        f"--skills={record['skill']}",
-        "--append-system-prompt",
-    ]
-    if record["runner_flags"] != expected_runner_flags:
+    if record["runner_flags"] != list(OMP_FIELD_RUNNER_FLAGS):
         raise EvidenceError("invalid field record runner_flags")
     if (
         not isinstance(record["remediation_state"], str)
@@ -921,7 +975,7 @@ def validate_field_record(record: dict[str, Any]) -> None:
         or record["behavioral_delta"] not in FIELD_BEHAVIORAL_DELTAS
     ):
         raise EvidenceError("invalid field record behavioral_delta")
-    if record["injection_sha256"] != record["skill_sha256"]:
+    if record["injection_sha256"] != record["skill_file_sha256"]:
         raise EvidenceError("field injection hash mismatch")
     if _verdict(record["verdict"]) is None:
         raise EvidenceError("invalid field record verdict")
@@ -1183,6 +1237,14 @@ def _validate_install_report(report: Mapping[str, Any]) -> None:
 def _validate_discovery_records(records: Sequence[Mapping[str, Any]]) -> None:
     for record in records:
         _require_sha256(record.get("source_sha256"), field="discovery source_sha256")
+        if record.get("auth_mode") != "subscription":
+            raise EvidenceError("invalid discovery auth_mode")
+        runtime = record.get("runtime")
+        expected_flags = DISCOVERY_RUNTIME_SAFETY_FLAGS.get(runtime)
+        if expected_flags is None or record.get("argv_safety_flags") != list(
+            expected_flags
+        ):
+            raise EvidenceError("invalid discovery argv_safety_flags")
         if _record_status(record) is None:
             raise EvidenceError("invalid discovery record verdict")
         if not isinstance(record.get("diagnostic"), str):
@@ -1221,18 +1283,26 @@ def _expect_exact_runtime_identities(
 def _validate_blocked_field_identity(identity: Mapping[str, Any]) -> None:
     if not set(identity).issubset(SAFE_FIELD_IDENTITY_KEYS):
         raise EvidenceError("blocked field identity contains non-allowlisted key")
-    for key in ("skill", "scenario_id", "provider", "severity", "auth_mode"):
+    for key in ("skill", "scenario_id", "provider", "severity"):
         value = identity.get(key)
         if value is not None and (not isinstance(value, str) or not value):
             raise EvidenceError(f"invalid blocked field identity {key}")
-    if identity.get("auth_mode") not in {None, "subscription"}:
+    if identity.get("auth_mode") != "subscription":
         raise EvidenceError("invalid blocked field identity auth_mode")
     repetition = identity.get("repetition")
     if repetition is not None and (not isinstance(repetition, int) or repetition < 1):
         raise EvidenceError("invalid blocked field identity repetition")
-    for key in ("prompt_sha256", "skill_sha256", "injection_sha256"):
-        if key in identity:
-            _require_sha256(identity[key], field=f"blocked field identity {key}")
+    for key in (
+        "prompt_sha256",
+        "skill_sha256",
+        "skill_file_sha256",
+        "injection_sha256",
+    ):
+        if key not in identity:
+            raise EvidenceError(f"missing blocked field identity {key}")
+        _require_sha256(identity[key], field=f"blocked field identity {key}")
+    if identity["injection_sha256"] != identity["skill_file_sha256"]:
+        raise EvidenceError("blocked field identity injection hash mismatch")
 
 
 def _validate_field_payload_binding(
@@ -1255,7 +1325,13 @@ def _validate_field_payload_binding(
     current_skill_hash = sha256_skill(skill_root)
     if payload["skill_sha256"] != current_skill_hash:
         raise EvidenceError("field Skill hash mismatch")
-    if payload["injection_sha256"] != current_skill_hash:
+    skill_file = skill_root / "SKILL.md"
+    if skill_file.is_symlink() or not skill_file.is_file():
+        raise EvidenceError("field Skill file is not regular")
+    current_skill_file_hash = sha256_file(skill_file)
+    if payload["skill_file_sha256"] != current_skill_file_hash:
+        raise EvidenceError("field Skill file hash mismatch")
+    if payload["injection_sha256"] != current_skill_file_hash:
         raise EvidenceError("field injection hash mismatch")
 
 

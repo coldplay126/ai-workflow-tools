@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -32,8 +31,8 @@ from awf.core.skill_pressure import (  # noqa: E402
     evaluate_response,
     load_skill_matrix,
     _sensitive_labels,
+    sha256_file,
     sha256_skill,
-    skill_snapshot_bytes,
     sha256_text,
     write_pressure_report,
     pressure_report_path,
@@ -54,6 +53,7 @@ class PairRun:
     with_skill_result: ProviderResult
     preflight_result: ProviderResult
     skill_sha256: str
+    skill_file_sha256: str
     injection_sha256: str
 
 
@@ -168,7 +168,16 @@ def probe_omp(
     )
     if help_result.returncode != 0:
         return help_result
-    required = ("-p", "--mode", "--skills", "--append-system-prompt", "--no-session", "--no-extensions", "--tools")
+    required = (
+        "-p",
+        "--mode",
+        "--no-tools",
+        "--no-skills",
+        "--append-system-prompt",
+        "--no-session",
+        "--no-extensions",
+        "--model",
+    )
     missing = [flag for flag in required if not _help_supports_option(help_result.stdout, flag)]
     if missing:
         return ProviderResult(
@@ -304,6 +313,7 @@ def execute_pair(
     source = validate_skill_source(repo_root, case)
     prompt = build_prompt(case.scenario)
     expected_skill_sha256 = sha256_skill(source)
+    expected_skill_file_sha256 = sha256_file(source / "SKILL.md")
 
     def snapshot_failure() -> tuple[Evaluation, ProviderResult]:
         return (
@@ -326,11 +336,14 @@ def execute_pair(
         skill_root.mkdir(parents=True)
         try:
             snapshot = _snapshot_skill(source, skill_root, case)
-            append_system_prompt = workspace / "APPEND_SYSTEM.md"
-            append_system_prompt.write_bytes(skill_snapshot_bytes(snapshot))
-            injection_sha256 = hashlib.sha256(
-                append_system_prompt.read_bytes()
-            ).hexdigest()
+            injection = snapshot / "SKILL.md"
+            if injection.is_symlink() or not injection.is_file():
+                raise OSError("snapshot SKILL.md is not a regular file")
+            if (
+                sha256_skill(snapshot) != expected_skill_sha256
+                or sha256_file(injection) != expected_skill_file_sha256
+            ):
+                raise OSError("snapshot hash mismatch")
         except (OSError, shutil.Error, ValueError):
             baseline, baseline_result = snapshot_failure()
             with_skill, with_skill_result = snapshot_failure()
@@ -340,7 +353,8 @@ def execute_pair(
                 with_skill_result=with_skill_result,
                 preflight_result=baseline_result,
                 skill_sha256=expected_skill_sha256,
-                injection_sha256=expected_skill_sha256,
+                skill_file_sha256=expected_skill_file_sha256,
+                injection_sha256=expected_skill_file_sha256,
             )
         environment = build_subscription_environment(
             "omp", auth, temporary_home, os.environ
@@ -350,23 +364,17 @@ def execute_pair(
             try:
                 return (
                     sha256_skill(source) == expected_skill_sha256
+                    and sha256_file(source / "SKILL.md") == expected_skill_file_sha256
                     and sha256_skill(snapshot) == expected_skill_sha256
-                    and hashlib.sha256(append_system_prompt.read_bytes()).hexdigest()
-                    == expected_skill_sha256
+                    and sha256_file(injection) == expected_skill_file_sha256
                 )
             except (OSError, ValueError):
                 return False
 
-
         if not snapshot_unchanged():
             baseline, baseline_result = snapshot_failure()
             with_skill, with_skill_result = snapshot_failure()
-            preflight_result = ProviderResult(
-                returncode=125,
-                stdout="",
-                stderr="source_snapshot_changed",
-                provider_name="omp",
-            )
+            preflight_result = baseline_result
         else:
             preflight_result = probe_omp(
                 omp_command,
@@ -382,19 +390,21 @@ def execute_pair(
                 with_skill_result = preflight_result
                 baseline = _evaluation(case, preflight_result)
                 with_skill = _evaluation(case, preflight_result)
+            elif not snapshot_unchanged():
+                baseline, baseline_result = snapshot_failure()
+                with_skill, with_skill_result = snapshot_failure()
             else:
                 common = [
                     omp_command,
                     "-p",
                     "--mode=text",
-                    "--tools=read",
+                    "--no-tools",
                     "--no-session",
                     "--no-extensions",
                     f"--model={model}",
-                    f"--max-time={timeout_sec}",
                 ]
                 baseline_result = run_process(
-                    [*common, "--skills=", prompt],
+                    [*common, "--no-skills", prompt],
                     cwd=workspace,
                     env=environment,
                     timeout=timeout_sec,
@@ -407,9 +417,9 @@ def execute_pair(
                     with_skill_result = run_process(
                         [
                             *common,
-                            f"--skills={case.name}",
+                            "--no-skills",
                             "--append-system-prompt",
-                            str(append_system_prompt),
+                            str(injection),
                             prompt,
                         ],
                         cwd=workspace,
@@ -427,7 +437,8 @@ def execute_pair(
             with_skill_result=with_skill_result,
             preflight_result=preflight_result,
             skill_sha256=expected_skill_sha256,
-            injection_sha256=injection_sha256,
+            skill_file_sha256=expected_skill_file_sha256,
+            injection_sha256=expected_skill_file_sha256,
         )
 
 
@@ -523,7 +534,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         pair = run.evaluation
         try:
-            source_unchanged = sha256_skill(validate_skill_source(repo_root, case)) == run.skill_sha256
+            current_source = validate_skill_source(repo_root, case)
+            source_unchanged = (
+                sha256_skill(current_source) == run.skill_sha256
+                and sha256_file(current_source / "SKILL.md") == run.skill_file_sha256
+            )
         except (OSError, ValueError):
             source_unchanged = False
         if not source_unchanged:
@@ -543,11 +558,10 @@ def main(argv: list[str] | None = None) -> int:
             "runner_flags": [
                 "-p",
                 "--mode=text",
-                "--tools=read",
+                "--no-tools",
                 "--no-session",
                 "--no-extensions",
-                "--skills=",
-                f"--skills={name}",
+                "--no-skills",
                 "--append-system-prompt",
             ],
             "auth_mode": "subscription",
@@ -563,6 +577,7 @@ def main(argv: list[str] | None = None) -> int:
             }[pair.verdict],
             "prompt_sha256": sha256_text(prompt),
             "skill_sha256": run.skill_sha256,
+            "skill_file_sha256": run.skill_file_sha256,
             "injection_sha256": run.injection_sha256,
             "verdict": pair.verdict.value,
             "baseline": _evaluation_payload(pair.baseline),
