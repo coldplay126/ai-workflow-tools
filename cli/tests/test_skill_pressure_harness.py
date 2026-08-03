@@ -2790,6 +2790,70 @@ def test_evidence_summary_rechecks_source_hashes_immediately_before_publish(
     assert not pressure.evidence_summary_path(tmp_path, "batch-1").exists()
 
 
+def test_evidence_summary_rechecks_sources_inside_append_only_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _current_source_bundle(tmp_path, batch_id="batch-1")
+    deterministic = pressure.deterministic_report_path(tmp_path, "batch-1")
+    original_publish = pressure._publish_new
+
+    def mutate_then_publish(target: Path, content: str, **kwargs: object) -> None:
+        deterministic.write_text(
+            deterministic.read_text(encoding="utf-8") + "\nmutated before link",
+            encoding="utf-8",
+        )
+        original_publish(target, content, **kwargs)
+
+    monkeypatch.setattr(pressure, "_publish_new", mutate_then_publish)
+
+    with pytest.raises(pressure.EvidenceError, match="source hash mismatch"):
+        pressure.write_evidence_summary(
+            tmp_path,
+            run_id="batch-1",
+            cells=_passing_evidence_cells(),
+            sources=bundle,
+            matrix=MATRIX,
+        )
+    assert not pressure.evidence_summary_path(tmp_path, "batch-1").exists()
+
+
+def test_evidence_summary_rejects_a_source_symlink_swap_during_hashing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _current_source_bundle(tmp_path, batch_id="batch-1")
+    deterministic = pressure.deterministic_report_path(tmp_path, "batch-1")
+    external = tmp_path / "outside.json"
+    external.write_text(deterministic.read_text(encoding="utf-8"), encoding="utf-8")
+    original_open = pressure.os.open
+    swapped = False
+
+    def swap_source_before_open(path: object, *args: object, **kwargs: object) -> int:
+        nonlocal swapped
+        if (
+            not swapped
+            and path == deterministic.name
+            and kwargs.get("dir_fd") is not None
+        ):
+            deterministic.unlink()
+            deterministic.symlink_to(external)
+            swapped = True
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(pressure.os, "open", swap_source_before_open)
+
+    with pytest.raises(pressure.EvidenceError, match="source"):
+        pressure.write_evidence_summary(
+            tmp_path,
+            run_id="batch-1",
+            cells=_passing_evidence_cells(),
+            sources=bundle,
+            matrix=MATRIX,
+        )
+    assert not pressure.evidence_summary_path(tmp_path, "batch-1").exists()
+
+
 def _copy_discovery_repo(tmp_path: Path) -> Path:
     repo_root = tmp_path / "repo"
     matrix_path = repo_root / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json"

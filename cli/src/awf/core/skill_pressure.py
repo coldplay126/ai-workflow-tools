@@ -4,13 +4,14 @@ import hashlib
 import json
 import os
 import re
+import stat
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from awf.core.operational_metrics import operations_root
 from awf.core.skill_subscription import (
@@ -730,7 +731,9 @@ def pressure_report_path(repo_root: str | Path, run_id: str) -> Path:
     return _pressure_operations_root(repo_root) / f"{run_id}.json"
 
 
-def _publish_new(target: Path, content: str) -> None:
+def _publish_new(
+    target: Path, content: str, *, before_publish: Callable[[], None] | None = None
+) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         mode="w",
@@ -742,6 +745,8 @@ def _publish_new(target: Path, content: str) -> None:
         handle.write(content)
         temp_path = Path(handle.name)
     try:
+        if before_publish is not None:
+            before_publish()
         os.link(temp_path, target)
     finally:
         temp_path.unlink(missing_ok=True)
@@ -1277,6 +1282,51 @@ def _expected_source_reference(root: Path, run_id: str, *, label: str) -> str:
     return paths[label].relative_to(root).as_posix()
 
 
+def _trusted_source_digest(root: Path, path: Path, *, label: str) -> str:
+    relative = path.relative_to(root)
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise EvidenceError("safe source file opening is unavailable")
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow
+    directory_fd: int | None = None
+    file_fd: int | None = None
+    try:
+        directory_fd = os.open(root, directory_flags)
+        for component in relative.parts[:-1]:
+            child_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
+                os.close(child_fd)
+                raise EvidenceError(f"{label} source must be a regular file")
+            os.close(directory_fd)
+            directory_fd = child_fd
+        file_fd = os.open(
+            relative.name, os.O_RDONLY | nofollow, dir_fd=directory_fd
+        )
+        initial = os.fstat(file_fd)
+        if not stat.S_ISREG(initial.st_mode):
+            raise EvidenceError(f"{label} source must be a regular file")
+        digest = hashlib.sha256()
+        while chunk := os.read(file_fd, 131072):
+            digest.update(chunk)
+        final = os.fstat(file_fd)
+        named = os.stat(relative.name, dir_fd=directory_fd, follow_symlinks=False)
+        if (
+            (initial.st_dev, initial.st_ino, initial.st_size, initial.st_mtime_ns)
+            != (final.st_dev, final.st_ino, final.st_size, final.st_mtime_ns)
+            or (initial.st_dev, initial.st_ino)
+            != (named.st_dev, named.st_ino)
+        ):
+            raise EvidenceError(f"{label} source hash mismatch")
+        return digest.hexdigest()
+    except OSError as exc:
+        raise EvidenceError(f"{label} source must be a regular file") from exc
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+
 def _validated_source_reference(
     root: Path, run_id: str, *, label: str, reference: object
 ) -> dict[str, str]:
@@ -1293,9 +1343,7 @@ def _validated_source_reference(
             raise EvidenceError("field source reference does not match current batch")
     elif normalized != _expected_source_reference(root, run_id, label=label):
         raise EvidenceError(f"{label} source reference does not match current batch")
-    if path.is_symlink() or not path.is_file():
-        raise EvidenceError(f"{label} source must be a regular file")
-    if sha256_file(path) != digest:
+    if _trusted_source_digest(root, path, label=label) != digest:
         raise EvidenceError(f"{label} source hash mismatch")
     return {"path": normalized, "sha256": digest}
 
@@ -1305,7 +1353,7 @@ def _verify_snapshot_current(
 ) -> None:
     path = _relative_source_reference(root, snapshot.path)
     current_path, _ = _source_reference_path(root, path, label=label)
-    if sha256_file(current_path) != snapshot.sha256:
+    if _trusted_source_digest(root, current_path, label=label) != snapshot.sha256:
         raise EvidenceError(f"{label} source hash mismatch")
 
 
@@ -2100,5 +2148,13 @@ def write_evidence_summary(
         "sources": serialized_sources,
     }
     target = evidence_summary_path(root, safe_run_id)
-    _publish_new(target, json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
-    return target
+
+    def verify_sources_before_publish() -> None:
+        if _json_source_references(root, safe_run_id, sources) != serialized_sources:
+            raise EvidenceError("source references changed before publication")
+
+    _publish_new(
+        target,
+        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        before_publish=verify_sources_before_publish,
+    )
