@@ -8,6 +8,7 @@ import stat
 from pathlib import Path
 import shutil
 from dataclasses import replace
+from typing import Callable
 
 import pytest
 
@@ -3810,6 +3811,7 @@ class _FakeDiscoveryProcess:
         canonical_root: Path | None = None,
         mutate_canonical_after_install: str | None = None,
         read_workspace_skills: bool = False,
+        mutate_snapshot_after_probe: tuple[str, str] | None = None,
     ) -> None:
         self.expected = expected
         self.failure = failure
@@ -3818,7 +3820,9 @@ class _FakeDiscoveryProcess:
         self.canonical_root = canonical_root
         self.mutate_canonical_after_install = mutate_canonical_after_install
         self.read_workspace_skills = read_workspace_skills
+        self.mutate_snapshot_after_probe = mutate_snapshot_after_probe
         self.installed_sources: dict[str, tuple[str, tuple[str, str, str]]] = {}
+        self.installed_paths: dict[str, Path] = {}
         self.workspace_skills: dict[tuple[str, str], tuple[str, tuple[str, str, str]]] = {}
         self.calls: list[tuple[list[str], Path, dict[str, str]]] = []
         self.claude_init_events: dict[str, dict[str, object]] = {}
@@ -3834,6 +3838,7 @@ class _FakeDiscoveryProcess:
         self.calls.append((argv, cwd, dict(env)))
         if argv[0] == "sh":
             source = Path(argv[2])
+            self.installed_paths[source.name] = source
             self.installed_sources[source.name] = (
                 sha256_skill(source),
                 run_skill_discovery._source_metadata(source / "SKILL.md"),
@@ -3917,7 +3922,7 @@ class _FakeDiscoveryProcess:
         if runtime == "claude":
             source = cwd / run_skill_discovery.TARGET_ROOTS[runtime] / skill
             metadata = run_skill_discovery._source_metadata(source / "SKILL.md")
-            self.workspace_skills[(runtime, skill)] = (sha256_skill(source), metadata)
+            self.workspace_skills[(runtime, skill)] = (sha256_skill(source.resolve()), metadata)
             init = {
                 "type": "system",
                 "subtype": "init",
@@ -3988,7 +3993,7 @@ class _FakeDiscoveryProcess:
         if self.read_workspace_skills:
             source = cwd / run_skill_discovery.TARGET_ROOTS[runtime] / skill
             metadata = run_skill_discovery._source_metadata(source / "SKILL.md")
-            self.workspace_skills[(runtime, skill)] = (sha256_skill(source), metadata)
+            self.workspace_skills[(runtime, skill)] = (sha256_skill(source.resolve()), metadata)
             payload = {
                 "name": metadata[0],
                 "description": metadata[1],
@@ -4004,6 +4009,14 @@ class _FakeDiscoveryProcess:
         if failure and failure[2].startswith("mismatch-"):
             field = failure[2].removeprefix("mismatch-")
             payload[field] = f"not-the-source-{field}"
+        if self.mutate_snapshot_after_probe == (runtime, skill):
+            snapshot_file = cwd / run_skill_discovery.TARGET_ROOTS[runtime] / skill / "SKILL.md"
+            snapshot_file.write_text(
+                snapshot_file.read_text(encoding="utf-8").replace(
+                    f"name: {skill}", "name: mutated-snapshot-by-host", 1
+                ),
+                encoding="utf-8",
+            )
         return DiscoveryProcessResult(0, json.dumps(payload), "", 0.01)
 
 
@@ -4025,6 +4038,8 @@ def _run_fake_discovery(
     missing_skill: str | None = None,
     mutate_canonical_after_install: str | None = None,
     read_workspace_skills: bool = False,
+    mutate_snapshot_after_probe: tuple[str, str] | None = None,
+    configure: Callable[[_FakeDiscoveryProcess], None] | None = None,
 ) -> tuple[object, _FakeDiscoveryProcess, Path]:
     repo_root = _copy_discovery_repo(tmp_path)
     if missing_skill:
@@ -4041,7 +4056,10 @@ def _run_fake_discovery(
         canonical_root=repo_root,
         mutate_canonical_after_install=mutate_canonical_after_install,
         read_workspace_skills=read_workspace_skills,
+        mutate_snapshot_after_probe=mutate_snapshot_after_probe,
     )
+    if configure is not None:
+        configure(fake)
     global_roots = tmp_path / "workstation-global-skill-roots"
     monkeypatch.setenv("HOME", str(global_roots / "home"))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(global_roots / "claude"))
@@ -4754,6 +4772,92 @@ def test_skill_discovery_freezes_snapshot_before_canonical_mutation(
             ) == frozen_metadata
     assert str(result.repo_root / "claude" / "skills") not in reports
     assert "awf-skill-discovery-" not in reports
+
+
+def test_skill_discovery_blocks_snapshot_mutated_by_successful_host_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, fake, _ = _run_fake_discovery(
+        tmp_path,
+        monkeypatch,
+        mutate_snapshot_after_probe=("agent-skills", "analysis"),
+    )
+    report = result.discovery_report.read_text(encoding="utf-8")
+    analysis_records = [
+        record for record in result.discovery_records if record["skill"] == "analysis"
+    ]
+    probe_calls = [
+        argv
+        for argv, _, _ in fake.calls
+        if argv[0].startswith("fake-")
+        and argv[1:]
+        not in (["--version"], ["--help"], ["exec", "--help"])
+    ]
+
+    assert len(probe_calls) == len(MATRIX.skills) * len(run_skill_discovery.RUNTIMES)
+    assert result.exit_code == 1
+    assert {(record["verdict"], record["diagnostic"]) for record in analysis_records} == {
+        ("BLOCKED", "skill_snapshot_changed")
+    }
+    assert "mutated-snapshot-by-host" not in report
+    assert "awf-skill-discovery-" not in report
+
+
+def test_skill_discovery_removes_report_when_snapshot_changes_after_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def configure(fake: _FakeDiscoveryProcess) -> None:
+        original_publish = run_skill_discovery._publish_new
+
+        def publish_with_post_link_mutation(
+            target: Path,
+            content: str,
+            *,
+            before_publish: Callable[[], None] | None = None,
+            after_publish: Callable[[], None] | None = None,
+        ) -> None:
+            if before_publish is None or after_publish is None:
+                original_publish(target, content)
+                return
+            before_publish()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+            snapshot_file = fake.installed_paths["analysis"] / "SKILL.md"
+            snapshot_file.write_text(
+                snapshot_file.read_text(encoding="utf-8").replace(
+                    "name: analysis", "name: mutated-after-link", 1
+                ),
+                encoding="utf-8",
+            )
+            try:
+                after_publish()
+            except Exception:
+                target.unlink()
+                raise
+
+        monkeypatch.setattr(run_skill_discovery, "_publish_new", publish_with_post_link_mutation)
+
+    result, fake, _ = _run_fake_discovery(tmp_path, monkeypatch, configure=configure)
+    report_path = run_skill_discovery.discovery_report_path(
+        result.repo_root, "skill-discovery-test"
+    )
+    probe_calls = [
+        argv
+        for argv, _, _ in fake.calls
+        if argv[0].startswith("fake-")
+        and argv[1:]
+        not in (["--version"], ["--help"], ["exec", "--help"])
+    ]
+
+    assert len(probe_calls) == len(MATRIX.skills) * len(run_skill_discovery.RUNTIMES)
+    assert result.exit_code == 1
+    assert result.discovery_report is None
+    assert not report_path.exists()
+    assert {
+        (record["verdict"], record["diagnostic"])
+        for record in result.discovery_records
+        if record["skill"] == "analysis"
+    } == {("BLOCKED", "skill_snapshot_changed")}
 
 
 def test_skill_discovery_materializes_45_isolated_canonical_links_and_cleans_up(
