@@ -1080,17 +1080,46 @@ def test_publish_new_is_append_only_runs_callback_uses_private_mode_and_cleans_t
         target,
         "private report\n",
         before_publish=lambda: callbacks.append("before-link"),
+        after_publish=lambda: callbacks.append("after-link"),
     )
 
-    assert callbacks == ["before-link"]
+    assert callbacks == ["before-link", "after-link"]
     assert target.read_text(encoding="utf-8") == "private report\n"
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
     assert list(target.parent.glob(f".{target.name}.*")) == []
 
     with pytest.raises(FileExistsError):
-        pressure._publish_new(target, "replacement\n")
+        pressure._publish_new(
+            target,
+            "replacement\n",
+            after_publish=lambda: callbacks.append("unexpected-after-link"),
+        )
 
     assert target.read_text(encoding="utf-8") == "private report\n"
+    assert callbacks == ["before-link", "after-link"]
+    assert list(target.parent.glob(f".{target.name}.*")) == []
+
+
+def test_publish_new_removes_just_created_target_when_after_publish_fails(
+    tmp_path: Path,
+) -> None:
+    target = pressure_report_path(tmp_path, "publisher-post-link-failure")
+    callbacks: list[str] = []
+
+    def reject_after_link() -> None:
+        callbacks.append("after-link")
+        raise pressure.EvidenceError("source changed after link")
+
+    with pytest.raises(pressure.EvidenceError, match="source changed after link"):
+        pressure._publish_new(
+            target,
+            "private report\n",
+            before_publish=lambda: callbacks.append("before-link"),
+            after_publish=reject_after_link,
+        )
+
+    assert callbacks == ["before-link", "after-link"]
+    assert not target.exists()
     assert list(target.parent.glob(f".{target.name}.*")) == []
 
 
@@ -3321,6 +3350,67 @@ def test_evidence_summary_rechecks_canonical_skill_tree_inside_publication(
             matrix=MATRIX,
         )
     assert not pressure.evidence_summary_path(tmp_path, "batch-1").exists()
+
+
+@pytest.mark.parametrize(
+    ("source_kind", "message"),
+    [
+        ("report", "deterministic source hash mismatch"),
+        ("canonical", "canonical Skill source hash mismatch"),
+    ],
+)
+def test_evidence_summary_revalidates_sources_after_link_and_removes_stale_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_kind: str,
+    message: str,
+) -> None:
+    bundle = _current_source_bundle(tmp_path, batch_id="batch-1")
+    target = pressure.evidence_summary_path(tmp_path, "batch-1")
+    deterministic = pressure.deterministic_report_path(tmp_path, "batch-1")
+    skill_file = tmp_path / "claude" / "skills" / "wf-status" / "SKILL.md"
+    original_link = pressure.os.link
+    original_verify = pressure.verify_source_bundle_unchanged
+    verification_count = 0
+
+    def count_source_verifications(candidate: pressure.SourceBundle) -> None:
+        nonlocal verification_count
+        verification_count += 1
+        original_verify(candidate)
+
+    def mutate_source_after_link(*args: object, **kwargs: object) -> None:
+        original_link(*args, **kwargs)
+        assert verification_count == 1
+        assert target.exists()
+        if source_kind == "report":
+            deterministic.write_text(
+                deterministic.read_text(encoding="utf-8") + "\nmutated after link",
+                encoding="utf-8",
+            )
+        else:
+            skill_file.write_text(
+                skill_file.read_text(encoding="utf-8")
+                + "\nmutated after summary link\n",
+                encoding="utf-8",
+            )
+
+    monkeypatch.setattr(
+        pressure, "verify_source_bundle_unchanged", count_source_verifications
+    )
+    monkeypatch.setattr(pressure.os, "link", mutate_source_after_link)
+
+    with pytest.raises(pressure.EvidenceError, match=message):
+        pressure.write_evidence_summary(
+            tmp_path,
+            run_id="batch-1",
+            cells=_passing_evidence_cells(),
+            sources=bundle,
+            matrix=MATRIX,
+        )
+
+    assert verification_count == 2
+    assert not target.exists()
+    assert list(target.parent.glob(f".{target.name}.*")) == []
 
 
 

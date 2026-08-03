@@ -836,7 +836,11 @@ def _write_publication_temp(temporary_fd: int, content: str) -> None:
 
 
 def _publish_new(
-    target: Path, content: str, *, before_publish: Callable[[], None] | None = None
+    target: Path,
+    content: str,
+    *,
+    before_publish: Callable[[], None] | None = None,
+    after_publish: Callable[[], None] | None = None,
 ) -> None:
     root, target_name = _publication_target(target)
     directory_fds: list[int] = []
@@ -874,6 +878,14 @@ def _publish_new(
             dst_dir_fd=output_fd,
             follow_symlinks=False,
         )
+        if after_publish is not None:
+            try:
+                after_publish()
+            except BaseException:
+                _verify_publication_directory_chain(chain)
+                os.unlink(target_name, dir_fd=output_fd)
+                os.fsync(output_fd)
+                raise
         _verify_publication_directory_chain(chain)
         os.fsync(output_fd)
     finally:
@@ -2348,15 +2360,16 @@ def write_evidence_summary(
     }
     target = evidence_summary_path(root, safe_run_id)
 
-    def verify_sources_before_publish() -> None:
+    def verify_sources_unchanged() -> None:
         if isinstance(sources, SourceBundle):
             verify_source_bundle_unchanged(sources)
         elif _json_source_references(root, safe_run_id, sources) != serialized_sources:
-            raise EvidenceError("source references changed before publication")
+            raise EvidenceError("source references changed during publication")
 
     _publish_new(
         target,
         json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        before_publish=verify_sources_before_publish,
+        before_publish=verify_sources_unchanged,
+        after_publish=verify_sources_unchanged,
     )
     return target
