@@ -25,7 +25,12 @@ _AUTH_RE = re.compile(
 )
 _QUOTED_MODEL_IDENTIFIER_RE = r"""(?:'[^'\r\n]+'|"[^"\r\n]+")"""
 _MODEL_IDENTIFIER_RE = rf"(?:{_QUOTED_MODEL_IDENTIFIER_RE}|\S*[0-9._/-]\S*)"
+_MODEL_IDENTIFIER_PATTERN = re.compile(_MODEL_IDENTIFIER_RE)
 _UNSUPPORTED_MODEL_STATUS_RE = r"is[ \t]+(?:not[ \t]+supported|unsupported)\b"
+_EXPLICIT_UNSUPPORTED_MODEL_RE = re.compile(
+    rf"\bmodel[ \t]+(?P<identifier>{_QUOTED_MODEL_IDENTIFIER_RE}|\S+)[ \t]+{_UNSUPPORTED_MODEL_STATUS_RE}",
+    re.IGNORECASE,
+)
 _NON_MODEL_PREFIX_RE = r"(?<!tool[ \t])(?<!feature[ \t])(?<!parameter[ \t])"
 _UNSUPPORTED_MODEL_ASSERTIONS = (
     re.compile(r"\bunsupported[ \t]+model\b", re.IGNORECASE),
@@ -33,11 +38,17 @@ _UNSUPPORTED_MODEL_ASSERTIONS = (
         rf"{_NON_MODEL_PREFIX_RE}\bmodel[ \t]+{_UNSUPPORTED_MODEL_STATUS_RE}",
         re.IGNORECASE,
     ),
-    re.compile(
-        rf"\bmodel[ \t]+{_MODEL_IDENTIFIER_RE}[ \t]+{_UNSUPPORTED_MODEL_STATUS_RE}",
-        re.IGNORECASE,
-    ),
 )
+
+
+def _has_explicit_unsupported_model(text: str) -> bool:
+    for match in _EXPLICIT_UNSUPPORTED_MODEL_RE.finditer(text):
+        identifier = match["identifier"]
+        if _MODEL_IDENTIFIER_PATTERN.fullmatch(identifier) or (
+            identifier in PINNED_SUBSCRIPTION_MODELS.values()
+        ):
+            return True
+    return False
 
 
 def _resolve_auth_path(value: str | Path, original_home: Path) -> Path:
@@ -127,7 +138,9 @@ def normalize_host_diagnostic(
     text = f"{stdout}\n{stderr}"
     if _EXPIRED_RE.search(text):
         return "host_subscription_expired"
-    if any(pattern.search(text) for pattern in _UNSUPPORTED_MODEL_ASSERTIONS):
+    if any(
+        pattern.search(text) for pattern in _UNSUPPORTED_MODEL_ASSERTIONS
+    ) or _has_explicit_unsupported_model(text):
         return "host_model_unsupported"
     if _AUTH_RE.search(text):
         return "host_auth_unavailable"

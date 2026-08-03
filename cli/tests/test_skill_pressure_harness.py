@@ -230,6 +230,8 @@ def test_host_diagnostic_ignores_warning_text_after_success() -> None:
         "unsupported model: gpt-5.4",
         "model openai-codex/gpt-5.6-sol is not supported",
         "model is unsupported",
+        "model sonnet is unsupported",
+        "model sonnet is not supported",
         "model openai-codex/gpt-5.6-sol is unsupported",
         "The 'openai-codex/gpt-5.6-sol' model is not supported by this provider",
     ],
