@@ -387,6 +387,51 @@ def _skill_state(root: Path) -> tuple[str, tuple[str, str, str], tuple[tuple[str
     return sha256_skill(root), _source_metadata(root / "SKILL.md"), entries
 
 
+class SkillSnapshotChangedError(EvidenceError):
+    pass
+
+
+class _SnapshotVerifier:
+    def __init__(self, expected: Mapping[str, ExpectedSkill]) -> None:
+        self._states: dict[str, tuple[str, tuple[str, str, str], tuple[tuple[str, str], ...]]] = {}
+        self._sources: dict[str, Path] = {}
+        self._reported_changes: set[str] = set()
+        self._initial_changes: set[str] = set()
+        for skill, candidate in expected.items():
+            if candidate.source_error:
+                continue
+            self._sources[skill] = candidate.source
+            try:
+                state = _skill_state(candidate.source)
+            except (OSError, ValueError):
+                self._initial_changes.add(skill)
+                continue
+            self._states[skill] = state
+            if state[:2] != (
+                candidate.source_sha256,
+                (candidate.name, candidate.description, candidate.body_heading),
+            ):
+                self._initial_changes.add(skill)
+
+    def changed_skills(self) -> set[str]:
+        changed = set(self._initial_changes)
+        for skill, state in self._states.items():
+            try:
+                if _skill_state(self._sources[skill]) != state:
+                    changed.add(skill)
+            except (OSError, ValueError):
+                changed.add(skill)
+        return changed
+
+    def acknowledge(self, skills: set[str]) -> None:
+        self._reported_changes.update(skills)
+
+    def verify_unreported_changes(self) -> None:
+        if self.changed_skills() - self._reported_changes:
+            raise SkillSnapshotChangedError("skill_snapshot_changed")
+
+
+
 def _copy_regular_file(source: Path, destination: Path) -> None:
     source_fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
     destination_fd: int | None = None
@@ -890,12 +935,24 @@ def _discovery_record(
     return record
 
 
+def _block_snapshot_changed_records(
+    records: Sequence[dict[str, object]], skills: set[str]
+) -> None:
+    for record in records:
+        if record["skill"] in skills:
+            record["verdict"] = "BLOCKED"
+            record["diagnostic"] = "skill_snapshot_changed"
+            record["exit_status"] = 78
+
+
 def _write_discovery_report(
     repo_root: Path,
     *,
     batch_id: str,
     matrix_sha256: str,
     records: Sequence[Mapping[str, object]],
+    before_publish: Callable[[], None] | None = None,
+    after_publish: Callable[[], None] | None = None,
 ) -> Path:
     report = {
         "schema": DISCOVERY_REPORT_SCHEMA,
@@ -908,7 +965,12 @@ def _write_discovery_report(
     if labels:
         raise EvidenceError(f"sensitive discovery report blocked: {','.join(labels)}")
     target = discovery_report_path(repo_root, batch_id)
-    _publish_new(target, content)
+    _publish_new(
+        target,
+        content,
+        before_publish=before_publish,
+        after_publish=after_publish,
+    )
     return target
 
 
@@ -945,6 +1007,7 @@ def run_discovery(
         expected = _materialize_expected_skills(
             expected, temporary_root / "skill-snapshots"
         )
+        snapshot_verifier = _SnapshotVerifier(expected)
         base_environment = dict(os.environ)
         environments = {
             runtime: build_subscription_environment(
@@ -998,14 +1061,25 @@ def run_discovery(
             for runtime in RUNTIMES
             for skill, source in expected.items()
         ]
+        changed_skills = snapshot_verifier.changed_skills()
+        if changed_skills:
+            _block_snapshot_changed_records(discovery_records, changed_skills)
+            snapshot_verifier.acknowledge(changed_skills)
         discovery_report = None
         if write_result:
-            discovery_report = _write_discovery_report(
-                root,
-                batch_id=batch_id,
-                matrix_sha256=matrix_sha256,
-                records=discovery_records,
-            )
+            try:
+                discovery_report = _write_discovery_report(
+                    root,
+                    batch_id=batch_id,
+                    matrix_sha256=matrix_sha256,
+                    records=discovery_records,
+                    before_publish=snapshot_verifier.verify_unreported_changes,
+                    after_publish=snapshot_verifier.verify_unreported_changes,
+                )
+            except SkillSnapshotChangedError:
+                _block_snapshot_changed_records(
+                    discovery_records, snapshot_verifier.changed_skills()
+                )
 
     records = [*install_records, *discovery_records]
     exit_code = (

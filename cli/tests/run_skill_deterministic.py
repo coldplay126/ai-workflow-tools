@@ -74,6 +74,7 @@ def main(argv: list[str] | None = None) -> int:
             cwd=repo_root,
             text=True,
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             check=False,
             timeout=args.timeout_sec,
         )
@@ -123,6 +124,7 @@ def main(argv: list[str] | None = None) -> int:
                     ],
                     sources=sources,
                     before_publish=verify_sources_before_publish,
+                    after_publish=verify_sources_before_publish,
                 )
 
             try:

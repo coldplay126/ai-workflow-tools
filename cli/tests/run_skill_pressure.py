@@ -57,6 +57,10 @@ class PairRun:
     injection_sha256: str
 
 
+class SourceSnapshotChangedError(RuntimeError):
+    pass
+
+
 _NORMALIZED_HOST_DIAGNOSTICS = frozenset(
     {
         "host_auth_unavailable",
@@ -535,15 +539,18 @@ def main(argv: list[str] | None = None) -> int:
             auth_context=auth_context,
         )
         pair = run.evaluation
-        try:
-            current_source = validate_skill_source(repo_root, case)
-            source_unchanged = (
-                sha256_skill(current_source) == run.skill_sha256
-                and sha256_file(current_source / "SKILL.md") == run.skill_file_sha256
-            )
-        except (OSError, ValueError):
-            source_unchanged = False
-        if not source_unchanged:
+        def source_unchanged() -> bool:
+            try:
+                current_source = validate_skill_source(repo_root, case)
+                return (
+                    sha256_skill(current_source) == run.skill_sha256
+                    and sha256_file(current_source / "SKILL.md")
+                    == run.skill_file_sha256
+                )
+            except (OSError, ValueError):
+                return False
+
+        if not source_unchanged():
             blocked = _blocked_evaluation("skill_snapshot_changed")
             pair = PairEvaluation(Verdict.BLOCKED, blocked, blocked)
         provider_version = "subscription"
@@ -593,6 +600,21 @@ def main(argv: list[str] | None = None) -> int:
                 "with_skill": run.with_skill_result.returncode,
             },
         }
+
+        def snapshot_blocked_record() -> dict[str, object]:
+            blocked = _blocked_evaluation("skill_snapshot_changed")
+            return {
+                **record,
+                "remediation_state": "open",
+                "behavioral_delta": "blocked",
+                "verdict": Verdict.BLOCKED.value,
+                "baseline": _evaluation_payload(blocked),
+                "with_skill": _evaluation_payload(blocked),
+            }
+
+        def verify_source_snapshot() -> None:
+            if not source_unchanged():
+                raise SourceSnapshotChangedError("skill_snapshot_changed")
         records.append(record)
         if pair.verdict in {Verdict.FAIL, Verdict.BLOCKED}:
             exit_code = 1
@@ -605,7 +627,36 @@ def main(argv: list[str] | None = None) -> int:
                     payload=record,
                     baseline=run.baseline_result.stdout,
                     with_skill=run.with_skill_result.stdout,
+                    before_publish=verify_source_snapshot,
+                    after_publish=verify_source_snapshot,
                 )
+            except SourceSnapshotChangedError:
+                record = snapshot_blocked_record()
+                records[-1] = record
+                try:
+                    write_pressure_report(
+                        repo_root,
+                        run_id=run_id,
+                        payload=record,
+                        baseline="",
+                        with_skill="",
+                        blocked_diagnostic="skill_snapshot_changed",
+                    )
+                except (OSError, ValueError):
+                    report_written = False
+                else:
+                    report_written = True
+                record["persistence"] = {
+                    "status": "BLOCKED" if report_written else "REJECTED",
+                    "run_id": run_id,
+                    "report_written": report_written,
+                    "diagnostic": (
+                        "skill_snapshot_changed"
+                        if report_written
+                        else "report_rejected"
+                    ),
+                }
+                exit_code = 1
             except SensitiveDataError:
                 report_written = pressure_report_path(repo_root, run_id).is_file()
                 record = {
