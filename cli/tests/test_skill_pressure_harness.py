@@ -276,70 +276,48 @@ def test_subscription_models_are_pinned_and_reject_invalid_selection() -> None:
         require_subscription_model("unsupported", "model")
 
 
-def test_claude_discovery_shared_helpers_require_projection_and_preserve_no_tool_invariants(
-    tmp_path: Path,
-) -> None:
-    projection = '{"name":"analysis","description":"Exact projection"}\n'
-    prompt = "describe the skill"
-
-    assert claude_discovery_argv(
-        "claude",
-        "sonnet",
-        "analysis",
-        prompt,
-        metadata_projection=projection,
-    ) == [
+def test_claude_discovery_shared_helpers_use_host_native_init_event_contract() -> None:
+    assert claude_discovery_argv("claude", "sonnet", "analysis") == [
         "claude",
         "-p",
         "--output-format",
-        "text",
+        "stream-json",
+        "--verbose",
         "--tools",
         "",
         "--no-session-persistence",
         "--setting-sources",
         "project",
-        "--append-system-prompt",
-        projection,
         "--model",
         "sonnet",
-        "/analysis\ndescribe the skill",
+        "/analysis",
     ]
     assert claude_discovery_required_flags() == (
         "-p",
         "--output-format",
+        "--verbose",
         "--tools",
         "--no-session-persistence",
         "--setting-sources",
-        "--append-system-prompt",
         "--model",
     )
     assert claude_discovery_safety_flags() == (
         "-p",
-        "--output-format=text",
+        "--output-format=stream-json",
+        "--verbose",
         "--tools=",
         "--no-session-persistence",
         "--setting-sources=project",
-        "--append-system-prompt",
     )
-    with pytest.raises(TypeError):
-        claude_discovery_argv("claude", "sonnet", "analysis", prompt)  # type: ignore[call-arg]
-    with pytest.raises(TypeError, match="metadata projection must be text"):
-        claude_discovery_argv(
-            "claude",
-            "sonnet",
-            "analysis",
-            prompt,
-            metadata_projection=tmp_path / "metadata-projection.json",  # type: ignore[arg-type]
-        )
 
 def test_evidence_validator_and_discovery_runner_share_claude_safety_flags() -> None:
     expected = (
         "-p",
-        "--output-format=text",
+        "--output-format=stream-json",
+        "--verbose",
         "--tools=",
         "--no-session-persistence",
         "--setting-sources=project",
-        "--append-system-prompt",
     )
 
     assert claude_discovery_safety_flags() == expected
@@ -2557,7 +2535,7 @@ class _FakeDiscoveryProcess:
         self.installed_sources: dict[str, tuple[str, tuple[str, str, str]]] = {}
         self.workspace_skills: dict[tuple[str, str], tuple[str, tuple[str, str, str]]] = {}
         self.calls: list[tuple[list[str], Path, dict[str, str]]] = []
-        self.claude_projection_data: dict[str, tuple[dict[str, str], str]] = {}
+        self.claude_init_events: dict[str, dict[str, object]] = {}
 
     def __call__(
         self,
@@ -2646,26 +2624,68 @@ class _FakeDiscoveryProcess:
             )
         if failure and failure[2] == "model-unsupported":
             return DiscoveryProcessResult(23, "", "model is not supported", 0.01)
-        if failure and failure[2] == "malformed":
+        if failure and failure[2] == "malformed" and runtime != "claude":
             return DiscoveryProcessResult(0, "{", "", 0.01)
         if failure and failure[2] == "unknown":
             return DiscoveryProcessResult(0, "unknown Skill requested", "", 0.01)
         if runtime == "claude":
-            metadata_projection = json.loads(
-                argv[argv.index("--append-system-prompt") + 1]
-            )
-            assert set(metadata_projection) == {"name", "description"}
-            assert all(isinstance(value, str) for value in metadata_projection.values())
             source = cwd / run_skill_discovery.TARGET_ROOTS[runtime] / skill
-            slash_metadata = run_skill_discovery._source_metadata(source / "SKILL.md")
-            self.workspace_skills[(runtime, skill)] = (sha256_skill(source), slash_metadata)
-            slash_body_heading = slash_metadata[2]
-            self.claude_projection_data[skill] = (
-                metadata_projection,
-                slash_body_heading,
+            metadata = run_skill_discovery._source_metadata(source / "SKILL.md")
+            self.workspace_skills[(runtime, skill)] = (sha256_skill(source), metadata)
+            init = {
+                "type": "system",
+                "subtype": "init",
+                "skills": [skill],
+                "slash_commands": [skill],
+                "tools": [],
+                "session_id": "host-native-session-id",
+                "cwd": str(cwd),
+            }
+            result = {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "session_id": "host-native-session-id",
+            }
+            scenario = failure[2] if failure else ""
+            if scenario == "malformed":
+                return DiscoveryProcessResult(0, "{", "", 0.01)
+            if scenario == "missing-init":
+                return DiscoveryProcessResult(0, json.dumps(result), "", 0.01)
+            if scenario == "duplicate-init":
+                return DiscoveryProcessResult(
+                    0, f"{json.dumps(init)}\n{json.dumps(init)}\n{json.dumps(result)}", "", 0.01
+                )
+            if scenario == "duplicate-json-key":
+                duplicate = (
+                    '{"type":"system","type":"system","subtype":"init",'
+                    f'"skills":["{skill}"],"slash_commands":["{skill}"],"tools":[]}}'
+                )
+                return DiscoveryProcessResult(0, f"{duplicate}\n{json.dumps(result)}", "", 0.01)
+            if scenario == "absent-name":
+                init["skills"] = []
+            elif scenario == "duplicate-name":
+                init["slash_commands"] = [skill, skill]
+            elif scenario == "malformed-arrays":
+                init["skills"] = skill
+            elif scenario == "non-string-arrays":
+                init["slash_commands"] = [1]
+            elif scenario == "nonempty-tools":
+                init["tools"] = [{"name": "Read"}]
+            elif scenario == "missing-result":
+                return DiscoveryProcessResult(0, json.dumps(init), "", 0.01)
+            elif scenario == "failed-result":
+                result = {
+                    "type": "result",
+                    "subtype": "error",
+                    "is_error": True,
+                    "session_id": "host-native-session-id",
+                }
+            self.claude_init_events[skill] = init
+            return DiscoveryProcessResult(
+                0, f"{json.dumps(init)}\n{json.dumps(result)}", "", 0.01
             )
-            payload = {**metadata_projection, "body_heading": slash_body_heading}
-        elif self.read_workspace_skills:
+        if self.read_workspace_skills:
             source = cwd / run_skill_discovery.TARGET_ROOTS[runtime] / skill
             metadata = run_skill_discovery._source_metadata(source / "SKILL.md")
             self.workspace_skills[(runtime, skill)] = (sha256_skill(source), metadata)
@@ -2816,29 +2836,21 @@ def test_agent_skills_preflight_blocks_when_top_level_exec_is_absent(
 
 
 def test_skill_discovery_uses_exact_safe_host_argv() -> None:
-    projection = '{"name":"analysis","description":"Exact projection"}\n'
     prompt = "describe the skill"
-    assert claude_argv(
-        "claude",
-        "sonnet",
-        "analysis",
-        prompt,
-        metadata_projection=projection,
-    ) == [
+    assert claude_argv("claude", "sonnet", "analysis") == [
         "claude",
         "-p",
         "--output-format",
-        "text",
+        "stream-json",
+        "--verbose",
         "--tools",
         "",
         "--no-session-persistence",
         "--setting-sources",
         "project",
-        "--append-system-prompt",
-        projection,
         "--model",
         "sonnet",
-        "/analysis\ndescribe the skill",
+        "/analysis",
     ]
     assert agent_skills_argv("codex", "gpt-5.4", "analysis", prompt) == [
         "codex",
@@ -2875,20 +2887,11 @@ def test_skill_discovery_uses_exact_safe_host_argv() -> None:
     )
 
 
-def test_skill_discovery_sends_exact_metadata_prompt_to_fake_host_argv(
+def test_skill_discovery_sends_native_claude_and_unchanged_metadata_prompts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _, fake, _ = _run_fake_discovery(tmp_path, monkeypatch)
     prompts = {
-        "claude": (
-        "Do not call tools, access files, or mutate anything. "
-        "Copy name and description exactly from the injected metadata projection. "
-        "Copy body_heading only from the selected slash Skill body; it must be the exact first Markdown H1 line, "
-        "including the literal leading '# '. "
-        "Encode embedded newlines as JSON escapes. "
-        'Return exactly one JSON object and no prose. Its schema is {"name":"injected metadata name",'
-        '"description":"injected metadata description","body_heading":"exact first slash Skill H1"}.'
-        ),
         "agent-skills": (
             "Do not call tools, access files, or mutate anything. Read the selected Skill only. "
             "Return the decoded YAML frontmatter scalar values for name and description, excluding YAML syntax "
@@ -2916,7 +2919,7 @@ def test_skill_discovery_sends_exact_metadata_prompt_to_fake_host_argv(
         "claude": next(
             argv
             for argv, _, _ in fake.calls
-            if argv[0] == "fake-claude" and argv[-1].startswith("/analysis\n")
+            if argv[0] == "fake-claude" and argv[-1] == "/analysis"
         ),
         "agent-skills": next(
             argv
@@ -2930,29 +2933,13 @@ def test_skill_discovery_sends_exact_metadata_prompt_to_fake_host_argv(
         ),
     }
 
-    assert model_argvs["claude"][-1] == f"/analysis\n{prompts['claude']}"
+    assert model_argvs["claude"][-1] == "/analysis"
+    assert "--append-system-prompt" not in model_argvs["claude"]
     assert model_argvs["agent-skills"][-1] == f"$analysis\n{prompts['agent-skills']}"
     assert model_argvs["omp"][-1] == prompts["omp"]
 
 
-def _metadata_projection_expected(tmp_path: Path) -> ExpectedSkill:
-    source = tmp_path / "skill-snapshots" / "analysis"
-    source.mkdir(parents=True)
-    skill_file = source / "SKILL.md"
-    skill_file.write_text(
-        "---\nname: analysis\ndescription: Exact projection description\n---\n# Exact slash body H1\n",
-        encoding="utf-8",
-    )
-    return ExpectedSkill(
-        "analysis",
-        "Exact projection description",
-        "# Exact slash body H1",
-        source,
-        sha256_skill(source),
-    )
-
-
-def test_skill_discovery_claude_projection_combines_decoded_metadata_with_slash_body(
+def test_skill_discovery_claude_binds_native_registration_to_immutable_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     result, fake, _ = _run_fake_discovery(tmp_path, monkeypatch)
@@ -2963,207 +2950,89 @@ def test_skill_discovery_claude_projection_combines_decoded_metadata_with_slash_
     claude_records = [
         record for record in result.discovery_records if record["runtime"] == "claude"
     ]
+    claude_calls = [
+        (argv, cwd) for argv, cwd, _ in fake.calls if argv[0] == "fake-claude" and argv[-1].startswith("/")
+    ]
     report_text = result.discovery_report.read_text(encoding="utf-8")
+    runner_source = Path(run_skill_discovery.__file__).read_text(encoding="utf-8")
 
-    assert len(fake.claude_projection_data) == len(expected) == 15
-    assert len(claude_records) == 15
+    assert len(claude_records) == len(expected) == len(fake.claude_init_events) == 15
     assert {record["elapsed_sec"] for record in result.discovery_records} == {0.01}
-    projection_bodies: set[str] = set()
-    for skill, source in expected.items():
-        metadata, slash_body_heading = fake.claude_projection_data[skill]
-        assert metadata == {
-            "name": source.name,
-            "description": source.description,
-        }
-        assert slash_body_heading == source.body_heading
-        projection_body = json.dumps(
-            metadata, ensure_ascii=False, separators=(",", ":")
-        ) + "\n"
-        projection_bodies.add(projection_body)
-        assert source.body_heading not in projection_body
-        assert projection_body not in report_text
-    assert "metadata-projections" not in report_text
+    assert all(record["verdict"] == "PASS" for record in claude_records)
     assert all(
         record["argv_safety_flags"]
         == [
             "-p",
-            "--output-format=text",
+            "--output-format=stream-json",
+            "--verbose",
             "--tools=",
             "--no-session-persistence",
             "--setting-sources=project",
-            "--append-system-prompt",
         ]
         for record in claude_records
     )
-    for argv, cwd, _ in fake.calls:
-        if argv[0] == "fake-claude" and argv[-1].startswith("/"):
-            appended_projection = argv[argv.index("--append-system-prompt") + 1]
-            assert appended_projection in projection_bodies
-            assert not Path(appended_projection).is_absolute()
-        elif argv[0] in {"fake-agent", "fake-omp"}:
-            assert "--append-system-prompt" not in argv
-        if argv[0].startswith("fake-"):
-            assert not cwd.parent.exists()
-
-
-def test_metadata_projection_creation_binds_to_the_immutable_snapshot_hash(
-    tmp_path: Path,
-) -> None:
-    expected = _metadata_projection_expected(tmp_path)
-    (expected.source / "SKILL.md").write_text(
-        "---\nname: analysis\ndescription: changed after hash\n---\n# Exact slash body H1\n",
-        encoding="utf-8",
-    )
-    projection_root = tmp_path / "metadata-projections"
-    projection_root.mkdir()
-
-    assert run_skill_discovery._create_metadata_projection(expected, projection_root) is None
-
-
-@pytest.mark.parametrize("target_kind", ("symlink", "directory"))
-def test_metadata_projection_creation_rejects_untrusted_nonregular_targets(
-    tmp_path: Path, target_kind: str
-) -> None:
-    expected = _metadata_projection_expected(tmp_path)
-    projection_root = tmp_path / "metadata-projections"
-    projection_root.mkdir()
-    target = projection_root / "analysis.json"
-    if target_kind == "symlink":
-        target.symlink_to(tmp_path / "outside")
-    else:
-        target.mkdir()
-
-    assert run_skill_discovery._create_metadata_projection(expected, projection_root) is None
-
-
-def test_metadata_projection_creation_fails_closed_when_write_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    expected = _metadata_projection_expected(tmp_path)
-    projection_root = tmp_path / "metadata-projections"
-    projection_root.mkdir()
-
-    def reject_write(_fd: int, _data: bytes) -> int:
-        raise OSError("write denied")
-
-    monkeypatch.setattr(run_skill_discovery.os, "write", reject_write)
-
-    assert run_skill_discovery._create_metadata_projection(expected, projection_root) is None
+    for skill, source in expected.items():
+        init = fake.claude_init_events[skill]
+        assert init["skills"] == [skill]
+        assert init["slash_commands"] == [skill]
+        assert init["tools"] == []
+        assert fake.workspace_skills[("claude", skill)] == (
+            source.source_sha256,
+            (source.name, source.description, source.body_heading),
+        )
+    for argv, cwd in claude_calls:
+        assert argv[-1].count("/") == 1
+        assert "\n" not in argv[-1]
+        assert "--append-system-prompt" not in argv
+        assert not cwd.parent.exists()
+    assert "host-native-session-id" not in report_text
+    assert all(str(init["cwd"]) not in report_text for init in fake.claude_init_events.values())
+    assert "MetadataProjection" not in runner_source
+    assert "_materialize_metadata_projections" not in runner_source
+    assert "--append-system-prompt" not in runner_source
 
 
 @pytest.mark.parametrize(
-    "change",
-    ("missing", "mutated", "symlink", "nonregular", "unreadable"),
+    ("scenario", "diagnostic"),
+    [
+        ("missing-init", "claude_init_missing"),
+        ("duplicate-init", "claude_init_duplicate"),
+        ("malformed", "claude_stream_malformed"),
+        ("duplicate-json-key", "claude_stream_malformed"),
+        ("absent-name", "claude_skill_not_registered"),
+        ("duplicate-name", "claude_skill_not_registered"),
+        ("malformed-arrays", "claude_init_invalid"),
+        ("non-string-arrays", "claude_init_invalid"),
+        ("nonempty-tools", "claude_init_tools_not_empty"),
+        ("missing-result", "claude_result_missing"),
+        ("failed-result", "claude_result_failed"),
+    ],
 )
-def test_claude_discovery_rejects_changed_projection_before_process_launch(
-    tmp_path: Path, change: str
-) -> None:
-    expected = _metadata_projection_expected(tmp_path)
-    projection_root = tmp_path / "metadata-projections"
-    projection_root.mkdir()
-    projection = run_skill_discovery._create_metadata_projection(expected, projection_root)
-    assert projection is not None
-    if change == "missing":
-        projection.path.unlink()
-    elif change == "mutated":
-        projection.path.write_text('{"name":"mutated","description":"mutated"}\n', encoding="utf-8")
-    elif change == "symlink":
-        projection.path.unlink()
-        projection.path.symlink_to(tmp_path / "outside")
-    elif change == "nonregular":
-        projection.path.unlink()
-        projection.path.mkdir()
-    else:
-        projection.path.chmod(0)
-    calls: list[list[str]] = []
-
-    def unexpected_process(
-        argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int
-    ) -> DiscoveryProcessResult:
-        calls.append(argv)
-        return DiscoveryProcessResult(0, "", "", 0.01)
-
-    record = run_skill_discovery._discovery_record(
-        runtime="claude",
-        preflight=run_skill_discovery.HostPreflight(
-            "claude", "fake-claude", "fake 1.0", True, "", 0
-        ),
-        expected=expected,
-        model="sonnet",
-        install_status="PASS",
-        workspace=tmp_path / "workspace",
-        env={},
-        timeout_sec=1,
-        process_runner=unexpected_process,
-        metadata_projection=projection,
-    )
-
-    assert calls == []
-    assert record["verdict"] == "FAIL"
-    assert record["diagnostic"] == "metadata_projection_changed"
-
-
-def test_claude_discovery_projection_error_precedes_preflight_blocking(
+def test_skill_discovery_rejects_invalid_claude_native_event_streams(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: str,
+    diagnostic: str,
 ) -> None:
-    expected = _metadata_projection_expected(tmp_path)
-
-    record = run_skill_discovery._discovery_record(
-        runtime="claude",
-        preflight=run_skill_discovery.HostPreflight(
-            "claude", "fake-claude", "", False, "host_timeout", 124
-        ),
-        expected=expected,
-        model="sonnet",
-        install_status="PASS",
-        workspace=tmp_path / "workspace",
-        env={},
-        timeout_sec=1,
-        process_runner=lambda **_: DiscoveryProcessResult(0, "", "", 0.01),
-        metadata_projection=None,
+    result, fake, _ = _run_fake_discovery(
+        tmp_path, monkeypatch, failure=("claude", "analysis", scenario)
+    )
+    record = next(
+        record
+        for record in result.discovery_records
+        if record["runtime"] == "claude" and record["skill"] == "analysis"
+    )
+    report_text = result.discovery_report.read_text(encoding="utf-8")
+    claude_cwd = next(
+        cwd
+        for argv, cwd, _ in fake.calls
+        if argv[0] == "fake-claude" and argv[-1] == "/analysis"
     )
 
     assert record["verdict"] == "FAIL"
-    assert record["diagnostic"] == "metadata_projection_changed"
-
-
-def test_claude_discovery_rejects_projection_mutated_during_process(
-    tmp_path: Path,
-) -> None:
-    expected = _metadata_projection_expected(tmp_path)
-    projection_root = tmp_path / "metadata-projections"
-    projection_root.mkdir()
-    projection = run_skill_discovery._create_metadata_projection(expected, projection_root)
-    assert projection is not None
-    calls: list[list[str]] = []
-
-    def mutate_projection(
-        argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int
-    ) -> DiscoveryProcessResult:
-        calls.append(argv)
-        projection.path.write_text(
-            '{"name":"mutated","description":"mutated"}\n', encoding="utf-8"
-        )
-        return DiscoveryProcessResult(23, "", "unredacted provider failure", 0.01)
-
-    record = run_skill_discovery._discovery_record(
-        runtime="claude",
-        preflight=run_skill_discovery.HostPreflight(
-            "claude", "fake-claude", "fake 1.0", True, "", 0
-        ),
-        expected=expected,
-        model="sonnet",
-        install_status="PASS",
-        workspace=tmp_path / "workspace",
-        env={},
-        timeout_sec=1,
-        process_runner=mutate_projection,
-        metadata_projection=projection,
-    )
-
-    assert len(calls) == 1
-    assert record["verdict"] == "FAIL"
-    assert record["diagnostic"] == "metadata_projection_changed"
+    assert record["diagnostic"] == diagnostic
+    assert "host-native-session-id" not in report_text
+    assert str(claude_cwd) not in report_text
 
 def test_skill_discovery_returns_exact_source_fields_for_every_skill(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3257,7 +3126,7 @@ def test_skill_discovery_parses_wf_discovery_literal_description_exactly(
             "FAIL",
             "host_model_unsupported",
         ),
-        (("claude", "analysis", "malformed"), "claude", "FAIL", "malformed_json_response"),
+        (("claude", "analysis", "malformed"), "claude", "FAIL", "claude_stream_malformed"),
         (
             ("agent-skills", "analysis", "unknown"),
             "agent-skills",

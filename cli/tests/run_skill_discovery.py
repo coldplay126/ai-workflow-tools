@@ -87,10 +87,6 @@ class ExpectedSkill:
     source_error: str = ""
 
 
-@dataclass(frozen=True)
-class MetadataProjection:
-    path: Path
-    sha256: str
 
 
 @dataclass(frozen=True)
@@ -479,122 +475,6 @@ def _materialize_expected_skills(
     return snapshots
 
 
-def _regular_file_bytes(path: Path) -> bytes:
-    before = path.lstat()
-    if not stat.S_ISREG(before.st_mode):
-        raise ValueError("metadata projection is not regular")
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    try:
-        opened = os.fstat(fd)
-        if not stat.S_ISREG(opened.st_mode) or (
-            before.st_dev,
-            before.st_ino,
-        ) != (
-            opened.st_dev,
-            opened.st_ino,
-        ):
-            raise ValueError("metadata projection changed while opening")
-        chunks: list[bytes] = []
-        while data := os.read(fd, 65536):
-            chunks.append(data)
-    finally:
-        os.close(fd)
-    after = path.lstat()
-    if not stat.S_ISREG(after.st_mode) or (
-        before.st_dev,
-        before.st_ino,
-    ) != (
-        after.st_dev,
-        after.st_ino,
-    ):
-        raise ValueError("metadata projection changed while reading")
-    return b"".join(chunks)
-
-
-def _expected_snapshot_matches(candidate: ExpectedSkill) -> bool:
-    source_sha256, metadata, _ = _skill_state(candidate.source)
-    return (
-        source_sha256 == candidate.source_sha256
-        and metadata == (candidate.name, candidate.description, candidate.body_heading)
-    )
-
-
-def _write_metadata_projection(path: Path, content: bytes) -> None:
-    fd = os.open(
-        path,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-        0o600,
-    )
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise ValueError("metadata projection is not regular")
-        written = 0
-        while written < len(content):
-            written += os.write(fd, content[written:])
-    finally:
-        os.close(fd)
-
-
-def _metadata_projection_text(projection: MetadataProjection) -> str | None:
-    try:
-        content = _regular_file_bytes(projection.path)
-    except (OSError, ValueError):
-        return None
-    if hashlib.sha256(content).hexdigest() != projection.sha256:
-        return None
-    try:
-        return content.decode("utf-8")
-    except UnicodeDecodeError:
-        return None
-
-
-def _metadata_projection_matches(projection: MetadataProjection) -> bool:
-    return _metadata_projection_text(projection) is not None
-
-
-def _create_metadata_projection(
-    candidate: ExpectedSkill, projection_root: Path
-) -> MetadataProjection | None:
-    try:
-        root_mode = projection_root.lstat().st_mode
-        if not stat.S_ISDIR(root_mode) or stat.S_ISLNK(root_mode):
-            return None
-        if not _expected_snapshot_matches(candidate):
-            return None
-        content = (
-            json.dumps(
-                {"name": candidate.name, "description": candidate.description},
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ).encode("utf-8")
-            + b"\n"
-        )
-        projection = MetadataProjection(
-            projection_root / f"{candidate.name}.json",
-            hashlib.sha256(content).hexdigest(),
-        )
-        _write_metadata_projection(projection.path, content)
-    except (OSError, ValueError):
-        return None
-    return projection if _metadata_projection_matches(projection) else None
-
-
-def _materialize_metadata_projections(
-    expected: Mapping[str, ExpectedSkill], projection_root: Path
-) -> dict[str, MetadataProjection | None]:
-    projections: dict[str, MetadataProjection | None] = {
-        skill: None for skill in expected
-    }
-    try:
-        projection_root.mkdir(mode=0o700)
-        if not stat.S_ISDIR(projection_root.lstat().st_mode):
-            return projections
-    except OSError:
-        return projections
-    for skill, candidate in expected.items():
-        if not candidate.source_error:
-            projections[skill] = _create_metadata_projection(candidate, projection_root)
-    return projections
 
 
 
@@ -794,15 +674,7 @@ def _prompt(runtime: str) -> str:
             '"description":"decoded frontmatter description","body_heading":"exact first Markdown H1"}.'
         )
     if runtime == "claude":
-        return (
-            "Do not call tools, access files, or mutate anything. "
-            "Copy name and description exactly from the injected metadata projection. "
-            "Copy body_heading only from the selected slash Skill body; it must be the exact first Markdown H1 line, "
-            "including the literal leading '# '. "
-            "Encode embedded newlines as JSON escapes. "
-            'Return exactly one JSON object and no prose. Its schema is {"name":"injected metadata name",'
-            '"description":"injected metadata description","body_heading":"exact first slash Skill H1"}.'
-        )
+        raise ValueError("Claude discovery is a host-native registration probe")
     return (
         "Do not call tools, access files, or mutate anything. Read the selected Skill only. "
         "Return the decoded YAML frontmatter scalar values for name and description, excluding YAML syntax "
@@ -821,20 +693,12 @@ def _argv_for(
     binary: str,
     model: str,
     skill: str,
-    prompt: str,
-    *,
-    metadata_projection: str | None,
+    prompt: str | None = None,
 ) -> list[str]:
     if runtime == "claude":
-        if metadata_projection is None:
-            raise ValueError("Claude discovery requires metadata projection")
-        return claude_argv(
-            binary,
-            model,
-            skill,
-            prompt,
-            metadata_projection=metadata_projection,
-        )
+        return claude_argv(binary, model, skill)
+    if prompt is None:
+        raise ValueError("discovery prompt is required")
     builders = {
         "agent-skills": agent_skills_argv,
         "omp": omp_argv,
@@ -857,6 +721,66 @@ def _json_object_no_duplicates(text: str) -> dict[str, object]:
     if not isinstance(parsed, dict):
         raise ValueError("response is not an object")
     return parsed
+
+def _claude_stream_diagnostic(stdout: str, skill: str) -> str:
+    def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        event: dict[str, object] = {}
+        for key, value in pairs:
+            if key in event:
+                raise ValueError("duplicate JSON key")
+            event[key] = value
+        return event
+
+    def reject_constant(_: str) -> object:
+        raise ValueError("invalid JSON constant")
+
+    init: dict[str, object] | None = None
+    result_count = 0
+    for line in stdout.splitlines():
+        if not line.strip():
+            return "claude_stream_malformed"
+        try:
+            event = json.loads(
+                line,
+                object_pairs_hook=reject_duplicates,
+                parse_constant=reject_constant,
+            )
+        except (ValueError, json.JSONDecodeError):
+            return "claude_stream_malformed"
+        if not isinstance(event, dict):
+            return "claude_stream_malformed"
+        if event.get("type") == "system" and event.get("subtype") == "init":
+            if init is not None:
+                return "claude_init_duplicate"
+            init = event
+        if event.get("type") == "result":
+            result_count += 1
+            if (
+                result_count != 1
+                or event.get("subtype") != "success"
+                or event.get("is_error") is not False
+            ):
+                return "claude_result_failed"
+
+    if init is None:
+        return "claude_init_missing"
+    tools = init.get("tools")
+    if tools != []:
+        return "claude_init_tools_not_empty"
+    skills = init.get("skills")
+    slash_commands = init.get("slash_commands")
+    if not (
+        isinstance(skills, list)
+        and isinstance(slash_commands, list)
+        and all(isinstance(name, str) for name in skills)
+        and all(isinstance(name, str) for name in slash_commands)
+    ):
+        return "claude_init_invalid"
+    if skills.count(skill) != 1 or slash_commands.count(skill) != 1:
+        return "claude_skill_not_registered"
+    if result_count != 1:
+        return "claude_result_missing"
+    return ""
 
 
 def _response_diagnostic(stdout: str, expected: ExpectedSkill) -> str:
@@ -887,7 +811,6 @@ def _discovery_record(
     env: dict[str, str],
     timeout_sec: int,
     process_runner: ProcessRunner,
-    metadata_projection: MetadataProjection | None,
 ) -> dict[str, object]:
     record = {
         "runtime": runtime,
@@ -909,15 +832,6 @@ def _discovery_record(
     if expected.source_error:
         record["diagnostic"] = expected.source_error
         return record
-    metadata_projection_text: str | None = None
-    if runtime == "claude":
-        if metadata_projection is not None:
-            metadata_projection_text = _metadata_projection_text(metadata_projection)
-        if metadata_projection_text is None:
-            record["exit_status"] = 78
-            record["verdict"] = "FAIL"
-            record["diagnostic"] = "metadata_projection_changed"
-            return record
     if not preflight.available:
         if preflight.diagnostic == "host_model_unsupported":
             record["verdict"] = "FAIL"
@@ -934,8 +848,7 @@ def _discovery_record(
         preflight.binary,
         model,
         expected.name,
-        _prompt(runtime),
-        metadata_projection=metadata_projection_text,
+        _prompt(runtime) if runtime != "claude" else None,
     )
     completed = _invoke(
         process_runner,
@@ -946,13 +859,6 @@ def _discovery_record(
     )
     record["elapsed_sec"] = completed.elapsed_sec
     record["exit_status"] = completed.returncode
-    if runtime == "claude" and (
-        metadata_projection is None
-        or not _metadata_projection_matches(metadata_projection)
-    ):
-        record["verdict"] = "FAIL"
-        record["diagnostic"] = "metadata_projection_changed"
-        return record
     if completed.error_kind is not None or completed.returncode != 0:
         diagnostic = normalize_host_diagnostic(
             completed.returncode,
@@ -964,7 +870,11 @@ def _discovery_record(
             record["verdict"] = "FAIL"
         record["diagnostic"] = diagnostic
         return record
-    diagnostic = _response_diagnostic(completed.stdout, expected)
+    diagnostic = (
+        _claude_stream_diagnostic(completed.stdout, expected.name)
+        if runtime == "claude"
+        else _response_diagnostic(completed.stdout, expected)
+    )
     if diagnostic:
         record["verdict"] = "FAIL"
         record["diagnostic"] = diagnostic
@@ -1029,9 +939,6 @@ def run_discovery(
         expected = _materialize_expected_skills(
             expected, temporary_root / "skill-snapshots"
         )
-        metadata_projections = _materialize_metadata_projections(
-            expected, temporary_root / "metadata-projections"
-        )
         base_environment = dict(os.environ)
         environments = {
             runtime: build_subscription_environment(
@@ -1081,9 +988,6 @@ def run_discovery(
                 env=environments[runtime],
                 timeout_sec=timeout_sec,
                 process_runner=process_runner,
-                metadata_projection=(
-                    metadata_projections[skill] if runtime == "claude" else None
-                ),
             )
             for runtime in RUNTIMES
             for skill, source in expected.items()

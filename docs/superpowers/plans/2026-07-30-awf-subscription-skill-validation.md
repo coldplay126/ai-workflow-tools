@@ -234,160 +234,65 @@ git commit -m "feat: add subscription Skill runtime contract"
 ### Task 2: Project-Isolated Subscription Discovery
 
 **Files:**
-- Modify: `cli/tests/run_skill_discovery.py:32-156,366-378,506-580,615-791`
-- Modify: `cli/tests/test_skill_pressure_harness.py:1432-1976`
+- Modify: `cli/src/awf/core/skill_subscription.py`
+- Modify: `cli/tests/run_skill_discovery.py`
+- Modify: `cli/tests/test_skill_pressure_harness.py`
 
-- [ ] **Step 1: Write failing discovery contract tests**
+- [ ] **Step 1: Write failing Claude host-native registration tests**
 
-Update the fake discovery process to retain each call's `cwd` and environment. Add assertions covering the exact command shapes:
+Add exact command-shape assertions for Claude:
 
 ```python
-def test_skill_discovery_uses_subscription_safe_project_argv() -> None:
-    projection = '{"name":"wf-status","description":"decoded source description"}\n'
-    prompt = "describe the skill"
-    assert claude_argv(
-        "claude",
-        "sonnet",
-        "wf-status",
-        prompt,
-        metadata_projection=projection,
-    ) == [
-        "claude", "-p", "--output-format", "text", "--tools", "",
-        "--no-session-persistence", "--setting-sources", "project",
-        "--append-system-prompt", projection,
-        "--model", "sonnet", "/wf-status\ndescribe the skill",
-    ]
-    assert agent_skills_argv("codex", "gpt-5.4", "wf-status", prompt) == [
-        "codex", "exec", "--ephemeral", "--sandbox", "read-only",
-        "--skip-git-repo-check", "--model", "gpt-5.4",
-        "$wf-status\ndescribe the skill",
-    ]
-    assert omp_argv("omp", "openai-codex/gpt-5.6-sol", "wf-status", prompt) == [
-        "omp", "-p", "--mode=text", "--tools=read", "--no-session",
-        "--no-extensions", "--model=openai-codex/gpt-5.6-sol",
-        "--skills=wf-status", prompt,
-    ]
+assert claude_argv("claude", "sonnet", "wf-status") == [
+    "claude", "-p", "--output-format", "stream-json", "--verbose",
+    "--tools", "", "--no-session-persistence", "--setting-sources",
+    "project", "--model", "sonnet", "/wf-status",
+]
 ```
 
-Add an end-to-end fake-run test asserting:
+Keep Codex and OMP argv and decoded-metadata/H1 JSON-response assertions unchanged. Update the fake Claude host to emit realistic NDJSON containing a `system/init` event followed by a successful `result` event. Prove that all 15 Claude invocations pass only when the expected name occurs exactly once in both native `skills` and `slash_commands`, with `tools: []`.
 
-- all 45 model invocations use one temporary project workspace as `cwd`, not the repository root
-- install targets are `<workspace>/.claude/skills`, `<workspace>/.agents/skills`, and `<workspace>/.omp/skills`
-- Claude sees the captured original home/config only
-- Codex sees a temporary home plus the captured original `CODEX_HOME`
-- OMP sees a temporary home plus the captured original `PI_CODING_AGENT_DIR`
-- `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` are absent in every model invocation
-- no credential location appears in install or discovery report JSON
-- temporary workspace and home are gone after `run_discovery` returns
-- every Claude argv supplies verified temporary-projection JSON text through `--append-system-prompt`, while Codex and OMP command shapes remain unchanged
-- each projection is regular JSON containing only decoded name/description, is outside the project Skill snapshot, has no H1, and is absent after cleanup
-- the Claude fake combines name/description from that projection with body_heading from the selected slash Skill body
-- projection creation binds to the immutable snapshot hash; missing, unreadable, symlinked, nonregular, write-failed, or pre/post-mutation projections fail as `FAIL metadata_projection_changed`
-- discovery reports retain the append-system-prompt safety flag but contain neither projection paths nor projection bodies
-
-Add failure tests proving auth and timeout diagnostics remain `BLOCKED`, while `host_model_unsupported` is `FAIL`, and no raw stderr appears in a written report.
+Add failure cases for malformed NDJSON, duplicate keys, missing or duplicate init events, absent or duplicate names, malformed/non-string name arrays, nonempty tools, and missing/failed terminal results. Assert stable safe diagnostics and verify reports retain no raw stdout, session ID, cwd, or path.
 
 - [ ] **Step 2: Run discovery-focused tests and verify RED**
 
 Run:
 
 ```bash
-uv run --project cli pytest cli/tests/test_skill_pressure_harness.py -q -k 'skill_discovery'
+uv run --project cli pytest cli/tests/test_skill_pressure_harness.py -q -k 'skill_discovery or claude_discovery'
 ```
 
-Expected failures: old home-level roots, old OMP `--no-tools` argv, missing Claude setting-source or metadata-projection flag, repository `cwd`, mutable/unbound projection acceptance, and raw/legacy diagnostics.
+Expected failures: the old text output/metadata-projection invocation, prompt suffix, missing verbose flag, and missing host-native event validation.
 
-- [ ] **Step 3: Move discovery installation into a temporary project workspace**
+- [ ] **Step 3: Replace projection extraction with host-native discovery**
 
-In `run_skill_discovery.py`:
+Use the shared Claude helper to emit exactly:
 
-```python
-PROJECT_SKILL_ROOTS = {
-    "claude": ".claude/skills",
-    "agent-skills": ".agents/skills",
-    "omp": ".omp/skills",
-}
+```text
+claude -p --output-format stream-json --verbose --tools '' --no-session-persistence --setting-sources project --model MODEL /SKILL
 ```
 
-Capture `SubscriptionAuthContext` before creating the temporary directory. Inside it, create `home/` and `workspace/`, install all candidate links beneath `workspace`, and use `workspace` as the actual discovery process `cwd`. Keep installer execution and report publication rooted at the repository.
+Update required and safety flags canonically. Remove `MetadataProjection`, projection files and hashes, all projection diagnostics, and all `--append-system-prompt` handling.
 
-Replace `_base_environment` with `build_subscription_environment`. Accept an optional `auth_context` in `run_discovery` for deterministic tests; production defaults to `SubscriptionAuthContext.capture()`.
+The projection approach is intentionally rejected: extraction instructions were correctly classified as prompt injection by `/wf-discovery` and `/wf-reset`; a direct live Claude probe proved that the project-only native `system/init` event reports both `skills` and `slash_commands` for `/wf-reset`.
 
-After materializing each immutable snapshot, create a separate `metadata-projections/<skill>.json` file beneath the temporary validation root, not under `workspace` or `skill-snapshots`. Before writing it, verify the regular snapshot tree's hash and decoded `(name, description, body_heading)` against its `ExpectedSkill`; write only deterministic decoded `name`/`description` JSON with `O_EXCL|O_NOFOLLOW`, then verify its regular bytes and hash. A creation error yields no projection and a Claude-only `FAIL metadata_projection_changed`.
+Parse Claude stdout as strict duplicate-key-rejecting NDJSON. Require exactly one init event, exact empty tools, exactly one expected Skill in each all-string registration array, exactly one successful result event, and exit zero. Persist only stable diagnostics.
 
-- [ ] **Step 4: Implement the three exact host command contracts**
+- [ ] **Step 4: Preserve the structural snapshot proof**
 
-Make these changes:
+Retain immutable source snapshot materialization, full source-directory hashing, decoded source name/description/H1 extraction, exact symlink installation checks, and pre/post snapshot checks. The native event proves host registration and invocation; the verified snapshot proves the source metadata bound to that registration. Claude must not self-report source metadata.
 
-- Claude: add `--setting-sources project` and `--append-system-prompt <verified-projection-text>`; retain no tools and no session persistence. The projection parameter is explicit in the shared Claude argv helper, not a global.
-- Codex: retain `$<skill>`, ephemeral execution, and read-only sandbox; call `require_subscription_model` so the OMP selector cannot reach Codex.
-- OMP: replace `--no-tools` with `--tools=read`, add `--no-extensions`, retain the one-Skill allowlist, and change only the OMP prompt to permit reading the selected Skill.
-
-Keep Codex and OMP on the decoded-YAML/full-file metadata contract:
-
-```python
-metadata_contract = (
-    "Return the decoded YAML frontmatter scalar values for name and description, excluding YAML syntax "
-    "such as surrounding quote delimiters, block indicators, and indentation. "
-    "Preserve each decoded scalar's content and embedded newlines exactly; do not translate, summarize, "
-    "or normalize whitespace. "
-    "body_heading is the exact source Markdown H1 line, including the literal leading '# '. "
-    "Encode embedded newlines as JSON escapes. "
-    'Return exactly one JSON object and no prose. Its schema is {"name":"decoded frontmatter name",'
-    '"description":"decoded frontmatter description","body_heading":"exact first Markdown H1"}.'
-)
-omp_prompt = (
-    "Use only the read tool to load the selected Skill. Do not read any other path or mutate anything. "
-    + metadata_contract
-)
-codex_prompt = (
-    "Do not call tools, access files, or mutate anything. Read the selected Skill only. "
-    + metadata_contract
-)
-```
-
-Claude must remain no-tool and use this separate two-source contract:
-
-```python
-claude_prompt = (
-    "Do not call tools, access files, or mutate anything. "
-    "Copy name and description exactly from the injected metadata projection. "
-    "Copy body_heading only from the selected slash Skill body; it must be the exact first Markdown H1 line, "
-    "including the literal leading '# '. "
-    "Encode embedded newlines as JSON escapes. "
-    'Return exactly one JSON object and no prose. Its schema is {"name":"injected metadata name",'
-    '"description":"injected metadata description","body_heading":"exact first slash Skill H1"}.'
-)
-```
-
-Verify the projection's regular bytes/hash immediately before and after each Claude process. Any missing, mutated, or unreadable projection overrides host output with `FAIL metadata_projection_changed`. Store only `--append-system-prompt` in safety flags; never serialize the projection's path or body.
-
-- [ ] **Step 5: Normalize and classify host failures before report creation**
-
-Set `auth_mode` to `subscription` in each discovery record. Replace raw regex branching with `normalize_host_diagnostic`. Use this verdict mapping:
-
-```python
-BLOCKED_DIAGNOSTICS = {
-    "host_timeout",
-    "host_auth_unavailable",
-    "host_subscription_expired",
-    "host_provider_exit",
-}
-```
-
-`host_model_unsupported` and response/schema mismatches are `FAIL`. Persist only the normalized diagnostic.
-
-- [ ] **Step 6: Run discovery-focused tests and verify GREEN**
+- [ ] **Step 5: Run discovery-focused tests and verify GREEN**
 
 Run the Step 2 command again.
 
-Expected: all discovery-focused tests pass, including 45 unique identities and cleanup assertions.
+Expected: all discovery-focused tests pass, including 45 unique identities, no projection scaffolding, source-snapshot binding, privacy assertions, and unchanged Codex/OMP contracts.
 
-- [ ] **Step 7: Commit Task 2**
+- [ ] **Step 6: Commit Task 2**
 
 ```bash
-git add cli/tests/run_skill_discovery.py cli/tests/test_skill_pressure_harness.py
-git commit -m "feat: reuse subscriptions for isolated Skill discovery"
+git add cli/src/awf/core/skill_subscription.py cli/tests/run_skill_discovery.py cli/tests/test_skill_pressure_harness.py docs/superpowers/specs/2026-07-30-awf-skill-validation-design.md docs/superpowers/plans/2026-07-30-awf-subscription-skill-validation.md
+git commit -m "feat: verify Claude Skill registration events"
 ```
 
 ### Task 3: No-Tool OMP Skill Injection and Evidence Binding

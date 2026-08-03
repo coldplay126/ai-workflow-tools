@@ -21,19 +21,19 @@ CONFIG_ENV_KEYS = ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR")
 _CLAUDE_DISCOVERY_REQUIRED_FLAGS = (
     "-p",
     "--output-format",
+    "--verbose",
     "--tools",
     "--no-session-persistence",
     "--setting-sources",
-    "--append-system-prompt",
     "--model",
 )
 _CLAUDE_DISCOVERY_SAFETY_FLAGS = (
     "-p",
-    "--output-format=text",
+    "--output-format=stream-json",
+    "--verbose",
     "--tools=",
     "--no-session-persistence",
     "--setting-sources=project",
-    "--append-system-prompt",
 )
 
 _EXPIRED_RE = re.compile(r"refresh token expired|subscription[^\n]*expired", re.IGNORECASE)
@@ -132,31 +132,21 @@ def require_subscription_model(runtime: str, model: str) -> None:
         raise ValueError(f"subscription model mismatch for {runtime}: expected {expected}")
 
 
-def claude_discovery_argv(
-    binary: str,
-    model: str,
-    skill: str,
-    prompt: str,
-    *,
-    metadata_projection: str,
-) -> list[str]:
-    if not isinstance(metadata_projection, str):
-        raise TypeError("metadata projection must be text")
+def claude_discovery_argv(binary: str, model: str, skill: str) -> list[str]:
     return [
         binary,
         "-p",
         "--output-format",
-        "text",
+        "stream-json",
+        "--verbose",
         "--tools",
         "",
         "--no-session-persistence",
         "--setting-sources",
         "project",
-        "--append-system-prompt",
-        metadata_projection,
         "--model",
         model,
-        f"/{skill}\n{prompt}",
+        f"/{skill}",
     ]
 
 

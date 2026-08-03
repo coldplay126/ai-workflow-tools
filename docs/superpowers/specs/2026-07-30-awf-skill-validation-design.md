@@ -417,15 +417,15 @@ The provider runtimes may still rotate an OAuth token or write their normal auth
 - Preserve the existing Claude subscription authentication context.
 - Install the candidate snapshot under `<workspace>/.claude/skills/<skill>`.
 - Start Claude in `<workspace>` with `--setting-sources project`.
-- Use `--tools ""` and `--no-session-persistence`.
-- Invoke the selected Skill explicitly as `/<skill>`.
-- Claude slash invocation injects only the selected Skill body beginning at its H1; it does not inject YAML frontmatter. For every immutable Skill snapshot, create a separate regular metadata projection beneath the temporary validation root and outside the project Skill snapshot.
-- Read and hash-verify the projection immediately before launch, then pass its verified JSON text through `--append-system-prompt <projection-text>` while retaining `--tools ""`; do not pass the temporary path, enable `Read`, or enable any other tool.
-- The projection contains only the exact decoded `name` and `description` as deterministic JSON. It contains no body H1, credential data, or filesystem path data.
-- Bind creation to the snapshotted `ExpectedSkill`: immediately verify the regular snapshot tree's source hash and its decoded name, description, and H1 before writing the projection. Symlink, nonregular, write, or hash failures are fail-closed.
-- Immediately before and after every Claude process, re-read the projection as a regular file and require its byte hash to match the creation hash. A missing, unreadable, or changed projection is the harness-defect `FAIL` diagnostic `metadata_projection_changed`, never `PASS`, `BLOCKED`, or a raw provider error.
-- Claude's prompt must copy `name` and `description` only from the injected metadata projection and must copy `body_heading` only from the selected slash Skill body, including its exact leading `# `.
-- Reports record `--append-system-prompt` only as a safety flag; they never persist a projection path or projection body.
+- Invoke every candidate using this exact no-tool host-native command shape:
+  ```text
+  claude -p --output-format stream-json --verbose --tools '' --no-session-persistence --setting-sources project --model sonnet /<skill>
+  ```
+- Do not append a user prompt, identity suffix, system prompt, metadata projection, temporary path, or any model-readable source metadata.
+- Parse stdout strictly as NDJSON with duplicate-key rejection. Require exactly one `{"type":"system","subtype":"init"}` event; require `tools` to be exactly `[]`; and require the expected name exactly once in each all-string `skills` and `slash_commands` array.
+- Require exactly one successful terminal `result` event with `subtype: "success"` and `is_error: false`, as well as process exit status zero. Malformed NDJSON, duplicate keys, missing or duplicate init events, invalid arrays, unexpected tools, incorrect registration, or missing/failed terminal events are fail-closed with stable normalized diagnostics. Raw stdout, session identifiers, working directories, and paths are never persisted.
+- The prior metadata-projection extraction approach is rejected. Its instructions were correctly treated as prompt injection by `/wf-discovery` and `/wf-reset`, whereas Claude's native init event directly reports registered Skill and slash-command names.
+- Preserve immutable snapshot materialization, full source-directory hashing, decoded source `name`/`description`/H1 extraction, exact temporary project-link verification, and pre/post source snapshot checks. The harness records those structural source facts directly; Claude does not self-report them.
 - Do not copy or link the existing Claude config directory into the workspace.
 
 #### Agent Skills through Codex
@@ -449,7 +449,7 @@ The provider runtimes may still rotate an OAuth token or write their normal auth
 
 #### Claude discovery identity proof
 
-Claude discovery proves identity from two immutable inputs: the injected metadata projection supplies decoded `name` and `description`, while the selected project-root slash Skill body supplies `body_heading`. The projection's creation-time snapshot-hash/metadata check and its pre/post-launch byte-hash checks bind those inputs to the same candidate without granting filesystem access to the model.
+Claude discovery uses two layers of proof. First, the no-tool project-only native init event proves that the host registered the exact expected name in both `skills` and `slash_commands`. Second, immutable snapshot materialization and exact symlink installation prove that the registered project root is the hash-bound source tree whose decoded `name`, `description`, and H1 are recorded. This avoids model self-reporting and binds source metadata structurally to the host-native registration proof.
 
 OMP omits the Skill discovery prompt when no read tool is available. Therefore one OMP command shape cannot prove both host discovery and no-tool field behavior.
 
@@ -486,21 +486,20 @@ Reports may record the host, model identifier, command safety flags, normalized 
 
 ### 15.6 Required regression coverage
 
-Focused tests must prove:
-
 1. credential locations are referenced but never copied, linked, hashed, serialized, or directly mutated by harness code
 2. each host runs from the temporary project workspace and selects the project Skill
-3. Claude disables user settings and mutation tools while preserving subscription authentication
-4. Claude uses a temporary regular metadata projection through `--append-system-prompt`, without `Read`; the fake live shape combines projection name/description with slash-body H1
-5. Claude rejects a missing, unreadable, symlinked, nonregular, mutated, write-failed, or source-hash-unbound projection as `FAIL metadata_projection_changed` before or after process launch
-6. Claude records only the append-system-prompt safety flag, never a projection path or body, and removes the projection with the temporary validation root
-7. Codex receives `gpt-5.4`, an ephemeral session, a read-only sandbox, and the effective original `CODEX_HOME`
-8. OMP discovery exposes only `read`
-9. OMP baseline exposes neither Skills nor tools
-10. OMP with-Skill injects the exact immutable `SKILL.md`, verifies its file hash, and separately preserves the full Skill snapshot hash
-11. auth/provider errors are normalized before persistence
-12. cleanup can remove only paths created beneath the temporary validation root
-13. a changed source or snapshot between execution and publication blocks evidence
+3. Claude uses the exact project-only, no-tool `stream-json`/`--verbose` invocation and has no user prompt, identity suffix, metadata projection, append-system-prompt, or filesystem tool
+4. a realistic Claude init/result NDJSON stream passes for every fake Claude invocation, while Codex and OMP retain their existing decoded-metadata JSON contracts unchanged
+5. Claude rejects malformed NDJSON, duplicate JSON keys, missing or duplicate init events, absent or duplicate registered names, malformed/non-string name arrays, nonempty tools, and missing or failed terminal results with stable normalized diagnostics
+6. Claude reports never contain raw event stdout, session identifiers, temporary working directories, or paths
+7. immutable snapshot materialization, full directory hashes, decoded source `name`/`description`/H1 records, exact project-link installation, and source pre/post checks bind source metadata to the registered snapshot
+8. Codex receives `gpt-5.4`, an ephemeral session, a read-only sandbox, and the effective original `CODEX_HOME`
+9. OMP discovery exposes only `read`
+10. OMP baseline exposes neither Skills nor tools
+11. OMP with-Skill injects the exact immutable `SKILL.md`, verifies its file hash, and separately preserves the full Skill snapshot hash
+12. auth/provider errors are normalized before persistence
+13. cleanup can remove only paths created beneath the temporary validation root
+14. a changed source or snapshot between execution and publication blocks evidence
 
 Subscription-backed smoke tests are workstation acceptance tests, not default CI tests. Deterministic CI continues to use fake hosts and temporary credential-free homes.
 
