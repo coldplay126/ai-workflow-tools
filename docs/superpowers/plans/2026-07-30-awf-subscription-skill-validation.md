@@ -539,9 +539,7 @@ export AWF_SKILL_BATCH_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 uv run --project cli python cli/tests/run_skill_deterministic.py \
   --batch-id "$AWF_SKILL_BATCH_ID" \
   --repo-root . \
-  --timeout-sec 600 \
-  --write-result \
-  --json
+  --timeout-sec 600
 ```
 
 Expected: exit 0 and one current-batch deterministic report with `exit_status: 0`.

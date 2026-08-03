@@ -11,6 +11,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "cli" / "src"))
 
 from awf.core.skill_pressure import (  # noqa: E402
+    DETERMINISTIC_PYTEST_ARGV,
+    DETERMINISTIC_SOURCE_FILES,
     EvidenceError,
     deterministic_report_path,
     sha256_file,
@@ -18,30 +20,6 @@ from awf.core.skill_pressure import (  # noqa: E402
 )
 
 
-DETERMINISTIC_TESTS = (
-    "cli/tests/test_skill_contract_matrix.py",
-    "cli/tests/test_skill_runtime_install.py",
-    "cli/tests/test_skill_pressure_harness.py",
-    "cli/tests/test_docs_semantic_audit.py",
-    "cli/tests/test_analysis_spec.py",
-    "cli/tests/test_workflow_status.py",
-    "cli/tests/test_wf_commands.py",
-    "cli/tests/test_release_worktree_smoke.py",
-)
-DETERMINISTIC_PYTEST_ARGV = (
-    "uv",
-    "run",
-    "--project",
-    "cli",
-    "pytest",
-    *DETERMINISTIC_TESTS,
-    "-q",
-)
-DETERMINISTIC_SOURCE_FILES = (
-    *DETERMINISTIC_TESTS,
-    "cli/tests/fixtures/skill-validation-matrix.v1.json",
-    "cli/src/awf/core/skill_pressure.py",
-)
 
 
 def _utc_now() -> str:
