@@ -233,14 +233,45 @@ def test_subscription_environment_builds_isolated_copies(tmp_path: Path) -> None
 def test_subscription_environments_reference_only_the_required_store(tmp_path: Path) -> None:
     auth = _subscription_auth(tmp_path)
     temporary_home = tmp_path / "run" / "home"
+    credential_variable_names = (
+        "ANTHROPIC_API_KEY",
+        "lowercase_api_key",
+        "MiXeD_ApI_kEy",
+        "GH_TOKEN",
+        "github_token",
+        "Npm_Token",
+        "ci_job_token",
+        "service_access_token",
+        "SERVICE_REFRESH_TOKEN",
+        "Service_Auth_Token",
+        "service_id_token",
+        "claude_code_oauth_token",
+        "generic_token",
+        "database_password",
+        "MiXeD_SeCrEt",
+        "service_credentials",
+        "aws_access_key_id",
+        "AWS_SECRET_ACCESS_KEY",
+        "Aws_SeSsIoN_ToKeN",
+        "google_application_credentials",
+        "AWS_WEB_IDENTITY_TOKEN_FILE",
+        "aws_container_credentials_relative_uri",
+        "SSh_AuTh_SoCk",
+        "git_askpass",
+        "SSH_ASKPASS",
+    )
     base = {
         "HOME": "/wrong",
         "CLAUDE_CONFIG_DIR": "/wrong/claude",
+        "cLaUdE_cOnFiG_dIr": "/wrong/claude-mixed",
         "CODEX_HOME": "/wrong/codex",
         "PI_CODING_AGENT_DIR": "/wrong/omp",
-        "ANTHROPIC_API_KEY": "must-be-removed",
-        "OPENAI_API_KEY": "must-be-removed",
         "PATH": "/bin",
+        "LANG": "en_US.UTF-8",
+        "LC_ALL": "en_US.UTF-8",
+        "HTTPS_PROXY": "http://proxy.invalid:8080",
+        "TOKENIZERS_PARALLELISM": "false",
+        **dict.fromkeys(credential_variable_names, "credential-value"),
     }
 
     claude = build_subscription_environment("claude", auth, temporary_home, base)
@@ -258,8 +289,12 @@ def test_subscription_environments_reference_only_the_required_store(tmp_path: P
     assert "CLAUDE_CONFIG_DIR" not in omp and "CODEX_HOME" not in omp
     for environment in (claude, codex, omp):
         assert environment["PATH"] == "/bin"
-        assert "ANTHROPIC_API_KEY" not in environment
-        assert "OPENAI_API_KEY" not in environment
+        assert environment["LANG"] == "en_US.UTF-8"
+        assert environment["LC_ALL"] == "en_US.UTF-8"
+        assert environment["HTTPS_PROXY"] == "http://proxy.invalid:8080"
+        assert environment["TOKENIZERS_PARALLELISM"] == "false"
+        assert not set(credential_variable_names).intersection(environment)
+        assert "cLaUdE_cOnFiG_dIr" not in environment
 
 
 def test_subscription_models_are_pinned_and_reject_invalid_selection() -> None:
@@ -2703,6 +2738,20 @@ class _FakeDiscoveryProcess:
                     "is_error": True,
                     "session_id": "host-native-session-id",
                 }
+            elif scenario == "trailing-event":
+                trailing_event = {
+                    "type": "assistant",
+                    "subtype": "message",
+                    "session_id": "trailing-session-id",
+                    "cwd": "/trailing/secret/path",
+                }
+                self.claude_init_events[skill] = init
+                return DiscoveryProcessResult(
+                    0,
+                    f"{json.dumps(init)}\n{json.dumps(result)}\n{json.dumps(trailing_event)}",
+                    "",
+                    0.01,
+                )
             self.claude_init_events[skill] = init
             return DiscoveryProcessResult(
                 0, f"{json.dumps(init)}\n{json.dumps(result)}", "", 0.01
@@ -3028,6 +3077,7 @@ def test_skill_discovery_claude_binds_native_registration_to_immutable_snapshot(
         ("nonempty-tools", "claude_init_tools_not_empty"),
         ("missing-result", "claude_result_missing"),
         ("failed-result", "claude_result_failed"),
+        ("trailing-event", "claude_result_not_terminal"),
     ],
 )
 def test_skill_discovery_rejects_invalid_claude_native_event_streams(
@@ -3055,6 +3105,9 @@ def test_skill_discovery_rejects_invalid_claude_native_event_streams(
     assert record["diagnostic"] == diagnostic
     assert "host-native-session-id" not in report_text
     assert str(claude_cwd) not in report_text
+    if scenario == "trailing-event":
+        assert "trailing-session-id" not in report_text
+        assert "/trailing/secret/path" not in report_text
 
 def test_skill_discovery_returns_exact_source_fields_for_every_skill(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

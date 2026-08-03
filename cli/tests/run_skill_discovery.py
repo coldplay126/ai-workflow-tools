@@ -736,6 +736,7 @@ def _claude_stream_diagnostic(stdout: str, skill: str) -> str:
 
     init: dict[str, object] | None = None
     result_count = 0
+    last_event_is_success_result = False
     for line in stdout.splitlines():
         if not line.strip():
             return "claude_stream_malformed"
@@ -749,6 +750,7 @@ def _claude_stream_diagnostic(stdout: str, skill: str) -> str:
             return "claude_stream_malformed"
         if not isinstance(event, dict):
             return "claude_stream_malformed"
+        last_event_is_success_result = False
         if event.get("type") == "system" and event.get("subtype") == "init":
             if init is not None:
                 return "claude_init_duplicate"
@@ -761,6 +763,7 @@ def _claude_stream_diagnostic(stdout: str, skill: str) -> str:
                 or event.get("is_error") is not False
             ):
                 return "claude_result_failed"
+            last_event_is_success_result = True
 
     if init is None:
         return "claude_init_missing"
@@ -780,6 +783,8 @@ def _claude_stream_diagnostic(stdout: str, skill: str) -> str:
         return "claude_skill_not_registered"
     if result_count != 1:
         return "claude_result_missing"
+    if not last_event_is_success_result:
+        return "claude_result_not_terminal"
     return ""
 
 

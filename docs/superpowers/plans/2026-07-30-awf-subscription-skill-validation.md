@@ -276,7 +276,7 @@ Update required and safety flags canonically. Remove `MetadataProjection`, proje
 
 The projection approach is intentionally rejected: extraction instructions were correctly classified as prompt injection by `/wf-discovery` and `/wf-reset`; a direct live Claude probe proved that the project-only native `system/init` event reports both `skills` and `slash_commands` for `/wf-reset`.
 
-Parse Claude stdout as strict duplicate-key-rejecting NDJSON. Require exactly one init event, exact empty tools, exactly one expected Skill in each all-string registration array, exactly one successful result event, and exit zero. Persist only stable diagnostics.
+Parse Claude stdout as strict duplicate-key-rejecting NDJSON. Require exactly one init event, exact empty tools, exactly one expected Skill in each all-string registration array, exactly one successful result event that is the final nonblank event, and exit zero. Persist only stable diagnostics.
 
 - [ ] **Step 4: Preserve the structural snapshot proof**
 
