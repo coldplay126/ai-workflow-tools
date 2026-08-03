@@ -8,7 +8,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
@@ -540,6 +540,7 @@ class SourceBundle(Mapping[str, object]):
     snapshots: Mapping[str, object]
     matrix: SkillMatrix
     reports: Mapping[str, object]
+    repo_root: Path
 
     def __getitem__(self, key: str) -> object:
         return self.references[key]
@@ -1222,18 +1223,89 @@ def _load_json_snapshot(path: str | Path, *, label: str) -> _ReportSnapshot:
     )
 
 
-def _report_reference(snapshot: _ReportSnapshot) -> Mapping[str, str]:
-    return MappingProxyType({"path": str(snapshot.path), "sha256": snapshot.sha256})
+_SOURCE_REFERENCE_ROOT = (".awf-operations", "skill-pressure")
 
 
-def _verify_snapshot_current(snapshot: _ReportSnapshot, *, label: str) -> None:
-    if snapshot.path.is_symlink():
+def _relative_source_reference(root: Path, path: Path) -> str:
+    _assert_no_symlink_components(root, path)
+    if path.is_symlink() or not path.is_file():
+        raise EvidenceError("source report must be a regular file")
+    relative = path.relative_to(root)
+    if relative.parts[:2] != _SOURCE_REFERENCE_ROOT:
+        raise EvidenceError("source report must be within .awf-operations/skill-pressure")
+    return relative.as_posix()
+
+
+def _report_reference(root: Path, snapshot: _ReportSnapshot) -> Mapping[str, str]:
+    return MappingProxyType(
+        {
+            "path": _relative_source_reference(root, snapshot.path),
+            "sha256": snapshot.sha256,
+        }
+    )
+
+
+def _source_reference_path(
+    root: Path, value: object, *, label: str
+) -> tuple[Path, str]:
+    if not isinstance(value, str) or not value or "\\" in value:
+        raise EvidenceError(f"{label} source reference must be a normalized POSIX path")
+    relative = PurePosixPath(value)
+    normalized = relative.as_posix()
+    if (
+        relative.is_absolute()
+        or ".." in relative.parts
+        or value != normalized
+        or normalized == "."
+    ):
+        raise EvidenceError(f"{label} source reference must be a normalized POSIX path")
+    if relative.parts[:2] != _SOURCE_REFERENCE_ROOT:
+        raise EvidenceError(
+            f"{label} source reference must be within .awf-operations/skill-pressure"
+        )
+    path = root.joinpath(*relative.parts)
+    _assert_no_symlink_components(root, path)
+    return path, normalized
+
+
+def _expected_source_reference(root: Path, run_id: str, *, label: str) -> str:
+    paths = {
+        "deterministic": deterministic_report_path(root, run_id),
+        "install": install_report_path(root, run_id),
+        "discovery": discovery_report_path(root, run_id),
+    }
+    return paths[label].relative_to(root).as_posix()
+
+
+def _validated_source_reference(
+    root: Path, run_id: str, *, label: str, reference: object
+) -> dict[str, str]:
+    if not isinstance(reference, Mapping) or set(reference) != {"path", "sha256"}:
+        raise EvidenceError(f"invalid {label} source reference")
+    path, normalized = _source_reference_path(root, reference["path"], label=label)
+    digest = _require_sha256(reference["sha256"], field=f"{label} source sha256")
+    if label == "field":
+        if (
+            path.parent != _pressure_operations_root(root)
+            or not path.name.startswith(f"{run_id}-")
+            or path.suffix != ".json"
+        ):
+            raise EvidenceError("field source reference does not match current batch")
+    elif normalized != _expected_source_reference(root, run_id, label=label):
+        raise EvidenceError(f"{label} source reference does not match current batch")
+    if path.is_symlink() or not path.is_file():
+        raise EvidenceError(f"{label} source must be a regular file")
+    if sha256_file(path) != digest:
         raise EvidenceError(f"{label} source hash mismatch")
-    try:
-        current = hashlib.sha256(snapshot.path.read_bytes()).hexdigest()
-    except OSError as exc:
-        raise EvidenceError(f"{label} source hash mismatch") from exc
-    if current != snapshot.sha256:
+    return {"path": normalized, "sha256": digest}
+
+
+def _verify_snapshot_current(
+    root: Path, snapshot: _ReportSnapshot, *, label: str
+) -> None:
+    path = _relative_source_reference(root, snapshot.path)
+    current_path, _ = _source_reference_path(root, path, label=label)
+    if sha256_file(current_path) != snapshot.sha256:
         raise EvidenceError(f"{label} source hash mismatch")
 
 
@@ -1604,10 +1676,12 @@ def validate_source_bundle(
 
     references = MappingProxyType(
         {
-            "deterministic": _report_reference(deterministic),
-            "install": _report_reference(install),
-            "discovery": _report_reference(discovery),
-            "field": tuple(_report_reference(snapshot) for snapshot in field_snapshots),
+            "deterministic": _report_reference(root, deterministic),
+            "install": _report_reference(root, install),
+            "discovery": _report_reference(root, discovery),
+            "field": tuple(
+                _report_reference(root, snapshot) for snapshot in field_snapshots
+            ),
         }
     )
     snapshots = MappingProxyType(
@@ -1626,7 +1700,7 @@ def validate_source_bundle(
             "field": tuple(field_snapshots),
         }
     )
-    return SourceBundle(references, snapshots, matrix, reports)
+    return SourceBundle(references, snapshots, matrix, reports, root)
 
 
 def source_bundle_snapshots(bundle: SourceBundle) -> Mapping[str, object]:
@@ -1634,18 +1708,19 @@ def source_bundle_snapshots(bundle: SourceBundle) -> Mapping[str, object]:
 
 
 def verify_source_bundle_unchanged(bundle: SourceBundle) -> None:
+    root = _repository_root(bundle.repo_root)
     for label in ("deterministic", "install", "discovery"):
         report = bundle.reports[label]
         if not isinstance(report, _ReportSnapshot):
             raise EvidenceError("invalid source snapshot")
-        _verify_snapshot_current(report, label=label)
+        _verify_snapshot_current(root, report, label=label)
     fields = bundle.reports["field"]
     if not isinstance(fields, tuple):
         raise EvidenceError("invalid field source snapshots")
     for report in fields:
         if not isinstance(report, _ReportSnapshot):
             raise EvidenceError("invalid field source snapshot")
-        _verify_snapshot_current(report, label="field")
+        _verify_snapshot_current(root, report, label="field")
 
 
 def _aggregate_verdict(values: Sequence[Verdict]) -> Verdict:
@@ -1971,15 +2046,22 @@ def _summary_matrix(cells: Sequence[EvidenceCell]) -> SkillMatrix:
     )
 
 
-def _json_source_references(sources: Mapping[str, object]) -> dict[str, object]:
-    serialized: dict[str, object] = {}
-    for label, reference in sources.items():
-        if isinstance(reference, Mapping):
-            serialized[label] = dict(reference)
-        elif isinstance(reference, tuple):
-            serialized[label] = [dict(item) for item in reference if isinstance(item, Mapping)]
-        else:
-            raise EvidenceError(f"invalid {label} source reference")
+def _json_source_references(
+    root: Path, run_id: str, sources: Mapping[str, object]
+) -> dict[str, object]:
+    serialized = {
+        label: _validated_source_reference(
+            root, run_id, label=label, reference=sources[label]
+        )
+        for label in ("deterministic", "install", "discovery")
+    }
+    field = sources["field"]
+    if not isinstance(field, tuple) or len(field) != 27:
+        raise EvidenceError("evidence field sources must contain exactly 27 reports")
+    serialized["field"] = [
+        _validated_source_reference(root, run_id, label="field", reference=reference)
+        for reference in field
+    ]
     return serialized
 
 
@@ -1991,13 +2073,14 @@ def write_evidence_summary(
     sources: Mapping[str, object],
     matrix: SkillMatrix | None = None,
 ) -> Path:
+    root = _repository_root(repo_root)
     safe_run_id = _require_safe_batch_id(run_id)
     if len(cells) != 135:
         raise EvidenceError("evidence summary requires exactly 135 cells")
     validate_evidence_matrix(matrix or _summary_matrix(cells), cells)
     if set(sources) != {"deterministic", "install", "discovery", "field"}:
         raise EvidenceError("evidence sources are incomplete")
-    serialized_sources = _json_source_references(sources)
+    serialized_sources = _json_source_references(root, safe_run_id, sources)
     if not isinstance(serialized_sources["field"], list) or len(serialized_sources["field"]) != 27:
         raise EvidenceError("evidence field sources must contain exactly 27 reports")
     report = {
@@ -2016,6 +2099,6 @@ def write_evidence_summary(
         ],
         "sources": serialized_sources,
     }
-    target = evidence_summary_path(repo_root, safe_run_id)
+    target = evidence_summary_path(root, safe_run_id)
     _publish_new(target, json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     return target

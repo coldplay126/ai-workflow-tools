@@ -499,7 +499,7 @@ Reports may record the host, model identifier, command safety flags, normalized 
 11. OMP with-Skill injects the exact immutable `SKILL.md`, verifies its file hash, and separately preserves the full Skill snapshot hash
 12. auth/provider errors are normalized before persistence
 13. cleanup can remove only paths created beneath the temporary validation root
-14. a changed source or snapshot between execution and publication blocks evidence
+14. a changed source or snapshot between execution and publication blocks evidence; summary source references are normalized repository-relative POSIX paths beneath `.awf-operations/skill-pressure`, with no absolute, temporary, traversal, symlinked, or outside-root path accepted
 
 Subscription-backed smoke tests are workstation acceptance tests, not default CI tests. Deterministic CI continues to use fake hosts and temporary credential-free homes.
 

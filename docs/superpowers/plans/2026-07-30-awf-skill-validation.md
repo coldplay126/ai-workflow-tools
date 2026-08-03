@@ -2860,7 +2860,7 @@ Implement two additional append-only schemas in the same module:
 - `awf_skill_deterministic_report_v1`: `batch_id`, exact pytest `argv`, UTC start/end, elapsed time, exit status, SHA-256 for stdout/stderr (never raw streams), matrix SHA-256, and SHA-256 for every deterministic test/source file.
 - `awf_skill_install_report_v1`: `batch_id`, matrix SHA-256, isolated home path identifier (not an absolute user path), and exactly 45 `{runtime, skill, source_sha256, target_root, status, diagnostic}` records.
 
-`write_deterministic_report()` and `write_install_report()` reuse `_publish_new` and reject overwrite. `validate_source_bundle()` loads paths supplied explicitly by the current execution, requires one shared non-empty `batch_id`, verifies every schema and matrix hash, requires deterministic exit `0`, exact unique 45-install/45-discovery/27-field identities, rejects any non-`PASS` install record, and returns immutable `{path, sha256}` references for the final summary. It never searches for “latest” reports.
+`write_deterministic_report()` and `write_install_report()` reuse `_publish_new` and reject overwrite. `validate_source_bundle()` loads paths supplied explicitly by the current execution, requires one shared non-empty `batch_id`, verifies every schema and matrix hash, requires deterministic exit `0`, exact unique 45-install/45-discovery/27-field identities, rejects any non-`PASS` install record, and returns immutable `{path, sha256}` references for the final summary. Each reference path is normalized repository-relative POSIX text beneath `.awf-operations/skill-pressure`; absolute, traversal, symlinked, outside-root, and temporary references are rejected. It never searches for “latest” reports.
 
 `cli/tests/run_skill_deterministic.py` owns the exact deterministic pytest argv used in Task 10. It runs that argv once, writes `awf_skill_deterministic_report_v1` in `finally` for pass, fail, timeout, or launch error, prints only the new report path plus status, and exits with pytest's status (or `124` on timeout). Its `--batch-id`, `--repo-root`, and `--timeout-sec` arguments are required; a duplicate report identity fails closed.
 
@@ -2887,7 +2887,7 @@ Every cell's `evidence` names the exact pytest node, runtime report identity, or
 
 Call `validate_field_record(payload)` after sensitive-data scanning and before transcript publication. A sensitive-data blocker remains a redacted `BLOCKED` report and intentionally does not validate or retain the unsafe payload.
 
-Add `write_evidence_summary(repo_root, *, run_id, cells, sources)` beside the validators. It first calls `validate_evidence_matrix`, then atomically publishes an `awf_skill_evidence_matrix_v1` append-only JSON report containing the 135 serialized cells and exact deterministic/install/discovery/field source report identities and SHA-256 values. Reusing a `run_id` raises `FileExistsError`.
+Add `write_evidence_summary(repo_root, *, run_id, cells, sources)` beside the validators. It first calls `validate_evidence_matrix`, resolves every reference from the repository root, rechecks each regular source file against its SHA-256 immediately before publication, then atomically publishes an `awf_skill_evidence_matrix_v1` append-only JSON report containing the 135 serialized cells and exact deterministic/install/discovery/field source report identities and SHA-256 values. Reusing a `run_id` raises `FileExistsError`.
 
 - [ ] **Step 4: Verify and commit**
 
