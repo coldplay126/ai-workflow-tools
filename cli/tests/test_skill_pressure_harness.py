@@ -1281,6 +1281,109 @@ def test_publish_new_rejects_output_component_made_writable_before_link(
 
     assert not target.exists()
 
+@pytest.mark.parametrize(
+    ("component_name", "mode"),
+    [(".awf-operations", 0o755), ("skill-pressure", 0o711)],
+)
+def test_publish_new_rejects_owned_nonprivate_output_component_modes(
+    tmp_path: Path, component_name: str, mode: int
+) -> None:
+    target = pressure_report_path(tmp_path, "publisher-nonprivate-component")
+    target.parent.mkdir(parents=True)
+    (tmp_path / ".awf-operations").chmod(0o700)
+    target.parent.chmod(0o700)
+    component = (
+        tmp_path / ".awf-operations"
+        if component_name == ".awf-operations"
+        else target.parent
+    )
+    component.chmod(mode)
+
+    with pytest.raises(pressure.EvidenceError, match="unsafe publication output directory"):
+        pressure._publish_new(target, "private report\n")
+
+    assert stat.S_IMODE(component.stat().st_mode) == mode
+    assert not target.exists()
+
+
+def test_publish_new_revalidates_chain_after_before_publish(
+    tmp_path: Path,
+) -> None:
+    target = pressure_report_path(tmp_path, "publisher-before-publish-chain-swap")
+    target.parent.mkdir(parents=True)
+    (tmp_path / ".awf-operations").chmod(0o700)
+    target.parent.chmod(0o700)
+    detached_output = tmp_path / "detached-output"
+
+    def swap_output_directory() -> None:
+        target.parent.rename(detached_output)
+        target.parent.mkdir(mode=0o700)
+        target.parent.chmod(0o700)
+
+    with pytest.raises(pressure.EvidenceError, match="publication path changed"):
+        pressure._publish_new(
+            target,
+            "private report\n",
+            before_publish=swap_output_directory,
+        )
+
+    assert not target.exists()
+    assert not (detached_output / target.name).exists()
+    assert list(detached_output.glob(f".{target.name}.*")) == []
+
+
+def test_publish_new_rolls_back_when_final_chain_check_fails_after_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = pressure_report_path(tmp_path, "publisher-final-chain-swap")
+    target.parent.mkdir(parents=True)
+    (tmp_path / ".awf-operations").chmod(0o700)
+    target.parent.chmod(0o700)
+    detached_output = tmp_path / "detached-output"
+    original_link = pressure.os.link
+
+    def link_then_swap(*args: object, **kwargs: object) -> None:
+        original_link(*args, **kwargs)
+        target.parent.rename(detached_output)
+        target.parent.mkdir(mode=0o700)
+        target.parent.chmod(0o700)
+
+    monkeypatch.setattr(pressure.os, "link", link_then_swap)
+
+    with pytest.raises(pressure.EvidenceError, match="publication path changed"):
+        pressure._publish_new(target, "private report\n")
+
+    assert not target.exists()
+    assert not (detached_output / target.name).exists()
+    assert list(detached_output.glob(f".{target.name}.*")) == []
+
+
+def test_publish_new_rolls_back_before_diagnosing_after_publish_chain_swap(
+    tmp_path: Path,
+) -> None:
+    target = pressure_report_path(tmp_path, "publisher-after-publish-chain-swap")
+    target.parent.mkdir(parents=True)
+    (tmp_path / ".awf-operations").chmod(0o700)
+    target.parent.chmod(0o700)
+    detached_output = tmp_path / "detached-output"
+
+    def reject_after_publish() -> None:
+        target.parent.rename(detached_output)
+        target.parent.mkdir(mode=0o700)
+        target.parent.chmod(0o700)
+        raise pressure.EvidenceError("after publish rejected")
+
+    with pytest.raises(pressure.EvidenceError, match="after publish rejected"):
+        pressure._publish_new(
+            target,
+            "private report\n",
+            after_publish=reject_after_publish,
+        )
+
+    assert not target.exists()
+    assert not (detached_output / target.name).exists()
+    assert list(detached_output.glob(f".{target.name}.*")) == []
+
 def test_sensitive_data_writes_redacted_blocker_without_raw_content(tmp_path: Path) -> None:
     raw = '{"contact":"person@example.com"}'
     with pytest.raises(SensitiveDataError, match="email"):
@@ -2878,6 +2981,77 @@ def passing_field_report_paths(tmp_path: Path, matrix: object, *, batch_id: str)
     return paths
 
 
+def _replace_with_snapshot_blocked_field_report(path: Path, diagnostic: dict[str, object]) -> None:
+    complete = json.loads(path.read_text(encoding="utf-8"))
+    path.write_text(
+        json.dumps(
+            {
+                "schema": complete["schema"],
+                "recorded_at": complete["recorded_at"],
+                "run_id": complete["run_id"],
+                "persistence_status": "BLOCKED",
+                "diagnostics": [diagnostic],
+                "field_identity": pressure._safe_field_identity(complete["payload"]),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_source_bundle_accepts_exact_snapshot_blocked_field_report(
+    tmp_path: Path,
+) -> None:
+    deterministic = passing_deterministic_report(tmp_path, batch_id="batch-1")
+    install = passing_install_report(tmp_path, MATRIX, batch_id="batch-1")
+    discovery = passing_discovery_report(tmp_path, MATRIX, batch_id="batch-1")
+    fields = passing_field_report_paths(tmp_path, MATRIX, batch_id="batch-1")
+    _replace_with_snapshot_blocked_field_report(
+        fields[0], {"code": "skill_snapshot_changed"}
+    )
+
+    bundle = pressure.validate_source_bundle(
+        repo_root=tmp_path,
+        batch_id="batch-1",
+        deterministic_path=deterministic,
+        install_path=install,
+        discovery_path=discovery,
+        field_paths=fields,
+    )
+
+    assert bundle.snapshots["field"][0]["persistence_status"] == "BLOCKED"
+    assert bundle.snapshots["field"][0]["diagnostics"] == [
+        {"code": "skill_snapshot_changed"}
+    ]
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    [
+        {"code": "skill_snapshot_changed", "labels": []},
+        {"code": "skill_snapshot_changed", "detail": "unexpected"},
+        {"code": "unknown_blocked_code"},
+    ],
+)
+def test_source_bundle_rejects_noncanonical_snapshot_blocked_diagnostic(
+    tmp_path: Path, diagnostic: dict[str, object]
+) -> None:
+    deterministic = passing_deterministic_report(tmp_path, batch_id="batch-1")
+    install = passing_install_report(tmp_path, MATRIX, batch_id="batch-1")
+    discovery = passing_discovery_report(tmp_path, MATRIX, batch_id="batch-1")
+    fields = passing_field_report_paths(tmp_path, MATRIX, batch_id="batch-1")
+    _replace_with_snapshot_blocked_field_report(fields[0], diagnostic)
+
+    with pytest.raises(pressure.EvidenceError, match="field BLOCKED envelope diagnostics"):
+        pressure.validate_source_bundle(
+            repo_root=tmp_path,
+            batch_id="batch-1",
+            deterministic_path=deterministic,
+            install_path=install,
+            discovery_path=discovery,
+            field_paths=fields,
+        )
+
+
 def test_field_record_requires_complete_reproducibility_metadata() -> None:
     with pytest.raises(pressure.EvidenceError, match="missing field record keys"):
         pressure.validate_field_record({"matrix_schema": MATRIX.schema})
@@ -3773,6 +3947,108 @@ def test_evidence_summary_rejects_a_source_symlink_swap_during_hashing(
             matrix=MATRIX,
         )
     assert not pressure.evidence_summary_path(tmp_path, "batch-1").exists()
+
+def test_trusted_source_digest_returns_unchanged_regular_file_hash(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    source = root / ".awf-operations" / "skill-pressure" / "source.json"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"trusted source\n")
+
+    assert pressure._trusted_source_digest(root, source, label="source") == hashlib.sha256(
+        source.read_bytes()
+    ).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("target", "substitution"),
+    [
+        ("component", "rename"),
+        ("component", "symlink"),
+        ("root", "rename"),
+        ("root", "symlink"),
+        ("file", "rename"),
+        ("file", "symlink"),
+    ],
+)
+def test_trusted_source_digest_rejects_substitution_during_read_without_fd_leak(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    substitution: str,
+) -> None:
+    root = tmp_path / "repo"
+    source = root / ".awf-operations" / "skill-pressure" / "source.json"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"trusted source\n")
+    replacement_root = tmp_path / "replacement-root"
+    replacement_source = (
+        replacement_root / ".awf-operations" / "skill-pressure" / source.name
+    )
+    replacement_source.parent.mkdir(parents=True)
+    replacement_source.write_bytes(source.read_bytes())
+    original_open = pressure.os.open
+    original_read = pressure.os.read
+    opened_fds: list[int] = []
+    swapped = False
+
+    def substitute() -> None:
+        nonlocal swapped
+        if target == "component":
+            component = (
+                root / ".awf-operations"
+                if substitution == "rename"
+                else root / ".awf-operations" / "skill-pressure"
+            )
+            preserved = tmp_path / f"preserved-{component.name}"
+            replacement = tmp_path / f"replacement-{component.name}"
+            component.rename(preserved)
+            if substitution == "rename":
+                replacement.mkdir()
+                replacement.rename(component)
+            else:
+                component.symlink_to(replacement_root, target_is_directory=True)
+        elif target == "root":
+            root.rename(tmp_path / "preserved-root")
+            if substitution == "rename":
+                replacement_root.rename(root)
+            else:
+                root.symlink_to(replacement_root, target_is_directory=True)
+        else:
+            source.rename(tmp_path / "preserved-source.json")
+            if substitution == "rename":
+                replacement_source.rename(source)
+            else:
+                source.symlink_to(replacement_source)
+        swapped = True
+
+    def track_open(path: object, *args: object, **kwargs: object) -> int:
+        nonlocal swapped
+        if (
+            target != "file"
+            and not swapped
+            and path == source.name
+            and kwargs.get("dir_fd") is not None
+        ):
+            substitute()
+        file_descriptor = original_open(path, *args, **kwargs)
+        opened_fds.append(file_descriptor)
+        return file_descriptor
+
+    def swap_before_read(file_descriptor: int, size: int) -> bytes:
+        if target == "file" and not swapped:
+            substitute()
+        return original_read(file_descriptor, size)
+
+    monkeypatch.setattr(pressure.os, "open", track_open)
+    monkeypatch.setattr(pressure.os, "read", swap_before_read)
+
+    with pytest.raises(pressure.EvidenceError, match="source hash mismatch"):
+        pressure._trusted_source_digest(root, source, label="source")
+
+    assert swapped
+    for file_descriptor in opened_fds:
+        with pytest.raises(OSError):
+            os.fstat(file_descriptor)
 
 
 def _copy_discovery_repo(tmp_path: Path) -> Path:

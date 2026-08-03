@@ -1839,15 +1839,20 @@ def _field_identity_from_report(
             raise EvidenceError("field BLOCKED envelope diagnostics mismatch")
         diagnostic = _require_mapping(diagnostics[0], field="blocked field diagnostic")
         labels = diagnostic.get("labels")
-        if (
-            set(diagnostic) != {"code", "labels"}
-            or diagnostic.get("code") != "sensitive_content"
-            or not isinstance(labels, list)
-            or not labels
-            or labels != sorted(labels)
-            or len(labels) != len(set(labels))
-            or any(label not in SENSITIVE_PATTERNS for label in labels)
-        ):
+        is_snapshot_blocker = (
+            set(diagnostic) == {"code"}
+            and diagnostic.get("code") == "skill_snapshot_changed"
+        )
+        is_sensitive_content_blocker = (
+            set(diagnostic) == {"code", "labels"}
+            and diagnostic.get("code") == "sensitive_content"
+            and isinstance(labels, list)
+            and bool(labels)
+            and labels == sorted(labels)
+            and len(labels) == len(set(labels))
+            and all(label in SENSITIVE_PATTERNS for label in labels)
+        )
+        if not (is_snapshot_blocker or is_sensitive_content_blocker):
             raise EvidenceError("field BLOCKED envelope diagnostics mismatch")
         payload = _require_mapping(report.get("field_identity"), field="blocked field identity")
         _validate_blocked_field_identity(payload)
