@@ -305,6 +305,17 @@ def execute_pair(
     prompt = build_prompt(case.scenario)
     expected_skill_sha256 = sha256_skill(source)
 
+    def snapshot_failure() -> tuple[Evaluation, ProviderResult]:
+        return (
+            _blocked_evaluation("source_snapshot_changed"),
+            ProviderResult(
+                returncode=125,
+                stdout="",
+                stderr="source_snapshot_changed",
+                provider_name="omp",
+            ),
+        )
+
     with tempfile.TemporaryDirectory(prefix="awf-skill-pressure-") as tmp:
         temporary_root = Path(tmp)
         temporary_home = temporary_root / "home"
@@ -313,10 +324,24 @@ def execute_pair(
         workspace.mkdir()
         skill_root = workspace / ".omp" / "skills"
         skill_root.mkdir(parents=True)
-        snapshot = _snapshot_skill(source, skill_root, case)
-        append_system_prompt = workspace / "APPEND_SYSTEM.md"
-        append_system_prompt.write_bytes(skill_snapshot_bytes(snapshot))
-        injection_sha256 = hashlib.sha256(append_system_prompt.read_bytes()).hexdigest()
+        try:
+            snapshot = _snapshot_skill(source, skill_root, case)
+            append_system_prompt = workspace / "APPEND_SYSTEM.md"
+            append_system_prompt.write_bytes(skill_snapshot_bytes(snapshot))
+            injection_sha256 = hashlib.sha256(
+                append_system_prompt.read_bytes()
+            ).hexdigest()
+        except (OSError, shutil.Error, ValueError):
+            baseline, baseline_result = snapshot_failure()
+            with_skill, with_skill_result = snapshot_failure()
+            return PairRun(
+                evaluation=compare_pair(baseline, with_skill),
+                baseline_result=baseline_result,
+                with_skill_result=with_skill_result,
+                preflight_result=baseline_result,
+                skill_sha256=expected_skill_sha256,
+                injection_sha256=expected_skill_sha256,
+            )
         environment = build_subscription_environment(
             "omp", auth, temporary_home, os.environ
         )
@@ -332,16 +357,6 @@ def execute_pair(
             except (OSError, ValueError):
                 return False
 
-        def snapshot_failure() -> tuple[Evaluation, ProviderResult]:
-            return (
-                _blocked_evaluation("source_snapshot_changed"),
-                ProviderResult(
-                    returncode=125,
-                    stdout="",
-                    stderr="source_snapshot_changed",
-                    provider_name="omp",
-                ),
-            )
 
         if not snapshot_unchanged():
             baseline, baseline_result = snapshot_failure()

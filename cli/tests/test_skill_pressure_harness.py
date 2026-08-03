@@ -1300,6 +1300,39 @@ def test_field_execute_pair_blocks_deleted_or_unreadable_injection_snapshot(
     assert run.evaluation.verdict is Verdict.BLOCKED
     assert run.evaluation.baseline.failures == ("source_snapshot_changed",)
     assert run.evaluation.with_skill.failures == ("source_snapshot_changed",)
+
+
+def test_field_execute_pair_blocks_injection_materialization_hash_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root, _ = _copied_wf_status_repo(tmp_path)
+    calls: list[list[str]] = []
+
+    def unexpected_process(
+        argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int
+    ) -> ProviderResult:
+        calls.append(argv)
+        raise AssertionError("OMP must not start after injection materialization error")
+
+    def failing_snapshot_bytes(_: Path) -> bytes:
+        raise OSError("injection hash unavailable")
+
+    monkeypatch.setattr(run_skill_pressure, "skill_snapshot_bytes", failing_snapshot_bytes)
+
+    run = execute_pair(
+        MATRIX.skills["wf-status"],
+        repo_root=repo_root,
+        omp_command="omp",
+        model=OMP_SUBSCRIPTION_MODEL,
+        timeout_sec=30,
+        auth_context=_subscription_auth(tmp_path),
+        run_process=unexpected_process,
+    )
+
+    assert calls == []
+    assert run.evaluation.verdict is Verdict.BLOCKED
+    assert run.evaluation.baseline.failures == ("source_snapshot_changed",)
+    assert run.evaluation.with_skill.failures == ("source_snapshot_changed",)
 def test_field_execute_pair_blocks_injection_mutation_before_evidence(
     tmp_path: Path,
 ) -> None:
