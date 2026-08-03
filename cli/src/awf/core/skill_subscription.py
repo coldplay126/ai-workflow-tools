@@ -18,6 +18,24 @@ PINNED_SUBSCRIPTION_MODELS = MappingProxyType(
 API_KEY_ENV_KEYS = frozenset({"ANTHROPIC_API_KEY", "OPENAI_API_KEY"})
 CONFIG_ENV_KEYS = ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR")
 
+_CLAUDE_DISCOVERY_REQUIRED_FLAGS = (
+    "-p",
+    "--output-format",
+    "--tools",
+    "--no-session-persistence",
+    "--setting-sources",
+    "--append-system-prompt",
+    "--model",
+)
+_CLAUDE_DISCOVERY_SAFETY_FLAGS = (
+    "-p",
+    "--output-format=text",
+    "--tools=",
+    "--no-session-persistence",
+    "--setting-sources=project",
+    "--append-system-prompt",
+)
+
 _EXPIRED_RE = re.compile(r"refresh token expired|subscription[^\n]*expired", re.IGNORECASE)
 _OAUTH_SESSION_REFRESH_FAILED_RE = re.compile(
     r"\boauth[ \t]+session(?:[ \t]+has)?[ \t]+expired\b"
@@ -112,6 +130,42 @@ def require_subscription_model(runtime: str, model: str) -> None:
         raise ValueError(f"unsupported runtime: {runtime}")
     if model != expected:
         raise ValueError(f"subscription model mismatch for {runtime}: expected {expected}")
+
+
+def claude_discovery_argv(
+    binary: str,
+    model: str,
+    skill: str,
+    prompt: str,
+    *,
+    metadata_projection: str,
+) -> list[str]:
+    if not isinstance(metadata_projection, str):
+        raise TypeError("metadata projection must be text")
+    return [
+        binary,
+        "-p",
+        "--output-format",
+        "text",
+        "--tools",
+        "",
+        "--no-session-persistence",
+        "--setting-sources",
+        "project",
+        "--append-system-prompt",
+        metadata_projection,
+        "--model",
+        model,
+        f"/{skill}\n{prompt}",
+    ]
+
+
+def claude_discovery_required_flags() -> tuple[str, ...]:
+    return _CLAUDE_DISCOVERY_REQUIRED_FLAGS
+
+
+def claude_discovery_safety_flags() -> tuple[str, ...]:
+    return _CLAUDE_DISCOVERY_SAFETY_FLAGS
 
 
 def build_subscription_environment(

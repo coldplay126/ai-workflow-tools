@@ -243,10 +243,18 @@ Update the fake discovery process to retain each call's `cwd` and environment. A
 
 ```python
 def test_skill_discovery_uses_subscription_safe_project_argv() -> None:
+    projection = '{"name":"wf-status","description":"decoded source description"}\n'
     prompt = "describe the skill"
-    assert claude_argv("claude", "sonnet", "wf-status", prompt) == [
+    assert claude_argv(
+        "claude",
+        "sonnet",
+        "wf-status",
+        prompt,
+        metadata_projection=projection,
+    ) == [
         "claude", "-p", "--output-format", "text", "--tools", "",
         "--no-session-persistence", "--setting-sources", "project",
+        "--append-system-prompt", projection,
         "--model", "sonnet", "/wf-status\ndescribe the skill",
     ]
     assert agent_skills_argv("codex", "gpt-5.4", "wf-status", prompt) == [
@@ -271,6 +279,11 @@ Add an end-to-end fake-run test asserting:
 - `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` are absent in every model invocation
 - no credential location appears in install or discovery report JSON
 - temporary workspace and home are gone after `run_discovery` returns
+- every Claude argv supplies verified temporary-projection JSON text through `--append-system-prompt`, while Codex and OMP command shapes remain unchanged
+- each projection is regular JSON containing only decoded name/description, is outside the project Skill snapshot, has no H1, and is absent after cleanup
+- the Claude fake combines name/description from that projection with body_heading from the selected slash Skill body
+- projection creation binds to the immutable snapshot hash; missing, unreadable, symlinked, nonregular, write-failed, or pre/post-mutation projections fail as `FAIL metadata_projection_changed`
+- discovery reports retain the append-system-prompt safety flag but contain neither projection paths nor projection bodies
 
 Add failure tests proving auth and timeout diagnostics remain `BLOCKED`, while `host_model_unsupported` is `FAIL`, and no raw stderr appears in a written report.
 
@@ -282,7 +295,7 @@ Run:
 uv run --project cli pytest cli/tests/test_skill_pressure_harness.py -q -k 'skill_discovery'
 ```
 
-Expected failures: old home-level roots, old OMP `--no-tools` argv, missing Claude setting-source flag, repository `cwd`, and raw/legacy diagnostics.
+Expected failures: old home-level roots, old OMP `--no-tools` argv, missing Claude setting-source or metadata-projection flag, repository `cwd`, mutable/unbound projection acceptance, and raw/legacy diagnostics.
 
 - [ ] **Step 3: Move discovery installation into a temporary project workspace**
 
@@ -300,15 +313,17 @@ Capture `SubscriptionAuthContext` before creating the temporary directory. Insid
 
 Replace `_base_environment` with `build_subscription_environment`. Accept an optional `auth_context` in `run_discovery` for deterministic tests; production defaults to `SubscriptionAuthContext.capture()`.
 
+After materializing each immutable snapshot, create a separate `metadata-projections/<skill>.json` file beneath the temporary validation root, not under `workspace` or `skill-snapshots`. Before writing it, verify the regular snapshot tree's hash and decoded `(name, description, body_heading)` against its `ExpectedSkill`; write only deterministic decoded `name`/`description` JSON with `O_EXCL|O_NOFOLLOW`, then verify its regular bytes and hash. A creation error yields no projection and a Claude-only `FAIL metadata_projection_changed`.
+
 - [ ] **Step 4: Implement the three exact host command contracts**
 
 Make these changes:
 
-- Claude: add `--setting-sources project`; retain no tools and no session persistence.
+- Claude: add `--setting-sources project` and `--append-system-prompt <verified-projection-text>`; retain no tools and no session persistence. The projection parameter is explicit in the shared Claude argv helper, not a global.
 - Codex: retain `$<skill>`, ephemeral execution, and read-only sandbox; call `require_subscription_model` so the OMP selector cannot reach Codex.
 - OMP: replace `--no-tools` with `--tools=read`, add `--no-extensions`, retain the one-Skill allowlist, and change only the OMP prompt to permit reading the selected Skill.
 
-The runtime prompts must retain their runtime-specific safety prefix, then append this exact metadata contract:
+Keep Codex and OMP on the decoded-YAML/full-file metadata contract:
 
 ```python
 metadata_contract = (
@@ -325,13 +340,27 @@ omp_prompt = (
     "Use only the read tool to load the selected Skill. Do not read any other path or mutate anything. "
     + metadata_contract
 )
-non_omp_prompt = (
+codex_prompt = (
     "Do not call tools, access files, or mutate anything. Read the selected Skill only. "
     + metadata_contract
 )
 ```
 
-Claude and Codex retain the no-tool prompt because their explicit Skill command injects the selected body; OMP retains its selected-Skill read-only constraint.
+Claude must remain no-tool and use this separate two-source contract:
+
+```python
+claude_prompt = (
+    "Do not call tools, access files, or mutate anything. "
+    "Copy name and description exactly from the injected metadata projection. "
+    "Copy body_heading only from the selected slash Skill body; it must be the exact first Markdown H1 line, "
+    "including the literal leading '# '. "
+    "Encode embedded newlines as JSON escapes. "
+    'Return exactly one JSON object and no prose. Its schema is {"name":"injected metadata name",'
+    '"description":"injected metadata description","body_heading":"exact first slash Skill H1"}.'
+)
+```
+
+Verify the projection's regular bytes/hash immediately before and after each Claude process. Any missing, mutated, or unreadable projection overrides host output with `FAIL metadata_projection_changed`. Store only `--append-system-prompt` in safety flags; never serialize the projection's path or body.
 
 - [ ] **Step 5: Normalize and classify host failures before report creation**
 

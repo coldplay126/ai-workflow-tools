@@ -419,6 +419,13 @@ The provider runtimes may still rotate an OAuth token or write their normal auth
 - Start Claude in `<workspace>` with `--setting-sources project`.
 - Use `--tools ""` and `--no-session-persistence`.
 - Invoke the selected Skill explicitly as `/<skill>`.
+- Claude slash invocation injects only the selected Skill body beginning at its H1; it does not inject YAML frontmatter. For every immutable Skill snapshot, create a separate regular metadata projection beneath the temporary validation root and outside the project Skill snapshot.
+- Read and hash-verify the projection immediately before launch, then pass its verified JSON text through `--append-system-prompt <projection-text>` while retaining `--tools ""`; do not pass the temporary path, enable `Read`, or enable any other tool.
+- The projection contains only the exact decoded `name` and `description` as deterministic JSON. It contains no body H1, credential data, or filesystem path data.
+- Bind creation to the snapshotted `ExpectedSkill`: immediately verify the regular snapshot tree's source hash and its decoded name, description, and H1 before writing the projection. Symlink, nonregular, write, or hash failures are fail-closed.
+- Immediately before and after every Claude process, re-read the projection as a regular file and require its byte hash to match the creation hash. A missing, unreadable, or changed projection is the harness-defect `FAIL` diagnostic `metadata_projection_changed`, never `PASS`, `BLOCKED`, or a raw provider error.
+- Claude's prompt must copy `name` and `description` only from the injected metadata projection and must copy `body_heading` only from the selected slash Skill body, including its exact leading `# `.
+- Reports record `--append-system-prompt` only as a safety flag; they never persist a projection path or projection body.
 - Do not copy or link the existing Claude config directory into the workspace.
 
 #### Agent Skills through Codex
@@ -439,6 +446,10 @@ The provider runtimes may still rotate an OAuth token or write their normal auth
 - Do not use the OMP auth broker or API-key environment variables for this validation.
 
 ### 15.4 OMP discovery and field execution
+
+#### Claude discovery identity proof
+
+Claude discovery proves identity from two immutable inputs: the injected metadata projection supplies decoded `name` and `description`, while the selected project-root slash Skill body supplies `body_heading`. The projection's creation-time snapshot-hash/metadata check and its pre/post-launch byte-hash checks bind those inputs to the same candidate without granting filesystem access to the model.
 
 OMP omits the Skill discovery prompt when no read tool is available. Therefore one OMP command shape cannot prove both host discovery and no-tool field behavior.
 
@@ -480,13 +491,16 @@ Focused tests must prove:
 1. credential locations are referenced but never copied, linked, hashed, serialized, or directly mutated by harness code
 2. each host runs from the temporary project workspace and selects the project Skill
 3. Claude disables user settings and mutation tools while preserving subscription authentication
-4. Codex receives `gpt-5.4`, an ephemeral session, a read-only sandbox, and the effective original `CODEX_HOME`
-5. OMP discovery exposes only `read`
-6. OMP baseline exposes neither Skills nor tools
-7. OMP with-Skill injects the exact immutable `SKILL.md`, verifies its file hash, and separately preserves the full Skill snapshot hash
-8. auth/provider errors are normalized before persistence
-9. cleanup can remove only paths created beneath the temporary validation root
-10. a changed source or snapshot between execution and publication blocks evidence
+4. Claude uses a temporary regular metadata projection through `--append-system-prompt`, without `Read`; the fake live shape combines projection name/description with slash-body H1
+5. Claude rejects a missing, unreadable, symlinked, nonregular, mutated, write-failed, or source-hash-unbound projection as `FAIL metadata_projection_changed` before or after process launch
+6. Claude records only the append-system-prompt safety flag, never a projection path or body, and removes the projection with the temporary validation root
+7. Codex receives `gpt-5.4`, an ephemeral session, a read-only sandbox, and the effective original `CODEX_HOME`
+8. OMP discovery exposes only `read`
+9. OMP baseline exposes neither Skills nor tools
+10. OMP with-Skill injects the exact immutable `SKILL.md`, verifies its file hash, and separately preserves the full Skill snapshot hash
+11. auth/provider errors are normalized before persistence
+12. cleanup can remove only paths created beneath the temporary validation root
+13. a changed source or snapshot between execution and publication blocks evidence
 
 Subscription-backed smoke tests are workstation acceptance tests, not default CI tests. Deterministic CI continues to use fake hosts and temporary credential-free homes.
 
