@@ -1150,6 +1150,8 @@ def test_publish_new_rejects_output_directory_symlink_swap_during_temp_creation(
 ) -> None:
     target = pressure_report_path(tmp_path, "publisher-symlink-race")
     target.parent.mkdir(parents=True)
+    (tmp_path / ".awf-operations").chmod(0o700)
+    target.parent.chmod(0o700)
     outside = tmp_path / "outside"
     outside.mkdir()
     component = (
@@ -2838,28 +2840,100 @@ def passing_deterministic_report(tmp_path: Path, *, batch_id: str) -> Path:
     )
 
 
-def passing_install_report(tmp_path: Path, matrix: object, *, batch_id: str) -> Path:
-    records = [
+def passing_install_records(matrix: object, *, repo_root: Path) -> list[dict[str, object]]:
+    return [
         {
             "runtime": runtime,
             "skill": case.name,
             "source_sha256": pressure.sha256_skill(
-                tmp_path / "claude" / "skills" / case.name
+                repo_root / "claude" / "skills" / case.name
             ),
-            "target_root": f".{runtime}/skills",
+            "target_root": {
+                "claude": ".claude/skills",
+                "agent-skills": ".agents/skills",
+                "omp": ".omp/skills",
+            }[runtime],
             "status": Verdict.PASS.value,
-            "diagnostic": "linked",
+            "diagnostic": "",
         }
         for runtime in ("claude", "agent-skills", "omp")
         for case in matrix.skills.values()  # type: ignore[attr-defined]
     ]
+
+
+def passing_install_report(tmp_path: Path, matrix: object, *, batch_id: str) -> Path:
     return pressure.write_install_report(
         tmp_path,
         batch_id=batch_id,
         matrix_sha256=_matrix_sha256(),
-        isolated_home_id="tmp-home-1",
-        records=records,
+        isolated_home_id=f"temporary-{'0' * 32}",
+        records=passing_install_records(matrix, repo_root=tmp_path),
     )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "label"),
+    [
+        ("diagnostic", "Bearer abcdefghijklmnop", "bearer_token"),
+        ("isolated_home_id", f"temporary-{'0' * 32}-sk-abcdefghijklmnop", "openai_key"),
+        ("target_root", "sk-abcdefghijklmnop", "openai_key"),
+    ],
+)
+def test_install_writer_rejects_sensitive_serialized_content_before_publication(
+    tmp_path: Path, field: str, value: str, label: str
+) -> None:
+    _provision_matrix(tmp_path)
+    records = passing_install_records(MATRIX, repo_root=tmp_path)
+    isolated_home_id = f"temporary-{'0' * 32}"
+    if field == "isolated_home_id":
+        isolated_home_id = value
+    else:
+        records[0][field] = value
+
+    with pytest.raises(SensitiveDataError, match=label):
+        pressure.write_install_report(
+            tmp_path,
+            batch_id="install-sensitive",
+            matrix_sha256=_matrix_sha256(),
+            isolated_home_id=isolated_home_id,
+            records=records,
+        )
+
+    assert not pressure.install_report_path(tmp_path, "install-sensitive").exists()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("isolated_home_id", "temporary-not-opaque", "invalid isolated_home_id"),
+        ("target_root", r"C:\operator\private\skills", "invalid install target_root"),
+        ("target_root", "/operator/private/skills", "invalid install target_root"),
+        ("target_root", ".claude/not-skills", "invalid install target_root"),
+        ("diagnostic", "/operator/private", "invalid install diagnostic"),
+        ("diagnostic", "unknown_diagnostic", "invalid install diagnostic"),
+    ],
+)
+def test_install_writer_rejects_noncanonical_values_before_publication(
+    tmp_path: Path, field: str, value: str, message: str
+) -> None:
+    _provision_matrix(tmp_path)
+    records = passing_install_records(MATRIX, repo_root=tmp_path)
+    isolated_home_id = f"temporary-{'0' * 32}"
+    if field == "isolated_home_id":
+        isolated_home_id = value
+    else:
+        records[0][field] = value
+
+    with pytest.raises(pressure.EvidenceError, match=message):
+        pressure.write_install_report(
+            tmp_path,
+            batch_id="install-noncanonical",
+            matrix_sha256=_matrix_sha256(),
+            isolated_home_id=isolated_home_id,
+            records=records,
+        )
+
+    assert not pressure.install_report_path(tmp_path, "install-noncanonical").exists()
 
 
 def passing_discovery_records(
@@ -3171,6 +3245,74 @@ def test_source_bundle_rejects_install_source_hash_not_matching_current_skill(
     with pytest.raises(
         pressure.EvidenceError, match="install source_sha256 does not match current Skill"
     ):
+        pressure.validate_source_bundle(
+            repo_root=tmp_path,
+            batch_id="batch-1",
+            deterministic_path=deterministic,
+            install_path=install,
+            discovery_path=discovery,
+            field_paths=fields,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "label"),
+    [
+        ("diagnostic", "Bearer abcdefghijklmnop", "bearer_token"),
+        ("isolated_home_id", f"temporary-{'0' * 32}-sk-abcdefghijklmnop", "openai_key"),
+        ("target_root", "sk-abcdefghijklmnop", "openai_key"),
+    ],
+)
+def test_source_bundle_rejects_sensitive_serialized_install_reports(
+    tmp_path: Path, field: str, value: str, label: str
+) -> None:
+    deterministic = passing_deterministic_report(tmp_path, batch_id="batch-1")
+    install = passing_install_report(tmp_path, MATRIX, batch_id="batch-1")
+    discovery = passing_discovery_report(tmp_path, MATRIX, batch_id="batch-1")
+    fields = passing_field_report_paths(tmp_path, MATRIX, batch_id="batch-1")
+    forged = json.loads(install.read_text())
+    if field == "isolated_home_id":
+        forged[field] = value
+    else:
+        forged["records"][0][field] = value
+    install.write_text(json.dumps(forged))
+
+    with pytest.raises(pressure.EvidenceError, match=rf"sensitive install report content.*{label}"):
+        pressure.validate_source_bundle(
+            repo_root=tmp_path,
+            batch_id="batch-1",
+            deterministic_path=deterministic,
+            install_path=install,
+            discovery_path=discovery,
+            field_paths=fields,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("isolated_home_id", "temporary-not-opaque", "invalid isolated_home_id"),
+        ("target_root", r"C:\operator\private\skills", "invalid install target_root"),
+        ("target_root", ".claude/not-skills", "invalid install target_root"),
+        ("diagnostic", "/operator/private", "invalid install diagnostic"),
+        ("diagnostic", "unknown_diagnostic", "invalid install diagnostic"),
+    ],
+)
+def test_source_bundle_rejects_noncanonical_install_attestations(
+    tmp_path: Path, field: str, value: str, message: str
+) -> None:
+    deterministic = passing_deterministic_report(tmp_path, batch_id="batch-1")
+    install = passing_install_report(tmp_path, MATRIX, batch_id="batch-1")
+    discovery = passing_discovery_report(tmp_path, MATRIX, batch_id="batch-1")
+    fields = passing_field_report_paths(tmp_path, MATRIX, batch_id="batch-1")
+    forged = json.loads(install.read_text())
+    if field == "isolated_home_id":
+        forged[field] = value
+    else:
+        forged["records"][0][field] = value
+    install.write_text(json.dumps(forged))
+
+    with pytest.raises(pressure.EvidenceError, match=message):
         pressure.validate_source_bundle(
             repo_root=tmp_path,
             batch_id="batch-1",
