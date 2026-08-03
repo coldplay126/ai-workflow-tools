@@ -154,6 +154,79 @@ FIELD_EVALUATION_FAILURES = frozenset(
     }
 )
 
+INSTALL_RUNTIME_ROOTS = MappingProxyType(
+    {
+        "claude": ".claude/skills",
+        "agent-skills": ".agents/skills",
+        "omp": ".omp/skills",
+    }
+)
+INSTALL_DIAGNOSTICS = frozenset(
+    {
+        "",
+        "canonical_source_materialization_failed",
+        "canonical_source_mutated_during_snapshot",
+        "canonical_source_name_mismatch",
+        "installer_target_not_snapshot",
+        "canonical_source_metadata_invalid",
+        *NORMALIZED_HOST_DIAGNOSTICS,
+    }
+)
+ISOLATED_HOME_ID_RE = re.compile(r"^temporary-[0-9a-f]{32}$")
+INSTALL_REPORT_DIGEST_FIELDS = frozenset({"matrix_sha256", "source_sha256"})
+
+
+def _redact_install_report_digests(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {
+            key: (
+                "<redacted>"
+                if (
+                    (
+                        key in INSTALL_REPORT_DIGEST_FIELDS
+                        and isinstance(item, str)
+                        and re.fullmatch(r"[0-9a-f]{64}", item)
+                    )
+                    or (
+                        key == "isolated_home_id"
+                        and isinstance(item, str)
+                        and ISOLATED_HOME_ID_RE.fullmatch(item) is not None
+                    )
+                )
+                else _redact_install_report_digests(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_install_report_digests(item) for item in value]
+    return value
+
+
+def _serialized_install_report_for_sensitive_scan(
+    report: Mapping[str, object],
+) -> str:
+    sanitized = _redact_install_report_digests(report)
+    assert isinstance(sanitized, Mapping)
+    return _serialized_install_report(sanitized)
+
+
+
+def _validate_isolated_home_id(value: object) -> None:
+    if not isinstance(value, str) or ISOLATED_HOME_ID_RE.fullmatch(value) is None:
+        raise EvidenceError("invalid isolated_home_id")
+
+
+def _serialized_install_report(report: Mapping[str, object]) -> str:
+    return json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+
+def _reject_sensitive_serialized_install_report(
+    serialized: str, *, error_type: type[ValueError]
+) -> None:
+    labels = sorted(set(_sensitive_labels(serialized)))
+    if labels:
+        raise error_type(f"sensitive install report content: {','.join(labels)}")
+
 FIELD_SKILL_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 FIELD_SCENARIO_RE = re.compile(r"^[a-z][a-z0-9.-]*$")
 FIELD_SEVERITIES = frozenset({"critical", "important", "minor"})
@@ -1432,22 +1505,25 @@ def _validate_install_records(records: Sequence[Mapping[str, object]]) -> None:
             raise EvidenceError("invalid install record keys")
         runtime = record["runtime"]
         skill = record["skill"]
-        if runtime not in SUPPORTED_RUNTIMES or not isinstance(skill, str) or not skill:
-            raise EvidenceError("invalid install record identity")
-        target_root = record["target_root"]
         if (
-            not isinstance(target_root, str)
-            or not target_root
-            or Path(target_root).is_absolute()
-            or ".." in Path(target_root).parts
+            not isinstance(runtime, str)
+            or runtime not in SUPPORTED_RUNTIMES
+            or not isinstance(skill, str)
+            or not skill
         ):
+            raise EvidenceError("invalid install record identity")
+        if record["target_root"] != INSTALL_RUNTIME_ROOTS[runtime]:
             raise EvidenceError("invalid install target_root")
-        if not isinstance(record["diagnostic"], str):
+        diagnostic = record["diagnostic"]
+        if not isinstance(diagnostic, str) or diagnostic not in INSTALL_DIAGNOSTICS:
+            raise EvidenceError("invalid install diagnostic")
+        status = _verdict(record["status"])
+        if status is None:
+            raise EvidenceError("invalid install status")
+        if (status is Verdict.PASS) != (diagnostic == ""):
             raise EvidenceError("invalid install diagnostic")
         _require_sha256(record["source_sha256"], field="install source_sha256")
-        if _verdict(record["status"]) is None:
-            raise EvidenceError("invalid install status")
-        identities.append((str(runtime), skill))
+        identities.append((runtime, skill))
     if len(set(identities)) != len(identities):
         raise EvidenceError("duplicate install record")
 
@@ -1461,15 +1537,6 @@ def write_install_report(
     records: Sequence[Mapping[str, object]],
 ) -> Path:
     safe_batch_id = _require_safe_batch_id(batch_id)
-    if (
-        not isinstance(isolated_home_id, str)
-        or not isolated_home_id
-        or Path(isolated_home_id).is_absolute()
-        or "/" in isolated_home_id
-        or "\\" in isolated_home_id
-    ):
-        raise EvidenceError("invalid isolated_home_id")
-    _validate_install_records(records)
     report = {
         "schema": INSTALL_REPORT_SCHEMA,
         "batch_id": safe_batch_id,
@@ -1477,8 +1544,15 @@ def write_install_report(
         "isolated_home_id": isolated_home_id,
         "records": [dict(record) for record in records],
     }
+    serialized = _serialized_install_report(report)
+    _reject_sensitive_serialized_install_report(
+        _serialized_install_report_for_sensitive_scan(report),
+        error_type=SensitiveDataError,
+    )
+    _validate_install_report(report)
+    _validate_install_records(report["records"])
     target = install_report_path(repo_root, safe_batch_id)
-    _publish_new(target, json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    _publish_new(target, serialized)
     return target
 
 
@@ -1738,15 +1812,7 @@ def _validate_deterministic_report(report: Mapping[str, Any]) -> None:
 def _validate_install_report(report: Mapping[str, Any]) -> None:
     if set(report) != {"schema", "batch_id", "matrix_sha256", "isolated_home_id", "records"}:
         raise EvidenceError("invalid install report keys")
-    isolated_home_id = report["isolated_home_id"]
-    if (
-        not isinstance(isolated_home_id, str)
-        or not isolated_home_id
-        or Path(isolated_home_id).is_absolute()
-        or "/" in isolated_home_id
-        or "\\" in isolated_home_id
-    ):
-        raise EvidenceError("invalid isolated_home_id")
+    _validate_isolated_home_id(report["isolated_home_id"])
 
 
 def _validate_discovery_records(records: Sequence[Mapping[str, Any]]) -> None:
@@ -2013,6 +2079,10 @@ def validate_source_bundle(
         raise EvidenceError("install report path does not match current batch")
     _assert_no_symlink_components(root, expected_install)
     install = _load_json_snapshot(expected_install, label="install")
+    _reject_sensitive_serialized_install_report(
+        _serialized_install_report_for_sensitive_scan(install.payload),
+        error_type=EvidenceError,
+    )
     _validate_report_header(
         install.payload,
         label="install",

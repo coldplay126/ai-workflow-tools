@@ -2936,6 +2936,60 @@ def test_install_writer_rejects_noncanonical_values_before_publication(
     assert not pressure.install_report_path(tmp_path, "install-noncanonical").exists()
 
 
+def test_install_writer_preserves_sha256_values_that_match_phone_patterns(
+    tmp_path: Path,
+) -> None:
+    _provision_matrix(tmp_path)
+    matrix_sha256 = "01012345678" + ("a" * 53)
+
+    report_path = pressure.write_install_report(
+        tmp_path,
+        batch_id="install-hash",
+        matrix_sha256=matrix_sha256,
+        isolated_home_id=f"temporary-{'0' * 32}",
+        records=passing_install_records(MATRIX, repo_root=tmp_path),
+    )
+
+    assert json.loads(report_path.read_text())["matrix_sha256"] == matrix_sha256
+
+
+
+def test_install_writer_preserves_opaque_home_ids_that_match_phone_patterns(
+    tmp_path: Path,
+) -> None:
+    _provision_matrix(tmp_path)
+    isolated_home_id = f"temporary-01012345678{'a' * 21}"
+
+    report_path = pressure.write_install_report(
+        tmp_path,
+        batch_id="install-opaque-home",
+        matrix_sha256=_matrix_sha256(),
+        isolated_home_id=isolated_home_id,
+        records=passing_install_records(MATRIX, repo_root=tmp_path),
+    )
+
+    assert json.loads(report_path.read_text())["isolated_home_id"] == isolated_home_id
+
+def test_install_writer_preserves_normalized_source_blocker(tmp_path: Path) -> None:
+    _provision_matrix(tmp_path)
+    records = passing_install_records(MATRIX, repo_root=tmp_path)
+    for record in records:
+        record["status"] = Verdict.BLOCKED.value
+        record["diagnostic"] = "canonical_source_metadata_invalid"
+
+    report_path = pressure.write_install_report(
+        tmp_path,
+        batch_id="install-source-blocker",
+        matrix_sha256=_matrix_sha256(),
+        isolated_home_id=f"temporary-{'0' * 32}",
+        records=records,
+    )
+
+    assert {
+        record["diagnostic"] for record in json.loads(report_path.read_text())["records"]
+    } == {"canonical_source_metadata_invalid"}
+
+
 def passing_discovery_records(
     matrix: object, *, repo_root: Path = REPO_ROOT
 ) -> list[dict[str, object]]:
