@@ -81,6 +81,7 @@ def main(argv: list[str] | None = None) -> int:
             discovery_path=discovery_path,
             field_paths=field_paths,
         )
+        verify_source_bundle_unchanged(sources)
         snapshots = source_bundle_snapshots(sources)
         deterministic = snapshots["deterministic"]
         install = snapshots["install"]
@@ -112,7 +113,6 @@ def main(argv: list[str] | None = None) -> int:
             field=field,
         )
         validate_evidence_matrix(matrix, cells)
-        verify_source_bundle_unchanged(sources)
         if any(cell.verdict in {Verdict.FAIL, Verdict.BLOCKED} for cell in cells):
             raise EvidenceError("current-batch evidence contains FAIL or BLOCKED")
         summary = write_evidence_summary(
