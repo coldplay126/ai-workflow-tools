@@ -1026,6 +1026,38 @@ def test_probe_omp_rejects_lookalike_required_options() -> None:
     assert result.returncode == 78
     assert "unsupported_omp_flags" in result.stderr
 
+def test_execute_pair_fails_missing_required_omp_flags_with_safe_diagnostic(
+    tmp_path: Path,
+) -> None:
+    repo_root, _ = _copied_wf_status_repo(tmp_path)
+    calls: list[list[str]] = []
+
+    def missing_flags(
+        argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int
+    ) -> ProviderResult:
+        calls.append(argv)
+        stdout = "omp v1" if argv[1:] == ["--version"] else "-p --mode --no-session"
+        return ProviderResult(0, stdout, "", provider_name="omp")
+
+    run = execute_pair(
+        MATRIX.skills["wf-status"],
+        repo_root=repo_root,
+        omp_command="omp",
+        model=OMP_SUBSCRIPTION_MODEL,
+        timeout_sec=30,
+        auth_context=_subscription_auth(tmp_path),
+        run_process=missing_flags,
+    )
+
+    assert calls == [["omp", "--version"], ["omp", "--help"]]
+    assert run.evaluation.verdict is Verdict.FAIL
+    assert run.evaluation.baseline.verdict is Verdict.FAIL
+    assert run.evaluation.with_skill.verdict is Verdict.FAIL
+    assert run.evaluation.baseline.failures == ("unsupported_omp_flags",)
+    assert run.evaluation.with_skill.failures == ("unsupported_omp_flags",)
+
+
+
 
 def _successful_wf_status_result() -> ProviderResult:
     return ProviderResult(
@@ -1168,6 +1200,46 @@ def test_execute_pair_rejects_symlinked_skill_source_before_process(tmp_path: Pa
     assert calls == []
 
 
+@pytest.mark.parametrize("injection_hazard", ["deleted", "unreadable"])
+def test_field_execute_pair_blocks_deleted_or_unreadable_injection_snapshot(
+    tmp_path: Path, injection_hazard: str
+) -> None:
+    repo_root, _ = _copied_wf_status_repo(tmp_path)
+    calls: list[list[str]] = []
+
+    def corrupt_injection(
+        argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int
+    ) -> ProviderResult:
+        calls.append(argv)
+        if argv[1:] == ["--version"]:
+            return ProviderResult(0, "omp test", "", provider_name="omp")
+        if argv[1:] == ["--help"]:
+            append_system_prompt = cwd / "APPEND_SYSTEM.md"
+            append_system_prompt.unlink()
+            if injection_hazard == "unreadable":
+                append_system_prompt.mkdir()
+            return ProviderResult(
+                0,
+                "-p --mode --skills --append-system-prompt --no-session --no-extensions --tools",
+                "",
+                provider_name="omp",
+            )
+        raise AssertionError("field arm must not start after injection hazard")
+
+    run = execute_pair(
+        MATRIX.skills["wf-status"],
+        repo_root=repo_root,
+        omp_command="omp",
+        model=OMP_SUBSCRIPTION_MODEL,
+        timeout_sec=30,
+        auth_context=_subscription_auth(tmp_path),
+        run_process=corrupt_injection,
+    )
+
+    assert calls == [["omp", "--version"], ["omp", "--help"]]
+    assert run.evaluation.verdict is Verdict.BLOCKED
+    assert run.evaluation.baseline.failures == ("source_snapshot_changed",)
+    assert run.evaluation.with_skill.failures == ("source_snapshot_changed",)
 def test_field_execute_pair_blocks_injection_mutation_before_evidence(
     tmp_path: Path,
 ) -> None:

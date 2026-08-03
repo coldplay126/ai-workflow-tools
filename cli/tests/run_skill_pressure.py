@@ -64,6 +64,7 @@ _NORMALIZED_HOST_DIAGNOSTICS = frozenset(
         "host_provider_exit",
         "host_subscription_expired",
         "host_timeout",
+        "unsupported_omp_flags",
     }
 )
 
@@ -180,7 +181,11 @@ def probe_omp(
 
 
 def _diagnostic_evaluation(diagnostic: str) -> Evaluation:
-    verdict = Verdict.FAIL if diagnostic == "host_model_unsupported" else Verdict.BLOCKED
+    verdict = (
+        Verdict.FAIL
+        if diagnostic in {"host_model_unsupported", "unsupported_omp_flags"}
+        else Verdict.BLOCKED
+    )
     return Evaluation(
         verdict=verdict,
         failures=(diagnostic,),
@@ -200,9 +205,15 @@ def _blocked_evaluation(failure: str) -> Evaluation:
 
 def _evaluation(case: SkillCase, result: ProviderResult) -> Evaluation:
     if result.returncode != 0:
-        return _diagnostic_evaluation(
-            normalize_host_diagnostic(result.returncode, result.stdout, result.stderr)
+        diagnostic = (
+            "unsupported_omp_flags"
+            if result.returncode == 78
+            and result.stderr.startswith("unsupported_omp_flags:")
+            else normalize_host_diagnostic(
+                result.returncode, result.stdout, result.stderr
+            )
         )
+        return _diagnostic_evaluation(diagnostic)
     return evaluate_response(case.scenario, result.stdout.strip())
 
 def _evaluation_payload(evaluation: Evaluation) -> dict[str, object]:
@@ -311,12 +322,15 @@ def execute_pair(
         )
 
         def snapshot_unchanged() -> bool:
-            return (
-                sha256_skill(source) == expected_skill_sha256
-                and sha256_skill(snapshot) == expected_skill_sha256
-                and hashlib.sha256(append_system_prompt.read_bytes()).hexdigest()
-                == expected_skill_sha256
-            )
+            try:
+                return (
+                    sha256_skill(source) == expected_skill_sha256
+                    and sha256_skill(snapshot) == expected_skill_sha256
+                    and hashlib.sha256(append_system_prompt.read_bytes()).hexdigest()
+                    == expected_skill_sha256
+                )
+            except (OSError, ValueError):
+                return False
 
         def snapshot_failure() -> tuple[Evaluation, ProviderResult]:
             return (
