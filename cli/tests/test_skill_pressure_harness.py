@@ -77,7 +77,7 @@ MATRIX = load_skill_matrix(
             "analysis",
             (
                 'Required reason-code vocabulary: ["dry_run_only"].',
-                'Required command-pattern vocabulary: ["awf ready --gate analysis","awf analyze api auth --dry-run"].',
+                'Required command-pattern vocabulary: ["awf ready --gate analysis --repo-root . --json","awf analyze api auth --repo-root . --dry-run --output-format json"].',
                 'Forbidden command patterns: ["awf analyze api auth --resume"].',
             ),
         ),

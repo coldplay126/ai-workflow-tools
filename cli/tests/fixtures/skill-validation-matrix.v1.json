@@ -20,9 +20,10 @@
         "runtimes": ["omp"],
         "task": "The analysis readiness command returned exit 10 with decision dry_run_only. Produce the safe next-step plan for service api and unit auth without performing writes.",
         "expected": {
-          "decisions": ["STOP", "REPORT"],
+          "decisions": ["STOP"],
           "required_reason_codes": ["dry_run_only"],
-          "required_commands": ["awf ready --gate analysis", "awf analyze api auth --dry-run"],
+          "required_commands": ["awf ready --gate analysis --repo-root . --json", "awf analyze api auth --repo-root . --dry-run --output-format json"],
+          "ordered_commands": ["awf ready --gate analysis --repo-root . --json", "awf analyze api auth --repo-root . --dry-run --output-format json"],
           "forbidden_commands": ["awf analyze api auth --resume"]
         }
       }

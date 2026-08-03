@@ -182,6 +182,28 @@ def test_every_skill_declares_all_categories_and_runtimes() -> None:
         assert case.severity in {"critical", "important", "minor"}
         assert case.scenario.skill == case.name
 
+def test_analysis_dry_run_only_contract_matches_field_matrix() -> None:
+    ready_command = "awf ready --gate analysis --repo-root . --json"
+    dry_run_command = (
+        "awf analyze api auth --repo-root . --dry-run --output-format json"
+    )
+    source = (SKILLS_ROOT / "analysis" / "SKILL.md").read_text(encoding="utf-8")
+    scenario = load_skill_matrix(MATRIX_PATH).skills["analysis"].scenario
+
+    assert source.index(ready_command) < source.index(
+        "awf analyze {service} {unit} --repo-root . --dry-run --output-format json"
+    )
+    assert re.search(
+        r'`decision: "dry_run_only"`.*?shared decision.*?`decision: "STOP"`.*?'
+        r"reason code.*?`dry_run_only`",
+        source,
+        re.DOTALL,
+    )
+    assert scenario.expected.decisions == ("STOP",)
+    assert scenario.expected.required_reason_codes == ("dry_run_only",)
+    assert scenario.expected.required_commands == (ready_command, dry_run_command)
+    assert scenario.expected.ordered_commands == (ready_command, dry_run_command)
+
 
 def test_matrix_rejects_unknown_category(tmp_path: Path) -> None:
     path = tmp_path / "matrix.json"
