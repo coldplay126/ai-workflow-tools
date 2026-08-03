@@ -237,7 +237,7 @@ def _evaluation_payload(evaluation: Evaluation) -> dict[str, object]:
                 else "host_provider_exit"
             )
         elif identifier == "source_snapshot":
-            evidence = "source_snapshot_changed"
+            evidence = "skill_snapshot_changed"
         else:
             evidence = "satisfied" if criterion.verdict is Verdict.PASS else "not_satisfied"
         criteria.append(
@@ -317,11 +317,11 @@ def execute_pair(
 
     def snapshot_failure() -> tuple[Evaluation, ProviderResult]:
         return (
-            _blocked_evaluation("source_snapshot_changed"),
+            _blocked_evaluation("skill_snapshot_changed"),
             ProviderResult(
                 returncode=125,
                 stdout="",
-                stderr="source_snapshot_changed",
+                stderr="skill_snapshot_changed",
                 provider_name="omp",
             ),
         )
@@ -542,7 +542,7 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError):
             source_unchanged = False
         if not source_unchanged:
-            blocked = _blocked_evaluation("source_snapshot_changed")
+            blocked = _blocked_evaluation("skill_snapshot_changed")
             pair = PairEvaluation(Verdict.BLOCKED, blocked, blocked)
         provider_version = "subscription"
         prompt = build_prompt(case.scenario)

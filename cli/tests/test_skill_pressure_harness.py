@@ -500,6 +500,23 @@ def valid_field_record() -> dict[str, object]:
     }
 
 
+def test_field_record_accepts_skill_snapshot_mutation_evidence() -> None:
+    record = valid_field_record()
+    baseline = record["baseline"]
+    assert isinstance(baseline, dict)
+    baseline["verdict"] = "BLOCKED"
+    baseline["failures"] = ["skill_snapshot_changed"]
+    baseline["criteria"] = [
+        {
+            "id": "source_snapshot",
+            "verdict": "BLOCKED",
+            "evidence": "skill_snapshot_changed",
+        }
+    ]
+
+    pressure.validate_field_record(record)
+
+
 def test_field_record_rejects_raw_evaluation_evidence() -> None:
     record = valid_field_record()
     baseline = record["baseline"]
@@ -510,7 +527,6 @@ def test_field_record_rejects_raw_evaluation_evidence() -> None:
 
     with pytest.raises(pressure.EvidenceError, match="evaluation"):
         pressure.validate_field_record(record)
-
 
 
 @pytest.mark.parametrize(
@@ -1308,8 +1324,8 @@ def test_field_execute_pair_blocks_deleted_or_unreadable_injection_snapshot(
 
     assert calls == [["omp", "--version"], ["omp", "--help"]]
     assert run.evaluation.verdict is Verdict.BLOCKED
-    assert run.evaluation.baseline.failures == ("source_snapshot_changed",)
-    assert run.evaluation.with_skill.failures == ("source_snapshot_changed",)
+    assert run.evaluation.baseline.failures == ("skill_snapshot_changed",)
+    assert run.evaluation.with_skill.failures == ("skill_snapshot_changed",)
 
 
 def test_field_execute_pair_blocks_injection_materialization_hash_error(
@@ -1347,8 +1363,8 @@ def test_field_execute_pair_blocks_injection_materialization_hash_error(
 
     assert calls == []
     assert run.evaluation.verdict is Verdict.BLOCKED
-    assert run.evaluation.baseline.failures == ("source_snapshot_changed",)
-    assert run.evaluation.with_skill.failures == ("source_snapshot_changed",)
+    assert run.evaluation.baseline.failures == ("skill_snapshot_changed",)
+    assert run.evaluation.with_skill.failures == ("skill_snapshot_changed",)
 def test_field_execute_pair_blocks_injection_mutation_before_evidence(
     tmp_path: Path,
 ) -> None:
@@ -1384,8 +1400,8 @@ def test_field_execute_pair_blocks_injection_mutation_before_evidence(
 
     assert (source / "SKILL.md").read_text() == original
     assert run.evaluation.verdict is Verdict.BLOCKED
-    assert run.evaluation.baseline.failures == ("source_snapshot_changed",)
-    assert run.evaluation.with_skill.failures == ("source_snapshot_changed",)
+    assert run.evaluation.baseline.failures == ("skill_snapshot_changed",)
+    assert run.evaluation.with_skill.failures == ("skill_snapshot_changed",)
     assert run.baseline_result.returncode == 125
     assert run.with_skill_result.returncode == 125
 
@@ -1419,8 +1435,8 @@ def test_field_execute_pair_blocks_preflight_snapshot_mutation(
 
     assert calls == [["omp", "--version"], ["omp", "--help"]]
     assert run.evaluation.verdict is Verdict.BLOCKED
-    assert run.evaluation.baseline.failures == ("source_snapshot_changed",)
-    assert run.evaluation.with_skill.failures == ("source_snapshot_changed",)
+    assert run.evaluation.baseline.failures == ("skill_snapshot_changed",)
+    assert run.evaluation.with_skill.failures == ("skill_snapshot_changed",)
 
 
 def test_field_execute_pair_stops_after_canonical_source_mutation(
@@ -1463,8 +1479,8 @@ def test_field_execute_pair_stops_after_canonical_source_mutation(
         for argument in argv
     )
     assert run.evaluation.verdict is Verdict.BLOCKED
-    assert run.evaluation.baseline.failures == ("source_snapshot_changed",)
-    assert run.evaluation.with_skill.failures == ("source_snapshot_changed",)
+    assert run.evaluation.baseline.failures == ("skill_snapshot_changed",)
+    assert run.evaluation.with_skill.failures == ("skill_snapshot_changed",)
     assert run.baseline_result.returncode == 125
     assert run.with_skill_result.returncode == 125
 

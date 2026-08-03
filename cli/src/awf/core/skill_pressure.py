@@ -150,7 +150,7 @@ NORMALIZED_HOST_DIAGNOSTICS = frozenset(
 FIELD_EVALUATION_FAILURES = frozenset(
     {
         "evaluation_failed",
-        "source_snapshot_changed",
+        "skill_snapshot_changed",
         *FIELD_EVALUATION_CRITERIA,
         *NORMALIZED_HOST_DIAGNOSTICS,
     }
@@ -903,7 +903,7 @@ def _validate_field_evaluation(value: object, *, field: str) -> None:
         if identifier == "host_diagnostic":
             valid_evidence = evidence in NORMALIZED_HOST_DIAGNOSTICS
         elif identifier == "source_snapshot":
-            valid_evidence = evidence == "source_snapshot_changed"
+            valid_evidence = evidence == "skill_snapshot_changed"
         else:
             valid_evidence = evidence in {"satisfied", "not_satisfied"}
         if not valid_evidence:
