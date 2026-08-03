@@ -23,10 +23,20 @@ _AUTH_RE = re.compile(
     r"credential|authentication|authorize|not logged in|login required|not authenticated|api[ _-]?key",
     re.IGNORECASE,
 )
-_MODEL_RE = re.compile(
-    r"\bunsupported\s+model\b|(?<!tool )(?<!feature )(?<!parameter )"
-    r"\bmodel(?:\s+\S+)?\s+(?:is\s+not\s+supported|(?:is\s+)?unsupported)\b",
-    re.IGNORECASE,
+_QUOTED_MODEL_IDENTIFIER_RE = r"""(?:'[^'\r\n]+'|"[^"\r\n]+")"""
+_MODEL_IDENTIFIER_RE = rf"(?:{_QUOTED_MODEL_IDENTIFIER_RE}|\S*[0-9._/-]\S*)"
+_UNSUPPORTED_MODEL_STATUS_RE = r"is[ \t]+(?:not[ \t]+supported|unsupported)\b"
+_NON_MODEL_PREFIX_RE = r"(?<!tool[ \t])(?<!feature[ \t])(?<!parameter[ \t])"
+_UNSUPPORTED_MODEL_ASSERTIONS = (
+    re.compile(r"\bunsupported[ \t]+model\b", re.IGNORECASE),
+    re.compile(
+        rf"{_NON_MODEL_PREFIX_RE}\bmodel[ \t]+{_UNSUPPORTED_MODEL_STATUS_RE}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\bmodel[ \t]+{_MODEL_IDENTIFIER_RE}[ \t]+{_UNSUPPORTED_MODEL_STATUS_RE}",
+        re.IGNORECASE,
+    ),
 )
 
 
@@ -117,7 +127,7 @@ def normalize_host_diagnostic(
     text = f"{stdout}\n{stderr}"
     if _EXPIRED_RE.search(text):
         return "host_subscription_expired"
-    if _MODEL_RE.search(text):
+    if any(pattern.search(text) for pattern in _UNSUPPORTED_MODEL_ASSERTIONS):
         return "host_model_unsupported"
     if _AUTH_RE.search(text):
         return "host_auth_unavailable"

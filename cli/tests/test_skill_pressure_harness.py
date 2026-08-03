@@ -231,6 +231,7 @@ def test_host_diagnostic_ignores_warning_text_after_success() -> None:
         "model openai-codex/gpt-5.6-sol is not supported",
         "model is unsupported",
         "model openai-codex/gpt-5.6-sol is unsupported",
+        "The 'openai-codex/gpt-5.6-sol' model is not supported by this provider",
     ],
 )
 def test_host_diagnostic_classifies_explicit_unsupported_model(message: str) -> None:
@@ -246,6 +247,12 @@ def test_host_diagnostic_classifies_explicit_unsupported_model(message: str) -> 
         "tool model is not supported",
         "feature model is not supported",
         "parameter model is not supported",
+        "model response is unsupported",
+        "model output is not supported",
+        "model result is unsupported",
+        "model tool is not supported",
+        "model feature is unsupported",
+        "model parameter is not supported",
     ],
 )
 def test_host_diagnostic_does_not_misclassify_unsupported_non_models(message: str) -> None:
