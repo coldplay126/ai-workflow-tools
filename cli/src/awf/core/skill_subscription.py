@@ -25,7 +25,7 @@ _AUTH_RE = re.compile(
 )
 _MODEL_RE = re.compile(
     r"\bunsupported\s+model\b|(?<!tool )(?<!feature )(?<!parameter )"
-    r"\bmodel(?:\s+\S+)?\s+is\s+not\s+supported\b",
+    r"\bmodel(?:\s+\S+)?\s+(?:is\s+not\s+supported|(?:is\s+)?unsupported)\b",
     re.IGNORECASE,
 )
 
