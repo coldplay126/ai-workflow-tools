@@ -26,6 +26,11 @@ _AUTH_RE = re.compile(
 _QUOTED_MODEL_IDENTIFIER_RE = r"""(?:'[^'\r\n]+'|"[^"\r\n]+")"""
 _MODEL_IDENTIFIER_RE = rf"(?:{_QUOTED_MODEL_IDENTIFIER_RE}|\S*[0-9._/-]\S*)"
 _MODEL_IDENTIFIER_PATTERN = re.compile(_MODEL_IDENTIFIER_RE)
+_PINNED_SIMPLE_WORD_SUBSCRIPTION_MODELS = frozenset(
+    model.casefold()
+    for model in PINNED_SUBSCRIPTION_MODELS.values()
+    if not _MODEL_IDENTIFIER_PATTERN.fullmatch(model)
+)
 _UNSUPPORTED_MODEL_STATUS_RE = r"is[ \t]+(?:not[ \t]+supported|unsupported)\b"
 _EXPLICIT_UNSUPPORTED_MODEL_RE = re.compile(
     rf"\bmodel[ \t]+(?P<identifier>{_QUOTED_MODEL_IDENTIFIER_RE}|\S+)[ \t]+{_UNSUPPORTED_MODEL_STATUS_RE}",
@@ -45,7 +50,7 @@ def _has_explicit_unsupported_model(text: str) -> bool:
     for match in _EXPLICIT_UNSUPPORTED_MODEL_RE.finditer(text):
         identifier = match["identifier"]
         if _MODEL_IDENTIFIER_PATTERN.fullmatch(identifier) or (
-            identifier in PINNED_SUBSCRIPTION_MODELS.values()
+            identifier.casefold() in _PINNED_SIMPLE_WORD_SUBSCRIPTION_MODELS
         ):
             return True
     return False
