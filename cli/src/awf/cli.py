@@ -22,6 +22,7 @@ from awf.commands.wf_pr import run_wf_pr
 from awf.commands.wt import (
     run_wt_acquire,
     run_wt_adopt,
+    run_wt_link_pr,
     run_wt_doctor,
     run_wt_import,
     run_wt_status,
@@ -831,6 +832,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print a versioned JSON result.",
     )
     wt_adopt_parser.set_defaults(handler=run_wt_adopt)
+
+    wt_link_pr_parser = wt_subparsers.add_parser(
+        "link-pr",
+        help="Link one managed feature lease to its merged pull request.",
+    )
+    wt_link_pr_parser.add_argument(
+        "--lease",
+        required=True,
+        help="Existing managed feature lease id.",
+    )
+    wt_link_pr_parser.add_argument(
+        "--pr",
+        required=True,
+        type=_positive_int,
+        help="Merged pull request number whose head matches the lease.",
+    )
+    wt_link_pr_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Persist the verified pull request link instead of previewing it.",
+    )
+    wt_link_pr_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_link_pr_parser.set_defaults(handler=run_wt_link_pr)
 
     wt_status_parser = wt_subparsers.add_parser(
         "status",
