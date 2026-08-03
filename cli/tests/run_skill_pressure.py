@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -32,9 +33,16 @@ from awf.core.skill_pressure import (  # noqa: E402
     load_skill_matrix,
     _sensitive_labels,
     sha256_skill,
+    skill_snapshot_bytes,
     sha256_text,
     write_pressure_report,
     pressure_report_path,
+)
+from awf.core.skill_subscription import (  # noqa: E402
+    SubscriptionAuthContext,
+    build_subscription_environment,
+    normalize_host_diagnostic,
+    require_subscription_model,
 )
 from awf.providers.base import ProviderResult  # noqa: E402
 
@@ -44,8 +52,46 @@ class PairRun:
     evaluation: PairEvaluation
     baseline_result: ProviderResult
     with_skill_result: ProviderResult
+    preflight_result: ProviderResult
     skill_sha256: str
+    injection_sha256: str
 
+
+_NORMALIZED_HOST_DIAGNOSTICS = frozenset(
+    {
+        "host_auth_unavailable",
+        "host_model_unsupported",
+        "host_provider_exit",
+        "host_subscription_expired",
+        "host_timeout",
+    }
+)
+
+
+def _safe_criterion_id(identifier: str) -> str:
+    if identifier in {"host_diagnostic", "source_snapshot"}:
+        return identifier
+    for prefix in (
+        "required_reason:",
+        "required_section:",
+        "required_command:",
+        "forbidden_command:",
+    ):
+        if identifier.startswith(prefix):
+            return prefix.removesuffix(":")
+    if identifier in {
+        "selected_skill",
+        "decision",
+        "reason_codes_type",
+        "sections_type",
+        "commands_type",
+        "command_shell_control",
+        "command_order",
+        "response_json",
+        "response_object",
+    }:
+        return identifier
+    return "evaluation"
 
 ProcessRunner = Callable[..., ProviderResult]
 SAFE_BATCH_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
@@ -94,25 +140,35 @@ def _run_process(
     )
 
 
+def _help_supports_option(help_text: str, option: str) -> bool:
+    pattern = rf"(?<![A-Za-z0-9_-]){re.escape(option)}(?![A-Za-z0-9_-])"
+    return re.search(pattern, help_text) is not None
+
+
 def probe_omp(
     omp_command: str,
     *,
-    repo_root: Path,
+    repo_root: Path | None = None,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
     run_process: ProcessRunner = _run_process,
 ) -> ProviderResult:
-    env = dict(os.environ)
+    launch_cwd = cwd or repo_root
+    if launch_cwd is None:
+        raise ValueError("probe_omp requires cwd or repo_root")
+    launch_env = dict(os.environ if env is None else env)
     version = run_process(
-        [omp_command, "--version"], cwd=repo_root, env=env, timeout=10
+        [omp_command, "--version"], cwd=launch_cwd, env=launch_env, timeout=10
     )
     if version.returncode != 0:
         return version
     help_result = run_process(
-        [omp_command, "--help"], cwd=repo_root, env=env, timeout=10
+        [omp_command, "--help"], cwd=launch_cwd, env=launch_env, timeout=10
     )
     if help_result.returncode != 0:
         return help_result
-    required = ("--no-skills", "--skills", "--no-tools", "--no-session", "--max-time")
-    missing = [flag for flag in required if flag not in help_result.stdout]
+    required = ("-p", "--mode", "--skills", "--append-system-prompt", "--no-session", "--no-extensions", "--tools")
+    missing = [flag for flag in required if not _help_supports_option(help_result.stdout, flag)]
     if missing:
         return ProviderResult(
             returncode=78,
@@ -123,33 +179,62 @@ def probe_omp(
     return version
 
 
+def _diagnostic_evaluation(diagnostic: str) -> Evaluation:
+    verdict = Verdict.FAIL if diagnostic == "host_model_unsupported" else Verdict.BLOCKED
+    return Evaluation(
+        verdict=verdict,
+        failures=(diagnostic,),
+        criteria=(CriterionResult("host_diagnostic", verdict, diagnostic),),
+        parsed=None,
+    )
+
+
 def _blocked_evaluation(failure: str) -> Evaluation:
     return Evaluation(
         verdict=Verdict.BLOCKED,
         failures=(failure,),
-        criteria=(CriterionResult("provider_exit", Verdict.BLOCKED, failure),),
+        criteria=(CriterionResult("source_snapshot", Verdict.BLOCKED, failure),),
         parsed=None,
     )
 
 
 def _evaluation(case: SkillCase, result: ProviderResult) -> Evaluation:
     if result.returncode != 0:
-        return _blocked_evaluation(f"provider_exit:{result.returncode}")
+        return _diagnostic_evaluation(
+            normalize_host_diagnostic(result.returncode, result.stdout, result.stderr)
+        )
     return evaluate_response(case.scenario, result.stdout.strip())
 
-
 def _evaluation_payload(evaluation: Evaluation) -> dict[str, object]:
+    criteria: list[dict[str, str]] = []
+    failures: list[str] = []
+    for criterion in evaluation.criteria:
+        identifier = _safe_criterion_id(criterion.id)
+        if identifier == "host_diagnostic":
+            evidence = (
+                criterion.evidence
+                if criterion.evidence in _NORMALIZED_HOST_DIAGNOSTICS
+                else "host_provider_exit"
+            )
+        elif identifier == "source_snapshot":
+            evidence = "source_snapshot_changed"
+        else:
+            evidence = "satisfied" if criterion.verdict is Verdict.PASS else "not_satisfied"
+        criteria.append(
+            {
+                "id": identifier,
+                "verdict": criterion.verdict.value,
+                "evidence": evidence,
+            }
+        )
+        if criterion.verdict is not Verdict.PASS:
+            failures.append(evidence if identifier in {"host_diagnostic", "source_snapshot"} else identifier)
+    if evaluation.verdict is not Verdict.PASS and not failures:
+        failures.append("evaluation_failed")
     return {
         "verdict": evaluation.verdict.value,
-        "failures": list(evaluation.failures),
-        "criteria": [
-            {
-                "id": criterion.id,
-                "verdict": criterion.verdict.value,
-                "evidence": criterion.evidence,
-            }
-            for criterion in evaluation.criteria
-        ],
+        "failures": failures,
+        "criteria": criteria,
     }
 
 
@@ -199,55 +284,122 @@ def execute_pair(
     omp_command: str,
     model: str,
     timeout_sec: int,
+    auth_context: SubscriptionAuthContext | None = None,
     run_process: ProcessRunner = _run_process,
 ) -> PairRun:
+    require_subscription_model("omp", model)
+    auth = auth_context or SubscriptionAuthContext.capture()
     repo_root = repo_root.resolve()
     source = validate_skill_source(repo_root, case)
     prompt = build_prompt(case.scenario)
+    expected_skill_sha256 = sha256_skill(source)
+
     with tempfile.TemporaryDirectory(prefix="awf-skill-pressure-") as tmp:
-        omp_dir = Path(tmp) / "omp-agent"
-        skill_root = omp_dir / "skills"
+        temporary_root = Path(tmp)
+        temporary_home = temporary_root / "home"
+        workspace = temporary_root / "workspace"
+        temporary_home.mkdir()
+        workspace.mkdir()
+        skill_root = workspace / ".omp" / "skills"
         skill_root.mkdir(parents=True)
         snapshot = _snapshot_skill(source, skill_root, case)
-        snapshot_sha256 = sha256_skill(snapshot)
-        env = {**os.environ, "PI_CODING_AGENT_DIR": str(omp_dir)}
-        common = [
-            omp_command,
-            "-p",
-            "--mode=text",
-            "--no-tools",
-            "--no-session",
-            f"--model={model}",
-            f"--max-time={timeout_sec}",
-        ]
-        baseline_result = run_process(
-            [*common, "--no-skills", prompt], cwd=repo_root, env=env, timeout=timeout_sec
+        append_system_prompt = workspace / "APPEND_SYSTEM.md"
+        append_system_prompt.write_bytes(skill_snapshot_bytes(snapshot))
+        injection_sha256 = hashlib.sha256(append_system_prompt.read_bytes()).hexdigest()
+        environment = build_subscription_environment(
+            "omp", auth, temporary_home, os.environ
         )
-        baseline = _evaluation(case, baseline_result)
-        if sha256_skill(snapshot) != snapshot_sha256:
-            with_skill_result = ProviderResult(
+
+        def snapshot_unchanged() -> bool:
+            return (
+                sha256_skill(source) == expected_skill_sha256
+                and sha256_skill(snapshot) == expected_skill_sha256
+                and hashlib.sha256(append_system_prompt.read_bytes()).hexdigest()
+                == expected_skill_sha256
+            )
+
+        def snapshot_failure() -> tuple[Evaluation, ProviderResult]:
+            return (
+                _blocked_evaluation("source_snapshot_changed"),
+                ProviderResult(
+                    returncode=125,
+                    stdout="",
+                    stderr="source_snapshot_changed",
+                    provider_name="omp",
+                ),
+            )
+
+        if not snapshot_unchanged():
+            baseline, baseline_result = snapshot_failure()
+            with_skill, with_skill_result = snapshot_failure()
+            preflight_result = ProviderResult(
                 returncode=125,
                 stdout="",
-                stderr="skill_snapshot_changed",
+                stderr="source_snapshot_changed",
                 provider_name="omp",
             )
-            with_skill = _blocked_evaluation("skill_snapshot_changed")
         else:
-            with_skill_result = run_process(
-                [*common, f"--skills={case.name}", prompt],
-                cwd=repo_root,
-                env=env,
-                timeout=timeout_sec,
+            preflight_result = probe_omp(
+                omp_command,
+                cwd=workspace,
+                env=environment,
+                run_process=run_process,
             )
-            with_skill = _evaluation(case, with_skill_result)
-            if sha256_skill(snapshot) != snapshot_sha256:
-                with_skill = _blocked_evaluation("skill_snapshot_changed")
-    return PairRun(
-        evaluation=compare_pair(baseline, with_skill),
-        baseline_result=baseline_result,
-        with_skill_result=with_skill_result,
-        skill_sha256=snapshot_sha256,
-    )
+            if not snapshot_unchanged():
+                baseline, baseline_result = snapshot_failure()
+                with_skill, with_skill_result = snapshot_failure()
+            elif preflight_result.returncode != 0:
+                baseline_result = preflight_result
+                with_skill_result = preflight_result
+                baseline = _evaluation(case, preflight_result)
+                with_skill = _evaluation(case, preflight_result)
+            else:
+                common = [
+                    omp_command,
+                    "-p",
+                    "--mode=text",
+                    "--tools=read",
+                    "--no-session",
+                    "--no-extensions",
+                    f"--model={model}",
+                    f"--max-time={timeout_sec}",
+                ]
+                baseline_result = run_process(
+                    [*common, "--skills=", prompt],
+                    cwd=workspace,
+                    env=environment,
+                    timeout=timeout_sec,
+                )
+                baseline = _evaluation(case, baseline_result)
+                if not snapshot_unchanged():
+                    baseline, baseline_result = snapshot_failure()
+                    with_skill, with_skill_result = snapshot_failure()
+                else:
+                    with_skill_result = run_process(
+                        [
+                            *common,
+                            f"--skills={case.name}",
+                            "--append-system-prompt",
+                            str(append_system_prompt),
+                            prompt,
+                        ],
+                        cwd=workspace,
+                        env=environment,
+                        timeout=timeout_sec,
+                    )
+                    with_skill = _evaluation(case, with_skill_result)
+                    if not snapshot_unchanged():
+                        baseline, baseline_result = snapshot_failure()
+                        with_skill, with_skill_result = snapshot_failure()
+
+        return PairRun(
+            evaluation=compare_pair(baseline, with_skill),
+            baseline_result=baseline_result,
+            with_skill_result=with_skill_result,
+            preflight_result=preflight_result,
+            skill_sha256=expected_skill_sha256,
+            injection_sha256=injection_sha256,
+        )
 
 
 def _validate_batch_id(batch_id: str) -> None:
@@ -323,23 +475,11 @@ def main(argv: list[str] | None = None) -> int:
         selected_cases = select_cases(matrix, args.skills, select_all=args.all)
         for case in selected_cases:
             validate_skill_source(repo_root, case)
+        require_subscription_model("omp", args.model)
+        auth_context = SubscriptionAuthContext.capture()
     except ValueError as exc:
         parser.error(str(exc))
 
-    preflight = probe_omp(args.omp_command, repo_root=repo_root)
-    if preflight.returncode != 0:
-        blocked = {
-            "schema": "awf_skill_pressure_run_v1",
-            "preflight": {
-                "verdict": Verdict.BLOCKED.value,
-                "exit_status": preflight.returncode,
-                "diagnostic": preflight.stderr,
-            },
-            "results": [],
-        }
-        print(json.dumps(blocked, ensure_ascii=False, indent=2))
-        return 1
-    omp_version = preflight.stdout.strip()
     records: list[dict[str, object]] = []
     exit_code = 0
     for case, repetition in expanded_runs(selected_cases):
@@ -350,8 +490,17 @@ def main(argv: list[str] | None = None) -> int:
             omp_command=args.omp_command,
             model=args.model,
             timeout_sec=args.timeout_sec,
+            auth_context=auth_context,
         )
         pair = run.evaluation
+        try:
+            source_unchanged = sha256_skill(validate_skill_source(repo_root, case)) == run.skill_sha256
+        except (OSError, ValueError):
+            source_unchanged = False
+        if not source_unchanged:
+            blocked = _blocked_evaluation("source_snapshot_changed")
+            pair = PairEvaluation(Verdict.BLOCKED, blocked, blocked)
+        provider_version = "subscription"
         prompt = build_prompt(case.scenario)
         record = {
             "batch_id": args.batch_id,
@@ -360,14 +509,19 @@ def main(argv: list[str] | None = None) -> int:
             "scenario_id": case.scenario.id,
             "repetition": repetition,
             "provider": "omp",
-            "provider_version": omp_version,
+            "provider_version": provider_version,
             "model": args.model,
             "runner_flags": [
+                "-p",
                 "--mode=text",
-                "--no-tools",
+                "--tools=read",
                 "--no-session",
-                f"--max-time={args.timeout_sec}",
+                "--no-extensions",
+                "--skills=",
+                f"--skills={name}",
+                "--append-system-prompt",
             ],
+            "auth_mode": "subscription",
             "severity": case.severity,
             "remediation_state": (
                 "open" if pair.verdict in {Verdict.FAIL, Verdict.BLOCKED} else "not_required"
@@ -380,6 +534,7 @@ def main(argv: list[str] | None = None) -> int:
             }[pair.verdict],
             "prompt_sha256": sha256_text(prompt),
             "skill_sha256": run.skill_sha256,
+            "injection_sha256": run.injection_sha256,
             "verdict": pair.verdict.value,
             "baseline": _evaluation_payload(pair.baseline),
             "with_skill": _evaluation_payload(pair.with_skill),
@@ -402,8 +557,8 @@ def main(argv: list[str] | None = None) -> int:
                     repo_root,
                     run_id=run_id,
                     payload=record,
-                    baseline=run.baseline_result.stdout,
-                    with_skill=run.with_skill_result.stdout,
+                    baseline="",
+                    with_skill="",
                 )
             except SensitiveDataError:
                 report_written = pressure_report_path(repo_root, run_id).is_file()

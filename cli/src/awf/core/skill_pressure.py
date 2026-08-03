@@ -13,6 +13,7 @@ from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 from awf.core.operational_metrics import operations_root
+from awf.core.skill_subscription import PINNED_SUBSCRIPTION_MODELS
 
 
 MATRIX_SCHEMA = "awf_skill_validation_matrix_v1"
@@ -72,11 +73,68 @@ FIELD_RECORD_REQUIRED = {
     "prompt_sha256",
     "skill_sha256",
     "verdict",
+    "auth_mode",
+    "injection_sha256",
     "baseline",
     "with_skill",
     "elapsed_sec",
     "exit_status",
 }
+
+OMP_FIELD_RUNNER_FLAGS = (
+    "-p",
+    "--mode=text",
+    "--tools=read",
+    "--no-session",
+    "--no-extensions",
+    "--skills=",
+)
+
+FIELD_EVALUATION_CRITERIA = frozenset(
+    {
+        "command_order",
+        "command_shell_control",
+        "commands_type",
+        "decision",
+        "evaluation",
+        "forbidden_command",
+        "reason_codes_type",
+        "required_command",
+        "required_reason",
+        "required_section",
+        "response_json",
+        "response_object",
+        "sections_type",
+        "selected_skill",
+        "source_snapshot",
+        "host_diagnostic",
+    }
+)
+NORMALIZED_HOST_DIAGNOSTICS = frozenset(
+    {
+        "host_auth_unavailable",
+        "host_model_unsupported",
+        "host_provider_exit",
+        "host_subscription_expired",
+        "host_timeout",
+    }
+)
+FIELD_EVALUATION_FAILURES = frozenset(
+    {
+        "evaluation_failed",
+        "source_snapshot_changed",
+        *FIELD_EVALUATION_CRITERIA,
+        *NORMALIZED_HOST_DIAGNOSTICS,
+    }
+)
+
+FIELD_SKILL_RE = re.compile(r"^[a-z][a-z0-9-]*$")
+FIELD_SCENARIO_RE = re.compile(r"^[a-z][a-z0-9.-]*$")
+FIELD_SEVERITIES = frozenset({"critical", "important", "minor"})
+FIELD_REMEDIATION_STATES = frozenset({"not_required", "open"})
+FIELD_BEHAVIORAL_DELTAS = frozenset(
+    {"blocked", "improved", "not_demonstrated", "regressed_or_noncompliant"}
+)
 DETERMINISTIC_TEST_PATHS = (
     "cli/tests/test_skill_contract_matrix.py",
     "cli/tests/test_skill_runtime_install.py",
@@ -100,6 +158,10 @@ DETERMINISTIC_SOURCE_FILES = (
     *DETERMINISTIC_TEST_PATHS,
     "cli/tests/fixtures/skill-validation-matrix.v1.json",
     "cli/src/awf/core/skill_pressure.py",
+    "cli/src/awf/core/skill_subscription.py",
+    "cli/tests/run_skill_discovery.py",
+    "cli/tests/run_skill_pressure.py",
+    "cli/tests/build_skill_evidence.py",
 )
 SAFE_FIELD_IDENTITY_KEYS = frozenset(
     {
@@ -112,6 +174,8 @@ SAFE_FIELD_IDENTITY_KEYS = frozenset(
         "severity",
         "prompt_sha256",
         "skill_sha256",
+        "auth_mode",
+        "injection_sha256",
     }
 )
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -538,15 +602,18 @@ def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def sha256_skill(skill_root: str | Path) -> str:
+def skill_snapshot_bytes(skill_root: str | Path) -> bytes:
     root = Path(skill_root)
-    digest = hashlib.sha256()
+    snapshot = bytearray()
     for path in sorted(path for path in root.rglob("*") if path.is_file()):
-        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\0")
-    return digest.hexdigest()
+        relative = path.relative_to(root).as_posix()
+        snapshot.extend(f"\n\n<!-- awf-skill-snapshot:{relative} -->\n".encode("utf-8"))
+        snapshot.extend(path.read_bytes())
+    return bytes(snapshot)
+
+
+def sha256_skill(skill_root: str | Path) -> str:
+    return hashlib.sha256(skill_snapshot_bytes(skill_root)).hexdigest()
 
 
 def _sensitive_labels(text: str) -> tuple[str, ...]:
@@ -581,7 +648,15 @@ def _publish_new(target: Path, content: str) -> None:
 
 def _safe_field_identity(payload: dict[str, object]) -> dict[str, object]:
     identity: dict[str, object] = {}
-    token_fields = ("batch_id", "matrix_schema", "skill", "scenario_id", "provider", "severity")
+    token_fields = (
+        "batch_id",
+        "matrix_schema",
+        "skill",
+        "scenario_id",
+        "provider",
+        "severity",
+        "auth_mode",
+    )
     for key in token_fields:
         value = payload.get(key)
         if (
@@ -593,7 +668,7 @@ def _safe_field_identity(payload: dict[str, object]) -> dict[str, object]:
     repetition = payload.get("repetition")
     if isinstance(repetition, int) and repetition > 0:
         identity["repetition"] = repetition
-    for key in ("prompt_sha256", "skill_sha256"):
+    for key in ("prompt_sha256", "skill_sha256", "injection_sha256"):
         value = payload.get(key)
         if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value):
             identity[key] = value
@@ -635,37 +710,18 @@ def write_pressure_report(
 
     validate_field_record(payload)
 
-    root = _repository_root(repo_root)
-    transcript_root = _pressure_operations_root(root) / "transcripts" / run_id
-    _assert_no_symlink_components(root, transcript_root)
-    baseline_path = transcript_root / "baseline.txt"
-    with_skill_path = transcript_root / "with-skill.txt"
-    created: list[Path] = []
-    try:
-        _publish_new(baseline_path, baseline)
-        created.append(baseline_path)
-        _publish_new(with_skill_path, with_skill)
-        created.append(with_skill_path)
-        envelope = {
-            "schema": REPORT_SCHEMA,
-            "recorded_at": recorded_at,
-            "run_id": run_id,
-            "persistence_status": "COMPLETE",
-            "payload": payload,
-            "transcripts": {
-                "baseline": {"path": str(baseline_path), "sha256": sha256_text(baseline)},
-                "with_skill": {"path": str(with_skill_path), "sha256": sha256_text(with_skill)},
-            },
-        }
-        _publish_new(target, json.dumps(envelope, ensure_ascii=False, indent=2) + "\n")
-    except BaseException:
-        for path in reversed(created):
-            path.unlink(missing_ok=True)
-        try:
-            transcript_root.rmdir()
-        except OSError:
-            pass
-        raise
+    envelope = {
+        "schema": REPORT_SCHEMA,
+        "recorded_at": recorded_at,
+        "run_id": run_id,
+        "persistence_status": "COMPLETE",
+        "payload": payload,
+        "response_hashes": {
+            "baseline": sha256_text(baseline),
+            "with_skill": sha256_text(with_skill),
+        },
+    }
+    _publish_new(target, json.dumps(envelope, ensure_ascii=False, indent=2) + "\n")
     return target
 
 
@@ -755,35 +811,123 @@ def _verdict(value: object) -> Verdict | None:
         return None
 
 
+def _validate_field_evaluation(value: object, *, field: str) -> None:
+    if not isinstance(value, Mapping) or set(value) != {
+        "verdict",
+        "failures",
+        "criteria",
+    }:
+        raise EvidenceError(f"invalid field record {field} evaluation")
+    if _verdict(value["verdict"]) is None:
+        raise EvidenceError(f"invalid field record {field} evaluation verdict")
+    failures = value["failures"]
+    if (
+        not isinstance(failures, list)
+        or not all(isinstance(failure, str) for failure in failures)
+        or not set(failures).issubset(FIELD_EVALUATION_FAILURES)
+    ):
+        raise EvidenceError(f"invalid field record {field} evaluation failures")
+    criteria = value["criteria"]
+    if not isinstance(criteria, list):
+        raise EvidenceError(f"invalid field record {field} evaluation criteria")
+    for criterion in criteria:
+        if not isinstance(criterion, Mapping) or set(criterion) != {
+            "id",
+            "verdict",
+            "evidence",
+        }:
+            raise EvidenceError(f"invalid field record {field} evaluation criterion")
+        identifier = criterion["id"]
+        if not isinstance(identifier, str) or identifier not in FIELD_EVALUATION_CRITERIA:
+            raise EvidenceError(f"invalid field record {field} evaluation criterion")
+        if _verdict(criterion["verdict"]) is None:
+            raise EvidenceError(f"invalid field record {field} evaluation criterion")
+        evidence = criterion["evidence"]
+        if not isinstance(evidence, str):
+            raise EvidenceError(f"invalid field record {field} evaluation evidence")
+        if identifier == "host_diagnostic":
+            valid_evidence = evidence in NORMALIZED_HOST_DIAGNOSTICS
+        elif identifier == "source_snapshot":
+            valid_evidence = evidence == "source_snapshot_changed"
+        else:
+            valid_evidence = evidence in {"satisfied", "not_satisfied"}
+        if not valid_evidence:
+            raise EvidenceError(f"invalid field record {field} evaluation evidence")
+
+
+def _validate_arm_values(
+    value: object, *, field: str, value_type: type[int] | type[float]
+) -> None:
+    if isinstance(value, Mapping):
+        if set(value) != {"baseline", "with_skill"} or not all(
+            type(item) is value_type for item in value.values()
+        ):
+            raise EvidenceError(f"invalid field record {field}")
+        return
+    if type(value) is not value_type:
+        raise EvidenceError(f"invalid field record {field}")
+
+
 def validate_field_record(record: dict[str, Any]) -> None:
     missing = sorted(FIELD_RECORD_REQUIRED - set(record))
     if missing:
         raise EvidenceError(f"missing field record keys: {','.join(missing)}")
+    unexpected = sorted(set(record) - FIELD_RECORD_REQUIRED)
+    if unexpected:
+        raise EvidenceError(f"unexpected field record keys: {','.join(unexpected)}")
     if record["matrix_schema"] != MATRIX_SCHEMA:
         raise EvidenceError("field record matrix schema mismatch")
     _require_safe_batch_id(record["batch_id"])
-    for key in ("prompt_sha256", "skill_sha256"):
+    for key in ("prompt_sha256", "skill_sha256", "injection_sha256"):
         _require_sha256(record[key], field=key)
-    for key in ("skill", "scenario_id", "provider", "provider_version", "model", "severity"):
+    for key in ("skill", "scenario_id", "provider_version"):
         if not isinstance(record[key], str) or not record[key]:
             raise EvidenceError(f"invalid field record {key}")
+    if FIELD_SKILL_RE.fullmatch(record["skill"]) is None:
+        raise EvidenceError("invalid field record skill")
+    if FIELD_SCENARIO_RE.fullmatch(record["scenario_id"]) is None:
+        raise EvidenceError("invalid field record scenario_id")
+    if record["provider_version"] != "subscription":
+        raise EvidenceError("invalid field record provider_version")
+    if not isinstance(record["severity"], str) or record["severity"] not in FIELD_SEVERITIES:
+        raise EvidenceError("invalid field record severity")
+    if record["provider"] != "omp":
+        raise EvidenceError("invalid field record provider")
+    if record["model"] != PINNED_SUBSCRIPTION_MODELS["omp"]:
+        raise EvidenceError("invalid field record model")
+    if record["auth_mode"] != "subscription":
+        raise EvidenceError("invalid field record auth_mode")
     if not isinstance(record["repetition"], int) or record["repetition"] < 1:
         raise EvidenceError("invalid field record repetition")
     if not isinstance(record["runner_flags"], list) or not all(
         isinstance(flag, str) and flag for flag in record["runner_flags"]
     ):
         raise EvidenceError("invalid field record runner_flags")
-    for key in ("remediation_state", "behavioral_delta"):
-        if not isinstance(record[key], str) or not record[key]:
-            raise EvidenceError(f"invalid field record {key}")
+    expected_runner_flags = [
+        *OMP_FIELD_RUNNER_FLAGS,
+        f"--skills={record['skill']}",
+        "--append-system-prompt",
+    ]
+    if record["runner_flags"] != expected_runner_flags:
+        raise EvidenceError("invalid field record runner_flags")
+    if (
+        not isinstance(record["remediation_state"], str)
+        or record["remediation_state"] not in FIELD_REMEDIATION_STATES
+    ):
+        raise EvidenceError("invalid field record remediation_state")
+    if (
+        not isinstance(record["behavioral_delta"], str)
+        or record["behavioral_delta"] not in FIELD_BEHAVIORAL_DELTAS
+    ):
+        raise EvidenceError("invalid field record behavioral_delta")
+    if record["injection_sha256"] != record["skill_sha256"]:
+        raise EvidenceError("field injection hash mismatch")
     if _verdict(record["verdict"]) is None:
         raise EvidenceError("invalid field record verdict")
-    if not isinstance(record["baseline"], Mapping) or not isinstance(record["with_skill"], Mapping):
-        raise EvidenceError("invalid field record evaluations")
-    if not isinstance(record["elapsed_sec"], (int, float, Mapping)):
-        raise EvidenceError("invalid field record elapsed_sec")
-    if not isinstance(record["exit_status"], (int, Mapping)):
-        raise EvidenceError("invalid field record exit_status")
+    _validate_field_evaluation(record["baseline"], field="baseline")
+    _validate_field_evaluation(record["with_skill"], field="with_skill")
+    _validate_arm_values(record["elapsed_sec"], field="elapsed_sec", value_type=float)
+    _validate_arm_values(record["exit_status"], field="exit_status", value_type=int)
 
 
 def _validate_timestamp(value: object, *, field: str) -> str:
@@ -1076,14 +1220,16 @@ def _expect_exact_runtime_identities(
 def _validate_blocked_field_identity(identity: Mapping[str, Any]) -> None:
     if not set(identity).issubset(SAFE_FIELD_IDENTITY_KEYS):
         raise EvidenceError("blocked field identity contains non-allowlisted key")
-    for key in ("skill", "scenario_id", "provider", "severity"):
+    for key in ("skill", "scenario_id", "provider", "severity", "auth_mode"):
         value = identity.get(key)
         if value is not None and (not isinstance(value, str) or not value):
             raise EvidenceError(f"invalid blocked field identity {key}")
+    if identity.get("auth_mode") not in {None, "subscription"}:
+        raise EvidenceError("invalid blocked field identity auth_mode")
     repetition = identity.get("repetition")
     if repetition is not None and (not isinstance(repetition, int) or repetition < 1):
         raise EvidenceError("invalid blocked field identity repetition")
-    for key in ("prompt_sha256", "skill_sha256"):
+    for key in ("prompt_sha256", "skill_sha256", "injection_sha256"):
         if key in identity:
             _require_sha256(identity[key], field=f"blocked field identity {key}")
 
@@ -1105,30 +1251,20 @@ def _validate_field_payload_binding(
         raise EvidenceError("field Skill source is not a regular directory")
     if any(path.is_symlink() for path in skill_root.rglob("*")):
         raise EvidenceError("field Skill source symlink is not allowed")
-    if payload["skill_sha256"] != sha256_skill(skill_root):
+    current_skill_hash = sha256_skill(skill_root)
+    if payload["skill_sha256"] != current_skill_hash:
         raise EvidenceError("field Skill hash mismatch")
+    if payload["injection_sha256"] != current_skill_hash:
+        raise EvidenceError("field injection hash mismatch")
 
 
-def _validate_complete_transcripts(
-    transcripts: Mapping[str, Any], *, root: Path, run_id: str
-) -> None:
-    if set(transcripts) != {"baseline", "with_skill"}:
-        raise EvidenceError("field COMPLETE envelope transcripts mismatch")
-    transcript_root = _pressure_operations_root(root) / "transcripts" / run_id
-    _assert_no_symlink_components(root, transcript_root)
-    for name, filename in (("baseline", "baseline.txt"), ("with_skill", "with-skill.txt")):
-        transcript = _require_mapping(transcripts[name], field=f"{name} transcript")
-        if set(transcript) != {"path", "sha256"}:
-            raise EvidenceError("field COMPLETE envelope transcript keys mismatch")
-        expected_path = transcript_root / filename
-        path_value = transcript.get("path")
-        if not isinstance(path_value, str) or Path(path_value).absolute() != expected_path:
-            raise EvidenceError("field COMPLETE envelope transcript path mismatch")
-        _assert_no_symlink_components(root, expected_path)
-        if expected_path.is_symlink() or not expected_path.is_file():
-            raise EvidenceError("field COMPLETE envelope transcript is not a regular file")
-        if _require_sha256(transcript.get("sha256"), field=f"{name} transcript sha256") != sha256_file(expected_path):
-            raise EvidenceError("field COMPLETE envelope transcript hash mismatch")
+def _validate_complete_response_hashes(response_hashes: Mapping[str, Any]) -> None:
+    if set(response_hashes) != {"baseline", "with_skill"}:
+        raise EvidenceError("field COMPLETE envelope response hashes mismatch")
+    for name in ("baseline", "with_skill"):
+        _require_sha256(
+            response_hashes[name], field=f"{name} response sha256"
+        )
 
 
 def _field_identity_from_report(
@@ -1147,15 +1283,20 @@ def _field_identity_from_report(
     _validate_timestamp(report.get("recorded_at"), field="field recorded_at")
     status = report.get("persistence_status")
     if status == "COMPLETE":
-        if set(report) != {"schema", "recorded_at", "run_id", "persistence_status", "payload", "transcripts"}:
+        if set(report) != {
+            "schema",
+            "recorded_at",
+            "run_id",
+            "persistence_status",
+            "payload",
+            "response_hashes",
+        }:
             raise EvidenceError("field COMPLETE envelope keys mismatch")
         payload = _require_mapping(report.get("payload"), field="field payload")
         validate_field_record(dict(payload))
         _validate_field_payload_binding(root, matrix, payload)
-        _validate_complete_transcripts(
-            _require_mapping(report.get("transcripts"), field="field transcripts"),
-            root=root,
-            run_id=run_id,
+        _validate_complete_response_hashes(
+            _require_mapping(report.get("response_hashes"), field="field response hashes")
         )
     elif status == "BLOCKED":
         if set(report) != {"schema", "recorded_at", "run_id", "persistence_status", "diagnostics", "field_identity"}:

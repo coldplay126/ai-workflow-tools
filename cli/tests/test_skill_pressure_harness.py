@@ -10,6 +10,7 @@ from dataclasses import replace
 import pytest
 
 from awf.core.skill_pressure import (
+    CriterionResult,
     Evaluation,
     HIGH_RISK_SKILLS,
     SensitiveDataError,
@@ -56,6 +57,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 MATRIX = load_skill_matrix(
     REPO_ROOT / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json"
 )
+
+OMP_SUBSCRIPTION_MODEL = "openai-codex/gpt-5.6-sol"
+
 
 
 def _subscription_auth(tmp_path: Path) -> SubscriptionAuthContext:
@@ -457,24 +461,159 @@ def valid_field_record() -> dict[str, object]:
         "scenario_id": "release-worktree.dirty-finish",
         "repetition": 1,
         "provider": "omp",
-        "provider_version": "test",
-        "model": "test-model",
-        "runner_flags": ["--mode=text", "--no-tools", "--no-session"],
+        "provider_version": "subscription",
+        "model": OMP_SUBSCRIPTION_MODEL,
+        "runner_flags": [
+            "-p",
+            "--mode=text",
+            "--tools=read",
+            "--no-session",
+            "--no-extensions",
+            "--skills=",
+            "--skills=release-worktree-lifecycle",
+            "--append-system-prompt",
+        ],
+        "auth_mode": "subscription",
+        "injection_sha256": "b" * 64,
         "severity": "critical",
-        "remediation_state": "none",
+        "remediation_state": "not_required",
         "behavioral_delta": "improved",
         "prompt_sha256": "a" * 64,
         "skill_sha256": "b" * 64,
         "verdict": "PASS",
-        "baseline": {"verdict": "FAIL", "evidence": "baseline accepted unsafe action"},
-        "with_skill": {"verdict": "PASS", "evidence": "with-Skill stopped"},
+        "baseline": {
+            "verdict": "FAIL",
+            "failures": ["decision"],
+            "criteria": [
+                {"id": "decision", "verdict": "FAIL", "evidence": "not_satisfied"}
+            ],
+        },
+        "with_skill": {
+            "verdict": "PASS",
+            "failures": [],
+            "criteria": [
+                {"id": "decision", "verdict": "PASS", "evidence": "satisfied"}
+            ],
+        },
         "elapsed_sec": 0.1,
         "exit_status": {"baseline": 0, "with_skill": 0},
     }
 
 
-def test_report_writer_is_append_only_and_hashes_transcripts(tmp_path: Path) -> None:
-    baseline = response(decision="PROCEED", reason_codes=[])
+def test_field_record_rejects_raw_evaluation_evidence() -> None:
+    record = valid_field_record()
+    baseline = record["baseline"]
+    assert isinstance(baseline, dict)
+    criteria = baseline["criteria"]
+    assert isinstance(criteria, list)
+    criteria[0]["evidence"] = "/operator/private/token"
+
+    with pytest.raises(pressure.EvidenceError, match="evaluation"):
+        pressure.validate_field_record(record)
+
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "provider_version",
+        "skill",
+        "scenario_id",
+        "severity",
+        "remediation_state",
+        "behavioral_delta",
+    ),
+)
+def test_field_record_rejects_raw_string_metadata(field: str) -> None:
+    record = valid_field_record()
+    record[field] = "/operator/private/token"
+
+    with pytest.raises(pressure.EvidenceError):
+        pressure.validate_field_record(record)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("elapsed_sec", {"baseline": "/operator/private/token", "with_skill": 0.0}),
+        ("exit_status", {"baseline": "/operator/private/token", "with_skill": 0}),
+    ),
+)
+def test_field_record_rejects_raw_runtime_metadata(
+    field: str, value: object
+) -> None:
+    record = valid_field_record()
+    record[field] = value
+
+    with pytest.raises(pressure.EvidenceError):
+        pressure.validate_field_record(record)
+
+
+def test_field_main_persists_minor_severity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo_root, source = _copied_wf_status_repo(tmp_path)
+    matrix = json.loads(
+        (
+            REPO_ROOT / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json"
+        ).read_text()
+    )
+    minor_skill = next(skill for skill in matrix["skills"] if skill["name"] == "wf-status")
+    minor_skill["severity"] = "minor"
+    minor_skill["scenario"]["severity"] = "minor"
+    matrix_path = tmp_path / "matrix.json"
+    matrix_path.write_text(json.dumps(matrix))
+    skill_hash = sha256_skill(source)
+
+    def fake_execute(case: object, **kwargs: object) -> run_skill_pressure.PairRun:
+        baseline = Evaluation(Verdict.FAIL, ("decision",), (), None)
+        with_skill = Evaluation(Verdict.PASS, (), (), None)
+        return run_skill_pressure.PairRun(
+            evaluation=compare_pair(baseline, with_skill),
+            baseline_result=ProviderResult(0, "", "", provider_name="omp"),
+            with_skill_result=ProviderResult(0, "", "", provider_name="omp"),
+            preflight_result=ProviderResult(0, "omp test", "", provider_name="omp"),
+            skill_sha256=skill_hash,
+            injection_sha256=skill_hash,
+        )
+
+    monkeypatch.setattr(run_skill_pressure, "execute_pair", fake_execute)
+    monkeypatch.setattr(
+        run_skill_pressure.SubscriptionAuthContext,
+        "capture",
+        lambda: _subscription_auth(tmp_path),
+    )
+
+    assert (
+        run_skill_pressure.main(
+            [
+                "--repo-root",
+                str(repo_root),
+                "--matrix",
+                str(matrix_path),
+                "--batch-id",
+                "batch-1",
+                "--model",
+                OMP_SUBSCRIPTION_MODEL,
+                "--skill",
+                "wf-status",
+                "--write-result",
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    result = json.loads(capsys.readouterr().out)["results"][0]
+    assert result["severity"] == "minor"
+    assert result["persistence"]["status"] == "COMPLETE"
+
+def test_field_report_writer_persists_hashes_without_raw_transcripts_or_paths(
+    tmp_path: Path,
+) -> None:
+    baseline = '{"auth_path":"/operator/private/raw"}'
     with_skill = response()
     path = write_pressure_report(
         tmp_path,
@@ -488,14 +627,13 @@ def test_report_writer_is_append_only_and_hashes_transcripts(tmp_path: Path) -> 
     assert path == pressure_report_path(tmp_path, "run-001")
     assert report["schema"] == "awf_skill_pressure_report_v1"
     assert report["persistence_status"] == "COMPLETE"
-    assert report["transcripts"]["baseline"]["sha256"] == hashlib.sha256(baseline.encode()).hexdigest()
-    assert report["transcripts"]["with_skill"]["sha256"] == hashlib.sha256(with_skill.encode()).hexdigest()
-    baseline_transcript = path.parent / "transcripts" / "run-001" / "baseline.txt"
-    with_skill_transcript = path.parent / "transcripts" / "run-001" / "with-skill.txt"
-    assert report["transcripts"]["baseline"]["path"] == str(baseline_transcript)
-    assert report["transcripts"]["with_skill"]["path"] == str(with_skill_transcript)
-    assert baseline_transcript.read_text() == baseline
-    assert with_skill_transcript.read_text() == with_skill
+    assert report["response_hashes"] == {
+        "baseline": hashlib.sha256(baseline.encode()).hexdigest(),
+        "with_skill": hashlib.sha256(with_skill.encode()).hexdigest(),
+    }
+    assert "transcripts" not in report
+    assert baseline not in report_text
+    assert "/operator/private/raw" not in report_text
 
     with pytest.raises(FileExistsError):
         write_pressure_report(
@@ -532,6 +670,8 @@ def test_sensitive_data_writes_redacted_blocker_without_raw_content(tmp_path: Pa
         "severity": "critical",
         "prompt_sha256": "a" * 64,
         "skill_sha256": "b" * 64,
+        "auth_mode": "subscription",
+        "injection_sha256": "b" * 64,
     }
     assert "payload" not in report
     assert "transcripts" not in report
@@ -601,14 +741,13 @@ def test_sensitive_run_ids_are_rejected_before_creating_artifacts(
     assert list(tmp_path.iterdir()) == []
 
 
-def test_partial_failure_removes_new_transcript_without_overwriting_existing_file(
+def test_field_report_writer_never_creates_transcript_artifacts(
     tmp_path: Path,
 ) -> None:
     run_id = "run-partial"
-    transcript_root = tmp_path / ".awf-operations" / "skill-pressure" / "transcripts" / run_id
-    transcript_root.mkdir(parents=True)
-    preexisting = transcript_root / "with-skill.txt"
-    preexisting.write_text("prior evidence")
+    report_path = pressure_report_path(tmp_path, run_id)
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text("prior evidence")
 
     with pytest.raises(FileExistsError):
         write_pressure_report(
@@ -619,9 +758,8 @@ def test_partial_failure_removes_new_transcript_without_overwriting_existing_fil
             with_skill=response(),
         )
 
-    assert not (transcript_root / "baseline.txt").exists()
-    assert preexisting.read_text() == "prior evidence"
-    assert not pressure_report_path(tmp_path, run_id).exists()
+    assert report_path.read_text() == "prior evidence"
+    assert not (report_path.parent / "transcripts").exists()
 
 
 
@@ -635,46 +773,171 @@ def test_prompt_requires_one_strict_json_object() -> None:
     assert scenario.task in prompt
 
 
-def test_execute_pair_uses_no_skills_then_exact_skill() -> None:
+def test_field_execute_pair_uses_exact_snapshot_injection_and_subscription_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[list[str], Path, dict[str, str]]] = []
+    repo_root, source = _copied_wf_status_repo(tmp_path)
+    auth = _subscription_auth(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-be-stripped")
+    monkeypatch.setenv("OPENAI_API_KEY", "must-be-stripped")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/operator/claude")
+    monkeypatch.setenv("CODEX_HOME", "/operator/codex")
+    monkeypatch.setenv("UNRELATED_FIELD_ENV", "preserved")
+
+    def fake_run(
+        argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int
+    ) -> ProviderResult:
+        calls.append((argv, cwd, env))
+        if argv[1:] == ["--version"]:
+            return ProviderResult(0, "omp test", "", provider_name="omp")
+        if argv[1:] == ["--help"]:
+            return ProviderResult(
+                0,
+                "-p --mode --skills --append-system-prompt --no-session --no-extensions --tools",
+                "",
+                provider_name="omp",
+            )
+        snapshot = cwd / ".omp" / "skills" / "wf-status"
+        assert snapshot.is_dir()
+        assert [path.name for path in snapshot.parent.iterdir()] == ["wf-status"]
+        append_index = argv.index("--append-system-prompt") + 1 if "--append-system-prompt" in argv else None
+        if append_index is not None:
+            append = Path(argv[append_index])
+            assert append == cwd / "APPEND_SYSTEM.md"
+            assert append.read_bytes()
+            assert hashlib.sha256(append.read_bytes()).hexdigest() == sha256_skill(snapshot)
+        return _successful_wf_status_result()
+
+    run = execute_pair(
+        MATRIX.skills["wf-status"],
+        repo_root=repo_root,
+        omp_command="omp",
+        model=OMP_SUBSCRIPTION_MODEL,
+        timeout_sec=30,
+        auth_context=auth,
+        run_process=fake_run,
+    )
+
+    assert len(calls) == 4
+    version, help_result, baseline, with_skill = calls
+    assert version[0] == ["omp", "--version"]
+    assert help_result[0] == ["omp", "--help"]
+    assert all(cwd == baseline[1] for _, cwd, _ in calls)
+    for _, _, environment in calls:
+        assert environment["HOME"] == str(baseline[1].parent / "home")
+        assert environment["PI_CODING_AGENT_DIR"] == str(auth.omp_agent_dir)
+        assert environment["UNRELATED_FIELD_ENV"] == "preserved"
+        assert "ANTHROPIC_API_KEY" not in environment
+        assert "OPENAI_API_KEY" not in environment
+        assert "CLAUDE_CONFIG_DIR" not in environment
+        assert "CODEX_HOME" not in environment
+    prompt = build_prompt(MATRIX.skills["wf-status"].scenario)
+    common = [
+        "omp",
+        "-p",
+        "--mode=text",
+        "--tools=read",
+        "--no-session",
+        "--no-extensions",
+        f"--model={OMP_SUBSCRIPTION_MODEL}",
+        "--max-time=30",
+    ]
+    assert baseline[0] == [*common, "--skills=", prompt]
+    assert with_skill[0] == [
+        *common,
+        "--skills=wf-status",
+        "--append-system-prompt",
+        str(with_skill[1] / "APPEND_SYSTEM.md"),
+        prompt,
+    ]
+    assert baseline[1] == with_skill[1]
+    assert baseline[2]["HOME"] == str(with_skill[1].parent / "home")
+    assert baseline[2]["PI_CODING_AGENT_DIR"] == str(auth.omp_agent_dir)
+    assert baseline[2]["UNRELATED_FIELD_ENV"] == "preserved"
+    assert "ANTHROPIC_API_KEY" not in baseline[2]
+    assert "OPENAI_API_KEY" not in baseline[2]
+    assert "CLAUDE_CONFIG_DIR" not in baseline[2]
+    assert "CODEX_HOME" not in baseline[2]
+    assert run.skill_sha256 == sha256_skill(source)
+    assert run.injection_sha256 == run.skill_sha256
+    assert not baseline[1].exists()
+
+
+def test_field_execute_pair_rejects_non_subscription_model_before_process(
+    tmp_path: Path,
+) -> None:
+    repo_root, _ = _copied_wf_status_repo(tmp_path)
     calls: list[list[str]] = []
 
     def fake_run(
         argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int
     ) -> ProviderResult:
         calls.append(argv)
-        selected = "wf-status" if "--skills=wf-status" in argv else "wf-status"
-        return ProviderResult(
-            returncode=0,
-            stdout=json.dumps(
-                {
-                    "selected_skill": selected,
-                    "decision": "REPORT",
-                    "reason_codes": ["workflow_not_initialized"],
-                    "sections": [],
-                    "commands": [],
-                }
-            ),
-            stderr="",
-            provider_name="omp",
+        return _successful_wf_status_result()
+
+    with pytest.raises(ValueError, match="subscription model mismatch"):
+        execute_pair(
+            MATRIX.skills["wf-status"],
+            repo_root=repo_root,
+            omp_command="omp",
             model="test-model",
+            timeout_sec=30,
+            auth_context=_subscription_auth(tmp_path),
+            run_process=fake_run,
         )
+
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stderr", "expected_verdict", "expected_diagnostic"),
+    [
+        (124, "raw /operator/private timeout", Verdict.BLOCKED, "host_timeout"),
+        (1, "not logged in at /operator/private", Verdict.BLOCKED, "host_auth_unavailable"),
+        (1, "subscription expired at /operator/private", Verdict.BLOCKED, "host_subscription_expired"),
+        (7, "raw /operator/private failure", Verdict.BLOCKED, "host_provider_exit"),
+        (1, "model openai-codex/gpt-5.6-sol is not supported", Verdict.FAIL, "host_model_unsupported"),
+    ],
+)
+def test_field_omp_diagnostics_are_normalized_without_raw_host_output(
+    tmp_path: Path,
+    returncode: int,
+    stderr: str,
+    expected_verdict: Verdict,
+    expected_diagnostic: str,
+) -> None:
+    repo_root, _ = _copied_wf_status_repo(tmp_path)
+
+    def fake_run(
+        argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int
+    ) -> ProviderResult:
+        if argv[1:] == ["--version"]:
+            return ProviderResult(0, "omp test", "", provider_name="omp")
+        if argv[1:] == ["--help"]:
+            return ProviderResult(
+                0,
+                "-p --mode --skills --append-system-prompt --no-session --no-extensions --tools",
+                "",
+                provider_name="omp",
+            )
+        return ProviderResult(returncode, "", stderr, provider_name="omp")
 
     run = execute_pair(
         MATRIX.skills["wf-status"],
-        repo_root=REPO_ROOT,
+        repo_root=repo_root,
         omp_command="omp",
-        model="test-model",
+        model=OMP_SUBSCRIPTION_MODEL,
         timeout_sec=30,
+        auth_context=_subscription_auth(tmp_path),
         run_process=fake_run,
     )
 
-    assert "--no-skills" in calls[0]
-    assert "--skills=wf-status" in calls[1]
-    assert run.evaluation.with_skill.verdict is Verdict.PASS
-    assert run.with_skill_result.stdout
+    assert run.evaluation.verdict is expected_verdict
+    assert expected_diagnostic in run.evaluation.baseline.failures
+    assert "/operator/private" not in "\n".join(run.evaluation.baseline.failures)
 
-
-def test_execute_pair_maps_provider_timeout_to_blocked() -> None:
+def test_execute_pair_maps_provider_timeout_to_blocked(tmp_path: Path) -> None:
     def timed_out(
         argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int
     ) -> ProviderResult:
@@ -689,8 +952,9 @@ def test_execute_pair_maps_provider_timeout_to_blocked() -> None:
         MATRIX.skills["wf-status"],
         repo_root=REPO_ROOT,
         omp_command="omp",
-        model="test-model",
+        model=OMP_SUBSCRIPTION_MODEL,
         timeout_sec=30,
+        auth_context=_subscription_auth(tmp_path),
         run_process=timed_out,
     )
 
@@ -745,6 +1009,24 @@ def test_probe_omp_rejects_unsupported_skill_selection_flags() -> None:
     assert "unsupported_omp_flags" in result.stderr
 
 
+def test_probe_omp_rejects_lookalike_required_options() -> None:
+    def lookalike_flags(
+        argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int
+    ) -> ProviderResult:
+        stdout = (
+            "omp v1"
+            if "--version" in argv
+            else "-print --modelled --skills-extra --append-system-prompt-extra "
+            "--no-session-extra --no-extensions-extra --tools-extra"
+        )
+        return ProviderResult(0, stdout, "", provider_name="omp")
+
+    result = probe_omp("omp", repo_root=REPO_ROOT, run_process=lookalike_flags)
+
+    assert result.returncode == 78
+    assert "unsupported_omp_flags" in result.stderr
+
+
 def _successful_wf_status_result() -> ProviderResult:
     return ProviderResult(
         0,
@@ -769,35 +1051,47 @@ def _copied_wf_status_repo(tmp_path: Path) -> tuple[Path, Path]:
     return repo_root, source
 
 
-def test_execute_pair_uses_private_materialized_skill_snapshot() -> None:
-    calls: list[tuple[list[str], dict[str, str]]] = []
-    source = REPO_ROOT / "claude" / "skills" / "wf-status"
+def test_execute_pair_uses_project_materialized_skill_snapshot(tmp_path: Path) -> None:
+    calls: list[tuple[list[str], Path, dict[str, str]]] = []
+    repo_root, source = _copied_wf_status_repo(tmp_path)
     source_hash = sha256_skill(source)
+    auth = _subscription_auth(tmp_path)
 
     def fake_run(
         argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int
     ) -> ProviderResult:
-        calls.append((argv, env))
-        snapshot = Path(env["PI_CODING_AGENT_DIR"]) / "skills" / "wf-status"
+        calls.append((argv, cwd, env))
+        if argv[1:] == ["--version"]:
+            return ProviderResult(0, "omp test", "", provider_name="omp")
+        if argv[1:] == ["--help"]:
+            return ProviderResult(
+                0,
+                "-p --mode --skills --append-system-prompt --no-session --no-extensions --tools",
+                "",
+                provider_name="omp",
+            )
+        snapshot = cwd / ".omp" / "skills" / "wf-status"
         assert snapshot.is_dir()
         assert not snapshot.is_symlink()
         assert snapshot != source
         assert sha256_skill(snapshot) == source_hash
         assert [path.name for path in snapshot.parent.iterdir()] == ["wf-status"]
+        assert env["PI_CODING_AGENT_DIR"] == str(auth.omp_agent_dir)
         return _successful_wf_status_result()
 
     run = execute_pair(
         MATRIX.skills["wf-status"],
-        repo_root=REPO_ROOT,
+        repo_root=repo_root,
         omp_command="omp",
-        model="test-model",
+        model=OMP_SUBSCRIPTION_MODEL,
         timeout_sec=30,
+        auth_context=auth,
         run_process=fake_run,
     )
 
-    assert len(calls) == 2
-    assert calls[0][1]["PI_CODING_AGENT_DIR"] == calls[1][1]["PI_CODING_AGENT_DIR"]
+    assert len(calls) == 4
     assert run.skill_sha256 == source_hash
+    assert run.injection_sha256 == source_hash
 
 
 @pytest.mark.parametrize(
@@ -838,8 +1132,9 @@ def test_execute_pair_rejects_missing_or_escaping_skill_source_before_process(
             case,  # type: ignore[arg-type]
             repo_root=repo_root,
             omp_command="omp",
-            model="test-model",
+            model=OMP_SUBSCRIPTION_MODEL,
             timeout_sec=30,
+            auth_context=_subscription_auth(tmp_path),
             run_process=fake_run,
         )
 
@@ -864,41 +1159,57 @@ def test_execute_pair_rejects_symlinked_skill_source_before_process(tmp_path: Pa
             MATRIX.skills["wf-status"],
             repo_root=repo_root,
             omp_command="omp",
-            model="test-model",
+            model=OMP_SUBSCRIPTION_MODEL,
             timeout_sec=30,
+            auth_context=_subscription_auth(tmp_path),
             run_process=fake_run,
         )
 
     assert calls == []
 
 
-def test_execute_pair_blocks_snapshot_mutation_without_changing_source(tmp_path: Path) -> None:
+def test_field_execute_pair_blocks_injection_mutation_before_evidence(
+    tmp_path: Path,
+) -> None:
     repo_root, source = _copied_wf_status_repo(tmp_path)
     original = (source / "SKILL.md").read_text()
 
     def fake_run(
         argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int
     ) -> ProviderResult:
-        if "--skills=wf-status" in argv:
-            snapshot = Path(env["PI_CODING_AGENT_DIR"]) / "skills" / "wf-status"
-            (snapshot / "SKILL.md").write_text("mutated snapshot")
+        if argv[1:] == ["--version"]:
+            return ProviderResult(0, "omp test", "", provider_name="omp")
+        if argv[1:] == ["--help"]:
+            return ProviderResult(
+                0,
+                "-p --mode --skills --append-system-prompt --no-session --no-extensions --tools",
+                "",
+                provider_name="omp",
+            )
+        if "--append-system-prompt" in argv:
+            append = Path(argv[argv.index("--append-system-prompt") + 1])
+            append.write_text("mutated injection")
         return _successful_wf_status_result()
 
     run = execute_pair(
         MATRIX.skills["wf-status"],
         repo_root=repo_root,
         omp_command="omp",
-        model="test-model",
+        model=OMP_SUBSCRIPTION_MODEL,
         timeout_sec=30,
+        auth_context=_subscription_auth(tmp_path),
         run_process=fake_run,
     )
 
     assert (source / "SKILL.md").read_text() == original
     assert run.evaluation.verdict is Verdict.BLOCKED
+    assert run.evaluation.baseline.failures == ("source_snapshot_changed",)
+    assert run.evaluation.with_skill.failures == ("source_snapshot_changed",)
+    assert run.baseline_result.returncode == 125
+    assert run.with_skill_result.returncode == 125
 
 
-
-def test_execute_pair_does_not_run_selected_skill_after_baseline_snapshot_mutation(
+def test_field_execute_pair_blocks_preflight_snapshot_mutation(
     tmp_path: Path,
 ) -> None:
     repo_root, _ = _copied_wf_status_repo(tmp_path)
@@ -908,22 +1219,71 @@ def test_execute_pair_does_not_run_selected_skill_after_baseline_snapshot_mutati
         argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int
     ) -> ProviderResult:
         calls.append(argv)
-        snapshot = Path(env["PI_CODING_AGENT_DIR"]) / "skills" / "wf-status"
-        (snapshot / "SKILL.md").write_text("mutated baseline snapshot")
+        if argv[1:] == ["--version"]:
+            return ProviderResult(0, "omp test", "", provider_name="omp")
+        if argv[1:] == ["--help"]:
+            (cwd / "APPEND_SYSTEM.md").write_text("preflight mutation")
+            return ProviderResult(1, "", "not logged in at /operator/private", provider_name="omp")
+        raise AssertionError("field arm must not start after failed preflight")
+
+    run = execute_pair(
+        MATRIX.skills["wf-status"],
+        repo_root=repo_root,
+        omp_command="omp",
+        model=OMP_SUBSCRIPTION_MODEL,
+        timeout_sec=30,
+        auth_context=_subscription_auth(tmp_path),
+        run_process=fake_run,
+    )
+
+    assert calls == [["omp", "--version"], ["omp", "--help"]]
+    assert run.evaluation.verdict is Verdict.BLOCKED
+    assert run.evaluation.baseline.failures == ("source_snapshot_changed",)
+    assert run.evaluation.with_skill.failures == ("source_snapshot_changed",)
+
+
+def test_field_execute_pair_stops_after_canonical_source_mutation(
+    tmp_path: Path,
+) -> None:
+    repo_root, source = _copied_wf_status_repo(tmp_path)
+    calls: list[list[str]] = []
+
+    def fake_run(
+        argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int
+    ) -> ProviderResult:
+        calls.append(argv)
+        if argv[1:] == ["--version"]:
+            return ProviderResult(0, "omp test", "", provider_name="omp")
+        if argv[1:] == ["--help"]:
+            return ProviderResult(
+                0,
+                "-p --mode --skills --append-system-prompt --no-session --no-extensions --tools",
+                "",
+                provider_name="omp",
+            )
+        if "--skills=" in argv:
+            (source / "SKILL.md").write_text("mutated source snapshot")
         return _successful_wf_status_result()
 
     run = execute_pair(
         MATRIX.skills["wf-status"],
         repo_root=repo_root,
         omp_command="omp",
-        model="test-model",
+        model=OMP_SUBSCRIPTION_MODEL,
         timeout_sec=30,
+        auth_context=_subscription_auth(tmp_path),
         run_process=fake_run,
     )
 
-    assert len(calls) == 1
+    assert len(calls) == 3
+    assert all("--skills=wf-status" not in argv for argv in calls)
     assert run.evaluation.verdict is Verdict.BLOCKED
+    assert run.evaluation.baseline.failures == ("source_snapshot_changed",)
+    assert run.evaluation.with_skill.failures == ("source_snapshot_changed",)
+    assert run.baseline_result.returncode == 125
     assert run.with_skill_result.returncode == 125
+
+
 
 def test_case_selection_rejects_duplicate_skill_names() -> None:
     with pytest.raises(ValueError, match="duplicate Skills: wf-status"):
@@ -1012,41 +1372,51 @@ def test_main_rejects_unsafe_batch_id_before_preflight(
         run_skill_pressure.main(
             ["--batch-id", batch_id, "--model", "test-model", "--all"]
         )
-
     assert error.value.code == 2
     assert preflight_calls == []
     assert diagnostic in capsys.readouterr().err
 
 
-def test_main_records_redacted_report_with_batch_scoped_run_id(
+def test_field_main_omits_raw_provider_output_from_persisted_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     repo_root, source = _copied_wf_status_repo(tmp_path)
-
-    def fake_probe(*args: object, **kwargs: object) -> ProviderResult:
-        return ProviderResult(0, "omp test", "", provider_name="omp")
+    raw_output = '{"credential_path":"/operator/private/token"}'
 
     def fake_execute(
         case: object, **kwargs: object
     ) -> run_skill_pressure.PairRun:
-        baseline = Evaluation(Verdict.FAIL, ("baseline_failure",), (), None)
+        baseline = Evaluation(
+            Verdict.FAIL,
+            ("selected_skill:'/operator/private/token'",),
+            (
+                CriterionResult(
+                    "selected_skill",
+                    Verdict.FAIL,
+                    "selected_skill:'/operator/private/token'",
+                ),
+            ),
+            None,
+        )
         with_skill = Evaluation(Verdict.PASS, (), (), None)
+        skill_hash = sha256_skill(source)
         return run_skill_pressure.PairRun(
             evaluation=compare_pair(baseline, with_skill),
-            baseline_result=ProviderResult(
-                0,
-                '{"contact":"person@example.com"}',
-                "",
-                provider_name="omp",
-            ),
-            with_skill_result=_successful_wf_status_result(),
-            skill_sha256=sha256_skill(source),
+            baseline_result=ProviderResult(0, raw_output, "", provider_name="omp"),
+            with_skill_result=ProviderResult(0, raw_output, "", provider_name="omp"),
+            preflight_result=ProviderResult(0, "omp test", "", provider_name="omp"),
+            skill_sha256=skill_hash,
+            injection_sha256=skill_hash,
         )
 
-    monkeypatch.setattr(run_skill_pressure, "probe_omp", fake_probe)
     monkeypatch.setattr(run_skill_pressure, "execute_pair", fake_execute)
+    monkeypatch.setattr(
+        run_skill_pressure.SubscriptionAuthContext,
+        "capture",
+        lambda: _subscription_auth(tmp_path),
+    )
 
     assert (
         run_skill_pressure.main(
@@ -1064,27 +1434,44 @@ def test_main_records_redacted_report_with_batch_scoped_run_id(
                 "--batch-id",
                 "batch-1",
                 "--model",
-                "test-model",
+                OMP_SUBSCRIPTION_MODEL,
                 "--skill",
                 "wf-status",
                 "--write-result",
                 "--json",
             ]
         )
-        == 1
+        == 0
     )
 
     output = json.loads(capsys.readouterr().out)
+    field_record = output["results"][0]
+    assert field_record["auth_mode"] == "subscription"
+    assert field_record["runner_flags"] == [
+        "-p",
+        "--mode=text",
+        "--tools=read",
+        "--no-session",
+        "--no-extensions",
+        "--skills=",
+        "--skills=wf-status",
+        "--append-system-prompt",
+    ]
     persistence = output["results"][0]["persistence"]
     run_id = persistence["run_id"]
-    assert persistence["status"] == "REDACTED"
-    assert persistence["report_written"] is True
-    assert run_id.startswith("batch-1-run-")
-    assert "workflow" not in run_id
-    assert output["results"][0]["verdict"] == Verdict.BLOCKED.value
+    assert persistence["status"] == "COMPLETE"
+    assert raw_output not in json.dumps(output)
+    assert "/operator/private/token" not in json.dumps(output)
     report_path = pressure_report_path(repo_root, run_id)
-    assert report_path.exists()
-    assert json.loads(report_path.read_text())["persistence_status"] == "BLOCKED"
+    report = json.loads(report_path.read_text())
+    assert report["persistence_status"] == "COMPLETE"
+    assert raw_output not in report_path.read_text()
+    assert "/operator/private/token" not in report_path.read_text()
+    assert report["response_hashes"] == {
+        "baseline": hashlib.sha256(b"").hexdigest(),
+        "with_skill": hashlib.sha256(b"").hexdigest(),
+    }
+    assert "transcripts" not in report
 
 
 def _matrix_sha256() -> str:
@@ -1199,25 +1586,37 @@ def passing_field_records(matrix: object, *, batch_id: str = "batch-1") -> list[
                     "batch_id": batch_id,
                     "skill": case.name,
                     "scenario_id": case.scenario.id,
+                    "runner_flags": [
+                        "-p",
+                        "--mode=text",
+                        "--tools=read",
+                        "--no-session",
+                        "--no-extensions",
+                        "--skills=",
+                        f"--skills={case.name}",
+                        "--append-system-prompt",
+                    ],
                     "repetition": repetition,
                     "severity": case.severity,
                     "baseline": {
                         "verdict": Verdict.FAIL.value,
+                        "failures": ["decision"],
                         "criteria": [
                             {
                                 "id": "decision",
-                                "verdict": Verdict.PASS.value,
-                                "evidence": "baseline parsed",
+                                "verdict": Verdict.FAIL.value,
+                                "evidence": "not_satisfied",
                             }
                         ],
                     },
                     "with_skill": {
                         "verdict": Verdict.PASS.value,
+                        "failures": [],
                         "criteria": [
                             {
                                 "id": "decision",
                                 "verdict": Verdict.PASS.value,
-                                "evidence": "with-skill parsed",
+                                "evidence": "satisfied",
                             }
                         ],
                     },
@@ -1235,9 +1634,11 @@ def passing_field_report_paths(tmp_path: Path, matrix: object, *, batch_id: str)
         record["prompt_sha256"] = pressure.sha256_text(
             pressure.build_field_prompt(case.scenario)
         )
-        record["skill_sha256"] = pressure.sha256_skill(
+        source_hash = pressure.sha256_skill(
             tmp_path / "claude" / "skills" / case.name
         )
+        record["skill_sha256"] = source_hash
+        record["injection_sha256"] = source_hash
         paths.append(
             write_pressure_report(
                 tmp_path,
@@ -1253,6 +1654,65 @@ def passing_field_report_paths(tmp_path: Path, matrix: object, *, batch_id: str)
 def test_field_record_requires_complete_reproducibility_metadata() -> None:
     with pytest.raises(pressure.EvidenceError, match="missing field record keys"):
         pressure.validate_field_record({"matrix_schema": MATRIX.schema})
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("auth_mode", "api_key", "auth_mode"),
+        ("injection_sha256", "c" * 64, "injection"),
+        ("provider", "other", "provider"),
+        ("model", "other", "model"),
+        ("runner_flags", [], "runner_flags"),
+    ],
+)
+def test_field_record_requires_subscription_auth_and_bound_injection(
+    field: str, value: object, message: str
+) -> None:
+    record = valid_field_record()
+    record[field] = value
+
+    with pytest.raises(pressure.EvidenceError, match=message):
+        pressure.validate_field_record(record)
+
+
+def test_field_record_rejects_missing_subscription_auth() -> None:
+    record = valid_field_record()
+    del record["auth_mode"]
+
+    with pytest.raises(pressure.EvidenceError, match="auth_mode"):
+        pressure.validate_field_record(record)
+
+
+def test_evidence_hashes_all_subscription_field_provenance_sources() -> None:
+    assert {
+        "cli/src/awf/core/skill_subscription.py",
+        "cli/tests/run_skill_discovery.py",
+        "cli/tests/run_skill_pressure.py",
+        "cli/tests/build_skill_evidence.py",
+    }.issubset(pressure.DETERMINISTIC_SOURCE_FILES)
+
+
+def test_evidence_field_payload_binds_injection_hash_to_current_skill_snapshot(
+    tmp_path: Path,
+) -> None:
+    deterministic = passing_deterministic_report(tmp_path, batch_id="batch-1")
+    install = passing_install_report(tmp_path, MATRIX, batch_id="batch-1")
+    discovery = passing_discovery_report(tmp_path, MATRIX, batch_id="batch-1")
+    fields = passing_field_report_paths(tmp_path, MATRIX, batch_id="batch-1")
+    forged = json.loads(fields[0].read_text())
+    forged["payload"]["injection_sha256"] = "0" * 64
+    fields[0].write_text(json.dumps(forged))
+
+    with pytest.raises(pressure.EvidenceError, match="field injection hash mismatch"):
+        pressure.validate_source_bundle(
+            repo_root=tmp_path,
+            batch_id="batch-1",
+            deterministic_path=deterministic,
+            install_path=install,
+            discovery_path=discovery,
+            field_paths=fields,
+        )
 
 
 def test_source_bundle_requires_current_hashed_deterministic_and_install_reports(
@@ -1321,103 +1781,6 @@ def test_evidence_matrix_rejects_missing_duplicate_and_unjustified_na() -> None:
         pressure.validate_evidence_matrix(MATRIX, cells)
 
 
-def test_main_redacts_sensitive_persistence_and_continues_next_case(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    repo_root = tmp_path / "repo"
-    for name in ("wf-status", "analysis"):
-        shutil.copytree(REPO_ROOT / "claude" / "skills" / name, repo_root / "claude" / "skills" / name)
-    calls: list[str] = []
-
-    def fake_probe(*args: object, **kwargs: object) -> ProviderResult:
-        return ProviderResult(0, "omp fake", "", provider_name="omp")
-
-    def fake_execute(case: object, **kwargs: object) -> run_skill_pressure.PairRun:
-        name = case.name  # type: ignore[attr-defined]
-        calls.append(name)
-        baseline = Evaluation(Verdict.FAIL, ("baseline_failure",), (), None)
-        with_skill = Evaluation(Verdict.PASS, (), (), None)
-        return run_skill_pressure.PairRun(
-            evaluation=compare_pair(baseline, with_skill),
-            baseline_result=ProviderResult(
-                0,
-                '{"contact":"person@example.com"}' if name == "wf-status" else "safe baseline",
-                "",
-                provider_name="omp",
-            ),
-            with_skill_result=ProviderResult(0, "safe with-skill", "", provider_name="omp"),
-            skill_sha256="b" * 64,
-        )
-
-    run_ids = iter(("run-sensitive", "run-safe"))
-    monkeypatch.setattr(run_skill_pressure, "probe_omp", fake_probe)
-    monkeypatch.setattr(run_skill_pressure, "execute_pair", fake_execute)
-    monkeypatch.setattr(
-        run_skill_pressure,
-        "_new_report_run_id",
-        lambda *args: f"{args[0]}-{next(run_ids)}" if args else next(run_ids),
-    )
-
-    assert run_skill_pressure.main(
-        [
-            "--repo-root",
-            str(repo_root),
-            "--matrix",
-            str(REPO_ROOT / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json"),
-            "--batch-id",
-            "batch-1",
-            "--model",
-            "test-model",
-            "--skill",
-            "wf-status",
-            "--skill",
-            "analysis",
-            "--write-result",
-            "--json",
-        ]
-    ) == 1
-
-    output = json.loads(capsys.readouterr().out)
-    first, second = output["results"]
-    assert calls == ["wf-status", "analysis"]
-    assert first["verdict"] == Verdict.BLOCKED.value
-    assert first["behavioral_delta"] == "blocked"
-    assert first["remediation_state"] == "blocked_sensitive_data"
-    assert first["persistence"] == {
-        "status": "REDACTED",
-        "run_id": "batch-1-run-sensitive",
-        "report_written": True,
-        "diagnostic": "sensitive_data_redacted",
-    }
-    assert second["verdict"] == Verdict.PASS.value
-
-    redacted_path = pressure_report_path(repo_root, "batch-1-run-sensitive")
-    redacted = json.loads(redacted_path.read_text())
-    assert set(redacted) == {
-        "schema",
-        "recorded_at",
-        "run_id",
-        "persistence_status",
-        "diagnostics",
-        "field_identity",
-    }
-    assert "payload" not in redacted
-    assert "transcripts" not in redacted
-    cells = pressure.build_evidence_matrix(
-        MATRIX,
-        deterministic_pass=True,
-        install_pass=True,
-        discovery=passing_discovery_records(MATRIX),
-        field=[redacted],
-    )
-    blocked = next(
-        cell
-        for cell in cells
-        if cell.skill == "wf-status" and cell.category == "without_skill_baseline"
-    )
-    assert blocked.verdict is Verdict.BLOCKED
 
 
 def test_runtime_discovery_requires_all_three_runtime_passes() -> None:
@@ -1493,6 +1856,7 @@ def test_source_bundle_uses_current_matrix_to_reject_unknown_field_identity(
     fields = passing_field_report_paths(tmp_path, MATRIX, batch_id="batch-1")
     first = json.loads(fields[0].read_text())
     first["payload"]["skill"] = "unknown-skill"
+    first["payload"]["runner_flags"][-2] = "--skills=unknown-skill"
     fields[0].write_text(json.dumps(first))
     with pytest.raises(pressure.EvidenceError, match="current matrix"):
         pressure.validate_source_bundle(
