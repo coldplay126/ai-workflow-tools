@@ -3267,6 +3267,28 @@ def test_skill_discovery_uses_exact_safe_host_argv() -> None:
     )
 
 
+def test_skill_discovery_subprocess_closes_stdin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = run_skill_discovery._run_process(
+        ["codex", "exec"],
+        cwd=tmp_path,
+        env={},
+        timeout=30,
+    )
+
+    assert result.returncode == 0
+    assert captured["stdin"] is subprocess.DEVNULL
+
+
 def test_skill_discovery_sends_native_claude_and_unchanged_metadata_prompts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

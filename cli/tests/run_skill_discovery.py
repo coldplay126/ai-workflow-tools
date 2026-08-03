@@ -166,6 +166,7 @@ def _run_process(
             env=env,
             text=True,
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             check=False,
             timeout=timeout,
         )
