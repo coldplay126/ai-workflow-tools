@@ -1046,6 +1046,24 @@ def test_publish_new_is_append_only_runs_callback_uses_private_mode_and_cleans_t
     assert list(target.parent.glob(f".{target.name}.*")) == []
 
 
+def test_publish_new_cleans_temp_when_private_mode_configuration_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = pressure_report_path(tmp_path, "publisher-mode-failure")
+
+    def reject_private_mode(temporary_fd: int, mode: int) -> None:
+        raise OSError("mode configuration failed")
+
+    monkeypatch.setattr(pressure.os, "fchmod", reject_private_mode)
+
+    with pytest.raises(OSError, match="mode configuration failed"):
+        pressure._publish_new(target, "private report\n")
+
+    assert not target.exists()
+    assert list(target.parent.glob(f".{target.name}.*")) == []
+
+
 @pytest.mark.parametrize("swapped_component", [".awf-operations", "skill-pressure"])
 def test_publish_new_rejects_output_directory_symlink_swap_during_temp_creation(
     tmp_path: Path,
@@ -1064,6 +1082,11 @@ def test_publish_new_rejects_output_directory_symlink_swap_during_temp_creation(
     if swapped_component == ".awf-operations":
         (outside / "skill-pressure").mkdir()
     preserved_component = component.with_name(f"{component.name}-preserved")
+    preserved_output = (
+        preserved_component / "skill-pressure"
+        if swapped_component == ".awf-operations"
+        else preserved_component
+    )
     original_open = pressure.os.open
     swapped = False
 
@@ -1083,7 +1106,7 @@ def test_publish_new_rejects_output_directory_symlink_swap_during_temp_creation(
     assert swapped
     assert not (outside / "skill-pressure" / target.name).exists()
     assert not (outside / target.name).exists()
-    assert list(preserved_component.glob(f".{target.name}.*")) == []
+    assert list(preserved_output.glob(f".{target.name}.*")) == []
 
 def test_sensitive_data_writes_redacted_blocker_without_raw_content(tmp_path: Path) -> None:
     raw = '{"contact":"person@example.com"}'

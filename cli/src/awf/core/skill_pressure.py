@@ -5,7 +5,6 @@ import json
 import os
 import re
 import stat
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -733,25 +732,165 @@ def pressure_report_path(repo_root: str | Path, run_id: str) -> Path:
     return _pressure_operations_root(repo_root) / f"{run_id}.json"
 
 
+_PUBLICATION_OUTPUT_COMPONENTS = (".awf-operations", "skill-pressure")
+
+
+def _publication_target(target: Path) -> tuple[Path, str]:
+    path = Path(target).absolute()
+    output_root = path.parent
+    if (
+        path.name in {"", ".", ".."}
+        or output_root.name != _PUBLICATION_OUTPUT_COMPONENTS[-1]
+        or output_root.parent.name != _PUBLICATION_OUTPUT_COMPONENTS[0]
+    ):
+        raise EvidenceError("publication target must be within repository output directory")
+    root = _repository_root(output_root.parent.parent)
+    if output_root != root.joinpath(*_PUBLICATION_OUTPUT_COMPONENTS):
+        raise EvidenceError("publication target must be within repository output directory")
+    _assert_no_symlink_components(root, output_root)
+    return root, path.name
+
+
+def _publication_directory_flags() -> int:
+    directory = getattr(os, "O_DIRECTORY", None)
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if directory is None or nofollow is None:
+        raise EvidenceError("safe publication is unavailable on this platform")
+    return os.O_RDONLY | directory | nofollow
+
+
+def _open_publication_directory_component(parent_fd: int, component: str) -> int:
+    flags = _publication_directory_flags()
+    try:
+        return os.open(component, flags, dir_fd=parent_fd)
+    except FileNotFoundError:
+        try:
+            os.mkdir(component, 0o777, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+        try:
+            return os.open(component, flags, dir_fd=parent_fd)
+        except OSError as exc:
+            raise EvidenceError("publication path changed") from exc
+    except OSError as exc:
+        raise EvidenceError("publication path changed") from exc
+
+
+def _publication_directory_identity(directory_fd: int) -> tuple[int, int]:
+    metadata = os.fstat(directory_fd)
+    return metadata.st_dev, metadata.st_ino
+
+
+def _verify_publication_directory_chain(
+    chain: Sequence[tuple[int, str, tuple[int, int]]],
+) -> None:
+    try:
+        for parent_fd, component, expected_identity in chain:
+            named = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(named.st_mode)
+                or (named.st_dev, named.st_ino) != expected_identity
+            ):
+                raise EvidenceError("publication path changed")
+    except OSError as exc:
+        raise EvidenceError("publication path changed") from exc
+
+
+def _create_publication_temp(directory_fd: int, target_name: str) -> tuple[str, int]:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise EvidenceError("safe publication is unavailable on this platform")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow
+    for _ in range(128):
+        temporary_name = f".{target_name}.{os.urandom(16).hex()}"
+        try:
+            temporary_fd = os.open(
+                temporary_name,
+                flags,
+                0o600,
+                dir_fd=directory_fd,
+            )
+        except FileExistsError:
+            continue
+        try:
+            os.fchmod(temporary_fd, 0o600)
+        except OSError:
+            try:
+                os.close(temporary_fd)
+            except OSError:
+                pass
+            try:
+                os.unlink(temporary_name, dir_fd=directory_fd)
+            except OSError:
+                pass
+            raise
+        return temporary_name, temporary_fd
+    raise FileExistsError("unable to create a unique publication temporary file")
+
+
+def _write_publication_temp(temporary_fd: int, content: str) -> None:
+    remaining = memoryview(content.encode("utf-8"))
+    while remaining:
+        written = os.write(temporary_fd, remaining)
+        if written <= 0:
+            raise OSError("failed to write publication temporary file")
+        remaining = remaining[written:]
+    os.fsync(temporary_fd)
+
+
 def _publish_new(
     target: Path, content: str, *, before_publish: Callable[[], None] | None = None
 ) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        dir=target.parent,
-        prefix=f".{target.name}.",
-        delete=False,
-    ) as handle:
-        handle.write(content)
-        temp_path = Path(handle.name)
+    root, target_name = _publication_target(target)
+    directory_fds: list[int] = []
+    temporary_fd: int | None = None
+    temporary_name: str | None = None
+    output_fd: int | None = None
     try:
+        try:
+            root_fd = os.open(root, _publication_directory_flags())
+        except OSError as exc:
+            raise EvidenceError("publication path changed") from exc
+        directory_fds.append(root_fd)
+        chain: list[tuple[int, str, tuple[int, int]]] = []
+        parent_fd = root_fd
+        for component in _PUBLICATION_OUTPUT_COMPONENTS:
+            child_fd = _open_publication_directory_component(parent_fd, component)
+            directory_fds.append(child_fd)
+            chain.append(
+                (parent_fd, component, _publication_directory_identity(child_fd))
+            )
+            parent_fd = child_fd
+        output_fd = parent_fd
+        _verify_publication_directory_chain(chain)
+        temporary_name, temporary_fd = _create_publication_temp(output_fd, target_name)
+        _write_publication_temp(temporary_fd, content)
+        os.close(temporary_fd)
+        temporary_fd = None
+        _verify_publication_directory_chain(chain)
         if before_publish is not None:
             before_publish()
-        os.link(temp_path, target)
+        os.link(
+            temporary_name,
+            target_name,
+            src_dir_fd=output_fd,
+            dst_dir_fd=output_fd,
+            follow_symlinks=False,
+        )
+        _verify_publication_directory_chain(chain)
+        os.fsync(output_fd)
     finally:
-        temp_path.unlink(missing_ok=True)
+        if temporary_fd is not None:
+            os.close(temporary_fd)
+        if temporary_name is not None and output_fd is not None:
+            try:
+                os.unlink(temporary_name, dir_fd=output_fd)
+            except FileNotFoundError:
+                pass
+            else:
+                os.fsync(output_fd)
+        for directory_fd in reversed(directory_fds):
+            os.close(directory_fd)
 
 
 def _safe_field_identity(payload: dict[str, object]) -> dict[str, object]:
