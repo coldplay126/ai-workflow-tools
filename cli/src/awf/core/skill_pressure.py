@@ -248,6 +248,7 @@ class ScenarioExpectation:
     required_sections: tuple[str, ...] = ()
     required_commands: tuple[str, ...] = ()
     ordered_commands: tuple[str, ...] = ()
+    allowed_commands: tuple[str, ...] = ()
     forbidden_commands: tuple[str, ...] = ()
 
 
@@ -302,6 +303,23 @@ def build_field_prompt(scenario: FieldScenario) -> str:
                 f"{json.dumps(expected.required_commands, separators=(',', ':'))}.",
                 "When the task calls for a proposed command, include every applicable required "
                 "command pattern exactly; do not substitute synonyms or reorder tokens.",
+            )
+        )
+    if expected.ordered_commands:
+        reporting_contract.extend(
+            (
+                "Ordered command-pattern vocabulary: "
+                f"{json.dumps(expected.ordered_commands, separators=(',', ':'))}.",
+                "When the task calls for proposed commands, include the applicable ordered "
+                "command patterns in that exact sequence.",
+            )
+        )
+    if expected.allowed_commands:
+        reporting_contract.extend(
+            (
+                "Allowed command-pattern vocabulary: "
+                f"{json.dumps(expected.allowed_commands, separators=(',', ':'))}.",
+                "Do not include a command outside the allowed command patterns.",
             )
         )
     if expected.forbidden_commands:
@@ -414,6 +432,9 @@ def _scenario(raw: Any, *, skill: str, severity: str) -> FieldScenario:
             ),
             ordered_commands=_string_tuple(
                 expected.get("ordered_commands"), field=f"{skill}.ordered_commands"
+            ),
+            allowed_commands=_string_tuple(
+                expected.get("allowed_commands"), field=f"{skill}.allowed_commands"
             ),
             forbidden_commands=_string_tuple(
                 expected.get("forbidden_commands"), field=f"{skill}.forbidden_commands"
@@ -619,6 +640,16 @@ def evaluate_response(scenario: FieldScenario, raw: str) -> Evaluation:
             not _has_shell_control(command),
             "shell_control_command",
         )
+    for command in commands:
+        if scenario.expected.allowed_commands:
+            check(
+                f"allowed_command:{command}",
+                any(
+                    _command_matches(command, allowed)
+                    for allowed in scenario.expected.allowed_commands
+                ),
+                f"unpermitted_command:{command}",
+            )
     for required in scenario.expected.required_commands:
         check(
             f"required_command:{required}",

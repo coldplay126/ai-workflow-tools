@@ -373,6 +373,7 @@ Create `cli/tests/fixtures/skill-validation-matrix.v1.json`. Use the same nine-c
           "required_reason_codes": ["dry_run_only"],
           "required_commands": ["awf ready --gate analysis --repo-root . --json", "awf analyze api auth --repo-root . --dry-run --output-format json"],
           "ordered_commands": ["awf ready --gate analysis --repo-root . --json", "awf analyze api auth --repo-root . --dry-run --output-format json"],
+          "allowed_commands": ["awf ready --gate analysis --repo-root . --json", "awf analyze api auth --repo-root . --dry-run --output-format json"],
           "forbidden_commands": ["awf analyze api auth --resume"]
         }
       }

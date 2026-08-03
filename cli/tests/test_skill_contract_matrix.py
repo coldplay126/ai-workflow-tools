@@ -200,6 +200,7 @@ def test_analysis_dry_run_only_contract_matches_field_matrix() -> None:
         re.DOTALL,
     )
     assert scenario.expected.decisions == ("STOP",)
+    assert scenario.expected.allowed_commands == (ready_command, dry_run_command)
     assert scenario.expected.required_reason_codes == ("dry_run_only",)
     assert scenario.expected.required_commands == (ready_command, dry_run_command)
     assert scenario.expected.ordered_commands == (ready_command, dry_run_command)

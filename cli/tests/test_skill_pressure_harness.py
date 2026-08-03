@@ -78,6 +78,8 @@ MATRIX = load_skill_matrix(
             (
                 'Required reason-code vocabulary: ["dry_run_only"].',
                 'Required command-pattern vocabulary: ["awf ready --gate analysis --repo-root . --json","awf analyze api auth --repo-root . --dry-run --output-format json"].',
+                'Ordered command-pattern vocabulary: ["awf ready --gate analysis --repo-root . --json","awf analyze api auth --repo-root . --dry-run --output-format json"].',
+                'Allowed command-pattern vocabulary: ["awf ready --gate analysis --repo-root . --json","awf analyze api auth --repo-root . --dry-run --output-format json"].',
                 'Forbidden command patterns: ["awf analyze api auth --resume"].',
             ),
         ),
@@ -466,6 +468,26 @@ def test_evaluator_rejects_forbidden_command() -> None:
     assert evaluation.verdict is Verdict.FAIL
     assert "forbidden_command:awf wt finish --apply" in evaluation.failures
 
+
+
+def test_analysis_dry_run_only_evaluator_rejects_provider_backed_command() -> None:
+    provider_command = "awf analyze api auth --repo-root . --output-format json"
+    evaluation = evaluate_response(
+        MATRIX.skills["analysis"].scenario,
+        response(
+            selected_skill="analysis",
+            decision="STOP",
+            reason_codes=["dry_run_only"],
+            commands=[
+                "awf ready --gate analysis --repo-root . --json",
+                "awf analyze api auth --repo-root . --dry-run --output-format json",
+                provider_command,
+            ],
+        ),
+    )
+
+    assert evaluation.verdict is Verdict.FAIL
+    assert f"unpermitted_command:{provider_command}" in evaluation.failures
 
 @pytest.mark.parametrize(
     "control",
