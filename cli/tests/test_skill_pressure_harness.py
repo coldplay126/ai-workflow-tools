@@ -575,6 +575,7 @@ def test_analysis_unallowed_command_failure_survives_persistence_and_fails_displ
     record = next(record for record in field if record["skill"] == "analysis")
     record["with_skill"] = persisted
     record["verdict"] = Verdict.FAIL.value
+    pressure.validate_field_record(record)
     cells = pressure.build_evidence_matrix(
         MATRIX,
         deterministic_pass=True,
