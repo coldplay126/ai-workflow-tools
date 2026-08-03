@@ -522,7 +522,7 @@ def _install_records(
                 str(source.source),
                 *(str(roots[runtime]) for runtime in RUNTIMES),
             ],
-            cwd=workspace,
+            cwd=repo_root,
             env=installer_env,
             timeout=30,
         )
@@ -556,7 +556,7 @@ def _install_records(
 def _prompt(runtime: str) -> str:
     if runtime == "omp":
         return (
-            "Read only the selected Skill. Do not read any other file or Skill. Do not mutate anything. "
+            "Use only the read tool to load the selected Skill. Do not read any other path or mutate anything. "
             'Return exactly one JSON object and no prose. Its schema is {"name":"exact Skill name",'
             '"description":"exact frontmatter description","body_heading":"exact first Markdown H1"}.'
         )

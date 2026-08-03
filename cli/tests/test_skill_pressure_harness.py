@@ -1923,7 +1923,7 @@ def test_skill_discovery_uses_exact_safe_host_argv() -> None:
         prompt,
     ]
     assert run_skill_discovery._prompt("omp") == (
-        "Read only the selected Skill. Do not read any other file or Skill. Do not mutate anything. "
+        "Use only the read tool to load the selected Skill. Do not read any other path or mutate anything. "
         'Return exactly one JSON object and no prose. Its schema is {"name":"exact Skill name",'
         '"description":"exact frontmatter description","body_heading":"exact first Markdown H1"}.'
     )
@@ -2123,13 +2123,13 @@ def test_skill_discovery_materializes_45_isolated_canonical_links_and_cleans_up(
     }
     install_calls = [(argv, cwd, env) for argv, cwd, env in fake.calls if argv[0] == "sh"]
     assert len(install_calls) == 15
-    workspaces = {cwd for _, cwd, _ in install_calls}
+    assert {cwd for _, cwd, _ in install_calls} == {result.repo_root}
+    targets = {Path(target) for argv, _, _ in install_calls for target in argv[3:]}
+    workspaces = {target.parents[1] for target in targets}
     assert len(workspaces) == 1
     workspace = next(iter(workspaces))
     assert {
-        str(Path(target).relative_to(workspace)).replace("\\", "/")
-        for argv, _, _ in install_calls
-        for target in argv[3:]
+        str(target.relative_to(workspace)).replace("\\", "/") for target in targets
     } == set(run_skill_discovery.TARGET_ROOTS.values())
     temporary_homes = {env["HOME"] for _, _, env in install_calls}
     assert len(temporary_homes) == 1
