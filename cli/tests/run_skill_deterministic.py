@@ -66,7 +66,9 @@ def main(argv: list[str] | None = None) -> int:
     stderr = ""
     written: Path | None = None
     write_error: Exception | None = None
+    sources_before_execution: dict[str, str] | None = None
     try:
+        sources_before_execution = _source_hashes(repo_root)
         completed = subprocess.run(
             list(DETERMINISTIC_PYTEST_ARGV),
             cwd=repo_root,
@@ -88,21 +90,50 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         finished_at = _utc_now()
         try:
-            written = write_deterministic_report(
-                repo_root,
-                batch_id=args.batch_id,
-                argv=DETERMINISTIC_PYTEST_ARGV,
-                started_at=started_at,
-                finished_at=finished_at,
-                elapsed_sec=time.monotonic() - started,
-                exit_status=status,
-                stdout=stdout,
-                stderr=stderr,
-                matrix_sha256=sha256_file(
-                    repo_root / "cli/tests/fixtures/skill-validation-matrix.v1.json"
-                ),
-                sources=_source_hashes(repo_root),
-            )
+            sources_after_execution = _source_hashes(repo_root)
+            sources_before_publication = _source_hashes(repo_root)
+            if (
+                sources_before_execution != sources_after_execution
+                or sources_before_execution != sources_before_publication
+            ):
+                if status == 0:
+                    status = 1
+                stderr = (
+                    f"{stderr}\ndeterministic_source_changed"
+                    if stderr
+                    else "deterministic_source_changed"
+                )
+            def write_report(sources: dict[str, str]) -> Path:
+                return write_deterministic_report(
+                    repo_root,
+                    batch_id=args.batch_id,
+                    argv=DETERMINISTIC_PYTEST_ARGV,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    elapsed_sec=time.monotonic() - started,
+                    exit_status=status,
+                    stdout=stdout,
+                    stderr=stderr,
+                    matrix_sha256=sources[
+                        "cli/tests/fixtures/skill-validation-matrix.v1.json"
+                    ],
+                    sources=sources,
+                )
+
+            try:
+                written = write_report(sources_before_publication)
+            except EvidenceError:
+                sources_before_retry = _source_hashes(repo_root)
+                if sources_before_retry == sources_before_publication:
+                    raise
+                if status == 0:
+                    status = 1
+                stderr = (
+                    f"{stderr}\ndeterministic_source_changed"
+                    if stderr
+                    else "deterministic_source_changed"
+                )
+                written = write_report(sources_before_retry)
         except (EvidenceError, FileExistsError, OSError) as exc:
             write_error = exc
     if write_error is not None or written is None:

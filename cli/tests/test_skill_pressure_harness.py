@@ -45,6 +45,7 @@ from run_skill_pressure import (
     select_cases,
 )
 import run_skill_discovery
+import run_skill_deterministic
 from run_skill_discovery import (
     ExpectedSkill,
     ProcessResult as DiscoveryProcessResult,
@@ -2017,6 +2018,170 @@ def _provision_matrix(repo_root: Path) -> None:
         dirs_exist_ok=True,
     )
 
+def test_deterministic_runner_publishes_unchanged_source_hashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _provision_matrix(tmp_path)
+
+    monkeypatch.setattr(
+        run_skill_deterministic.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, stdout="deterministic suite passed", stderr=""
+        ),
+    )
+
+    assert (
+        run_skill_deterministic.main(
+            ["--batch-id", "unchanged", "--repo-root", str(tmp_path), "--timeout-sec", "1"]
+        )
+        == 0
+    )
+
+    report_path = pressure.deterministic_report_path(tmp_path, "unchanged")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["exit_status"] == 0
+    assert report["sources"] == {
+        relative: pressure.sha256_file(tmp_path / relative)
+        for relative in pressure.DETERMINISTIC_SOURCE_FILES
+    }
+
+
+def test_deterministic_runner_fails_closed_when_source_mutates_during_pytest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _provision_matrix(tmp_path)
+    source = tmp_path / "cli/tests/test_analysis_spec.py"
+
+    def mutate_then_succeed(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        source.write_text(
+            source.read_text(encoding="utf-8") + "\n# mutation during deterministic pytest\n",
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(
+            args[0], 0, stdout="deterministic suite passed", stderr=""
+        )
+
+    monkeypatch.setattr(run_skill_deterministic.subprocess, "run", mutate_then_succeed)
+
+    assert (
+        run_skill_deterministic.main(
+            ["--batch-id", "during", "--repo-root", str(tmp_path), "--timeout-sec", "1"]
+        )
+        == 1
+    )
+
+    report_path = pressure.deterministic_report_path(tmp_path, "during")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["exit_status"] == 1
+    assert report["sources"] == {
+        relative: pressure.sha256_file(tmp_path / relative)
+        for relative in pressure.DETERMINISTIC_SOURCE_FILES
+    }
+    assert str(tmp_path) not in json.dumps(report)
+
+
+def test_deterministic_runner_fails_closed_on_prepublication_source_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _provision_matrix(tmp_path)
+    source = tmp_path / "cli/tests/test_analysis_spec.py"
+    original_source_hashes = run_skill_deterministic._source_hashes
+    source_hash_calls = 0
+
+    def mutate_after_post_execution_hash(repo_root: Path) -> dict[str, str]:
+        nonlocal source_hash_calls
+        source_hash_calls += 1
+        hashes = original_source_hashes(repo_root)
+        if source_hash_calls == 2:
+            source.write_text(
+                source.read_text(encoding="utf-8")
+                + "\n# mutation before deterministic publication\n",
+                encoding="utf-8",
+            )
+        return hashes
+
+    monkeypatch.setattr(
+        run_skill_deterministic,
+        "_source_hashes",
+        mutate_after_post_execution_hash,
+    )
+    monkeypatch.setattr(
+        run_skill_deterministic.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, stdout="deterministic suite passed", stderr=""
+        ),
+    )
+
+    assert (
+        run_skill_deterministic.main(
+            ["--batch-id", "publication-race", "--repo-root", str(tmp_path), "--timeout-sec", "1"]
+        )
+        == 1
+    )
+
+    report_path = pressure.deterministic_report_path(tmp_path, "publication-race")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["exit_status"] == 1
+    assert report["sources"] == {
+        relative: pressure.sha256_file(tmp_path / relative)
+        for relative in pressure.DETERMINISTIC_SOURCE_FILES
+    }
+
+def test_deterministic_runner_persists_failed_evidence_for_publication_hash_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _provision_matrix(tmp_path)
+    source = tmp_path / "cli/tests/test_analysis_spec.py"
+    original_write = run_skill_deterministic.write_deterministic_report
+    mutated = False
+
+    def mutate_once_then_write(*args: object, **kwargs: object) -> Path:
+        nonlocal mutated
+        if not mutated:
+            mutated = True
+            source.write_text(
+                source.read_text(encoding="utf-8")
+                + "\n# mutation during deterministic publication\n",
+                encoding="utf-8",
+            )
+        return original_write(*args, **kwargs)
+
+    monkeypatch.setattr(
+        run_skill_deterministic,
+        "write_deterministic_report",
+        mutate_once_then_write,
+    )
+    monkeypatch.setattr(
+        run_skill_deterministic.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, stdout="deterministic suite passed", stderr=""
+        ),
+    )
+
+    assert (
+        run_skill_deterministic.main(
+            [
+                "--batch-id",
+                "writer-race",
+                "--repo-root",
+                str(tmp_path),
+                "--timeout-sec",
+                "1",
+            ]
+        )
+        == 1
+    )
+
+    report_path = pressure.deterministic_report_path(tmp_path, "writer-race")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["exit_status"] == 1
+    assert report["sources"] == {
+        relative: pressure.sha256_file(tmp_path / relative)
+        for relative in pressure.DETERMINISTIC_SOURCE_FILES
+    }
 
 def passing_deterministic_report(tmp_path: Path, *, batch_id: str) -> Path:
     _provision_matrix(tmp_path)
