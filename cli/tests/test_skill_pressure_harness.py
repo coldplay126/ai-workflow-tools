@@ -43,6 +43,7 @@ from run_skill_pressure import (
 )
 import run_skill_discovery
 from run_skill_discovery import (
+    ExpectedSkill,
     ProcessResult as DiscoveryProcessResult,
     agent_skills_argv,
     claude_argv,
@@ -2763,12 +2764,14 @@ def test_skill_discovery_uses_exact_safe_host_argv() -> None:
     ]
     assert run_skill_discovery._prompt("omp") == (
         "Use only the read tool to load the selected Skill. Do not read any other path or mutate anything. "
-        "Copy all three values byte-for-byte from SKILL.md. "
-        "Do not translate, summarize, normalize whitespace, or strip Markdown markers. "
-        "body_heading includes the literal leading '# '. "
+        "Return the decoded YAML frontmatter scalar values for name and description, excluding YAML syntax "
+        "such as surrounding quote delimiters, block indicators, and indentation. "
+        "Preserve each decoded scalar's content and embedded newlines exactly; do not translate, summarize, "
+        "or normalize whitespace. "
+        "body_heading is the exact source Markdown H1 line, including the literal leading '# '. "
         "Encode embedded newlines as JSON escapes. "
-        'Return exactly one JSON object and no prose. Its schema is {"name":"exact Skill name",'
-        '"description":"exact frontmatter description","body_heading":"exact first Markdown H1"}.'
+        'Return exactly one JSON object and no prose. Its schema is {"name":"decoded frontmatter name",'
+        '"description":"decoded frontmatter description","body_heading":"exact first Markdown H1"}.'
     )
 
 
@@ -2779,30 +2782,36 @@ def test_skill_discovery_sends_exact_metadata_prompt_to_fake_host_argv(
     prompts = {
         "claude": (
             "Do not call tools, access files, or mutate anything. Read the selected Skill only. "
-            "Copy all three values byte-for-byte from SKILL.md. "
-            "Do not translate, summarize, normalize whitespace, or strip Markdown markers. "
-            "body_heading includes the literal leading '# '. "
+            "Return the decoded YAML frontmatter scalar values for name and description, excluding YAML syntax "
+            "such as surrounding quote delimiters, block indicators, and indentation. "
+            "Preserve each decoded scalar's content and embedded newlines exactly; do not translate, summarize, "
+            "or normalize whitespace. "
+            "body_heading is the exact source Markdown H1 line, including the literal leading '# '. "
             "Encode embedded newlines as JSON escapes. "
-            'Return exactly one JSON object and no prose. Its schema is {"name":"exact Skill name",'
-            '"description":"exact frontmatter description","body_heading":"exact first Markdown H1"}.'
+            'Return exactly one JSON object and no prose. Its schema is {"name":"decoded frontmatter name",'
+            '"description":"decoded frontmatter description","body_heading":"exact first Markdown H1"}.'
         ),
         "agent-skills": (
             "Do not call tools, access files, or mutate anything. Read the selected Skill only. "
-            "Copy all three values byte-for-byte from SKILL.md. "
-            "Do not translate, summarize, normalize whitespace, or strip Markdown markers. "
-            "body_heading includes the literal leading '# '. "
+            "Return the decoded YAML frontmatter scalar values for name and description, excluding YAML syntax "
+            "such as surrounding quote delimiters, block indicators, and indentation. "
+            "Preserve each decoded scalar's content and embedded newlines exactly; do not translate, summarize, "
+            "or normalize whitespace. "
+            "body_heading is the exact source Markdown H1 line, including the literal leading '# '. "
             "Encode embedded newlines as JSON escapes. "
-            'Return exactly one JSON object and no prose. Its schema is {"name":"exact Skill name",'
-            '"description":"exact frontmatter description","body_heading":"exact first Markdown H1"}.'
+            'Return exactly one JSON object and no prose. Its schema is {"name":"decoded frontmatter name",'
+            '"description":"decoded frontmatter description","body_heading":"exact first Markdown H1"}.'
         ),
         "omp": (
             "Use only the read tool to load the selected Skill. Do not read any other path or mutate anything. "
-            "Copy all three values byte-for-byte from SKILL.md. "
-            "Do not translate, summarize, normalize whitespace, or strip Markdown markers. "
-            "body_heading includes the literal leading '# '. "
+            "Return the decoded YAML frontmatter scalar values for name and description, excluding YAML syntax "
+            "such as surrounding quote delimiters, block indicators, and indentation. "
+            "Preserve each decoded scalar's content and embedded newlines exactly; do not translate, summarize, "
+            "or normalize whitespace. "
+            "body_heading is the exact source Markdown H1 line, including the literal leading '# '. "
             "Encode embedded newlines as JSON escapes. "
-            'Return exactly one JSON object and no prose. Its schema is {"name":"exact Skill name",'
-            '"description":"exact frontmatter description","body_heading":"exact first Markdown H1"}.'
+            'Return exactly one JSON object and no prose. Its schema is {"name":"decoded frontmatter name",'
+            '"description":"decoded frontmatter description","body_heading":"exact first Markdown H1"}.'
         ),
     }
     model_argvs = {
@@ -3033,7 +3042,7 @@ def test_skill_discovery_accepts_valid_json_metadata_with_unknown_skill_words(
 
     assert run_skill_discovery._response_diagnostic(stdout, expected) == ""
 
-def test_skill_discovery_metadata_response_passes_only_byte_exact_source_values() -> None:
+def test_skill_discovery_metadata_response_passes_only_exact_decoded_scalar_values() -> None:
     expected = replace(
         load_expected_skills(
             REPO_ROOT,
@@ -3068,6 +3077,35 @@ def test_skill_discovery_metadata_response_passes_only_byte_exact_source_values(
     assert run_skill_discovery._response_diagnostic(exact_stdout, expected) == ""
     for payload, diagnostic in responses[1:]:
         assert run_skill_discovery._response_diagnostic(json.dumps(payload), expected) == diagnostic
+
+
+def test_skill_discovery_requires_decoded_response_for_quoted_yaml_scalar(
+    tmp_path: Path,
+) -> None:
+    skill_file = tmp_path / "SKILL.md"
+    skill_file.write_text(
+        '---\n'
+        'name: quoted-metadata\n'
+        'description: "quoted YAML description"\n'
+        '---\n'
+        '# Quoted metadata\n',
+        encoding="utf-8",
+    )
+    name, description, body_heading = run_skill_discovery._source_metadata(skill_file)
+    expected = ExpectedSkill(name, description, body_heading, tmp_path, "")
+    decoded = {
+        "name": expected.name,
+        "description": expected.description,
+        "body_heading": expected.body_heading,
+    }
+    literal_quoted = {**decoded, "description": f'"{expected.description}"'}
+
+    assert description == "quoted YAML description"
+    assert run_skill_discovery._response_diagnostic(json.dumps(decoded), expected) == ""
+    assert (
+        run_skill_discovery._response_diagnostic(json.dumps(literal_quoted), expected)
+        == "source_metadata_mismatch"
+    )
 
 
 def test_skill_discovery_persists_only_normalized_provider_stderr_diagnostic(

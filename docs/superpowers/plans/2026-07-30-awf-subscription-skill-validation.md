@@ -312,12 +312,14 @@ The runtime prompts must retain their runtime-specific safety prefix, then appen
 
 ```python
 metadata_contract = (
-    "Copy all three values byte-for-byte from SKILL.md. "
-    "Do not translate, summarize, normalize whitespace, or strip Markdown markers. "
-    "body_heading includes the literal leading '# '. "
+    "Return the decoded YAML frontmatter scalar values for name and description, excluding YAML syntax "
+    "such as surrounding quote delimiters, block indicators, and indentation. "
+    "Preserve each decoded scalar's content and embedded newlines exactly; do not translate, summarize, "
+    "or normalize whitespace. "
+    "body_heading is the exact source Markdown H1 line, including the literal leading '# '. "
     "Encode embedded newlines as JSON escapes. "
-    'Return exactly one JSON object and no prose. Its schema is {"name":"exact Skill name",'
-    '"description":"exact frontmatter description","body_heading":"exact first Markdown H1"}.'
+    'Return exactly one JSON object and no prose. Its schema is {"name":"decoded frontmatter name",'
+    '"description":"decoded frontmatter description","body_heading":"exact first Markdown H1"}.'
 )
 omp_prompt = (
     "Use only the read tool to load the selected Skill. Do not read any other path or mutate anything. "
