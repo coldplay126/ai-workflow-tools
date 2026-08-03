@@ -73,6 +73,7 @@ def _safe_criterion_id(identifier: str) -> str:
     if identifier in {"host_diagnostic", "source_snapshot"}:
         return identifier
     for prefix in (
+        "allowed_command:",
         "required_reason:",
         "required_section:",
         "required_command:",

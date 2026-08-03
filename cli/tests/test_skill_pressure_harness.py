@@ -524,6 +524,72 @@ def test_analysis_dry_run_only_evaluator_rejects_provider_backed_command() -> No
     assert evaluation.verdict is Verdict.FAIL
     assert f"unpermitted_command:{provider_command}" in evaluation.failures
 
+def test_analysis_dry_run_only_evaluator_accepts_allowed_commands() -> None:
+    evaluation = evaluate_response(
+        MATRIX.skills["analysis"].scenario,
+        response(
+            selected_skill="analysis",
+            decision="STOP",
+            reason_codes=["dry_run_only"],
+            commands=[
+                "awf ready --gate analysis --repo-root . --json",
+                "awf analyze api auth --repo-root . --dry-run --output-format json",
+            ],
+        ),
+    )
+
+    assert evaluation.verdict is Verdict.PASS
+    assert evaluation.failures == ()
+
+
+def test_analysis_unallowed_command_failure_survives_persistence_and_fails_displayed_commands() -> None:
+    provider_command = "awf analyze api auth --repo-root . --output-format json"
+    evaluation = evaluate_response(
+        MATRIX.skills["analysis"].scenario,
+        response(
+            selected_skill="analysis",
+            decision="STOP",
+            reason_codes=["dry_run_only"],
+            commands=[
+                "awf ready --gate analysis --repo-root . --json",
+                "awf analyze api auth --repo-root . --dry-run --output-format json",
+                provider_command,
+            ],
+        ),
+    )
+
+    assert evaluation.verdict is Verdict.FAIL
+    assert [criterion.id for criterion in evaluation.criteria if criterion.verdict is Verdict.FAIL] == [
+        f"allowed_command:{provider_command}"
+    ]
+
+    persisted = run_skill_pressure._evaluation_payload(evaluation)
+    assert persisted["failures"] == ["allowed_command"]
+    assert {
+        criterion["id"]
+        for criterion in persisted["criteria"]  # type: ignore[index]
+        if criterion["verdict"] == Verdict.FAIL.value  # type: ignore[index]
+    } == {"allowed_command"}
+
+    field = passing_field_records(MATRIX)
+    record = next(record for record in field if record["skill"] == "analysis")
+    record["with_skill"] = persisted
+    record["verdict"] = Verdict.FAIL.value
+    cells = pressure.build_evidence_matrix(
+        MATRIX,
+        deterministic_pass=True,
+        install_pass=True,
+        discovery=passing_discovery_records(MATRIX),
+        field=field,
+    )
+    displayed = next(
+        cell
+        for cell in cells
+        if cell.skill == "analysis" and cell.category == "displayed_commands"
+    )
+
+    assert displayed.verdict is Verdict.FAIL
+
 @pytest.mark.parametrize(
     "control",
     [

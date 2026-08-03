@@ -116,6 +116,7 @@ DISCOVERY_RUNTIME_SAFETY_FLAGS = MappingProxyType(
 
 FIELD_EVALUATION_CRITERIA = frozenset(
     {
+        "allowed_command",
         "command_order",
         "command_shell_control",
         "commands_type",
