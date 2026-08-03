@@ -815,7 +815,7 @@ def _publication_directory_identity(directory_fd: int) -> tuple[int, int]:
     if (
         not stat.S_ISDIR(metadata.st_mode)
         or metadata.st_uid != os.geteuid()
-        or metadata.st_mode & 0o022
+        or stat.S_IMODE(metadata.st_mode) != 0o700
     ):
         raise EvidenceError("unsafe publication output directory")
     return metadata.st_dev, metadata.st_ino
@@ -832,10 +832,36 @@ def _verify_publication_directory_chain(
                 or (named.st_dev, named.st_ino) != expected_identity
             ):
                 raise EvidenceError("publication path changed")
-            if named.st_uid != os.geteuid() or named.st_mode & 0o022:
+            if (
+                named.st_uid != os.geteuid()
+                or stat.S_IMODE(named.st_mode) != 0o700
+            ):
                 raise EvidenceError("unsafe publication output directory")
     except OSError as exc:
         raise EvidenceError("publication path changed") from exc
+
+
+
+def _rollback_published_target(
+    output_fd: int,
+    target_name: str,
+    chain: Sequence[tuple[int, str, tuple[int, int]]],
+) -> BaseException | None:
+    rollback_error: BaseException | None = None
+    try:
+        os.unlink(target_name, dir_fd=output_fd)
+    except BaseException as exc:
+        rollback_error = exc
+    try:
+        os.fsync(output_fd)
+    except BaseException as exc:
+        if rollback_error is None:
+            rollback_error = exc
+    try:
+        _verify_publication_directory_chain(chain)
+    except BaseException:
+        pass
+    return rollback_error
 
 
 def _create_publication_temp(directory_fd: int, target_name: str) -> tuple[str, int]:
@@ -892,13 +918,14 @@ def _publish_new(
     temporary_fd: int | None = None
     temporary_name: str | None = None
     output_fd: int | None = None
+    chain: list[tuple[int, str, tuple[int, int]]] = []
+    published = False
     try:
         try:
             root_fd = os.open(root, _publication_directory_flags())
         except OSError as exc:
             raise EvidenceError("publication path changed") from exc
         directory_fds.append(root_fd)
-        chain: list[tuple[int, str, tuple[int, int]]] = []
         parent_fd = root_fd
         for component in _PUBLICATION_OUTPUT_COMPONENTS:
             child_fd = _open_publication_directory_component(parent_fd, component)
@@ -916,6 +943,7 @@ def _publish_new(
         _verify_publication_directory_chain(chain)
         if before_publish is not None:
             before_publish()
+        _verify_publication_directory_chain(chain)
         os.link(
             temporary_name,
             target_name,
@@ -923,28 +951,40 @@ def _publish_new(
             dst_dir_fd=output_fd,
             follow_symlinks=False,
         )
+        published = True
         if after_publish is not None:
-            try:
-                after_publish()
-            except BaseException:
-                _verify_publication_directory_chain(chain)
-                os.unlink(target_name, dir_fd=output_fd)
-                os.fsync(output_fd)
-                raise
+            after_publish()
         _verify_publication_directory_chain(chain)
+        os.unlink(temporary_name, dir_fd=output_fd)
+        temporary_name = None
         os.fsync(output_fd)
+    except BaseException:
+        if published:
+            rollback_error = _rollback_published_target(output_fd, target_name, chain)
+            if rollback_error is not None:
+                raise EvidenceError("publication rollback failed") from rollback_error
+        raise
     finally:
         if temporary_fd is not None:
-            os.close(temporary_fd)
+            try:
+                os.close(temporary_fd)
+            except OSError:
+                pass
         if temporary_name is not None and output_fd is not None:
             try:
                 os.unlink(temporary_name, dir_fd=output_fd)
-            except FileNotFoundError:
+            except OSError:
                 pass
             else:
-                os.fsync(output_fd)
+                try:
+                    os.fsync(output_fd)
+                except OSError:
+                    pass
         for directory_fd in reversed(directory_fds):
-            os.close(directory_fd)
+            try:
+                os.close(directory_fd)
+            except OSError:
+                pass
 
 
 def _safe_field_identity(payload: dict[str, object]) -> dict[str, object]:
@@ -1512,22 +1552,67 @@ def _expected_source_reference(root: Path, run_id: str, *, label: str) -> str:
     return paths[label].relative_to(root).as_posix()
 
 
+def _verify_trusted_source_directory_chain(
+    root: Path,
+    directories: Sequence[tuple[int, tuple[int, int]]],
+    chain: Sequence[tuple[int, str, tuple[int, int]]],
+    *,
+    label: str,
+) -> None:
+    try:
+        root_identity = directories[0][1]
+        named_root = os.stat(root, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(named_root.st_mode)
+            or (named_root.st_dev, named_root.st_ino) != root_identity
+        ):
+            raise EvidenceError(f"{label} source hash mismatch")
+        for directory_fd, expected_identity in directories:
+            current = os.fstat(directory_fd)
+            if (
+                not stat.S_ISDIR(current.st_mode)
+                or (current.st_dev, current.st_ino) != expected_identity
+            ):
+                raise EvidenceError(f"{label} source hash mismatch")
+        for parent_fd, component, expected_identity in chain:
+            named = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(named.st_mode)
+                or (named.st_dev, named.st_ino) != expected_identity
+            ):
+                raise EvidenceError(f"{label} source hash mismatch")
+    except OSError as exc:
+        raise EvidenceError(f"{label} source hash mismatch") from exc
+
+
 def _trusted_source_digest(root: Path, path: Path, *, label: str) -> str:
     relative = path.relative_to(root)
     nofollow = getattr(os, "O_NOFOLLOW", None)
     if nofollow is None:
         raise EvidenceError("safe source file opening is unavailable")
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow
-    directory_fd: int | None = None
+    directory_fds: list[int] = []
+    directories: list[tuple[int, tuple[int, int]]] = []
+    chain: list[tuple[int, str, tuple[int, int]]] = []
     file_fd: int | None = None
     try:
-        directory_fd = os.open(root, directory_flags)
+        root_fd = os.open(root, directory_flags)
+        directory_fds.append(root_fd)
+        root_metadata = os.fstat(root_fd)
+        if not stat.S_ISDIR(root_metadata.st_mode):
+            raise EvidenceError(f"{label} source must be a regular file")
+        root_identity = (root_metadata.st_dev, root_metadata.st_ino)
+        directories.append((root_fd, root_identity))
+        directory_fd = root_fd
         for component in relative.parts[:-1]:
             child_fd = os.open(component, directory_flags, dir_fd=directory_fd)
-            if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
-                os.close(child_fd)
+            directory_fds.append(child_fd)
+            child_metadata = os.fstat(child_fd)
+            if not stat.S_ISDIR(child_metadata.st_mode):
                 raise EvidenceError(f"{label} source must be a regular file")
-            os.close(directory_fd)
+            child_identity = (child_metadata.st_dev, child_metadata.st_ino)
+            directories.append((child_fd, child_identity))
+            chain.append((directory_fd, component, child_identity))
             directory_fd = child_fd
         file_fd = os.open(
             relative.name, os.O_RDONLY | nofollow, dir_fd=directory_fd
@@ -1547,14 +1632,23 @@ def _trusted_source_digest(root: Path, path: Path, *, label: str) -> str:
             != (named.st_dev, named.st_ino)
         ):
             raise EvidenceError(f"{label} source hash mismatch")
+        _verify_trusted_source_directory_chain(
+            root, directories, chain, label=label
+        )
         return digest.hexdigest()
     except OSError as exc:
         raise EvidenceError(f"{label} source must be a regular file") from exc
     finally:
         if file_fd is not None:
-            os.close(file_fd)
-        if directory_fd is not None:
-            os.close(directory_fd)
+            try:
+                os.close(file_fd)
+            except OSError:
+                pass
+        for directory_fd in reversed(directory_fds):
+            try:
+                os.close(directory_fd)
+            except OSError:
+                pass
 
 
 def _validated_source_reference(
