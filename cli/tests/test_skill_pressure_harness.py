@@ -1678,7 +1678,7 @@ class _FakeDiscoveryProcess:
         self.failure = failure
         self.fail_install = fail_install
         self.blocked_install_runtime = blocked_install_runtime
-        self.calls: list[tuple[list[str], dict[str, str]]] = []
+        self.calls: list[tuple[list[str], Path, dict[str, str]]] = []
 
     def __call__(
         self,
@@ -1688,8 +1688,7 @@ class _FakeDiscoveryProcess:
         env: dict[str, str],
         timeout: int,
     ) -> DiscoveryProcessResult:
-        del cwd
-        self.calls.append((argv, dict(env)))
+        self.calls.append((argv, cwd, dict(env)))
         if argv[0] == "sh":
             source = Path(argv[2])
             blocked = False
@@ -1742,6 +1741,10 @@ class _FakeDiscoveryProcess:
             return DiscoveryProcessResult(23, "authentication required", "", 0.01)
         if failure and failure[2] == "nonzero":
             return DiscoveryProcessResult(23, "", "host_failed", 0.01)
+        if failure and failure[2] == "subscription-expired":
+            return DiscoveryProcessResult(23, "", "refresh token expired", 0.01)
+        if failure and failure[2] == "model-unsupported":
+            return DiscoveryProcessResult(23, "", "model is not supported", 0.01)
         if failure and failure[2] == "malformed":
             return DiscoveryProcessResult(0, "{", "", 0.01)
         if failure and failure[2] == "unknown":
@@ -1792,7 +1795,10 @@ def _run_fake_discovery(
     monkeypatch.setenv("HOME", str(global_roots / "home"))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(global_roots / "claude"))
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(global_roots / "omp"))
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-auth"))
+    monkeypatch.setenv("CODEX_HOME", str(global_roots / "codex"))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-be-stripped")
+    monkeypatch.setenv("OPENAI_API_KEY", "must-be-stripped")
+    monkeypatch.setenv("AWF_DISCOVERY_RETAINED", "retained")
     result = run_discovery(
         repo_root=repo_root,
         matrix_path=repo_root / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json",
@@ -1802,11 +1808,7 @@ def _run_fake_discovery(
             "agent-skills": "fake-agent",
             "omp": "fake-omp",
         },
-        models={
-            "claude": "claude-test-model",
-            "agent-skills": "agent-test-model",
-            "omp": "omp-test-model",
-        },
+        models=dict(PINNED_SUBSCRIPTION_MODELS),
         timeout_sec=7,
         write_result=True,
         process_runner=fake,
@@ -1821,7 +1823,7 @@ def test_skill_discovery_preflight_reads_version_and_help_then_blocks_missing_fl
         tmp_path, monkeypatch, failure=("claude", "preflight", "missing-flag")
     )
 
-    claude_calls = [argv for argv, _ in fake.calls if argv[0] == "fake-claude"]
+    claude_calls = [argv for argv, _, _ in fake.calls if argv[0] == "fake-claude"]
     assert claude_calls[:2] == [["fake-claude", "--version"], ["fake-claude", "--help"]]
     assert {
         record["verdict"]
@@ -1851,7 +1853,7 @@ def test_agent_skills_preflight_reads_top_level_and_exec_scoped_help(
         tmp_path, monkeypatch, failure=("agent-skills", "preflight", "missing-exec-flag")
     )
 
-    agent_calls = [argv for argv, _ in fake.calls if argv[0] == "fake-agent"]
+    agent_calls = [argv for argv, _, _ in fake.calls if argv[0] == "fake-agent"]
     assert agent_calls[:3] == [
         ["fake-agent", "--version"],
         ["fake-agent", "--help"],
@@ -1871,7 +1873,7 @@ def test_agent_skills_preflight_blocks_when_top_level_exec_is_absent(
         tmp_path, monkeypatch, failure=("agent-skills", "preflight", "missing-exec")
     )
 
-    assert [argv for argv, _ in fake.calls if argv[0] == "fake-agent"][:2] == [
+    assert [argv for argv, _, _ in fake.calls if argv[0] == "fake-agent"][:2] == [
         ["fake-agent", "--version"],
         ["fake-agent", "--help"],
     ]
@@ -1892,11 +1894,13 @@ def test_skill_discovery_uses_exact_safe_host_argv() -> None:
         "--tools",
         "",
         "--no-session-persistence",
+        "--setting-sources",
+        "project",
         "--model",
         "sonnet",
         "/analysis\ndescribe the skill",
     ]
-    assert agent_skills_argv("codex", "gpt", "analysis", prompt) == [
+    assert agent_skills_argv("codex", "gpt-5.4", "analysis", prompt) == [
         "codex",
         "exec",
         "--ephemeral",
@@ -1904,19 +1908,25 @@ def test_skill_discovery_uses_exact_safe_host_argv() -> None:
         "read-only",
         "--skip-git-repo-check",
         "--model",
-        "gpt",
+        "gpt-5.4",
         "$analysis\ndescribe the skill",
     ]
-    assert omp_argv("omp", "gpt", "analysis", prompt) == [
+    assert omp_argv("omp", "openai-codex/gpt-5.6-sol", "analysis", prompt) == [
         "omp",
         "-p",
         "--mode=text",
-        "--no-tools",
+        "--tools=read",
         "--no-session",
-        "--model=gpt",
+        "--no-extensions",
+        "--model=openai-codex/gpt-5.6-sol",
         "--skills=analysis",
         prompt,
     ]
+    assert run_skill_discovery._prompt("omp") == (
+        "Read only the selected Skill. Do not read any other file or Skill. Do not mutate anything. "
+        'Return exactly one JSON object and no prose. Its schema is {"name":"exact Skill name",'
+        '"description":"exact frontmatter description","body_heading":"exact first Markdown H1"}.'
+    )
 
 
 def test_skill_discovery_returns_exact_source_fields_for_every_skill(
@@ -1992,17 +2002,45 @@ def test_skill_discovery_parses_wf_discovery_literal_description_exactly(
 
 
 @pytest.mark.parametrize(
-    ("failure", "runtime", "expected_verdict"),
+    ("failure", "runtime", "expected_verdict", "expected_diagnostic"),
     [
-        (("claude", "preflight", "missing"), "claude", "BLOCKED"),
-        (("agent-skills", "preflight", "timeout"), "agent-skills", "BLOCKED"),
-        (("omp", "analysis", "timeout"), "omp", "BLOCKED"),
-        (("omp", "analysis", "nonzero"), "omp", "FAIL"),
-        (("claude", "analysis", "malformed"), "claude", "FAIL"),
-        (("agent-skills", "analysis", "unknown"), "agent-skills", "FAIL"),
-        (("omp", "analysis", "mismatch-name"), "omp", "FAIL"),
-        (("omp", "analysis", "mismatch-description"), "omp", "FAIL"),
-        (("omp", "analysis", "mismatch-body_heading"), "omp", "FAIL"),
+        (("claude", "preflight", "missing"), "claude", "BLOCKED", "host_provider_exit"),
+        (("agent-skills", "preflight", "timeout"), "agent-skills", "BLOCKED", "host_timeout"),
+        (("omp", "analysis", "timeout"), "omp", "BLOCKED", "host_timeout"),
+        (("omp", "analysis", "nonzero"), "omp", "BLOCKED", "host_provider_exit"),
+        (
+            ("agent-skills", "analysis", "subscription-expired"),
+            "agent-skills",
+            "BLOCKED",
+            "host_subscription_expired",
+        ),
+        (("omp", "analysis", "auth-stdout"), "omp", "BLOCKED", "host_auth_unavailable"),
+        (
+            ("claude", "analysis", "model-unsupported"),
+            "claude",
+            "FAIL",
+            "host_model_unsupported",
+        ),
+        (("claude", "analysis", "malformed"), "claude", "FAIL", "malformed_json_response"),
+        (
+            ("agent-skills", "analysis", "unknown"),
+            "agent-skills",
+            "FAIL",
+            "unknown_skill_response",
+        ),
+        (("omp", "analysis", "mismatch-name"), "omp", "FAIL", "source_metadata_mismatch"),
+        (
+            ("omp", "analysis", "mismatch-description"),
+            "omp",
+            "FAIL",
+            "source_metadata_mismatch",
+        ),
+        (
+            ("omp", "analysis", "mismatch-body_heading"),
+            "omp",
+            "FAIL",
+            "source_metadata_mismatch",
+        ),
     ],
 )
 def test_skill_discovery_retains_a_nonpass_record_for_every_fake_failure(
@@ -2011,6 +2049,7 @@ def test_skill_discovery_retains_a_nonpass_record_for_every_fake_failure(
     failure: tuple[str, str, str],
     runtime: str,
     expected_verdict: str,
+    expected_diagnostic: str,
 ) -> None:
     result, _, _ = _run_fake_discovery(tmp_path, monkeypatch, failure=failure)
 
@@ -2021,7 +2060,7 @@ def test_skill_discovery_retains_a_nonpass_record_for_every_fake_failure(
         if record["runtime"] == runtime and record["verdict"] == expected_verdict
     ]
     assert records
-    assert all(record["diagnostic"] for record in records)
+    assert {record["diagnostic"] for record in records} == {expected_diagnostic}
 
 
 def test_skill_discovery_rejects_extra_response_prose_as_schema_failure(
@@ -2043,7 +2082,7 @@ def test_skill_discovery_rejects_extra_response_prose_as_schema_failure(
         matrix_path=result.repo_root / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json",
         batch_id="skill-discovery-extra-prose",
         binaries={"claude": "fake-claude", "agent-skills": "fake-agent", "omp": "fake-omp"},
-        models={"claude": "claude-test-model", "agent-skills": "agent-test-model", "omp": "omp-test-model"},
+        models=dict(PINNED_SUBSCRIPTION_MODELS),
         timeout_sec=7,
         write_result=True,
         process_runner=with_extra_prose,
@@ -2080,13 +2119,24 @@ def test_skill_discovery_materializes_45_isolated_canonical_links_and_cleans_up(
     assert {record["target_root"] for record in install["records"]} == {
         ".claude/skills",
         ".agents/skills",
-        ".omp/agent/skills",
+        ".omp/skills",
     }
-    install_calls = [env for argv, env in fake.calls if argv[0] == "sh"]
+    install_calls = [(argv, cwd, env) for argv, cwd, env in fake.calls if argv[0] == "sh"]
     assert len(install_calls) == 15
-    temporary_homes = {env["HOME"] for env in install_calls}
+    workspaces = {cwd for _, cwd, _ in install_calls}
+    assert len(workspaces) == 1
+    workspace = next(iter(workspaces))
+    assert {
+        str(Path(target).relative_to(workspace)).replace("\\", "/")
+        for argv, _, _ in install_calls
+        for target in argv[3:]
+    } == set(run_skill_discovery.TARGET_ROOTS.values())
+    temporary_homes = {env["HOME"] for _, _, env in install_calls}
     assert len(temporary_homes) == 1
+    assert Path(next(iter(temporary_homes))).name == "home"
     assert not Path(next(iter(temporary_homes))).exists()
+    assert workspace.name == "workspace"
+    assert not workspace.exists()
     assert {record["status"] for record in install["records"]} == {"PASS"}
 
 
@@ -2117,26 +2167,103 @@ def test_skill_discovery_keeps_successful_roots_when_one_root_is_blocked(
     assert not any(
         argv[0] == "fake-agent"
         and argv[1:] not in (["--version"], ["--help"], ["exec", "--help"])
-        for argv, _ in fake.calls
+        for argv, _, _ in fake.calls
     )
 
 
-def test_skill_discovery_uses_no_global_skill_root_or_credential_paths(
+def test_skill_discovery_uses_subscription_credentials_without_exposing_them(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     result, fake, global_roots = _run_fake_discovery(tmp_path, monkeypatch)
 
-    global_text = str(global_roots)
-    assert all(
-        global_text not in "\n".join(argv) and global_text not in "\n".join(env.values())
-        for argv, env in fake.calls
+    reports = f"{result.install_report.read_text()}\n{result.discovery_report.read_text()}"
+    assert str(global_roots) not in reports
+    assert "authentication required" not in reports
+    assert all(record["auth_mode"] == "subscription" for record in result.discovery_records)
+
+    host_calls = [
+        (argv, cwd, env) for argv, cwd, env in fake.calls if argv[0].startswith("fake-")
+    ]
+    assert {cwd.name for _, cwd, _ in host_calls} == {"workspace"}
+    assert len({cwd for _, cwd, _ in host_calls}) == 1
+    for _, _, env in host_calls:
+        assert env["AWF_DISCOVERY_RETAINED"] == "retained"
+        assert "ANTHROPIC_API_KEY" not in env
+        assert "OPENAI_API_KEY" not in env
+
+    claude_envs = [env for argv, _, env in host_calls if argv[0] == "fake-claude"]
+    agent_envs = [env for argv, _, env in host_calls if argv[0] == "fake-agent"]
+    omp_envs = [env for argv, _, env in host_calls if argv[0] == "fake-omp"]
+    assert {env["HOME"] for env in claude_envs} == {str(global_roots / "home")}
+    assert {env["CLAUDE_CONFIG_DIR"] for env in claude_envs} == {str(global_roots / "claude")}
+    assert all("CODEX_HOME" not in env and "PI_CODING_AGENT_DIR" not in env for env in claude_envs)
+    assert {env["CODEX_HOME"] for env in agent_envs} == {str(global_roots / "codex")}
+    assert all(env["HOME"] != str(global_roots / "home") for env in agent_envs)
+    assert all("CLAUDE_CONFIG_DIR" not in env and "PI_CODING_AGENT_DIR" not in env for env in agent_envs)
+    assert {env["PI_CODING_AGENT_DIR"] for env in omp_envs} == {str(global_roots / "omp")}
+    assert all(env["HOME"] != str(global_roots / "home") for env in omp_envs)
+    assert all("CLAUDE_CONFIG_DIR" not in env and "CODEX_HOME" not in env for env in omp_envs)
+
+
+def test_skill_discovery_rejects_non_subscription_model_before_host_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = _copy_discovery_repo(tmp_path)
+    expected = load_expected_skills(
+        repo_root,
+        repo_root / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json",
     )
-    for argv, env in fake.calls:
-        if argv[0] != "fake-agent":
-            assert "CODEX_HOME" not in env
-    assert "CODEX_HOME" in next(env for argv, env in fake.calls if argv[0] == "fake-agent")
-    assert global_text not in result.install_report.read_text()
-    assert global_text not in result.discovery_report.read_text()
+    fake = _FakeDiscoveryProcess(expected)
+    monkeypatch.setattr(
+        run_skill_discovery.SubscriptionAuthContext,
+        "capture",
+        classmethod(lambda cls: (_ for _ in ()).throw(AssertionError("must not capture"))),
+    )
+
+    with pytest.raises(ValueError, match="subscription model mismatch"):
+        run_discovery(
+            repo_root=repo_root,
+            matrix_path=repo_root / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json",
+            batch_id="skill-discovery-model-rejection",
+            binaries={"claude": "fake-claude", "agent-skills": "fake-agent", "omp": "fake-omp"},
+            models={**PINNED_SUBSCRIPTION_MODELS, "claude": "other"},
+            timeout_sec=7,
+            write_result=False,
+            process_runner=fake,
+        )
+
+    assert fake.calls == []
+
+
+def test_skill_discovery_uses_supplied_auth_context_without_recapturing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = _copy_discovery_repo(tmp_path)
+    expected = load_expected_skills(
+        repo_root,
+        repo_root / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json",
+    )
+    fake = _FakeDiscoveryProcess(expected)
+    auth = _subscription_auth(tmp_path)
+    monkeypatch.setattr(
+        run_skill_discovery.SubscriptionAuthContext,
+        "capture",
+        classmethod(lambda cls: (_ for _ in ()).throw(AssertionError("must not capture"))),
+    )
+
+    result = run_discovery(
+        repo_root=repo_root,
+        matrix_path=repo_root / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json",
+        batch_id="skill-discovery-explicit-auth",
+        binaries={"claude": "fake-claude", "agent-skills": "fake-agent", "omp": "fake-omp"},
+        models=dict(PINNED_SUBSCRIPTION_MODELS),
+        timeout_sec=7,
+        write_result=False,
+        process_runner=fake,
+        auth_context=auth,
+    )
+
+    assert result.exit_code == 0
 
 
 def test_skill_discovery_writes_current_batch_reports_after_install_failure(

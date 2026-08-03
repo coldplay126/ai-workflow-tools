@@ -28,12 +28,18 @@ from awf.core.skill_pressure import (  # noqa: E402
     sha256_skill,
     write_install_report,
 )
+from awf.core.skill_subscription import (  # noqa: E402
+    SubscriptionAuthContext,
+    build_subscription_environment,
+    normalize_host_diagnostic,
+    require_subscription_model,
+)
 
 RUNTIMES = ("claude", "agent-skills", "omp")
 TARGET_ROOTS = {
     "claude": ".claude/skills",
     "agent-skills": ".agents/skills",
-    "omp": ".omp/agent/skills",
+    "omp": ".omp/skills",
 }
 REQUIRED_FLAGS = {
     "claude": (
@@ -41,6 +47,7 @@ REQUIRED_FLAGS = {
         "--output-format",
         "--tools",
         "--no-session-persistence",
+        "--setting-sources",
         "--model",
     ),
     "agent-skills": (
@@ -50,7 +57,7 @@ REQUIRED_FLAGS = {
         "--skip-git-repo-check",
         "--model",
     ),
-    "omp": ("-p", "--mode=text", "--no-tools", "--no-session", "--model", "--skills"),
+    "omp": ("-p", "--mode=text", "--tools=read", "--no-session", "--no-extensions", "--model", "--skills"),
 }
 SAFETY_FLAGS = {
     "claude": (
@@ -58,16 +65,13 @@ SAFETY_FLAGS = {
         "--output-format=text",
         "--tools=",
         "--no-session-persistence",
+        "--setting-sources=project",
     ),
     "agent-skills": ("exec", "--ephemeral", "--sandbox=read-only", "--skip-git-repo-check"),
-    "omp": ("-p", "--mode=text", "--no-tools", "--no-session"),
+    "omp": ("-p", "--mode=text", "--tools=read", "--no-session", "--no-extensions"),
 }
 UNKNOWN_SKILL_RE = re.compile(
     r"(?:unknown|unrecognized|unsupported)\s+(?:command|skill)|skill\s+.*(?:not found|unknown)",
-    re.IGNORECASE,
-)
-AUTH_FAILURE_RE = re.compile(
-    r"(?:credential|authentication|authorize|login|api[ _-]?key|not authenticated)",
     re.IGNORECASE,
 )
 
@@ -123,6 +127,8 @@ def claude_argv(binary: str, model: str, skill: str, prompt: str) -> list[str]:
         "--tools",
         "",
         "--no-session-persistence",
+        "--setting-sources",
+        "project",
         "--model",
         model,
         f"/{skill}\n{prompt}",
@@ -148,8 +154,9 @@ def omp_argv(binary: str, model: str, skill: str, prompt: str) -> list[str]:
         binary,
         "-p",
         "--mode=text",
-        "--no-tools",
+        "--tools=read",
         "--no-session",
+        "--no-extensions",
         f"--model={model}",
         f"--skills={skill}",
         prompt,
@@ -363,19 +370,6 @@ def load_expected_skills(repo_root: Path, matrix_path: Path) -> dict[str, Expect
     return expected
 
 
-def _base_environment(isolated_home: Path, *, runtime: str | None) -> dict[str, str]:
-    env = dict(os.environ)
-    codex_home = env.pop("CODEX_HOME", None)
-    for key in ("HOME", "CLAUDE_CONFIG_DIR", "PI_CODING_AGENT_DIR"):
-        env.pop(key, None)
-    env["HOME"] = str(isolated_home)
-    if runtime == "claude":
-        env["CLAUDE_CONFIG_DIR"] = str(isolated_home / ".claude")
-    elif runtime == "omp":
-        env["PI_CODING_AGENT_DIR"] = str(isolated_home / ".omp" / "agent")
-    elif runtime == "agent-skills" and codex_home:
-        env["CODEX_HOME"] = codex_home
-    return env
 
 
 
@@ -395,52 +389,48 @@ def _preflight(
     runtime: str,
     binary: str,
     *,
-    repo_root: Path,
+    workspace: Path,
     env: dict[str, str],
     process_runner: ProcessRunner,
 ) -> HostPreflight:
     version = _invoke(
         process_runner,
         [binary, "--version"],
-        cwd=repo_root,
+        cwd=workspace,
         env=env,
         timeout=10,
     )
-    if version.error_kind is not None:
-        return HostPreflight(runtime, binary, "", False, version.error_kind, version.returncode)
-    if version.returncode != 0:
+    if version.error_kind is not None or version.returncode != 0:
         return HostPreflight(
             runtime,
             binary,
             "",
             False,
-            f"preflight_version_exit:{version.returncode}",
+            normalize_host_diagnostic(
+                version.returncode, version.stdout, version.stderr, version.error_kind
+            ),
             version.returncode,
         )
     version_text = version.stdout.strip()
     top_level_help = _invoke(
         process_runner,
         [binary, "--help"],
-        cwd=repo_root,
+        cwd=workspace,
         env=env,
         timeout=10,
     )
-    if top_level_help.error_kind is not None:
+    if top_level_help.error_kind is not None or top_level_help.returncode != 0:
         return HostPreflight(
             runtime,
             binary,
             version_text,
             False,
-            top_level_help.error_kind,
-            top_level_help.returncode,
-        )
-    if top_level_help.returncode != 0:
-        return HostPreflight(
-            runtime,
-            binary,
-            version_text,
-            False,
-            f"preflight_help_exit:{top_level_help.returncode}",
+            normalize_host_diagnostic(
+                top_level_help.returncode,
+                top_level_help.stdout,
+                top_level_help.stderr,
+                top_level_help.error_kind,
+            ),
             top_level_help.returncode,
         )
     if runtime == "agent-skills":
@@ -456,26 +446,22 @@ def _preflight(
         scoped_help = _invoke(
             process_runner,
             [binary, "exec", "--help"],
-            cwd=repo_root,
+            cwd=workspace,
             env=env,
             timeout=10,
         )
-        if scoped_help.error_kind is not None:
+        if scoped_help.error_kind is not None or scoped_help.returncode != 0:
             return HostPreflight(
                 runtime,
                 binary,
                 version_text,
                 False,
-                scoped_help.error_kind,
-                scoped_help.returncode,
-            )
-        if scoped_help.returncode != 0:
-            return HostPreflight(
-                runtime,
-                binary,
-                version_text,
-                False,
-                f"preflight_exec_help_exit:{scoped_help.returncode}",
+                normalize_host_diagnostic(
+                    scoped_help.returncode,
+                    scoped_help.stdout,
+                    scoped_help.stderr,
+                    scoped_help.error_kind,
+                ),
                 scoped_help.returncode,
             )
         help_text = scoped_help.stdout
@@ -507,13 +493,13 @@ def _install_records(
     expected: Mapping[str, ExpectedSkill],
     *,
     repo_root: Path,
-    isolated_home: Path,
+    workspace: Path,
+    installer_env: dict[str, str],
     process_runner: ProcessRunner,
 ) -> list[dict[str, object]]:
-    roots = {runtime: isolated_home / relative for runtime, relative in TARGET_ROOTS.items()}
+    roots = {runtime: workspace / relative for runtime, relative in TARGET_ROOTS.items()}
     installer = repo_root / "scripts" / "install-skill-links.sh"
     records: list[dict[str, object]] = []
-    installer_env = _base_environment(isolated_home, runtime=None)
     for skill, source in expected.items():
         if source.source_error:
             for runtime in RUNTIMES:
@@ -536,7 +522,7 @@ def _install_records(
                 str(source.source),
                 *(str(roots[runtime]) for runtime in RUNTIMES),
             ],
-            cwd=repo_root,
+            cwd=workspace,
             env=installer_env,
             timeout=30,
         )
@@ -544,10 +530,14 @@ def _install_records(
             linked = _verify_link(roots[runtime] / skill, source.source)
             if linked:
                 status, diagnostic = "PASS", ""
-            elif completed.error_kind is not None:
-                status, diagnostic = "BLOCKED", completed.error_kind
-            elif completed.returncode != 0:
-                status, diagnostic = "BLOCKED", f"installer_exit:{completed.returncode}"
+            elif completed.error_kind is not None or completed.returncode != 0:
+                status = "BLOCKED"
+                diagnostic = normalize_host_diagnostic(
+                    completed.returncode,
+                    completed.stdout,
+                    completed.stderr,
+                    completed.error_kind,
+                )
             else:
                 status, diagnostic = "BLOCKED", "installer_target_not_canonical"
             records.append(
@@ -563,7 +553,13 @@ def _install_records(
     return records
 
 
-def _prompt() -> str:
+def _prompt(runtime: str) -> str:
+    if runtime == "omp":
+        return (
+            "Read only the selected Skill. Do not read any other file or Skill. Do not mutate anything. "
+            'Return exactly one JSON object and no prose. Its schema is {"name":"exact Skill name",'
+            '"description":"exact frontmatter description","body_heading":"exact first Markdown H1"}.'
+        )
     return (
         "Do not call tools, access files, or mutate anything. Return exactly one JSON object and no prose. "
         'Its schema is {"name":"exact Skill name","description":"exact frontmatter description",'
@@ -619,7 +615,7 @@ def _discovery_record(
     expected: ExpectedSkill,
     model: str,
     install_status: str,
-    repo_root: Path,
+    workspace: Path,
     env: dict[str, str],
     timeout_sec: int,
     process_runner: ProcessRunner,
@@ -631,6 +627,7 @@ def _discovery_record(
         "model": model,
         "skill": expected.name,
         "source_sha256": expected.source_sha256,
+        "auth_mode": "subscription",
         "argv_safety_flags": list(SAFETY_FLAGS[runtime]),
         "elapsed_sec": 0.0,
         "exit_status": preflight.exit_status,
@@ -644,6 +641,8 @@ def _discovery_record(
         record["diagnostic"] = expected.source_error
         return record
     if not preflight.available:
+        if preflight.diagnostic == "host_model_unsupported":
+            record["verdict"] = "FAIL"
         record["diagnostic"] = preflight.diagnostic
         return record
     if install_status != "PASS":
@@ -651,25 +650,26 @@ def _discovery_record(
         record["diagnostic"] = "install_blocked"
         return record
 
-    argv = _argv_for(runtime, preflight.binary, model, expected.name, _prompt())
+    argv = _argv_for(runtime, preflight.binary, model, expected.name, _prompt(runtime))
     completed = _invoke(
         process_runner,
         argv,
-        cwd=repo_root,
+        cwd=workspace,
         env=env,
         timeout=timeout_sec,
     )
     record["elapsed_sec"] = completed.elapsed_sec
     record["exit_status"] = completed.returncode
-    if completed.error_kind is not None:
-        record["diagnostic"] = completed.error_kind
-        return record
-    if completed.returncode != 0:
-        if AUTH_FAILURE_RE.search(f"{completed.stdout}\n{completed.stderr}"):
-            record["diagnostic"] = "host_auth_unavailable"
-        else:
+    if completed.error_kind is not None or completed.returncode != 0:
+        diagnostic = normalize_host_diagnostic(
+            completed.returncode,
+            completed.stdout,
+            completed.stderr,
+            completed.error_kind,
+        )
+        if diagnostic == "host_model_unsupported":
             record["verdict"] = "FAIL"
-            record["diagnostic"] = f"host_exit:{completed.returncode}"
+        record["diagnostic"] = diagnostic
         return record
     diagnostic = _response_diagnostic(completed.stdout, expected)
     if diagnostic:
@@ -713,6 +713,7 @@ def run_discovery(
     timeout_sec: int,
     write_result: bool,
     process_runner: ProcessRunner = _run_process,
+    auth_context: SubscriptionAuthContext | None = None,
 ) -> DiscoveryRun:
     if timeout_sec <= 0:
         raise ValueError("timeout_sec must be positive")
@@ -722,15 +723,29 @@ def run_discovery(
     if missing:
         raise ValueError(f"missing runtime binary or model: {','.join(missing)}")
     matrix_sha256 = sha256_file(matrix_path)
+    for runtime in RUNTIMES:
+        require_subscription_model(runtime, models[runtime])
+    auth = auth_context or SubscriptionAuthContext.capture()
 
     with tempfile.TemporaryDirectory(prefix="awf-skill-discovery-") as temporary:
-        isolated_home = Path(temporary)
+        temporary_root = Path(temporary)
+        temporary_home = temporary_root / "home"
+        workspace = temporary_root / "workspace"
+        temporary_home.mkdir()
+        workspace.mkdir()
+        base_environment = dict(os.environ)
+        environments = {
+            runtime: build_subscription_environment(
+                runtime, auth, temporary_home, base_environment
+            )
+            for runtime in RUNTIMES
+        }
         preflights = {
             runtime: _preflight(
                 runtime,
                 binaries[runtime],
-                repo_root=root,
-                env=_base_environment(isolated_home, runtime=runtime),
+                workspace=workspace,
+                env=environments[runtime],
                 process_runner=process_runner,
             )
             for runtime in RUNTIMES
@@ -738,7 +753,8 @@ def run_discovery(
         install_records = _install_records(
             expected,
             repo_root=root,
-            isolated_home=isolated_home,
+            workspace=workspace,
+            installer_env=environments["agent-skills"],
             process_runner=process_runner,
         )
         install_by_identity = {
@@ -762,8 +778,8 @@ def run_discovery(
                 expected=source,
                 model=models[runtime],
                 install_status=install_by_identity[(runtime, skill)],
-                repo_root=root,
-                env=_base_environment(isolated_home, runtime=runtime),
+                workspace=workspace,
+                env=environments[runtime],
                 timeout_sec=timeout_sec,
                 process_runner=process_runner,
             )
@@ -780,7 +796,11 @@ def run_discovery(
             )
 
     records = [*install_records, *discovery_records]
-    exit_code = 0 if all(record.get("verdict", record.get("status")) == "PASS" for record in records) else 1
+    exit_code = (
+        0
+        if all(record.get("verdict", record.get("status")) == "PASS" for record in records)
+        else 1
+    )
     return DiscoveryRun(
         repo_root=root,
         install_records=tuple(install_records),
