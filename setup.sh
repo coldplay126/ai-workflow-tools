@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CLAUDE_DIR="$HOME/.claude"
 OMP_AGENT_DIR="${OMP_AGENT_DIR:-$HOME/.omp/agent/agents}"
 AGENTS_SKILLS_DIR="${AGENTS_SKILLS_DIR:-$HOME/.agents/skills}"
+OMP_SKILLS_DIR="${OMP_SKILLS_DIR:-$HOME/.omp/agent/skills}"
 
 if ! command -v uv >/dev/null 2>&1; then
   echo "error: uv가 필요합니다: https://docs.astral.sh/uv/getting-started/installation/" >&2
@@ -30,45 +31,51 @@ fi
 
 echo ""
 echo "[2/4] Claude Skills 설치 중..."
-mkdir -p "$CLAUDE_DIR/skills"
 
 SKILLS=(
   analysis
-  wf wf-orchestrator phase-plan phase-review phase-approve phase-impl
-  phase-verify phase-test phase-done
-  wf-discovery wf-status wf-reset multi-agent
+  multi-agent
+  phase-approve
+  phase-done
+  phase-impl
+  phase-plan
+  phase-review
+  phase-test
+  phase-verify
+  release-worktree-lifecycle
+  wf
+  wf-discovery
+  wf-orchestrator
+  wf-reset
+  wf-status
 )
 
+runtime_names=(claude agent-skills omp)
+runtime_roots=("$CLAUDE_DIR/skills" "$AGENTS_SKILLS_DIR" "$OMP_SKILLS_DIR")
+install_blocked=0
 for skill in "${SKILLS[@]}"; do
-  target="$CLAUDE_DIR/skills/$skill"
-  source="$SCRIPT_DIR/claude/skills/$skill"
-
-  if [ -L "$target" ]; then
-    current=$(readlink "$target")
-    if [ "$current" = "$source" ]; then
-      echo "  ✓ $skill (이미 설치됨)"
-      continue
+  for index in "${!runtime_names[@]}"; do
+    runtime="${runtime_names[$index]}"
+    root="${runtime_roots[$index]}"
+    if "$SCRIPT_DIR/scripts/install-skill-links.sh" \
+      "$SCRIPT_DIR/claude/skills/$skill" \
+      "$root"; then
+      :
+    else
+      status=$?
+      if [ "$status" -ne 3 ]; then
+        exit "$status"
+      fi
+      printf 'runtime=%s skill=%s path=%s\n' "$runtime" "$skill" "$root/$skill" >&2
+      install_blocked=1
     fi
-    echo "  ↻ $skill (심링크 업데이트)"
-    rm "$target"
-  elif [ -d "$target" ]; then
-    echo "  ⚠ $skill: 기존 디렉토리가 존재합니다."
-    read -p "    교체하시겠습니까? (y/N) " -r
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-      echo "  → 건너뜀"
-      continue
-    fi
-    rm -rf "$target"
-  fi
-
-  ln -sf "$source" "$target"
-  echo "  ✓ $skill"
+  done
 done
 
-"$SCRIPT_DIR/scripts/install-skill-links.sh" \
-  "$SCRIPT_DIR/claude/skills/release-worktree-lifecycle" \
-  "$CLAUDE_DIR/skills" \
-  "$AGENTS_SKILLS_DIR"
+if [ "$install_blocked" -ne 0 ]; then
+  printf 'AWF Skill installation is BLOCKED; inspect AWF_SKILL_INSTALL_RESULT lines above.\n' >&2
+  exit 3
+fi
 
 # 1b. Agents 심링크
 echo ""

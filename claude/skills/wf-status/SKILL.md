@@ -14,6 +14,8 @@ cli:
   command: "awf wf status"
 ---
 
+# /wf-status — 워크플로우 상태 조회
+
 ## 워크플로우 상태 조회
 
 이 스킬은 `.workflow/state.json`을 읽고 현재 워크플로우의 진행 상태를 시각적으로 표시합니다.

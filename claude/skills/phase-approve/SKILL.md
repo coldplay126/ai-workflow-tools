@@ -22,6 +22,8 @@ contract_template: "repo/claude/skills/wf-orchestrator/templates/agent-cards/app
 runtime_contract: ".workflow/agent-cards/approve.json"
 ---
 
+# /phase-approve — Phase 3 승인
+
 ## Deterministic Phase Preflight
 
 수동으로 이 phase를 실행할 때도 [wf-orchestrator/reference/deterministic-preflight.md](../wf-orchestrator/reference/deterministic-preflight.md)의

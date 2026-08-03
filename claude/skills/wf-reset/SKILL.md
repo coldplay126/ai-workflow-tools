@@ -15,6 +15,8 @@ cli:
   command: "awf wf reset"
 ---
 
+# /wf-reset — 워크플로우 초기화/폐기
+
 ## User Input
 
 ```text
@@ -23,7 +25,7 @@ $ARGUMENTS
 
 ## 워크플로우 초기화/폐기
 
-이 스킬은 현재 워크플로우를 초기화하거나 폐기합니다.
+이 스킬은 현재 워크플로우를 초기화하거나 폐기하며 archive 또는 rollback을 수행합니다.
 
 ### 실행 흐름
 

@@ -3,6 +3,12 @@ name: wf
 version: 1.0.0
 description: This skill should be used when the user invokes "/wf", "/wf init <concept>", "/wf resume", "/wf status", or "/wf reset <action>", or asks to start, resume, inspect, or reset the gated workflow through one lifecycle entrypoint.
 type: workflow
+conditions:
+  trigger:
+    - /wf, /wf init, /wf resume, /wf status, or /wf reset is invoked
+    - user asks to start, resume, inspect, or reset the gated workflow lifecycle
+  skip:
+    - a phase-specific Skill already owns the active workflow action
 ---
 
 # Workflow Lifecycle Dispatcher

@@ -111,7 +111,7 @@
             "type": "object",
             "properties": {
               "key": { "type": "string" },
-              "path": { "type": "string" },
+              "path": { "type": ["string", "null"] },
               "description": { "type": "string" }
             }
           }
@@ -144,7 +144,11 @@
       "type": "object",
       "required": ["id", "pass_conditions", "on_pass"],
       "properties": {
-        "id": { "type": "string", "pattern": "^G[1-6]$" },
+        "id": {
+          "type": ["string", "null"],
+          "pattern": "^G[1-6]$",
+          "description": "G1-G6 for gated phases; null only for the terminal done phase"
+        },
         "pass_conditions": {
           "type": "array",
           "items": { "type": "string" },
@@ -152,8 +156,9 @@
         },
         "on_pass": {
           "type": "object",
+          "required": ["next_phase"],
           "properties": {
-            "next_phase": { "type": "string" }
+            "next_phase": { "type": ["string", "null"] }
           }
         },
         "on_fail": {
@@ -162,7 +167,7 @@
           "additionalProperties": {
             "type": "object",
             "properties": {
-              "next_phase": { "type": "string" },
+              "next_phase": { "type": ["string", "null"] },
               "prompt_user": { "type": "boolean" },
               "creates": { "type": "string" }
             }
