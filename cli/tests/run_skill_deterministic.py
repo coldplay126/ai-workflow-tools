@@ -104,6 +104,10 @@ def main(argv: list[str] | None = None) -> int:
                     else "deterministic_source_changed"
                 )
             def write_report(sources: dict[str, str]) -> Path:
+                def verify_sources_before_publish() -> None:
+                    if _source_hashes(repo_root) != sources:
+                        raise EvidenceError("deterministic source hash mismatch before publication")
+
                 return write_deterministic_report(
                     repo_root,
                     batch_id=args.batch_id,
@@ -118,6 +122,7 @@ def main(argv: list[str] | None = None) -> int:
                         "cli/tests/fixtures/skill-validation-matrix.v1.json"
                     ],
                     sources=sources,
+                    before_publish=verify_sources_before_publish,
                 )
 
             try:

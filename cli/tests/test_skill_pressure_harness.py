@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import hashlib
 import subprocess
+import os
+import stat
 from pathlib import Path
 import shutil
 from dataclasses import replace
@@ -1019,6 +1021,69 @@ def test_field_report_writer_persists_hashes_without_raw_transcripts_or_paths(
         )
     assert path.read_text() == report_text
 
+
+def test_publish_new_is_append_only_runs_callback_uses_private_mode_and_cleans_temp(
+    tmp_path: Path,
+) -> None:
+    target = pressure_report_path(tmp_path, "publisher-contract")
+    callbacks: list[str] = []
+
+    pressure._publish_new(
+        target,
+        "private report\n",
+        before_publish=lambda: callbacks.append("before-link"),
+    )
+
+    assert callbacks == ["before-link"]
+    assert target.read_text(encoding="utf-8") == "private report\n"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert list(target.parent.glob(f".{target.name}.*")) == []
+
+    with pytest.raises(FileExistsError):
+        pressure._publish_new(target, "replacement\n")
+
+    assert target.read_text(encoding="utf-8") == "private report\n"
+    assert list(target.parent.glob(f".{target.name}.*")) == []
+
+
+@pytest.mark.parametrize("swapped_component", [".awf-operations", "skill-pressure"])
+def test_publish_new_rejects_output_directory_symlink_swap_during_temp_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    swapped_component: str,
+) -> None:
+    target = pressure_report_path(tmp_path, "publisher-symlink-race")
+    target.parent.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    component = (
+        tmp_path / ".awf-operations"
+        if swapped_component == ".awf-operations"
+        else target.parent
+    )
+    if swapped_component == ".awf-operations":
+        (outside / "skill-pressure").mkdir()
+    preserved_component = component.with_name(f"{component.name}-preserved")
+    original_open = pressure.os.open
+    swapped = False
+
+    def swap_before_temp_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        nonlocal swapped
+        if not swapped and flags & os.O_CREAT:
+            component.rename(preserved_component)
+            component.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(pressure.os, "open", swap_before_temp_open)
+
+    with pytest.raises(pressure.EvidenceError, match="publication path changed"):
+        pressure._publish_new(target, "private report\n")
+
+    assert swapped
+    assert not (outside / "skill-pressure" / target.name).exists()
+    assert not (outside / target.name).exists()
+    assert list(preserved_component.glob(f".{target.name}.*")) == []
 
 def test_sensitive_data_writes_redacted_blocker_without_raw_content(tmp_path: Path) -> None:
     raw = '{"contact":"person@example.com"}'
@@ -2047,6 +2112,42 @@ def test_deterministic_runner_publishes_unchanged_source_hashes(
     }
 
 
+def test_deterministic_runner_fails_closed_when_runner_mutates_during_pytest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _provision_matrix(tmp_path)
+    runner = tmp_path / "cli/tests/run_skill_deterministic.py"
+    shutil.copy2(REPO_ROOT / "cli/tests/run_skill_deterministic.py", runner)
+
+    def mutate_runner_then_succeed(
+        *args: object, **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        runner.write_text(
+            runner.read_text(encoding="utf-8") + "\n# mutation to deterministic runner\n",
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(
+            args[0], 0, stdout="deterministic suite passed", stderr=""
+        )
+
+    monkeypatch.setattr(run_skill_deterministic.subprocess, "run", mutate_runner_then_succeed)
+
+    assert (
+        run_skill_deterministic.main(
+            ["--batch-id", "runner-mutation", "--repo-root", str(tmp_path), "--timeout-sec", "1"]
+        )
+        == 1
+    )
+
+    report_path = pressure.deterministic_report_path(tmp_path, "runner-mutation")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["exit_status"] == 1
+    assert report["sources"] == {
+        relative: pressure.sha256_file(tmp_path / relative)
+        for relative in pressure.DETERMINISTIC_SOURCE_FILES
+    }
+
+
 def test_deterministic_runner_fails_closed_when_source_mutates_during_pytest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2129,7 +2230,7 @@ def test_deterministic_runner_fails_closed_on_prepublication_source_race(
         for relative in pressure.DETERMINISTIC_SOURCE_FILES
     }
 
-def test_deterministic_runner_persists_failed_evidence_for_publication_hash_race(
+def test_deterministic_runner_persists_failed_evidence_for_callback_hash_race(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _provision_matrix(tmp_path)
@@ -2137,21 +2238,28 @@ def test_deterministic_runner_persists_failed_evidence_for_publication_hash_race
     original_write = run_skill_deterministic.write_deterministic_report
     mutated = False
 
-    def mutate_once_then_write(*args: object, **kwargs: object) -> Path:
+    def mutate_once_inside_publication_callback(*args: object, **kwargs: object) -> Path:
         nonlocal mutated
-        if not mutated:
-            mutated = True
-            source.write_text(
-                source.read_text(encoding="utf-8")
-                + "\n# mutation during deterministic publication\n",
-                encoding="utf-8",
-            )
-        return original_write(*args, **kwargs)
+        before_publish = kwargs.pop("before_publish")
+        assert callable(before_publish)
+
+        def mutate_then_verify_sources() -> None:
+            nonlocal mutated
+            if not mutated:
+                mutated = True
+                source.write_text(
+                    source.read_text(encoding="utf-8")
+                    + "\n# mutation inside deterministic publication callback\n",
+                    encoding="utf-8",
+                )
+            before_publish()
+
+        return original_write(*args, before_publish=mutate_then_verify_sources, **kwargs)
 
     monkeypatch.setattr(
         run_skill_deterministic,
         "write_deterministic_report",
-        mutate_once_then_write,
+        mutate_once_inside_publication_callback,
     )
     monkeypatch.setattr(
         run_skill_deterministic.subprocess,
@@ -2165,7 +2273,7 @@ def test_deterministic_runner_persists_failed_evidence_for_publication_hash_race
         run_skill_deterministic.main(
             [
                 "--batch-id",
-                "writer-race",
+                "callback-race",
                 "--repo-root",
                 str(tmp_path),
                 "--timeout-sec",
@@ -2175,7 +2283,7 @@ def test_deterministic_runner_persists_failed_evidence_for_publication_hash_race
         == 1
     )
 
-    report_path = pressure.deterministic_report_path(tmp_path, "writer-race")
+    report_path = pressure.deterministic_report_path(tmp_path, "callback-race")
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["exit_status"] == 1
     assert report["sources"] == {
@@ -2737,6 +2845,51 @@ def test_evidence_builder_rejects_source_mutation_after_validation(
     assert install.exists()
     assert len(fields) == 27
 
+def test_evidence_builder_rechecks_canonical_skill_tree_before_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    batch_id = "batch-1"
+    passing_deterministic_report(tmp_path, batch_id=batch_id)
+    passing_install_report(tmp_path, MATRIX, batch_id=batch_id)
+    passing_discovery_report(tmp_path, MATRIX, batch_id=batch_id)
+    passing_field_report_paths(tmp_path, MATRIX, batch_id=batch_id)
+    original_validate = build_skill_evidence.validate_source_bundle
+
+    def validate_then_mutate(**kwargs: object) -> pressure.SourceBundle:
+        bundle = original_validate(**kwargs)  # type: ignore[arg-type]
+        skill_file = tmp_path / "claude" / "skills" / "wf-status" / "SKILL.md"
+        skill_file.write_text(
+            skill_file.read_text(encoding="utf-8") + "\nmutated after validation\n",
+            encoding="utf-8",
+        )
+        return bundle
+
+    def evidence_construction_must_not_run(
+        *args: object, **kwargs: object
+    ) -> tuple[pressure.EvidenceCell, ...]:
+        raise AssertionError("evidence construction ran after canonical source mutation")
+
+    monkeypatch.setattr(
+        build_skill_evidence, "validate_source_bundle", validate_then_mutate
+    )
+    monkeypatch.setattr(
+        build_skill_evidence,
+        "build_evidence_matrix",
+        evidence_construction_must_not_run,
+    )
+
+    assert (
+        build_skill_evidence.main(
+            ["--batch-id", batch_id, "--repo-root", str(tmp_path)]
+        )
+        == 1
+    )
+    assert "canonical Skill source hash mismatch" in capsys.readouterr().err
+
+
+
 
 def test_deterministic_writer_rejects_noncanonical_audit_inputs(tmp_path: Path) -> None:
     with pytest.raises(pressure.EvidenceError, match="canonical deterministic argv"):
@@ -2866,6 +3019,29 @@ def _current_source_bundle(tmp_path: Path, *, batch_id: str) -> pressure.SourceB
         discovery_path=discovery,
         field_paths=fields,
     )
+
+def test_source_bundle_rechecks_canonical_skill_tree_after_validation(
+    tmp_path: Path,
+) -> None:
+    bundle = _current_source_bundle(tmp_path, batch_id="batch-1")
+    skill = "wf-status"
+    skill_root = tmp_path / "claude" / "skills" / skill
+    original_hash = pressure.sha256_skill(skill_root)
+
+    assert bundle.canonical_skill_hashes[skill] == original_hash
+    with pytest.raises(TypeError):
+        bundle.canonical_skill_hashes[skill] = "0" * 64  # type: ignore[index]
+
+    skill_file = skill_root / "SKILL.md"
+    skill_file.write_text(
+        skill_file.read_text(encoding="utf-8") + "\nmutated canonical Skill\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(pressure.EvidenceError, match="canonical Skill source hash mismatch"):
+        pressure.verify_source_bundle_unchanged(bundle)
+
+
 
 
 def test_source_bundle_serializes_current_report_references_as_relative_posix_paths(
@@ -3047,6 +3223,35 @@ def test_evidence_summary_rechecks_sources_inside_append_only_publication(
             matrix=MATRIX,
         )
     assert not pressure.evidence_summary_path(tmp_path, "batch-1").exists()
+
+def test_evidence_summary_rechecks_canonical_skill_tree_inside_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _current_source_bundle(tmp_path, batch_id="batch-1")
+    skill_file = tmp_path / "claude" / "skills" / "wf-status" / "SKILL.md"
+    original_publish = pressure._publish_new
+
+    def mutate_then_publish(target: Path, content: str, **kwargs: object) -> None:
+        skill_file.write_text(
+            skill_file.read_text(encoding="utf-8") + "\nmutated before summary link\n",
+            encoding="utf-8",
+        )
+        original_publish(target, content, **kwargs)
+
+    monkeypatch.setattr(pressure, "_publish_new", mutate_then_publish)
+
+    with pytest.raises(pressure.EvidenceError, match="canonical Skill source hash mismatch"):
+        pressure.write_evidence_summary(
+            tmp_path,
+            run_id="batch-1",
+            cells=_passing_evidence_cells(),
+            sources=bundle,
+            matrix=MATRIX,
+        )
+    assert not pressure.evidence_summary_path(tmp_path, "batch-1").exists()
+
+
 
 
 def test_evidence_summary_rejects_a_source_symlink_swap_during_hashing(

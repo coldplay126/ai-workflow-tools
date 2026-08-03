@@ -187,6 +187,7 @@ DETERMINISTIC_SOURCE_FILES = (
     "cli/src/awf/core/skill_pressure.py",
     "cli/src/awf/core/skill_subscription.py",
     "cli/tests/run_skill_discovery.py",
+    "cli/tests/run_skill_deterministic.py",
     "cli/tests/run_skill_pressure.py",
     "cli/tests/build_skill_evidence.py",
 )
@@ -542,6 +543,7 @@ class SourceBundle(Mapping[str, object]):
     matrix: SkillMatrix
     reports: Mapping[str, object]
     repo_root: Path
+    canonical_skill_hashes: Mapping[str, str]
 
     def __getitem__(self, key: str) -> object:
         return self.references[key]
@@ -1117,6 +1119,7 @@ def write_deterministic_report(
     stderr: str,
     matrix_sha256: str,
     sources: Mapping[str, object],
+    before_publish: Callable[[], None] | None = None,
 ) -> Path:
     safe_batch_id = _require_safe_batch_id(batch_id)
     validated_sources = _validated_deterministic_sources(repo_root, argv, sources)
@@ -1148,7 +1151,11 @@ def write_deterministic_report(
         "sources": validated_sources,
     }
     target = deterministic_report_path(repo_root, safe_batch_id)
-    _publish_new(target, json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    _publish_new(
+        target,
+        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        before_publish=before_publish,
+    )
     return target
 
 
@@ -1795,7 +1802,14 @@ def validate_source_bundle(
             "field": tuple(field_snapshots),
         }
     )
-    return SourceBundle(references, snapshots, matrix, reports, root)
+    return SourceBundle(
+        references=references,
+        snapshots=snapshots,
+        matrix=matrix,
+        reports=reports,
+        repo_root=root,
+        canonical_skill_hashes=MappingProxyType(canonical_skill_hashes.copy()),
+    )
 
 
 def source_bundle_snapshots(bundle: SourceBundle) -> Mapping[str, object]:
@@ -1816,6 +1830,8 @@ def verify_source_bundle_unchanged(bundle: SourceBundle) -> None:
         if not isinstance(report, _ReportSnapshot):
             raise EvidenceError("invalid field source snapshot")
         _verify_snapshot_current(root, report, label="field")
+    if _canonical_skill_hashes(root, bundle.matrix) != bundle.canonical_skill_hashes:
+        raise EvidenceError("canonical Skill source hash mismatch")
 
 
 def _aggregate_verdict(values: Sequence[Verdict]) -> Verdict:
@@ -2197,7 +2213,9 @@ def write_evidence_summary(
     target = evidence_summary_path(root, safe_run_id)
 
     def verify_sources_before_publish() -> None:
-        if _json_source_references(root, safe_run_id, sources) != serialized_sources:
+        if isinstance(sources, SourceBundle):
+            verify_source_bundle_unchanged(sources)
+        elif _json_source_references(root, safe_run_id, sources) != serialized_sources:
             raise EvidenceError("source references changed before publication")
 
     _publish_new(
