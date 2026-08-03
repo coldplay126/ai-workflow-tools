@@ -3332,7 +3332,7 @@ def test_production_verifier_kills_timeout_descendant(
     from awf.worktrees import service as service_module
 
     pid_path = tmp_path / "descendant.pid"
-    monkeypatch.setattr(service_module, "_PRODUCTION_VERIFY_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(service_module, "_PRODUCTION_VERIFY_TIMEOUT_SECONDS", 1.0)
     script = (
         "import os, pathlib, signal, subprocess, sys, time; "
         "child=subprocess.Popen([sys.executable, '-c', "
