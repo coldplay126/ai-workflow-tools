@@ -218,6 +218,31 @@ def test_host_diagnostics_are_allowlisted_and_prioritized(
 ) -> None:
     assert normalize_host_diagnostic(returncode, stdout, stderr, error_kind) == expected
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Failed to authenticate: OAuth session expired and could not be refreshed",
+        "OAuth session has expired; refresh failed",
+        "oauth session expired after a request; failed to refresh credentials",
+    ],
+)
+def test_host_diagnostic_classifies_oauth_session_refresh_failures(message: str) -> None:
+    assert normalize_host_diagnostic(1, stderr=message) == "host_subscription_expired"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "OAuth session expired",
+        "OAuth session refresh failed",
+        "session expired and could not be refreshed",
+    ],
+)
+def test_host_diagnostic_does_not_overclassify_incomplete_oauth_refresh_messages(
+    message: str,
+) -> None:
+    assert normalize_host_diagnostic(1, stderr=message) == "host_provider_exit"
+
 def test_host_diagnostic_ignores_warning_text_after_success() -> None:
     assert (
         normalize_host_diagnostic(
@@ -2422,6 +2447,13 @@ class _FakeDiscoveryProcess:
             return DiscoveryProcessResult(23, "", "host_failed", 0.01)
         if failure and failure[2] == "subscription-expired":
             return DiscoveryProcessResult(23, "", "refresh token expired", 0.01)
+        if failure and failure[2] == "oauth-session-expired":
+            return DiscoveryProcessResult(
+                23,
+                "",
+                "Failed to authenticate: OAuth session expired and could not be refreshed",
+                0.01,
+            )
         if failure and failure[2] == "model-unsupported":
             return DiscoveryProcessResult(23, "", "model is not supported", 0.01)
         if failure and failure[2] == "malformed":
@@ -2618,10 +2650,69 @@ def test_skill_discovery_uses_exact_safe_host_argv() -> None:
     ]
     assert run_skill_discovery._prompt("omp") == (
         "Use only the read tool to load the selected Skill. Do not read any other path or mutate anything. "
+        "Copy all three values byte-for-byte from SKILL.md. "
+        "Do not translate, summarize, normalize whitespace, or strip Markdown markers. "
+        "body_heading includes the literal leading '# '. "
+        "Encode embedded newlines as JSON escapes. "
         'Return exactly one JSON object and no prose. Its schema is {"name":"exact Skill name",'
         '"description":"exact frontmatter description","body_heading":"exact first Markdown H1"}.'
     )
 
+
+def test_skill_discovery_sends_exact_metadata_prompt_to_fake_host_argv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, fake, _ = _run_fake_discovery(tmp_path, monkeypatch)
+    prompts = {
+        "claude": (
+            "Do not call tools, access files, or mutate anything. Read the selected Skill only. "
+            "Copy all three values byte-for-byte from SKILL.md. "
+            "Do not translate, summarize, normalize whitespace, or strip Markdown markers. "
+            "body_heading includes the literal leading '# '. "
+            "Encode embedded newlines as JSON escapes. "
+            'Return exactly one JSON object and no prose. Its schema is {"name":"exact Skill name",'
+            '"description":"exact frontmatter description","body_heading":"exact first Markdown H1"}.'
+        ),
+        "agent-skills": (
+            "Do not call tools, access files, or mutate anything. Read the selected Skill only. "
+            "Copy all three values byte-for-byte from SKILL.md. "
+            "Do not translate, summarize, normalize whitespace, or strip Markdown markers. "
+            "body_heading includes the literal leading '# '. "
+            "Encode embedded newlines as JSON escapes. "
+            'Return exactly one JSON object and no prose. Its schema is {"name":"exact Skill name",'
+            '"description":"exact frontmatter description","body_heading":"exact first Markdown H1"}.'
+        ),
+        "omp": (
+            "Use only the read tool to load the selected Skill. Do not read any other path or mutate anything. "
+            "Copy all three values byte-for-byte from SKILL.md. "
+            "Do not translate, summarize, normalize whitespace, or strip Markdown markers. "
+            "body_heading includes the literal leading '# '. "
+            "Encode embedded newlines as JSON escapes. "
+            'Return exactly one JSON object and no prose. Its schema is {"name":"exact Skill name",'
+            '"description":"exact frontmatter description","body_heading":"exact first Markdown H1"}.'
+        ),
+    }
+    model_argvs = {
+        "claude": next(
+            argv
+            for argv, _, _ in fake.calls
+            if argv[0] == "fake-claude" and argv[-1].startswith("/analysis\n")
+        ),
+        "agent-skills": next(
+            argv
+            for argv, _, _ in fake.calls
+            if argv[0] == "fake-agent" and argv[-1].startswith("$analysis\n")
+        ),
+        "omp": next(
+            argv
+            for argv, _, _ in fake.calls
+            if argv[0] == "fake-omp" and "--skills=analysis" in argv
+        ),
+    }
+
+    assert model_argvs["claude"][-1] == f"/analysis\n{prompts['claude']}"
+    assert model_argvs["agent-skills"][-1] == f"$analysis\n{prompts['agent-skills']}"
+    assert model_argvs["omp"][-1] == prompts["omp"]
 
 def test_skill_discovery_returns_exact_source_fields_for_every_skill(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2829,6 +2920,42 @@ def test_skill_discovery_accepts_valid_json_metadata_with_unknown_skill_words(
 
     assert run_skill_discovery._response_diagnostic(stdout, expected) == ""
 
+def test_skill_discovery_metadata_response_passes_only_byte_exact_source_values() -> None:
+    expected = replace(
+        load_expected_skills(
+            REPO_ROOT,
+            REPO_ROOT / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json",
+        )["analysis"],
+        description="first line\nsecond line",
+        body_heading="# Preserve this heading  ",
+    )
+    exact = {
+        "name": expected.name,
+        "description": expected.description,
+        "body_heading": expected.body_heading,
+    }
+    responses = [
+        (exact, ""),
+        (
+            {**exact, "description": expected.description.replace("\n", " ")},
+            "source_metadata_mismatch",
+        ),
+        (
+            {**exact, "body_heading": expected.body_heading.removeprefix("# ")},
+            "source_metadata_mismatch",
+        ),
+        (
+            {**exact, "body_heading": expected.body_heading.rstrip()},
+            "source_metadata_mismatch",
+        ),
+    ]
+
+    exact_stdout = json.dumps(exact)
+    assert "\\n" in exact_stdout
+    assert run_skill_discovery._response_diagnostic(exact_stdout, expected) == ""
+    for payload, diagnostic in responses[1:]:
+        assert run_skill_discovery._response_diagnostic(json.dumps(payload), expected) == diagnostic
+
 
 def test_skill_discovery_persists_only_normalized_provider_stderr_diagnostic(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2873,6 +3000,26 @@ def test_skill_discovery_persists_only_normalized_provider_stderr_diagnostic(
     assert raw_detail not in report
     assert raw_token not in report
     assert str(credential_path) not in report
+
+def test_skill_discovery_normalizes_oauth_session_refresh_failure_without_raw_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, _, _ = _run_fake_discovery(
+        tmp_path,
+        monkeypatch,
+        failure=("claude", "analysis", "oauth-session-expired"),
+    )
+    raw_diagnostic = "Failed to authenticate: OAuth session expired and could not be refreshed"
+    report = result.discovery_report.read_text(encoding="utf-8")
+    record = next(
+        record
+        for record in result.discovery_records
+        if record["runtime"] == "claude" and record["skill"] == "analysis"
+    )
+
+    assert record["verdict"] == "BLOCKED"
+    assert record["diagnostic"] == "host_subscription_expired"
+    assert raw_diagnostic not in report
 
 
 def test_skill_discovery_freezes_snapshot_before_canonical_mutation(

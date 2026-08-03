@@ -19,6 +19,15 @@ API_KEY_ENV_KEYS = frozenset({"ANTHROPIC_API_KEY", "OPENAI_API_KEY"})
 CONFIG_ENV_KEYS = ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR")
 
 _EXPIRED_RE = re.compile(r"refresh token expired|subscription[^\n]*expired", re.IGNORECASE)
+_OAUTH_SESSION_REFRESH_FAILED_RE = re.compile(
+    r"\boauth[ \t]+session(?:[ \t]+has)?[ \t]+expired\b"
+    r"[^\r\n]{0,160}?\b(?:"
+    r"could[ \t]+not[ \t]+be[ \t]+refreshed"
+    r"|failed[ \t]+to[ \t]+refresh"
+    r"|refresh[ \t]+failed"
+    r")\b",
+    re.IGNORECASE,
+)
 _AUTH_RE = re.compile(
     r"credential|authentication|authorize|not logged in|login required|not authenticated|api[ _-]?key",
     re.IGNORECASE,
@@ -141,7 +150,7 @@ def normalize_host_diagnostic(
     if returncode == 0:
         return ""
     text = f"{stdout}\n{stderr}"
-    if _EXPIRED_RE.search(text):
+    if _EXPIRED_RE.search(text) or _OAUTH_SESSION_REFRESH_FAILED_RE.search(text):
         return "host_subscription_expired"
     if any(
         pattern.search(text) for pattern in _UNSUPPORTED_MODEL_ASSERTIONS

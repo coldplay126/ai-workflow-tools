@@ -308,16 +308,28 @@ Make these changes:
 - Codex: retain `$<skill>`, ephemeral execution, and read-only sandbox; call `require_subscription_model` so the OMP selector cannot reach Codex.
 - OMP: replace `--no-tools` with `--tools=read`, add `--no-extensions`, retain the one-Skill allowlist, and change only the OMP prompt to permit reading the selected Skill.
 
-The OMP prompt must be exact and side-effect-free:
+The runtime prompts must retain their runtime-specific safety prefix, then append this exact metadata contract:
 
 ```python
-"Use only the read tool to load the selected Skill. Do not read any other path or mutate anything. "
-"Return exactly one JSON object and no prose. Its schema is "
-'{"name":"exact Skill name","description":"exact frontmatter description",'
-'"body_heading":"exact first Markdown H1"}.'
+metadata_contract = (
+    "Copy all three values byte-for-byte from SKILL.md. "
+    "Do not translate, summarize, normalize whitespace, or strip Markdown markers. "
+    "body_heading includes the literal leading '# '. "
+    "Encode embedded newlines as JSON escapes. "
+    'Return exactly one JSON object and no prose. Its schema is {"name":"exact Skill name",'
+    '"description":"exact frontmatter description","body_heading":"exact first Markdown H1"}.'
+)
+omp_prompt = (
+    "Use only the read tool to load the selected Skill. Do not read any other path or mutate anything. "
+    + metadata_contract
+)
+non_omp_prompt = (
+    "Do not call tools, access files, or mutate anything. Read the selected Skill only. "
+    + metadata_contract
+)
 ```
 
-Claude and Codex retain the no-tool prompt because their explicit Skill command injects the selected body.
+Claude and Codex retain the no-tool prompt because their explicit Skill command injects the selected body; OMP retains its selected-Skill read-only constraint.
 
 - [ ] **Step 5: Normalize and classify host failures before report creation**
 

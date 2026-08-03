@@ -685,13 +685,21 @@ def _prompt(runtime: str) -> str:
     if runtime == "omp":
         return (
             "Use only the read tool to load the selected Skill. Do not read any other path or mutate anything. "
+            "Copy all three values byte-for-byte from SKILL.md. "
+            "Do not translate, summarize, normalize whitespace, or strip Markdown markers. "
+            "body_heading includes the literal leading '# '. "
+            "Encode embedded newlines as JSON escapes. "
             'Return exactly one JSON object and no prose. Its schema is {"name":"exact Skill name",'
             '"description":"exact frontmatter description","body_heading":"exact first Markdown H1"}.'
         )
     return (
-        "Do not call tools, access files, or mutate anything. Return exactly one JSON object and no prose. "
-        'Its schema is {"name":"exact Skill name","description":"exact frontmatter description",'
-        '"body_heading":"exact first Markdown H1"}. Read the selected Skill only.'
+        "Do not call tools, access files, or mutate anything. Read the selected Skill only. "
+        "Copy all three values byte-for-byte from SKILL.md. "
+        "Do not translate, summarize, normalize whitespace, or strip Markdown markers. "
+        "body_heading includes the literal leading '# '. "
+        "Encode embedded newlines as JSON escapes. "
+        'Return exactly one JSON object and no prose. Its schema is {"name":"exact Skill name",'
+        '"description":"exact frontmatter description","body_heading":"exact first Markdown H1"}.'
     )
 
 
