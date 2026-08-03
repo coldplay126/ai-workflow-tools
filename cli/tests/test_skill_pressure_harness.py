@@ -23,6 +23,13 @@ from awf.core.skill_pressure import (
 )
 import awf.core.skill_pressure as pressure
 from awf.providers.base import ProviderResult
+from awf.core.skill_subscription import (
+    PINNED_SUBSCRIPTION_MODELS,
+    SubscriptionAuthContext,
+    build_subscription_environment,
+    normalize_host_diagnostic,
+    require_subscription_model,
+)
 import build_skill_evidence
 import run_skill_pressure
 from run_skill_pressure import (
@@ -49,6 +56,122 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 MATRIX = load_skill_matrix(
     REPO_ROOT / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json"
 )
+
+
+def _subscription_auth(tmp_path: Path) -> SubscriptionAuthContext:
+    original_home = tmp_path / "operator"
+    return SubscriptionAuthContext(
+        original_home=original_home,
+        claude_config_dir=original_home / ".claude",
+        codex_home=original_home / ".codex",
+        omp_agent_dir=original_home / ".omp" / "agent",
+    )
+
+
+def test_subscription_environment_capture_derives_defaults_and_honors_explicit_paths(
+    tmp_path: Path,
+) -> None:
+    original_home = tmp_path / "operator"
+    defaults = SubscriptionAuthContext.capture({"HOME": str(original_home)})
+
+    assert defaults.original_home == original_home.resolve()
+    assert defaults.claude_config_dir == (original_home / ".claude").resolve()
+    assert defaults.codex_home == (original_home / ".codex").resolve()
+    assert defaults.omp_agent_dir == (original_home / ".omp" / "agent").resolve()
+
+    explicit = SubscriptionAuthContext.capture(
+        {
+            "HOME": str(original_home),
+            "CLAUDE_CONFIG_DIR": str(tmp_path / "claude"),
+            "CODEX_HOME": str(tmp_path / "codex"),
+            "PI_CODING_AGENT_DIR": str(tmp_path / "omp-agent"),
+        }
+    )
+
+    assert explicit.claude_config_dir == (tmp_path / "claude").resolve()
+    assert explicit.codex_home == (tmp_path / "codex").resolve()
+    assert explicit.omp_agent_dir == (tmp_path / "omp-agent").resolve()
+
+
+def test_subscription_environments_reference_only_the_required_store(tmp_path: Path) -> None:
+    auth = _subscription_auth(tmp_path)
+    temporary_home = tmp_path / "run" / "home"
+    base = {
+        "HOME": "/wrong",
+        "CLAUDE_CONFIG_DIR": "/wrong/claude",
+        "CODEX_HOME": "/wrong/codex",
+        "PI_CODING_AGENT_DIR": "/wrong/omp",
+        "ANTHROPIC_API_KEY": "must-be-removed",
+        "OPENAI_API_KEY": "must-be-removed",
+        "PATH": "/bin",
+    }
+
+    claude = build_subscription_environment("claude", auth, temporary_home, base)
+    codex = build_subscription_environment("agent-skills", auth, temporary_home, base)
+    omp = build_subscription_environment("omp", auth, temporary_home, base)
+
+    assert claude["HOME"] == str(auth.original_home)
+    assert claude["CLAUDE_CONFIG_DIR"] == str(auth.claude_config_dir)
+    assert "CODEX_HOME" not in claude and "PI_CODING_AGENT_DIR" not in claude
+    assert codex["HOME"] == str(temporary_home)
+    assert codex["CODEX_HOME"] == str(auth.codex_home)
+    assert "CLAUDE_CONFIG_DIR" not in codex and "PI_CODING_AGENT_DIR" not in codex
+    assert omp["HOME"] == str(temporary_home)
+    assert omp["PI_CODING_AGENT_DIR"] == str(auth.omp_agent_dir)
+    assert "CLAUDE_CONFIG_DIR" not in omp and "CODEX_HOME" not in omp
+    for environment in (claude, codex, omp):
+        assert environment["PATH"] == "/bin"
+        assert "ANTHROPIC_API_KEY" not in environment
+        assert "OPENAI_API_KEY" not in environment
+
+
+def test_subscription_models_are_pinned_and_reject_invalid_selection() -> None:
+    assert dict(PINNED_SUBSCRIPTION_MODELS) == {
+        "claude": "sonnet",
+        "agent-skills": "gpt-5.4",
+        "omp": "openai-codex/gpt-5.6-sol",
+    }
+
+    for runtime, model in PINNED_SUBSCRIPTION_MODELS.items():
+        require_subscription_model(runtime, model)
+
+    with pytest.raises(ValueError, match="subscription model mismatch"):
+        require_subscription_model("agent-skills", "openai-codex/gpt-5.6-sol")
+    with pytest.raises(ValueError, match="unsupported runtime"):
+        require_subscription_model("unsupported", "model")
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "stderr", "error_kind", "expected"),
+    [
+        (
+            1,
+            "subscription renewal expired; model is not supported; not logged in",
+            "",
+            "timeout",
+            "host_timeout",
+        ),
+        (
+            1,
+            "subscription renewal expired; model is not supported; not logged in",
+            "",
+            None,
+            "host_subscription_expired",
+        ),
+        (1, "", "model is not supported; not logged in", None, "host_model_unsupported"),
+        (1, "", "not logged in", None, "host_auth_unavailable"),
+        (7, "", "opaque provider text", None, "host_provider_exit"),
+        (0, "", "", None, ""),
+    ],
+)
+def test_host_diagnostics_are_allowlisted_and_prioritized(
+    returncode: int,
+    stdout: str,
+    stderr: str,
+    error_kind: str | None,
+    expected: str,
+) -> None:
+    assert normalize_host_diagnostic(returncode, stdout, stderr, error_kind) == expected
 
 
 def response(**overrides: object) -> str:
