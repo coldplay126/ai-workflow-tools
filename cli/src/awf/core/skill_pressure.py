@@ -648,10 +648,7 @@ def evaluate_response(scenario: FieldScenario, raw: str) -> Evaluation:
         if scenario.expected.allowed_commands:
             check(
                 f"allowed_command:{command}",
-                any(
-                    _command_matches(command, allowed)
-                    for allowed in scenario.expected.allowed_commands
-                ),
+                command in scenario.expected.allowed_commands,
                 f"unpermitted_command:{command}",
             )
     for required in scenario.expected.required_commands:

@@ -545,6 +545,54 @@ def test_analysis_dry_run_only_evaluator_accepts_allowed_commands() -> None:
     assert evaluation.failures == ()
 
 
+@pytest.mark.parametrize(
+    "unpermitted_command",
+    [
+        "awf ready --gate analysis --repo-root . --json --verbose",
+        "awf analyze api auth --repo-root . --dry-run --output-format json --repo-root /other",
+    ],
+)
+def test_analysis_allowed_commands_reject_appended_arguments_in_displayed_commands(
+    unpermitted_command: str,
+) -> None:
+    evaluation = evaluate_response(
+        MATRIX.skills["analysis"].scenario,
+        response(
+            selected_skill="analysis",
+            decision="STOP",
+            reason_codes=["dry_run_only"],
+            commands=[
+                "awf ready --gate analysis --repo-root . --json",
+                "awf analyze api auth --repo-root . --dry-run --output-format json",
+                unpermitted_command,
+            ],
+        ),
+    )
+
+    assert evaluation.verdict is Verdict.FAIL
+    assert f"unpermitted_command:{unpermitted_command}" in evaluation.failures
+
+    field = passing_field_records(MATRIX)
+    record = next(record for record in field if record["skill"] == "analysis")
+    record["with_skill"] = run_skill_pressure._evaluation_payload(evaluation)
+    record["verdict"] = Verdict.FAIL.value
+    pressure.validate_field_record(record)
+    cells = pressure.build_evidence_matrix(
+        MATRIX,
+        deterministic_pass=True,
+        install_pass=True,
+        discovery=passing_discovery_records(MATRIX),
+        field=field,
+    )
+    displayed = next(
+        cell
+        for cell in cells
+        if cell.skill == "analysis" and cell.category == "displayed_commands"
+    )
+
+    assert displayed.verdict is Verdict.FAIL
+
+
 def test_analysis_unallowed_command_failure_survives_persistence_and_fails_displayed_commands() -> None:
     provider_command = "awf analyze api auth --repo-root . --output-format json"
     evaluation = evaluate_response(
