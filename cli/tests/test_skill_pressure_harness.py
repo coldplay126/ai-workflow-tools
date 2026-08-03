@@ -1985,8 +1985,8 @@ def test_field_main_omits_raw_provider_output_from_persisted_evidence(
     assert raw_output not in report_path.read_text()
     assert "/operator/private/token" not in report_path.read_text()
     assert report["response_hashes"] == {
-        "baseline": hashlib.sha256(b"").hexdigest(),
-        "with_skill": hashlib.sha256(b"").hexdigest(),
+        "baseline": hashlib.sha256(raw_output.encode()).hexdigest(),
+        "with_skill": hashlib.sha256(raw_output.encode()).hexdigest(),
     }
     assert "APPEND_SYSTEM.md" not in json.dumps(output)
     assert "awf-skill-pressure-" not in json.dumps(output)
@@ -3265,6 +3265,28 @@ def test_skill_discovery_uses_exact_safe_host_argv() -> None:
         'Return exactly one JSON object and no prose. Its schema is {"name":"decoded frontmatter name",'
         '"description":"decoded frontmatter description","body_heading":"exact first Markdown H1"}.'
     )
+
+
+def test_field_subprocess_closes_stdin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = run_skill_pressure._run_process(
+        ["omp", "-p"],
+        cwd=tmp_path,
+        env={},
+        timeout=30,
+    )
+
+    assert result.returncode == 0
+    assert captured["stdin"] is subprocess.DEVNULL
 
 
 def test_skill_discovery_subprocess_closes_stdin(

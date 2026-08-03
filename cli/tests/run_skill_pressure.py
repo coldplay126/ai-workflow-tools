@@ -114,6 +114,7 @@ def _run_process(
             env=env,
             text=True,
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             check=False,
             timeout=timeout,
         )
@@ -602,8 +603,8 @@ def main(argv: list[str] | None = None) -> int:
                     repo_root,
                     run_id=run_id,
                     payload=record,
-                    baseline="",
-                    with_skill="",
+                    baseline=run.baseline_result.stdout,
+                    with_skill=run.with_skill_result.stdout,
                 )
             except SensitiveDataError:
                 report_written = pressure_report_path(repo_root, run_id).is_file()
