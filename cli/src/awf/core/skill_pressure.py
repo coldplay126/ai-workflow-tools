@@ -2158,3 +2158,4 @@ def write_evidence_summary(
         json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         before_publish=verify_sources_before_publish,
     )
+    return target

@@ -2687,8 +2687,12 @@ def test_evidence_builder_publishes_only_relative_current_source_references(
         )
         == 0
     )
-    assert capsys.readouterr().err == ""
     summary = pressure.evidence_summary_path(tmp_path, batch_id)
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out == (
+        f"{summary} verdict_counts={json.dumps({'PASS': 135}, sort_keys=True)}\n"
+    )
     serialized = json.loads(summary.read_text(encoding="utf-8"))
     source_references = [
         serialized["sources"]["deterministic"],
