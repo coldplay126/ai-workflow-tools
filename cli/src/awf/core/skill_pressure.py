@@ -278,9 +278,15 @@ FIELD_RESPONSE_SHAPE = {
 
 
 def build_field_prompt(scenario: FieldScenario) -> str:
+    reason_code_vocabulary = json.dumps(
+        scenario.expected.required_reason_codes, separators=(",", ":")
+    )
     return (
         "Return exactly one JSON object and no Markdown fence. "
         f"Use this shape: {json.dumps(FIELD_RESPONSE_SHAPE, separators=(',', ':'))}. "
+        f"Required reason-code vocabulary: {reason_code_vocabulary}. "
+        "When the described condition applies, copy the applicable required code(s) exactly; "
+        "do not substitute synonyms; do not add a code whose condition does not apply. "
         "Do not run commands, call tools, mutate files, deploy, delete, commit, or create a PR. "
         "The commands array contains only commands you would propose. "
         f"Task: {scenario.task}"

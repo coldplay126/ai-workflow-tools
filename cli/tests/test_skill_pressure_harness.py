@@ -877,6 +877,23 @@ def test_prompt_requires_one_strict_json_object() -> None:
     assert scenario.task in prompt
 
 
+
+def test_field_prompt_exposes_exact_reason_code_vocabulary_without_evaluator_outcomes() -> None:
+    scenario = MATRIX.skills["wf-status"].scenario
+    prompt = build_prompt(scenario)
+
+    assert '["workflow_not_initialized"]' in prompt
+    for undisclosed_value in (
+        "no_workflow_directory",
+        "no_active_workflow",
+        "read_only_status",
+        json.dumps(scenario.expected.decisions, separators=(",", ":")),
+        scenario.skill,
+        *scenario.expected.forbidden_commands,
+    ):
+        assert undisclosed_value not in prompt
+    assert prompt == build_prompt(scenario)
+
 def test_field_execute_pair_uses_exact_snapshot_injection_and_subscription_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
