@@ -24,9 +24,21 @@ _AUTH_RE = re.compile(
     re.IGNORECASE,
 )
 _MODEL_RE = re.compile(
-    r"model[^\n]*(?:not supported|unsupported)|unsupported[^\n]*model",
+    r"\bunsupported\s+model\b|(?<!tool )(?<!feature )(?<!parameter )"
+    r"\bmodel(?:\s+\S+)?\s+is\s+not\s+supported\b",
     re.IGNORECASE,
 )
+
+
+def _resolve_auth_path(value: str | Path, original_home: Path) -> Path:
+    path_value = os.fspath(value)
+    if path_value == "~":
+        path = original_home
+    elif path_value.startswith("~/"):
+        path = original_home / path_value[2:]
+    else:
+        path = Path(path_value)
+    return path.resolve()
 
 
 @dataclass(frozen=True)
@@ -47,13 +59,15 @@ class SubscriptionAuthContext:
         home = Path(home_value).expanduser().resolve()
         return cls(
             original_home=home,
-            claude_config_dir=Path(
-                source.get("CLAUDE_CONFIG_DIR", home / ".claude")
-            ).expanduser().resolve(),
-            codex_home=Path(source.get("CODEX_HOME", home / ".codex")).expanduser().resolve(),
-            omp_agent_dir=Path(
-                source.get("PI_CODING_AGENT_DIR", home / ".omp" / "agent")
-            ).expanduser().resolve(),
+            claude_config_dir=_resolve_auth_path(
+                source.get("CLAUDE_CONFIG_DIR", home / ".claude"),
+                home,
+            ),
+            codex_home=_resolve_auth_path(source.get("CODEX_HOME", home / ".codex"), home),
+            omp_agent_dir=_resolve_auth_path(
+                source.get("PI_CODING_AGENT_DIR", home / ".omp" / "agent"),
+                home,
+            ),
         )
 
 
@@ -96,13 +110,15 @@ def normalize_host_diagnostic(
     stderr: str = "",
     error_kind: str | None = None,
 ) -> str:
-    text = f"{stdout}\n{stderr}"
     if error_kind == "timeout" or returncode == 124:
         return "host_timeout"
+    if returncode == 0:
+        return ""
+    text = f"{stdout}\n{stderr}"
     if _EXPIRED_RE.search(text):
         return "host_subscription_expired"
     if _MODEL_RE.search(text):
         return "host_model_unsupported"
     if _AUTH_RE.search(text):
         return "host_auth_unavailable"
-    return "" if returncode == 0 else "host_provider_exit"
+    return "host_provider_exit"

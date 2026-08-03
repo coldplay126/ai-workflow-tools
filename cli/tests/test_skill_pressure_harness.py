@@ -92,6 +92,41 @@ def test_subscription_environment_capture_derives_defaults_and_honors_explicit_p
     assert explicit.codex_home == (tmp_path / "codex").resolve()
     assert explicit.omp_agent_dir == (tmp_path / "omp-agent").resolve()
 
+@pytest.mark.parametrize(
+    ("configured_codex_home", "expected"),
+    [
+        ("~", Path("/fake/operator")),
+        ("~/.codex", Path("/fake/operator/.codex")),
+    ],
+)
+def test_subscription_environment_capture_expands_tilde_against_supplied_home(
+    configured_codex_home: str,
+    expected: Path,
+) -> None:
+    auth = SubscriptionAuthContext.capture(
+        {
+            "HOME": "/fake/operator",
+            "CODEX_HOME": configured_codex_home,
+        }
+    )
+
+    assert auth.codex_home == expected
+
+
+def test_subscription_environment_builds_isolated_copies(tmp_path: Path) -> None:
+    auth = _subscription_auth(tmp_path)
+    temporary_home = tmp_path / "run" / "home"
+    base = {"HOME": "/wrong", "PATH": "/bin"}
+
+    claude = build_subscription_environment("claude", auth, temporary_home, base)
+    codex = build_subscription_environment("agent-skills", auth, temporary_home, base)
+    claude["PATH"] = "/modified"
+    claude["EXTRA"] = "value"
+
+    assert base == {"HOME": "/wrong", "PATH": "/bin"}
+    assert codex["PATH"] == "/bin"
+    assert "EXTRA" not in codex
+
 
 def test_subscription_environments_reference_only_the_required_store(tmp_path: Path) -> None:
     auth = _subscription_auth(tmp_path)
@@ -140,6 +175,12 @@ def test_subscription_models_are_pinned_and_reject_invalid_selection() -> None:
     with pytest.raises(ValueError, match="unsupported runtime"):
         require_subscription_model("unsupported", "model")
 
+def test_pinned_subscription_models_reject_mutation() -> None:
+    with pytest.raises(TypeError):
+        PINNED_SUBSCRIPTION_MODELS["claude"] = "other"
+
+
+
 
 @pytest.mark.parametrize(
     ("returncode", "stdout", "stderr", "error_kind", "expected"),
@@ -172,6 +213,41 @@ def test_host_diagnostics_are_allowlisted_and_prioritized(
     expected: str,
 ) -> None:
     assert normalize_host_diagnostic(returncode, stdout, stderr, error_kind) == expected
+
+def test_host_diagnostic_ignores_warning_text_after_success() -> None:
+    assert (
+        normalize_host_diagnostic(
+            0,
+            stderr="warning: model gpt-5.4 is not supported for dry-run",
+        )
+        == ""
+    )
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "unsupported model: gpt-5.4",
+        "model openai-codex/gpt-5.6-sol is not supported",
+    ],
+)
+def test_host_diagnostic_classifies_explicit_unsupported_model(message: str) -> None:
+    assert normalize_host_diagnostic(1, stderr=message) == "host_model_unsupported"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "unsupported tool: model-inspector",
+        "feature model-management is unsupported",
+        "unsupported parameter: model",
+        "tool model is not supported",
+        "feature model is not supported",
+        "parameter model is not supported",
+    ],
+)
+def test_host_diagnostic_does_not_misclassify_unsupported_non_models(message: str) -> None:
+    assert normalize_host_diagnostic(1, stderr=message) == "host_provider_exit"
 
 
 def response(**overrides: object) -> str:
