@@ -117,6 +117,7 @@ NORMALIZED_HOST_DIAGNOSTICS = frozenset(
         "host_provider_exit",
         "host_subscription_expired",
         "host_timeout",
+        "unsupported_omp_flags",
     }
 )
 FIELD_EVALUATION_FAILURES = frozenset(

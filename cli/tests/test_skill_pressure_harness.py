@@ -610,6 +610,66 @@ def test_field_main_persists_minor_severity(
     assert result["severity"] == "minor"
     assert result["persistence"]["status"] == "COMPLETE"
 
+
+def test_field_main_persists_unsupported_omp_flags_diagnostic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo_root, source = _copied_wf_status_repo(tmp_path)
+    skill_hash = sha256_skill(source)
+
+    def fake_execute(case: object, **kwargs: object) -> run_skill_pressure.PairRun:
+        failed = Evaluation(
+            Verdict.FAIL,
+            ("unsupported_omp_flags",),
+            (
+                CriterionResult(
+                    "host_diagnostic", Verdict.FAIL, "unsupported_omp_flags"
+                ),
+            ),
+            None,
+        )
+        return run_skill_pressure.PairRun(
+            evaluation=compare_pair(failed, failed),
+            baseline_result=ProviderResult(78, "", "", provider_name="omp"),
+            with_skill_result=ProviderResult(78, "", "", provider_name="omp"),
+            preflight_result=ProviderResult(78, "", "", provider_name="omp"),
+            skill_sha256=skill_hash,
+            injection_sha256=skill_hash,
+        )
+
+    monkeypatch.setattr(run_skill_pressure, "execute_pair", fake_execute)
+    monkeypatch.setattr(
+        run_skill_pressure.SubscriptionAuthContext,
+        "capture",
+        lambda: _subscription_auth(tmp_path),
+    )
+
+    assert (
+        run_skill_pressure.main(
+            [
+                "--repo-root",
+                str(repo_root),
+                "--matrix",
+                str(REPO_ROOT / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json"),
+                "--batch-id",
+                "batch-1",
+                "--model",
+                OMP_SUBSCRIPTION_MODEL,
+                "--skill",
+                "wf-status",
+                "--write-result",
+                "--json",
+            ]
+        )
+        == 1
+    )
+
+    result = json.loads(capsys.readouterr().out)["results"][0]
+    assert result["verdict"] == Verdict.FAIL.value
+    assert result["persistence"]["status"] == "COMPLETE"
+
 def test_field_report_writer_persists_hashes_without_raw_transcripts_or_paths(
     tmp_path: Path,
 ) -> None:
