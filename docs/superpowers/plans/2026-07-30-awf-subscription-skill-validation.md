@@ -403,9 +403,13 @@ Add a preflight assertion requiring `--append-system-prompt` and `--no-extension
 Extend `valid_field_record()` and passing field fixtures with:
 
 ```python
-"auth_mode": "subscription",
-"skill_file_sha256": hashlib.sha256(b"skill-file").hexdigest(),
-"injection_sha256": hashlib.sha256(b"skill-file").hexdigest(),
+field_record.update(
+    {
+        "auth_mode": "subscription",
+        "skill_file_sha256": hashlib.sha256(b"skill-file").hexdigest(),
+        "injection_sha256": hashlib.sha256(b"skill-file").hexdigest(),
+    }
+)
 ```
 
 Add tests proving:
