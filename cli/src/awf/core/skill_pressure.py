@@ -269,8 +269,8 @@ class FieldScenario:
 
 
 FIELD_RESPONSE_SHAPE = {
-    "selected_skill": "skill-name",
-    "decision": "PROCEED|STOP|REPORT|ASK_USER|DELEGATE",
+    "selected_skill": "independently-selected-skill",
+    "decision": "independently-determined-decision",
     "reason_codes": ["machine_readable_reason"],
     "sections": ["section_name"],
     "commands": ["command that would be proposed"],
@@ -278,18 +278,49 @@ FIELD_RESPONSE_SHAPE = {
 
 
 def build_field_prompt(scenario: FieldScenario) -> str:
-    reason_code_vocabulary = json.dumps(
-        scenario.expected.required_reason_codes, separators=(",", ":")
-    )
-    return (
-        "Return exactly one JSON object and no Markdown fence. "
-        f"Use this shape: {json.dumps(FIELD_RESPONSE_SHAPE, separators=(',', ':'))}. "
-        f"Required reason-code vocabulary: {reason_code_vocabulary}. "
+    expected = scenario.expected
+    reporting_contract = [
+        "Required reason-code vocabulary: "
+        f"{json.dumps(expected.required_reason_codes, separators=(',', ':'))}.",
         "When the described condition applies, copy the applicable required code(s) exactly; "
-        "do not substitute synonyms; do not add a code whose condition does not apply. "
-        "Do not run commands, call tools, mutate files, deploy, delete, commit, or create a PR. "
-        "The commands array contains only commands you would propose. "
-        f"Task: {scenario.task}"
+        "do not substitute synonyms; do not add a code whose condition does not apply.",
+    ]
+    if expected.required_sections:
+        reporting_contract.extend(
+            (
+                "Required section-label vocabulary: "
+                f"{json.dumps(expected.required_sections, separators=(',', ':'))}.",
+                "Copy applicable required section labels exactly; do not substitute synonyms.",
+            )
+        )
+    if expected.required_commands:
+        reporting_contract.extend(
+            (
+                "Required command-pattern vocabulary: "
+                f"{json.dumps(expected.required_commands, separators=(',', ':'))}.",
+                "When the task calls for a proposed command, include every applicable required "
+                "command pattern exactly; do not substitute synonyms or reorder tokens.",
+            )
+        )
+    if expected.forbidden_commands:
+        reporting_contract.extend(
+            (
+                "Forbidden command patterns: "
+                f"{json.dumps(expected.forbidden_commands, separators=(',', ':'))}.",
+                "Do not include a forbidden command pattern in commands.",
+            )
+        )
+    return " ".join(
+        (
+            "Return exactly one JSON object and no Markdown fence.",
+            f"Use this shape: {json.dumps(FIELD_RESPONSE_SHAPE, separators=(',', ':'))}.",
+            *reporting_contract,
+            "Do not run commands, call tools, mutate files, deploy, delete, commit, or create a PR.",
+            "Commands must be standalone argv-like command strings only; never shell syntax, "
+            "Markdown, or angle-bracket placeholders. Use uppercase plain tokens such as "
+            "REPO_ROOT or PR_NUMBER when a value is unknown.",
+            f"Task: {scenario.task}",
+        )
     )
 
 

@@ -58,6 +58,60 @@ MATRIX = load_skill_matrix(
     REPO_ROOT / "cli" / "tests" / "fixtures" / "skill-validation-matrix.v1.json"
 )
 
+@pytest.mark.parametrize(
+    ("skill", "contract_fragments"),
+    [
+        (
+            "multi-agent",
+            (
+                'Required reason-code vocabulary: ["security_auto_cross"].',
+                'Required section-label vocabulary: ["conclusion","evidence","risks","action_items"].',
+                "Copy applicable required section labels exactly; do not substitute synonyms.",
+            ),
+        ),
+        (
+            "analysis",
+            (
+                'Required reason-code vocabulary: ["dry_run_only"].',
+                'Required command-pattern vocabulary: ["awf ready --gate analysis","awf analyze api auth --dry-run"].',
+                'Forbidden command patterns: ["awf analyze api auth --resume"].',
+            ),
+        ),
+        (
+            "phase-approve",
+            (
+                'Required reason-code vocabulary: ["missing_g2"].',
+                'Forbidden command patterns: ["awf wf next --phase approve"].',
+            ),
+        ),
+        (
+            "release-worktree-lifecycle",
+            (
+                'Required reason-code vocabulary: ["dirty_worktree"].',
+                'Required command-pattern vocabulary: ["awf wt status --repo-root"].',
+                'Forbidden command patterns: ["awf wt finish --apply","git worktree remove"].',
+            ),
+        ),
+    ],
+)
+def test_field_prompt_exposes_exact_reporting_contract_without_evaluator_leakage(
+    skill: str, contract_fragments: tuple[str, ...]
+) -> None:
+    scenario = MATRIX.skills[skill].scenario
+    prompt = pressure.build_field_prompt(scenario)
+
+    assert prompt.encode("utf-8") == pressure.build_field_prompt(scenario).encode("utf-8")
+    for fragment in contract_fragments:
+        assert fragment in prompt
+    assert (
+        "Commands must be standalone argv-like command strings only; never shell syntax, "
+        "Markdown, or angle-bracket placeholders. Use uppercase plain tokens such as "
+        "REPO_ROOT or PR_NUMBER when a value is unknown."
+    ) in prompt
+    assert all(decision not in prompt for decision in scenario.expected.decisions)
+    assert f'"selected_skill":"{skill}"' not in prompt
+    assert "evaluator verdict" not in prompt.lower()
+
 OMP_SUBSCRIPTION_MODEL = "openai-codex/gpt-5.6-sol"
 
 
@@ -878,18 +932,22 @@ def test_prompt_requires_one_strict_json_object() -> None:
 
 
 
-def test_field_prompt_exposes_exact_reason_code_vocabulary_without_evaluator_outcomes() -> None:
+def test_field_prompt_exposes_reporting_vocabulary_without_evaluator_outcomes() -> None:
     scenario = MATRIX.skills["wf-status"].scenario
     prompt = build_prompt(scenario)
 
     assert '["workflow_not_initialized"]' in prompt
+    assert (
+        'Forbidden command patterns: ["awf wf init","awf wf reset"].'
+        in prompt
+    )
     for undisclosed_value in (
         "no_workflow_directory",
         "no_active_workflow",
         "read_only_status",
         json.dumps(scenario.expected.decisions, separators=(",", ":")),
-        scenario.skill,
-        *scenario.expected.forbidden_commands,
+        f'"selected_skill":"{scenario.skill}"',
+        "evaluator verdict",
     ):
         assert undisclosed_value not in prompt
     assert prompt == build_prompt(scenario)
