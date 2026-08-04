@@ -141,6 +141,46 @@ def create_adoptable_imported_lease(
     )
 
 
+def create_linkable_managed_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Lease, str]:
+    repo = make_repository(tmp_path)
+    db = tmp_path / "state" / "worktrees.sqlite3"
+    monkeypatch.setenv("AWF_WORKTREE_STATE_DB", str(db))
+    git = GitClient(repo)
+    draft = Lease.new(
+        repository_id=git.repository_id(),
+        repository_name=git.repository_name(),
+        repository_root=git.repository_root(),
+        worktree_path=tmp_path / "cache" / "draft",
+        initiative="managed-pr-link",
+        purpose=Purpose.FEATURE,
+        branch="awf/managed-pr-link/feature",
+        base_ref="origin/staging",
+        head_sha=git.head_sha(),
+        managed=True,
+        owner_kind="awf",
+    )
+    lease = replace(
+        draft,
+        worktree_path=tmp_path / "cache" / git.repository_name() / draft.id,
+    )
+    git.add_worktree(lease.worktree_path, lease.branch, lease.head_sha)
+    lease = WorktreeRegistry(db).create_lease(lease)
+    (lease.worktree_path / "feature.txt").write_text("feature\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "feature.txt"],
+        cwd=lease.worktree_path,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "feature"],
+        cwd=lease.worktree_path,
+        check=True,
+    )
+    return lease, git.head_sha(lease.worktree_path)
+
+
 def test_wt_status_parser_surface() -> None:
     args = build_parser().parse_args(
         [
@@ -931,6 +971,163 @@ def test_wt_adopt_pr_blocks_provenance_mismatch(
 
     rc, stdout, stderr = capture_main(
         ["wt", "adopt", "--lease", lease.id, "--pr", "129", "--json"]
+    )
+
+    payload = json.loads(stdout)
+    assert rc == 3
+    assert stderr == ""
+    assert payload["status"] == "blocked"
+    assert payload["blockers"][0]["code"] == "pr_branch_mismatch"
+
+
+def test_wt_link_pr_previews_developed_head_without_repo_argument(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease, current_head = create_linkable_managed_lease(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "awf.worktrees.github.GhClient.view_pr",
+        lambda _self, _number: replace(
+            merged_pull_request(lease, number=131),
+            head_sha=current_head,
+        ),
+    )
+
+    rc, stdout, stderr = capture_main(
+        ["wt", "link-pr", "--lease", lease.id, "--pr", "131", "--json"]
+    )
+
+    payload = json.loads(stdout)
+    assert rc == 0
+    assert stderr == ""
+    assert payload["command"] == "wt.link-pr"
+    assert payload["decision"] == "preview"
+    assert payload["actions"][0]["head_sha"] == current_head
+
+
+def test_wt_link_pr_applies_then_reuses_exact_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease, current_head = create_linkable_managed_lease(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "awf.worktrees.github.GhClient.view_pr",
+        lambda _self, _number: replace(
+            merged_pull_request(lease, number=131),
+            head_sha=current_head,
+        ),
+    )
+    args = [
+        "wt",
+        "link-pr",
+        "--lease",
+        lease.id,
+        "--pr",
+        "131",
+        "--apply",
+        "--json",
+    ]
+
+    first_rc, first_stdout, first_stderr = capture_main(args)
+    repeat_rc, repeat_stdout, repeat_stderr = capture_main(args)
+
+    first = json.loads(first_stdout)
+    repeat = json.loads(repeat_stdout)
+    assert first_rc == 0
+    assert first_stderr == ""
+    assert first["decision"] == "ready"
+    assert first["lease"]["target_pr"] == 131
+    assert first["lease"]["head_sha"] == current_head
+    assert first["lease"]["state"] == "CLEANABLE"
+    assert first["lease"]["deployment_state"] == "not_required"
+    assert repeat_rc == 0
+    assert repeat_stderr == ""
+    assert repeat["decision"] == "reuse"
+    assert repeat["lease"] == first["lease"]
+
+
+@pytest.mark.parametrize("value", ("0", "-1", "not-a-number"))
+def test_wt_link_pr_rejects_invalid_pr_values_without_json_envelope(
+    value: str,
+) -> None:
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    with (
+        redirect_stdout(stdout),
+        redirect_stderr(stderr),
+        pytest.raises(SystemExit) as exited,
+    ):
+        main(
+            [
+                "wt",
+                "link-pr",
+                "--lease",
+                "lease-id",
+                "--pr",
+                value,
+                "--json",
+            ]
+        )
+
+    assert exited.value.code == 2
+    assert stdout.getvalue() == ""
+    assert "value must be a positive integer" in stderr.getvalue()
+
+
+def test_wt_link_pr_unknown_lease_is_structured_blocker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "AWF_WORKTREE_STATE_DB",
+        str(tmp_path / "state" / "worktrees.sqlite3"),
+    )
+
+    rc, stdout, stderr = capture_main(
+        ["wt", "link-pr", "--lease", "missing", "--pr", "131", "--json"]
+    )
+
+    payload = json.loads(stdout)
+    assert rc == 3
+    assert stderr == ""
+    assert payload["command"] == "wt.link-pr"
+    assert payload["blockers"][0]["code"] == "unknown_lease"
+
+
+def test_wt_link_pr_maps_github_provider_failure_to_external_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease, _ = create_linkable_managed_lease(tmp_path, monkeypatch)
+
+    def github_failure(_self: object, _number: int) -> PullRequest:
+        raise ExternalServiceError("gh authentication required")
+
+    monkeypatch.setattr("awf.worktrees.github.GhClient.view_pr", github_failure)
+
+    rc, stdout, stderr = capture_main(
+        ["wt", "link-pr", "--lease", lease.id, "--pr", "131", "--json"]
+    )
+
+    payload = json.loads(stdout)
+    assert rc == 4
+    assert stderr == ""
+    assert payload["command"] == "wt.link-pr"
+    assert payload["blockers"][0]["code"] == "github_link_failed"
+
+
+def test_wt_link_pr_blocks_provenance_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease, current_head = create_linkable_managed_lease(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "awf.worktrees.github.GhClient.view_pr",
+        lambda _self, _number: replace(
+            merged_pull_request(lease, number=131),
+            head_ref="different-branch",
+            head_sha=current_head,
+        ),
+    )
+
+    rc, stdout, stderr = capture_main(
+        ["wt", "link-pr", "--lease", lease.id, "--pr", "131", "--json"]
     )
 
     payload = json.loads(stdout)

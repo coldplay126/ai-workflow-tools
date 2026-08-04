@@ -197,6 +197,60 @@ def run_wt_import(
     return _emit(result, as_json=bool(args.json))
 
 
+def run_wt_link_pr(args: argparse.Namespace) -> int:
+    registry = WorktreeRegistry(state_db_path())
+    try:
+        lease = registry.get_lease_read_only(args.lease)
+        if lease is None:
+            result = CommandResult.blocked(
+                "wt.link-pr",
+                blockers=(
+                    {
+                        "code": "unknown_lease",
+                        "message": f"lease {args.lease} does not exist",
+                    },
+                ),
+            )
+        else:
+            service = WorktreeService(
+                registry,
+                GitClient(lease.repository_root),
+                github=GhClient(lease.repository_root),
+            )
+            result = service.link_pr(
+                args.lease, pr_number=args.pr, apply=args.apply
+            )
+    except (ConfigError, FileNotFoundError) as error:
+        result = CommandResult.error(
+            "wt.link-pr",
+            code="config_error",
+            message=str(error),
+            exit_code=2,
+        )
+    except GitError as error:
+        result = CommandResult.error(
+            "wt.link-pr",
+            code="git_error",
+            message=str(error),
+            exit_code=5,
+        )
+    except OSError as error:
+        result = CommandResult.error(
+            "wt.link-pr",
+            code="filesystem_error",
+            message=str(error),
+            exit_code=5,
+        )
+    except (sqlite3.Error, ValueError) as error:
+        result = CommandResult.error(
+            "wt.link-pr",
+            code="registry_conflict",
+            message=str(error),
+            exit_code=5,
+        )
+    return _emit(result, as_json=bool(args.json))
+
+
 def run_wt_adopt(args: argparse.Namespace) -> int:
     registry = WorktreeRegistry(state_db_path())
     try:

@@ -497,6 +497,91 @@ class WorktreeService:
             warnings=tuple(warnings),
         )
 
+    def link_pr(
+        self, lease_id: str, *, pr_number: int, apply: bool = False
+    ) -> CommandResult:
+        lease = self.registry.get_lease_read_only(lease_id)
+        if lease is None:
+            return self._managed_link_blocked(
+                "unknown_lease", f"lease {lease_id} does not exist"
+            )
+        validated = self._validate_managed_pr_link(lease, pr_number)
+        if isinstance(validated, CommandResult):
+            return validated
+        pull_request, current_head = validated
+        if lease.target_pr == pr_number:
+            return CommandResult.ok("wt.link-pr", decision="reuse", lease=lease)
+        if not apply:
+            return CommandResult.ok(
+                "wt.link-pr",
+                decision="preview",
+                lease=lease,
+                actions=(
+                    {
+                        "kind": "link_pr",
+                        "lease_id": lease.id,
+                        "path": str(lease.worktree_path),
+                        "pr_number": pull_request.number,
+                        "head_sha": current_head,
+                    },
+                ),
+            )
+
+        with repository_lock(self.lock_dir / f"{lease.repository_id}.lock"):
+            current = self.registry.get_lease(lease.id)
+            if current is None:
+                return self._managed_link_blocked(
+                    "unknown_lease", f"lease {lease.id} does not exist"
+                )
+            validated = self._validate_managed_pr_link(current, pr_number)
+            if isinstance(validated, CommandResult):
+                return validated
+            pull_request, current_head = validated
+            if current.target_pr == pr_number:
+                return CommandResult.ok(
+                    "wt.link-pr", decision="reuse", lease=current
+                )
+            try:
+                linked = self.registry.transition(
+                    current.id,
+                    LeaseState.CLEANABLE,
+                    expected_version=current.version,
+                    event_type="managed_lease_pr_linked",
+                    summary=(
+                        "managed feature lease linked to pull request "
+                        f"#{pull_request.number}"
+                    ),
+                    observed_head_sha=current_head,
+                    pr_number=pull_request.number,
+                    head_sha=current_head,
+                    deployment_state=DeploymentState.NOT_REQUIRED,
+                )
+            except (RuntimeError, sqlite3.Error) as error:
+                return CommandResult.error(
+                    "wt.link-pr",
+                    code="registry_conflict",
+                    message=str(error),
+                    exit_code=5,
+                    lease=current,
+                )
+            stored = self.registry.get_lease(current.id)
+            if (
+                stored is None
+                or stored.version != linked.version
+                or stored.target_pr != pull_request.number
+                or stored.head_sha != current_head
+                or stored.state is not LeaseState.CLEANABLE
+                or stored.deployment_state is not DeploymentState.NOT_REQUIRED
+            ):
+                return CommandResult.error(
+                    "wt.link-pr",
+                    code="registry_conflict",
+                    message=f"unable to verify linked lease {current.id}",
+                    exit_code=5,
+                    lease=stored or linked,
+                )
+        return CommandResult.ok("wt.link-pr", decision="ready", lease=linked)
+
     def finish(self, *, pr_number: int, apply: bool = False) -> CommandResult:
         if (
             not isinstance(pr_number, int)
@@ -2151,6 +2236,188 @@ class WorktreeService:
                 )
         return CommandResult.ok("wt.adopt", decision="ready", lease=adopted)
 
+    def _validate_managed_pr_link(
+        self, lease: Lease, pr_number: object
+    ) -> tuple[PullRequest, str] | CommandResult:
+        if (
+            not isinstance(pr_number, int)
+            or isinstance(pr_number, bool)
+            or pr_number <= 0
+        ):
+            return self._managed_link_blocked(
+                "invalid_pr_number",
+                "pull request number must be a positive integer",
+                lease=lease,
+            )
+        blocker = self._managed_link_lease_blocker(lease, pr_number)
+        if blocker is not None:
+            return blocker
+        before_head = self._managed_link_worktree_head(lease)
+        if isinstance(before_head, CommandResult):
+            return before_head
+        try:
+            pull_request = (
+                self.github or GhClient(lease.repository_root)
+            ).view_pr(pr_number)
+        except ExternalServiceError as error:
+            return self._external_error(
+                "wt.link-pr",
+                "github_link_failed",
+                f"Unable to validate pull request #{pr_number}: {error}",
+                lease=lease,
+            )
+        if pull_request.number != pr_number:
+            return self._managed_link_blocked(
+                "pr_number_mismatch",
+                f"GitHub returned pull request #{pull_request.number} for #{pr_number}",
+                lease=lease,
+            )
+        if not self._is_completed_pr(pull_request):
+            return self._managed_link_blocked(
+                "pr_not_merged",
+                f"pull request #{pr_number} is {pull_request.state}",
+                lease=lease,
+            )
+        if pull_request.head_ref != lease.branch:
+            return self._managed_link_blocked(
+                "pr_branch_mismatch",
+                f"pull request #{pr_number} does not match branch {lease.branch!r}",
+                lease=lease,
+            )
+        after_head = self._managed_link_worktree_head(lease)
+        if isinstance(after_head, CommandResult):
+            return after_head
+        if pull_request.head_sha != after_head:
+            return self._managed_link_blocked(
+                "pr_head_mismatch",
+                f"pull request #{pr_number} does not match the current worktree HEAD",
+                lease=lease,
+            )
+        if before_head != after_head:
+            return self._managed_link_blocked(
+                "head_mismatch",
+                f"lease {lease.id} changed while its pull request was validated",
+                lease=lease,
+            )
+        return pull_request, after_head
+
+    def _managed_link_lease_blocker(
+        self, lease: Lease, pr_number: int
+    ) -> CommandResult | None:
+        if self.git is None or self.git.repository_id() != lease.repository_id:
+            return self._managed_link_blocked(
+                "repository_mismatch",
+                f"lease {lease.id} does not match this repository",
+                lease=lease,
+            )
+        if lease.state is LeaseState.REMOVED:
+            return self._managed_link_blocked(
+                "removed_lease",
+                f"lease {lease.id} has been removed",
+                lease=lease,
+            )
+        if not lease.managed or lease.owner_kind != "awf":
+            return self._managed_link_blocked(
+                "unmanaged_lease",
+                f"lease {lease.id} is not an AWF-managed lease",
+                lease=lease,
+            )
+        if lease.purpose is not Purpose.FEATURE:
+            return self._managed_link_blocked(
+                "unsupported_purpose",
+                f"lease {lease.id} is not a feature lease",
+                lease=lease,
+            )
+        if lease.state is LeaseState.CLOSED_UNMERGED:
+            return self._managed_link_blocked(
+                "closed_unmerged",
+                f"lease {lease.id} was closed without merging",
+                lease=lease,
+            )
+        if self.registry.get_cleanup_reservation(lease.id) is not None:
+            return self._managed_link_blocked(
+                "cleanup_reserved",
+                f"lease {lease.id} is reserved for cleanup",
+                lease=lease,
+            )
+        if lease.target_pr is not None and lease.target_pr != pr_number:
+            return self._managed_link_blocked(
+                "pr_link_mismatch",
+                f"lease {lease.id} is linked to pull request #{lease.target_pr}",
+                lease=lease,
+            )
+        expected_state = (
+            LeaseState.ACTIVE
+            if lease.target_pr is None
+            else LeaseState.CLEANABLE
+        )
+        if lease.state is not expected_state:
+            return self._managed_link_blocked(
+                "unsupported_state",
+                (
+                    f"lease {lease.id} is {lease.state.value}; expected "
+                    f"{expected_state.value} for PR linking"
+                ),
+                lease=lease,
+            )
+        return None
+
+    def _managed_link_worktree_head(
+        self, lease: Lease
+    ) -> str | CommandResult:
+        registered = self.git.list_worktrees()
+        expected_path = lease.worktree_path.resolve()
+        worktree = next(
+            (
+                item
+                for item in registered
+                if item.path.resolve() == expected_path and expected_path.is_dir()
+            ),
+            None,
+        )
+        if worktree is None:
+            return self._managed_link_blocked(
+                "orphaned_lease",
+                f"lease {lease.id} is not registered as a Git worktree",
+                lease=lease,
+            )
+        if worktree.bare or worktree.detached or worktree.branch != lease.branch:
+            return self._managed_link_blocked(
+                "branch_mismatch",
+                f"lease {lease.id} does not match its registered branch",
+                lease=lease,
+            )
+        if any(
+            item.path.resolve() != expected_path and item.branch == lease.branch
+            for item in registered
+        ):
+            return self._managed_link_blocked(
+                "branch_conflict",
+                f"branch {lease.branch!r} is checked out at another worktree",
+                lease=lease,
+            )
+        current_head = self.git.head_sha(lease.worktree_path)
+        if worktree.head_sha != current_head:
+            return self._managed_link_blocked(
+                "head_mismatch",
+                f"lease {lease.id} does not match its registered HEAD",
+                lease=lease,
+            )
+        if self.git.status_porcelain(lease.worktree_path):
+            return self._managed_link_blocked(
+                "dirty_worktree",
+                f"lease {lease.id} has uncommitted changes",
+                lease=lease,
+            )
+        verified_head = self.git.head_sha(lease.worktree_path)
+        if verified_head != current_head:
+            return self._managed_link_blocked(
+                "head_mismatch",
+                f"lease {lease.id} changed while its worktree was validated",
+                lease=lease,
+            )
+        return verified_head
+
     def _validate_pr_adoption(
         self, imported: Lease, pr_number: int
     ) -> PullRequest | CommandResult:
@@ -2471,6 +2738,16 @@ class WorktreeService:
                 }
             )
         return actions
+
+    @staticmethod
+    def _managed_link_blocked(
+        code: str, message: str, *, lease: Lease | None = None
+    ) -> CommandResult:
+        return CommandResult.blocked(
+            "wt.link-pr",
+            blockers=({"code": code, "message": message},),
+            lease=lease,
+        )
 
     @staticmethod
     def _adopt_blocked(

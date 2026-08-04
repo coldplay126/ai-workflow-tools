@@ -70,7 +70,7 @@
 
 `awf wt` is the CLI authority for leased Git worktrees. It keeps each managed
 worktree in a registry and requires explicit evidence before removing one. The
-eight subcommands are:
+nine subcommands are:
 
 | Command | Purpose |
 |---------|---------|
@@ -80,6 +80,7 @@ eight subcommands are:
 | `awf wt gc` | Preview or remove stale, proven-safe merged leases; `--merged` is required. |
 | `awf wt import` | Inventory existing direct-child repository worktrees and optionally register them as imported leases. |
 | `awf wt adopt` | Preview or link a clean imported lease to an explicitly supplied, already-merged PR. |
+| `awf wt link-pr` | Preview or link an active managed feature lease to its exact already-merged PR. |
 | `awf wt status` | Read registered leases, optionally refreshing PR and deployment state. |
 | `awf wt doctor` | Read-only report of registry and local Git-worktree mismatches. |
 
@@ -162,6 +163,36 @@ awf wt acquire --initiative reward-widget --purpose feature \
   --base staging --owner-id "$USER" --apply --json
 awf wt status --repo-root . --initiative reward-widget --json
 ```
+
+Managed feature PR-link and finish flow:
+
+Use this when a managed feature worktree's PR was created and merged outside
+AWF before its lease recorded `target_pr`. `<id>` is the managed feature lease
+ID and `<merged-pr>` is that feature branch's already-merged PR number.
+
+```bash
+# Link only the exact PR whose repository, branch, and head match the current worktree.
+awf wt link-pr --lease <id> --pr <merged-pr> --json
+awf wt link-pr --lease <id> --pr <merged-pr> --apply --json
+
+# Restart the normal cleanup procedure at its required status preflight.
+awf wt status --repo-root <repo-root> --refresh --json
+awf wt finish --repo-root <repo-root> --pr <merged-pr> --json
+awf wt finish --repo-root <repo-root> --pr <merged-pr> --apply --json
+```
+
+`link-pr` accepts only a clean, managed `feature` lease that is `ACTIVE` with
+no PR link, or the exact already-linked `CLEANABLE` lease for idempotent reuse.
+The supplied PR must be merged and must exactly match the lease repository,
+branch, and current registered/check-out worktree HEAD. The recorded
+acquisition SHA may be older after normal feature commits. Preview is
+read-only; apply revalidates Git after the GitHub lookup, replaces the recorded
+SHA with the independently verified current PR/worktree SHA, and atomically
+records `target_pr`, `CLEANABLE`, and `not_required`. Repeating the same link
+returns `reuse`. Unknown leases, other purposes or states, an existing
+different PR, dirty or changed Git state, or any repository/branch/head/merge
+mismatch is `blocked`. A GitHub failure is exit code `4`. The command never
+guesses a PR from branch history and never mutates the branch or worktree.
 
 Imported worktree PR-link and finish flow:
 
