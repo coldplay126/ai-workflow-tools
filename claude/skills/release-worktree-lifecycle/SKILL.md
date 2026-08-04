@@ -1,11 +1,11 @@
 ---
 name: release-worktree-lifecycle
-version: 1.0.0
-description: Use whenever handling deploy, production release, staging-to-main or staging-to-master promotion, release PR creation or merge, deployment worktree creation/reuse, or merged branch/worktree cleanup. Requires awf wt status/acquire/promote/finish/gc and forbids bypassing CLI safety blockers.
+version: 1.1.0
+description: Use whenever handling deploy, production release, staging-to-main or staging-to-master promotion, release PR creation or merge, managed feature PR linkage, deployment worktree creation/reuse, or merged branch/worktree cleanup. Requires awf wt status/acquire/link-pr/promote/finish/gc and forbids bypassing CLI safety blockers.
 type: deployment-safety
 conditions:
   trigger:
-    - handling deploy, production release, promotion, release PR, managed deployment worktree creation or reuse, or merged worktree cleanup
+    - handling deploy, production release, promotion, release PR, managed feature PR linkage, managed deployment worktree creation or reuse, or merged worktree cleanup
   skip:
     - no release, deployment, promotion, or worktree lifecycle action is involved
 ---
@@ -18,7 +18,7 @@ The `awf wt` CLI is authoritative; this skill defines the operator procedure onl
 
 ## Required preflight
 
-Before acquiring, promoting, finishing, or collecting a worktree, MUST run:
+Before acquiring, linking, promoting, finishing, or collecting a worktree, MUST run:
 
 ```sh
 awf wt status --repo-root <repo-root> --refresh --json
@@ -49,6 +49,36 @@ awf wt acquire --initiative <initiative> --purpose feature --repo-root <repo-roo
 ```
 
 If `acquire --apply` returns `ready`, MUST use or report the returned lease and MUST NOT repeat `--apply`.
+
+## Managed feature PR linkage
+
+Use this only when an active managed feature worktree's PR was created and
+merged outside AWF before the lease recorded `target_pr`. After the required
+status preflight, preview the explicit link:
+
+```sh
+awf wt link-pr --lease <id> --pr <merged-pr> --json
+```
+
+The preview MUST identify the intended lease, PR, branch, and exact head SHA.
+Only then explicitly apply:
+
+```sh
+awf wt link-pr --lease <id> --pr <merged-pr> --apply --json
+```
+
+`link-pr` accepts only an active, clean, managed `feature` lease with no
+different PR link. The supplied PR MUST be merged and MUST exactly match the
+lease repository, branch, and recorded head SHA. Apply revalidates local Git
+after the GitHub lookup, then atomically records `target_pr`, `CLEANABLE`, and
+`not_required`. The same linked PR returns `reuse`; any lease-state,
+repository, branch, head, cleanliness, or merge mismatch is `blocked`. A
+GitHub external failure is exit code `4`. MUST NOT infer a PR from branch
+history, adopt the lease, or use direct Git or registry mutation.
+
+After `ready` or `reuse`, restart at the required status preflight, then use
+the normal `finish` preview/apply procedure. The linked result is cleanup
+evidence only; it is not permission to skip any finish gate.
 
 ## Production promotion
 
@@ -145,7 +175,7 @@ For `removed`, MUST report completion and take no further cleanup action for tha
 
 ## Forbidden fallbacks
 
-MUST NOT use direct worktree creation, removal, pruning, direct Git or filesystem cleanup, or other unmanaged deletion. MUST NOT merge staging wholesale, use `git branch --merged` as cleanup proof, stash, reset, clean, force-delete, or bypass a CLI blocker. These actions are not a substitute for `awf wt` status, doctor, acquire, promote, finish, or gc.
+MUST NOT use direct worktree creation, removal, pruning, direct Git or filesystem cleanup, or other unmanaged deletion. MUST NOT merge staging wholesale, use `git branch --merged` as cleanup proof, stash, reset, clean, force-delete, or bypass a CLI blocker. These actions are not a substitute for `awf wt` status, doctor, acquire, link-pr, promote, finish, or gc.
 
 ## JSON decision table
 
@@ -161,6 +191,8 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
     "adopt_apply": "awf wt adopt --lease <id> --pr <merged-pr> --apply --json",
     "acquire_preview": "awf wt acquire --initiative <initiative> --purpose feature --repo-root <repo-root> --json",
     "acquire_apply": "awf wt acquire --initiative <initiative> --purpose feature --repo-root <repo-root> --apply --json",
+    "link_pr_preview": "awf wt link-pr --lease <id> --pr <merged-pr> --json",
+    "link_pr_apply": "awf wt link-pr --lease <id> --pr <merged-pr> --apply --json",
     "promote_preview": "awf wt promote --source-pr <number> --to <branch> --repo-root <repo-root> --json",
     "promote_apply": "awf wt promote --source-pr <number> --to <branch> --repo-root <repo-root> --apply --json",
     "finish_preview": "awf wt finish --repo-root <repo-root> --pr <merged-pr> --json",
@@ -174,6 +206,14 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
     "promotion_scope": "source_pr_delta_only",
     "deployment_health": "repository_rollout_evidence",
     "blocked_action": "preserve_worktree_report_code_message",
+    "managed_feature_pr_link": {
+      "lease_state": "active_clean_managed_feature",
+      "pr_provenance": "already_merged_exact_repository_branch_and_recorded_head",
+      "apply_transition": "cleanable_not_required",
+      "same_pr": "reuse",
+      "different_pr": "blocked",
+      "github_external_failure": "exit_4"
+    },
     "imported_pr_lifecycle": {
       "pr_provenance": "already_merged_exact_branch_and_head",
       "same_pr": "reuse",
@@ -181,7 +221,7 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
       "github_external_failure": "exit_4",
       "runtime_source_before_removal": "install_cli_and_skill_from_stable_merged_main_and_verify_links"
     },
-    "preview_before_apply": ["acquire", "promote", "import", "adopt", "finish", "gc"],
+    "preview_before_apply": ["acquire", "link-pr", "promote", "import", "adopt", "finish", "gc"],
     "stop_conditions": [
       "deployment_health_unknown",
       "closed_unmerged",
