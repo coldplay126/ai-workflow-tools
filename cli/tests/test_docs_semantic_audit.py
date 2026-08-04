@@ -614,6 +614,8 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "adopt_apply": ("wt", "adopt"),
         "acquire_preview": ("wt", "acquire"),
         "acquire_apply": ("wt", "acquire"),
+        "link_pr_preview": ("wt", "link-pr"),
+        "link_pr_apply": ("wt", "link-pr"),
         "promote_preview": ("wt", "promote"),
         "promote_apply": ("wt", "promote"),
         "finish_preview": ("wt", "finish"),
@@ -638,6 +640,12 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
     assert "--apply" in commands["adopt_apply"]
     assert "--apply" not in commands["acquire_preview"]
     assert "--apply" in commands["acquire_apply"]
+    assert "--lease" in commands["link_pr_preview"]
+    assert "--pr" in commands["link_pr_preview"]
+    assert "--apply" not in commands["link_pr_preview"]
+    assert "--lease" in commands["link_pr_apply"]
+    assert "--pr" in commands["link_pr_apply"]
+    assert "--apply" in commands["link_pr_apply"]
     assert "--apply" not in commands["promote_preview"]
     assert "--apply" in commands["promote_apply"]
     assert "--apply" not in commands["finish_preview"]
@@ -653,6 +661,16 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
     assert safety["promotion_scope"] == "source_pr_delta_only"
     assert safety["deployment_health"] == "repository_rollout_evidence"
     assert safety["blocked_action"] == "preserve_worktree_report_code_message"
+    assert safety["managed_feature_pr_link"] == {
+        "lease_state": "active_unlinked_or_cleanable_exact_reuse",
+        "pr_provenance": (
+            "already_merged_exact_repository_branch_and_current_worktree_head"
+        ),
+        "apply_transition": "replace_recorded_head_then_cleanable_not_required",
+        "same_pr": "reuse",
+        "different_pr": "blocked",
+        "github_external_failure": "exit_4",
+    }
     assert safety["imported_pr_lifecycle"] == {
         "pr_provenance": "already_merged_exact_branch_and_head",
         "same_pr": "reuse",
@@ -664,6 +682,7 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
     }
     assert safety["preview_before_apply"] == [
         "acquire",
+        "link-pr",
         "promote",
         "import",
         "adopt",
@@ -688,6 +707,7 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "reuse": "use_exact_lease",
         "preview": {
             "acquire": "review_then_apply_explicitly",
+            "link_pr": "review_then_apply_explicitly",
             "promote": "review_then_apply_explicitly",
             "finish": "review_blockers_then_apply",
             "gc": "review_blockers_then_apply",
@@ -695,11 +715,52 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "ready": {
             "status": "inspect_select_lifecycle_action",
             "acquire_apply": "use_or_report_returned_lease",
+            "link_pr_apply": "restart_status_preflight_then_finish",
             "promote_apply": "use_or_report_returned_lease",
         },
         "removed": "report_completion",
         "blocked": "preserve_worktree_report_code_message",
     }
+
+
+def test_managed_feature_pr_link_docs_share_ordered_safety_contract() -> None:
+    paths = (
+        REPO_ROOT / "claude" / "skills" / "release-worktree-lifecycle" / "SKILL.md",
+        CLI_README,
+    )
+    expected_commands = (
+        "awf wt link-pr --lease <id> --pr <merged-pr> --json",
+        "awf wt link-pr --lease <id> --pr <merged-pr> --apply --json",
+        "awf wt status --repo-root <repo-root> --refresh --json",
+        "awf wt finish --repo-root <repo-root> --pr <merged-pr> --json",
+        "awf wt finish --repo-root <repo-root> --pr <merged-pr> --apply --json",
+    )
+    expected_argv = tuple(
+        _argv_from_skill_command(command) for command in expected_commands
+    )
+
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        displayed_commands = _shell_fenced_awf_commands(text)
+        raw_slice = _raw_contiguous_command_slice(
+            displayed_commands, expected_commands
+        )
+        assert raw_slice == expected_commands
+        normalized_argv = tuple(
+            _argv_from_skill_command(command) for command in raw_slice
+        )
+        assert normalized_argv == expected_argv
+        parser = build_parser()
+        for argv in normalized_argv:
+            parsed = parser.parse_args(argv)
+            assert parsed.command == "wt"
+
+        prose = " ".join(text.lower().split())
+        assert "current registered/check-out worktree head" in prose
+        assert "recorded acquisition sha may be older" in prose
+        assert "github failure is exit code `4`" in prose or (
+            "github external failure is exit code `4`" in prose
+        )
 
 
 def test_canonical_imported_pr_cleanup_docs_share_ordered_safety_contract() -> None:

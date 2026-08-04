@@ -99,7 +99,7 @@ def test_link_pr_records_verified_head_and_cleanup_state_atomically(
 
 Cover these cases with parameterized tests and assert lease/event equality before and after every rejection:
 
-```python
+```text
 @pytest.mark.parametrize(
     ("mutation", "expected_code"),
     (
@@ -215,14 +215,14 @@ Do not accept a repository path from the caller. The lease registry row determin
 
 Implement private helpers with these exact responsibilities:
 
-```python
+```text
 def _managed_link_lease_blocker(self, lease: Lease) -> CommandResult | None:
     # repository ID must equal self.git.repository_id()
     # lease.managed must be true and owner_kind must be "awf"
     # purpose must be Purpose.FEATURE
-    # state must not be REMOVED
+    # target_pr=None requires ACTIVE; exact same target_pr requires CLEANABLE
+    # REMOVED, BLOCKED, and every other state are rejected
     # no cleanup reservation may exist
-    # target_pr may be None only; same PR is idempotent, another PR is blocked
 
 
 def _managed_link_worktree(
@@ -239,7 +239,7 @@ Use existing blocker names where semantics match. Return `unsupported_purpose` f
 
 - [ ] **Step 3: Add exact merged-PR provenance validation**
 
-```python
+```text
 def _validate_managed_pr_link(
     self, lease: Lease, pr_number: int
 ) -> tuple[PullRequest, str] | CommandResult:

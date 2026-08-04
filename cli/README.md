@@ -171,7 +171,7 @@ AWF before its lease recorded `target_pr`. `<id>` is the managed feature lease
 ID and `<merged-pr>` is that feature branch's already-merged PR number.
 
 ```bash
-# Link only the exact PR whose repository, branch, and head match the lease.
+# Link only the exact PR whose repository, branch, and head match the current worktree.
 awf wt link-pr --lease <id> --pr <merged-pr> --json
 awf wt link-pr --lease <id> --pr <merged-pr> --apply --json
 
@@ -181,15 +181,18 @@ awf wt finish --repo-root <repo-root> --pr <merged-pr> --json
 awf wt finish --repo-root <repo-root> --pr <merged-pr> --apply --json
 ```
 
-`link-pr` accepts only an active, clean, managed `feature` lease with no
-existing PR link. The supplied PR must be merged and must exactly match the
-lease repository, branch, and recorded head SHA. Preview is read-only; apply
-revalidates Git after the GitHub lookup and atomically records `target_pr`,
-`CLEANABLE`, and `not_required`. Repeating the same link returns `reuse`.
-Unknown leases, other purposes or states, an existing different PR, dirty or
-changed Git state, or any repository/branch/head/merge mismatch is `blocked`.
-A GitHub failure is exit code `4`. The command never guesses a PR from branch
-history and never mutates the branch or worktree.
+`link-pr` accepts only a clean, managed `feature` lease that is `ACTIVE` with
+no PR link, or the exact already-linked `CLEANABLE` lease for idempotent reuse.
+The supplied PR must be merged and must exactly match the lease repository,
+branch, and current registered/check-out worktree HEAD. The recorded
+acquisition SHA may be older after normal feature commits. Preview is
+read-only; apply revalidates Git after the GitHub lookup, replaces the recorded
+SHA with the independently verified current PR/worktree SHA, and atomically
+records `target_pr`, `CLEANABLE`, and `not_required`. Repeating the same link
+returns `reuse`. Unknown leases, other purposes or states, an existing
+different PR, dirty or changed Git state, or any repository/branch/head/merge
+mismatch is `blocked`. A GitHub failure is exit code `4`. The command never
+guesses a PR from branch history and never mutates the branch or worktree.
 
 Imported worktree PR-link and finish flow:
 

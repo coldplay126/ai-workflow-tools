@@ -2403,6 +2403,96 @@ def test_link_pr_rejects_unproven_links_without_mutation(
     assert harness.git.head_sha(lease.worktree_path) == current_head
 
 
+def test_link_pr_accepts_closed_pr_with_merge_commit(
+    harness: Harness,
+) -> None:
+    lease, _ = developed_managed_feature(harness)
+    harness.github.prs[131] = replace(
+        harness.github.prs[131],
+        state="CLOSED",
+        merge_commit_sha="f" * 40,
+    )
+
+    result = harness.service.link_pr(lease.id, pr_number=131, apply=True)
+
+    assert result.decision == "ready"
+    assert result.lease is not None
+    assert result.lease.state is LeaseState.CLEANABLE
+    assert result.lease.target_pr == 131
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_code"),
+    (
+        ("repository", "repository_mismatch"),
+        ("orphaned", "orphaned_lease"),
+        ("detached", "branch_mismatch"),
+    ),
+)
+def test_link_pr_preserves_managed_git_safety_blockers(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    expected_code: str,
+) -> None:
+    lease, _ = developed_managed_feature(harness)
+    registered = harness.git.list_worktrees()
+    target = next(item for item in registered if item.path == lease.worktree_path)
+    if failure == "repository":
+        monkeypatch.setattr(
+            harness.git, "repository_id", lambda: "other-repository"
+        )
+    elif failure == "orphaned":
+        monkeypatch.setattr(
+            harness.git,
+            "list_worktrees",
+            lambda: tuple(item for item in registered if item is not target),
+        )
+    else:
+        monkeypatch.setattr(
+            harness.git,
+            "list_worktrees",
+            lambda: tuple(
+                replace(item, branch=None, detached=True)
+                if item is target
+                else item
+                for item in registered
+            ),
+        )
+    before = harness.registry.get_lease(lease.id)
+    before_events = harness.registry.list_events(lease.id)
+
+    result = harness.service.link_pr(lease.id, pr_number=131, apply=True)
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == expected_code
+    assert harness.registry.get_lease(lease.id) == before
+    assert harness.registry.list_events(lease.id) == before_events
+    assert harness.github.view_calls == []
+
+
+def test_link_pr_rejects_removed_managed_feature_lease(
+    harness: Harness,
+) -> None:
+    lease, _ = developed_managed_feature(harness)
+    removed = harness.registry.transition(
+        lease.id,
+        LeaseState.REMOVED,
+        expected_version=lease.version,
+        event_type="removed",
+        summary="removed",
+    )
+    before_events = harness.registry.list_events(lease.id)
+
+    result = harness.service.link_pr(lease.id, pr_number=131, apply=True)
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "removed_lease"
+    assert harness.registry.get_lease(lease.id) == removed
+    assert harness.registry.list_events(lease.id) == before_events
+    assert harness.github.view_calls == []
+
+
 def test_link_pr_rejects_unmanaged_imported_lease(
     harness: Harness,
 ) -> None:
@@ -2444,6 +2534,28 @@ def test_link_pr_rejects_non_feature_managed_lease(
     assert result.status == "blocked"
     assert result.blockers[0]["code"] == "unsupported_purpose"
     assert harness.registry.get_lease(lease.id) == lease
+    assert harness.registry.list_events(lease.id) == before_events
+    assert harness.github.view_calls == []
+
+
+def test_link_pr_rejects_blocked_managed_feature_lease(
+    harness: Harness,
+) -> None:
+    lease, _ = developed_managed_feature(harness)
+    blocked = harness.registry.transition(
+        lease.id,
+        LeaseState.BLOCKED,
+        expected_version=lease.version,
+        event_type="prepare_failed",
+        summary="prepare failed",
+    )
+    before_events = harness.registry.list_events(lease.id)
+
+    result = harness.service.link_pr(lease.id, pr_number=131, apply=True)
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "unsupported_state"
+    assert harness.registry.get_lease(lease.id) == blocked
     assert harness.registry.list_events(lease.id) == before_events
     assert harness.github.view_calls == []
 
@@ -2522,7 +2634,7 @@ def test_link_pr_apply_revalidates_git_after_locked_provider_call(
     assert view_calls == [131, 131]
 
 
-def test_link_pr_makes_existing_finish_preview_available(
+def test_link_pr_enables_finish_cleanup_end_to_end(
     harness: Harness,
 ) -> None:
     lease, _ = developed_managed_feature(harness)
@@ -2540,6 +2652,22 @@ def test_link_pr_makes_existing_finish_preview_available(
             "path": str(lease.worktree_path),
             "branch": lease.branch,
         },
+    )
+
+    removed = harness.service.finish(pr_number=131, apply=True)
+
+    assert removed.decision == "removed"
+    stored = harness.registry.get_lease(lease.id)
+    assert stored is not None
+    assert stored.state is LeaseState.REMOVED
+    assert not lease.worktree_path.exists()
+
+    doctor = harness.service.doctor()
+
+    assert all(
+        action.get("lease_id") != lease.id
+        and action.get("path") != str(lease.worktree_path)
+        for action in doctor.actions
     )
 
 

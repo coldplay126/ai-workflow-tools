@@ -2346,6 +2346,20 @@ class WorktreeService:
                 f"lease {lease.id} is linked to pull request #{lease.target_pr}",
                 lease=lease,
             )
+        expected_state = (
+            LeaseState.ACTIVE
+            if lease.target_pr is None
+            else LeaseState.CLEANABLE
+        )
+        if lease.state is not expected_state:
+            return self._managed_link_blocked(
+                "unsupported_state",
+                (
+                    f"lease {lease.id} is {lease.state.value}; expected "
+                    f"{expected_state.value} for PR linking"
+                ),
+                lease=lease,
+            )
         return None
 
     def _managed_link_worktree_head(

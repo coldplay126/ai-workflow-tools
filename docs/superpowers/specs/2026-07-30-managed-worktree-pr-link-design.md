@@ -73,7 +73,7 @@ awf wt link-pr --lease <lease-id> --pr <merged-pr-number> --apply --json
 
 모든 조건을 만족해야 한다.
 
-- lease가 존재하고 removed 상태가 아님
+- PR link가 없으면 `state=ACTIVE`, 동일 PR link가 이미 있으면 idempotent reuse를 위한 `state=CLEANABLE`
 - lease repository ID가 현재 repository와 일치
 - `managed=true`
 - `owner_kind=awf`
@@ -105,6 +105,7 @@ Acquired feature lease의 recorded HEAD는 생성 시 base SHA이며 정상 개�
 - `unmanaged_lease`
 - `unsupported_purpose`
 - `cleanup_reserved`
+- `unsupported_state`
 - `pr_link_mismatch`
 - `pr_not_merged`
 - `pr_branch_mismatch`

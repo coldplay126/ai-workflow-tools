@@ -67,18 +67,28 @@ Only then explicitly apply:
 awf wt link-pr --lease <id> --pr <merged-pr> --apply --json
 ```
 
-`link-pr` accepts only an active, clean, managed `feature` lease with no
-different PR link. The supplied PR MUST be merged and MUST exactly match the
-lease repository, branch, and recorded head SHA. Apply revalidates local Git
-after the GitHub lookup, then atomically records `target_pr`, `CLEANABLE`, and
-`not_required`. The same linked PR returns `reuse`; any lease-state,
-repository, branch, head, cleanliness, or merge mismatch is `blocked`. A
-GitHub external failure is exit code `4`. MUST NOT infer a PR from branch
-history, adopt the lease, or use direct Git or registry mutation.
+`link-pr` accepts only a clean, managed `feature` lease that is `ACTIVE` with
+no PR link, or the exact already-linked `CLEANABLE` lease for idempotent reuse.
+The supplied PR MUST be merged and MUST exactly match the lease repository,
+branch, and current registered/check-out worktree HEAD. The recorded
+acquisition SHA may be older after normal feature commits. Apply revalidates
+local Git after the GitHub lookup, replaces the recorded SHA with the
+independently verified current PR/worktree SHA, then atomically records
+`target_pr`, `CLEANABLE`, and `not_required`. The same linked PR returns
+`reuse`; any lease-state, repository, branch, head, cleanliness, or merge
+mismatch is `blocked`. A GitHub external failure is exit code `4`. MUST NOT
+infer a PR from branch history, adopt the lease, or use direct Git or registry
+mutation.
 
 After `ready` or `reuse`, restart at the required status preflight, then use
 the normal `finish` preview/apply procedure. The linked result is cleanup
 evidence only; it is not permission to skip any finish gate.
+
+```sh
+awf wt status --repo-root <repo-root> --refresh --json
+awf wt finish --repo-root <repo-root> --pr <merged-pr> --json
+awf wt finish --repo-root <repo-root> --pr <merged-pr> --apply --json
+```
 
 ## Production promotion
 
@@ -207,9 +217,9 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
     "deployment_health": "repository_rollout_evidence",
     "blocked_action": "preserve_worktree_report_code_message",
     "managed_feature_pr_link": {
-      "lease_state": "active_clean_managed_feature",
-      "pr_provenance": "already_merged_exact_repository_branch_and_recorded_head",
-      "apply_transition": "cleanable_not_required",
+      "lease_state": "active_unlinked_or_cleanable_exact_reuse",
+      "pr_provenance": "already_merged_exact_repository_branch_and_current_worktree_head",
+      "apply_transition": "replace_recorded_head_then_cleanable_not_required",
       "same_pr": "reuse",
       "different_pr": "blocked",
       "github_external_failure": "exit_4"
@@ -241,6 +251,7 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
     "reuse": "use_exact_lease",
     "preview": {
       "acquire": "review_then_apply_explicitly",
+      "link_pr": "review_then_apply_explicitly",
       "promote": "review_then_apply_explicitly",
       "finish": "review_blockers_then_apply",
       "gc": "review_blockers_then_apply"
@@ -248,6 +259,7 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
     "ready": {
       "status": "inspect_select_lifecycle_action",
       "acquire_apply": "use_or_report_returned_lease",
+      "link_pr_apply": "restart_status_preflight_then_finish",
       "promote_apply": "use_or_report_returned_lease"
     },
     "removed": "report_completion",
