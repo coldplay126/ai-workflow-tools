@@ -489,6 +489,8 @@ def test_github_client_marks_checks_passed_only_for_completed_successes(
                     "baseRefOid": "base-sha",
                     "headRefName": "awf/reward-widget/feature",
                     "headRefOid": "head-sha",
+                    "author": {"login": "source-author"},
+                    "mergedBy": {"login": "source-merger"},
                     "mergeCommit": None,
                     "reviewDecision": "APPROVED",
                     "statusCheckRollup": [
@@ -515,7 +517,7 @@ def test_github_client_marks_checks_passed_only_for_completed_successes(
                 "--json",
                 (
                     "number,state,baseRefName,baseRefOid,headRefName,headRefOid,"
-                    "mergeCommit,reviewDecision,statusCheckRollup,files,url"
+                    "mergeCommit,reviewDecision,statusCheckRollup,files,url,author,mergedBy"
                 ),
             ],
             {
@@ -530,6 +532,8 @@ def test_github_client_marks_checks_passed_only_for_completed_successes(
     ]
     assert pr.checks_passed is True
     assert pr.changed_paths == ("README.txt",)
+    assert pr.author_login == "source-author"
+    assert pr.merged_by_login == "source-merger"
 
 
 def test_github_client_finds_exact_open_pr_by_head_and_base(
@@ -3423,6 +3427,138 @@ def test_promote_requires_reviewed_checked_staging_source(
     assert result.status == "blocked"
     assert result.blockers[0]["code"] == blocker
     assert not promotion_harness.registry.db_path.exists()
+
+
+def test_promote_default_policy_rejects_unapproved_self_merge(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.github.prs[372] = replace(
+        promotion_harness.github.prs[372],
+        review_decision="",
+        author_login="steven",
+        merged_by_login="steven",
+    )
+
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=False,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "source_pr_not_approved"
+
+
+@pytest.mark.parametrize("actor_login", ("steven", "dependabot[bot]"))
+def test_promote_opt_in_policy_accepts_unapproved_self_merge(
+    promotion_harness: PromotionHarness,
+    actor_login: str,
+) -> None:
+    promotion_harness.configure(
+        source_review_policy="approved_or_self_merged"
+    )
+    promotion_harness.github.prs[372] = replace(
+        promotion_harness.github.prs[372],
+        review_decision="",
+        author_login=actor_login,
+        merged_by_login=actor_login,
+    )
+
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=False,
+    )
+
+    assert result.status == "ok"
+    assert result.decision == "preview"
+
+
+def test_promote_opt_in_policy_accepts_approved_source_without_identities(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.configure(
+        source_review_policy="approved_or_self_merged"
+    )
+
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=False,
+    )
+
+    assert result.status == "ok"
+    assert result.decision == "preview"
+
+
+@pytest.mark.parametrize(
+    ("source_change", "blocker"),
+    (
+        ({"state": "OPEN"}, "source_pr_not_merged"),
+        ({"checks_passed": False}, "source_pr_checks_failed"),
+        ({"base_ref": "main"}, "source_pr_base_mismatch"),
+    ),
+)
+def test_promote_opt_in_policy_retains_source_gates(
+    promotion_harness: PromotionHarness,
+    source_change: dict[str, object],
+    blocker: str,
+) -> None:
+    promotion_harness.configure(
+        source_review_policy="approved_or_self_merged"
+    )
+    promotion_harness.github.prs[372] = replace(
+        promotion_harness.github.prs[372],
+        review_decision="",
+        author_login="steven",
+        merged_by_login="steven",
+        **source_change,
+    )
+
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=False,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == blocker
+
+
+@pytest.mark.parametrize(
+    ("author_login", "merged_by_login"),
+    (
+        ("steven", "reviewer"),
+        ("steven", None),
+        (None, "steven"),
+        (" ", " "),
+        ("a--b", "a--b"),
+        ("a" * 40, "a" * 40),
+    ),
+)
+def test_promote_opt_in_policy_rejects_non_self_merged_source(
+    promotion_harness: PromotionHarness,
+    author_login: str | None,
+    merged_by_login: str | None,
+) -> None:
+    promotion_harness.configure(
+        source_review_policy="approved_or_self_merged"
+    )
+    promotion_harness.github.prs[372] = replace(
+        promotion_harness.github.prs[372],
+        review_decision="",
+        author_login=author_login,
+        merged_by_login=merged_by_login,
+    )
+
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=False,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "source_pr_not_approved"
 
 
 def test_promote_verifies_before_pushing_or_creating_a_pr(

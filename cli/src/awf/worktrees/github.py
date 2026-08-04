@@ -11,7 +11,7 @@ from typing import Any
 
 _GH_VIEW_FIELDS = (
     "number,state,baseRefName,baseRefOid,headRefName,headRefOid,mergeCommit,"
-    "reviewDecision,statusCheckRollup,files,url"
+    "reviewDecision,statusCheckRollup,files,url,author,mergedBy"
 )
 _ALLOWED_CHECK_CONCLUSIONS = frozenset({"SUCCESS", "SKIPPED", "NEUTRAL"})
 _MAX_CHANGED_PATHS = 256
@@ -42,6 +42,8 @@ class PullRequest:
     checks_passed: bool
     changed_paths: tuple[str, ...]
     url: str
+    author_login: str | None = None
+    merged_by_login: str | None = None
 
 
 class GhClient:
@@ -154,6 +156,8 @@ def _pull_request_from_json(value: str) -> PullRequest:
         checks_passed = _checks_passed(payload.get("statusCheckRollup"))
         changed_paths = _changed_paths(payload.get("files"))
         url = _required_string(payload, "url")
+        author_login = _optional_login(payload.get("author"), "author")
+        merged_by_login = _optional_login(payload.get("mergedBy"), "mergedBy")
     except (TypeError, ValueError) as error:
         raise ExternalServiceError("gh pr view returned an invalid pull request") from error
     return PullRequest(
@@ -168,6 +172,8 @@ def _pull_request_from_json(value: str) -> PullRequest:
         checks_passed=checks_passed,
         changed_paths=changed_paths,
         url=url,
+        author_login=author_login,
+        merged_by_login=merged_by_login,
     )
 
 
@@ -187,6 +193,21 @@ def _required_string(payload: Mapping[str, Any], field: str) -> str:
     ):
         raise ValueError(field)
     return value
+
+
+def _optional_login(value: object, field: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ValueError(field)
+    login = value.get("login")
+    if (
+        not isinstance(login, str)
+        or not login
+        or len(login.encode("utf-8")) > _MAX_FIELD_BYTES
+    ):
+        raise ValueError(f"{field}.login")
+    return login
 
 
 def _optional_string(value: object) -> str:

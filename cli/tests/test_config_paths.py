@@ -7,12 +7,24 @@ from pathlib import Path
 from awf.core.config import AwfConfig, resolve_analysis_context, resolve_runtime_paths
 from awf.core.mcp import McpServerInfo
 import awf.core.mcp as mcp_module
+from awf.core.paths import find_repo_root
 
 
 def _repo_root(path: Path) -> Path:
     path.mkdir(parents=True)
     (path / ".awf.toml").write_text("", encoding="utf-8")
     return path
+
+
+def test_find_repo_root_accepts_git_worktree_pointer(tmp_path: Path) -> None:
+    worktree = tmp_path / "managed-worktree"
+    worktree.mkdir()
+    (worktree / ".git").write_text(
+        "gitdir: /tmp/repository/.git/worktrees/managed-worktree\n",
+        encoding="utf-8",
+    )
+
+    assert find_repo_root(str(worktree)) == worktree.resolve()
 
 
 def test_provider_model_defaults_are_current() -> None:

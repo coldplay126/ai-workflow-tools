@@ -54,6 +54,20 @@ _MAX_IMPORT_COLLISION_ACTIONS = 32
 _DEPLOYMENT_STATUS_TIMEOUT_SECONDS = 30.0
 
 _PRODUCTION_VERIFY_TIMEOUT_SECONDS = 300.0
+_GITHUB_ACTOR_LOGIN = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}(?:\[bot\])?"
+)
+
+
+def _same_github_actor(author: object, merger: object) -> bool:
+    return (
+        isinstance(author, str)
+        and isinstance(merger, str)
+        and _GITHUB_ACTOR_LOGIN.fullmatch(author) is not None
+        and _GITHUB_ACTOR_LOGIN.fullmatch(merger) is not None
+        and author.casefold() == merger.casefold()
+    )
+
 
 def _initiative_slug(initiative: str) -> str:
     if not initiative or not initiative.isascii():
@@ -2782,11 +2796,20 @@ class WorktreeService:
                 "source_pr_not_merged",
                 f"source pull request #{source.number} is {source.state}",
             )
-        if source.review_decision != "APPROVED":
-            return self._promotion_blocked(
-                "source_pr_not_approved",
-                f"source pull request #{source.number} is not approved",
+        review_accepted = source.review_decision == "APPROVED"
+        if self.config.source_review_policy == "approved_or_self_merged":
+            review_accepted = review_accepted or _same_github_actor(
+                source.author_login, source.merged_by_login
             )
+        if not review_accepted:
+            if self.config.source_review_policy == "approved_or_self_merged":
+                message = (
+                    f"source pull request #{source.number} is neither approved"
+                    " nor self-merged"
+                )
+            else:
+                message = f"source pull request #{source.number} is not approved"
+            return self._promotion_blocked("source_pr_not_approved", message)
         if not source.checks_passed:
             return self._promotion_blocked(
                 "source_pr_checks_failed",

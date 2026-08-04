@@ -137,6 +137,10 @@ not shell strings:
 default_base = "staging"
 production_branch = "main"
 
+[promotion]
+# Default: "approved". This opt-in also accepts a PR merged by its author.
+source_review_policy = "approved_or_self_merged"
+
 [prepare]
 inputs = ["pyproject.toml", "uv.lock"]
 command = ["uv", "sync", "--frozen"]
@@ -150,6 +154,11 @@ commands = [
 [deployment]
 status_command = ["./scripts/deployment-status", "production"]
 ```
+
+`approved_or_self_merged` still requires a merged source PR, successful checks,
+the configured staging base, and exact promotion-delta verification. The
+self-merge alternative fails closed if either GitHub actor login is missing or
+malformed; an `APPROVED` source does not need identity data.
 
 Feature flow:
 
@@ -235,7 +244,7 @@ gates. MUST NOT use direct Git or filesystem cleanup.
 Promotion and finish flow:
 
 ```bash
-# The source PR must be merged, approved, checked, and based on staging.
+# The source PR must satisfy the repository's review policy, checks, and staging base.
 awf wt promote --source-pr 372 --to main --json
 awf wt promote --source-pr 372 --to main --apply --json
 
