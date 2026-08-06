@@ -510,6 +510,8 @@ def test_wt_promote_parser_surface() -> None:
             "promote",
             "--source-pr",
             "372",
+            "--source-pr",
+            "373",
             "--to",
             "main",
             "--repo-root",
@@ -521,7 +523,7 @@ def test_wt_promote_parser_surface() -> None:
 
     assert args.command == "wt"
     assert args.wt_command == "promote"
-    assert args.source_pr == 372
+    assert args.source_pr == [372, 373]
     assert args.to == "main"
     assert args.repo_root == "/repo"
     assert args.apply is True

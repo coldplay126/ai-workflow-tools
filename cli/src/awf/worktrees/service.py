@@ -10,7 +10,7 @@ import selectors
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -209,38 +209,39 @@ class WorktreeService:
             return CommandResult.ok("wt.acquire", decision="ready", lease=lease)
 
     def promote(
-        self, *, source_pr: int, target_branch: str, apply: bool
+        self,
+        *,
+        source_pr: int | Sequence[int],
+        target_branch: str,
+        apply: bool,
     ) -> CommandResult:
-        if (
-            not isinstance(source_pr, int)
-            or isinstance(source_pr, bool)
-            or source_pr <= 0
-        ):
-            return self._promotion_blocked(
-                "invalid_source_pr", "source pull request must be a positive integer"
-            )
+        try:
+            source_numbers = self._promotion_source_numbers(source_pr)
+        except ValueError as error:
+            return self._promotion_blocked("invalid_source_pr", str(error))
         try:
             target_ref = self._promotion_target_ref(target_branch)
         except ConfigError as error:
             return self._promotion_blocked("invalid_target_branch", str(error))
         try:
             github = self.github or GhClient(self.git.repository_root())
-            source = github.view_pr(source_pr)
+            sources = tuple(github.view_pr(number) for number in source_numbers)
         except ExternalServiceError as error:
             return self._external_error(
                 "wt.promote", "source_pr_unavailable", str(error)
             )
         except ValueError as error:
             return self._promotion_blocked("source_pr_unavailable", str(error))
-        source_blocker = self._promotion_source_blocker(source, target_ref)
+        source_blocker = self._promotion_sources_blocker(sources, target_ref)
         if source_blocker is not None:
             return source_blocker
-        invalid_oid = self._invalid_promotion_oid(source)
-        if invalid_oid is not None:
-            return self._promotion_blocked(
-                "source_pr_invalid_oid",
-                f"source pull request has an invalid {invalid_oid}",
-            )
+        for source in sources:
+            invalid_oid = self._invalid_promotion_oid(source)
+            if invalid_oid is not None:
+                return self._promotion_blocked(
+                    "source_pr_invalid_oid",
+                    f"source pull request #{source.number} has an invalid {invalid_oid}",
+                )
         if not self.config.verify_production:
             return self._promotion_blocked(
                 "production_verify_missing",
@@ -252,7 +253,7 @@ class WorktreeService:
                 target_sha = self.git.resolve_ref(target_ref)
             except GitError as error:
                 return self._promotion_blocked("target_ref_unavailable", str(error))
-            lease = self._new_promotion_lease(source, target_ref, target_sha)
+            lease = self._new_promotion_lease(sources, target_ref, target_sha)
             return CommandResult.ok(
                 "wt.promote",
                 decision="preview",
@@ -261,9 +262,19 @@ class WorktreeService:
                         "kind": "create_worktree",
                         "path": str(lease.worktree_path),
                         "branch": lease.branch,
-                        "source_pr": source.number,
-                        "source_base_sha": source.base_sha,
-                        "source_head_sha": source.head_sha,
+                        "source_pr": sources[0].number,
+                        "source_prs": [source.number for source in sources],
+                        "sources": [
+                            {
+                                "pr": source.number,
+                                "base_sha": source.base_sha,
+                                "head_sha": source.head_sha,
+                                "merge_sha": source.merge_commit_sha,
+                            }
+                            for source in sources
+                        ],
+                        "source_base_sha": sources[0].base_sha,
+                        "source_head_sha": sources[-1].head_sha,
                         "target_branch": target_branch,
                         "target_base_sha": target_sha,
                     },
@@ -277,9 +288,8 @@ class WorktreeService:
                 ),
             )
 
-
         repository_id = self.git.repository_id()
-        initiative = self._promotion_initiative(source.number, target_branch)
+        initiative = self._promotion_initiative(source_numbers, target_branch)
         expected_branch = self._promotion_branch(initiative)
         with repository_lock(self.lock_dir / f"{repository_id}.lock"):
             active = self.registry.find_active(
@@ -288,48 +298,72 @@ class WorktreeService:
             if active is not None:
                 return self._reuse_promotion(
                     active,
-                    source=source,
+                    sources=sources,
                     target_ref=target_ref,
                     expected_branch=expected_branch,
                     github=github,
                     target_branch=target_branch,
                 )
             try:
-                source_base_sha = self.git.fetch_ref(source.base_sha)
-                source_head_sha = self.git.fetch_ref(source.head_sha)
                 target_sha = self.git.fetch_ref(target_branch)
-                merge_base = self.git.merge_base(source_base_sha, source_head_sha)
-                patch = self.git.binary_diff(merge_base, source_head_sha)
-                source_paths = self.git.changed_paths(
-                    self.git.repository_root(),
-                    merge_base,
-                    source_head_sha,
-                    find_renames=True,
-                )
+                deltas: list[bytes] = []
+                expected_blob_heads: dict[str, str] = {}
+                for source in sources:
+                    source_base_sha = self.git.fetch_ref(source.base_sha)
+                    source_head_sha = self.git.fetch_ref(source.head_sha)
+                    merge_base = self.git.merge_base(
+                        source_base_sha, source_head_sha
+                    )
+                    patch = self.git.binary_diff(merge_base, source_head_sha)
+                    source_paths = self.git.changed_paths(
+                        self.git.repository_root(),
+                        merge_base,
+                        source_head_sha,
+                        find_renames=True,
+                    )
+                    if (
+                        source_base_sha != source.base_sha
+                        or source_head_sha != source.head_sha
+                    ):
+                        return self._promotion_blocked(
+                            "source_sha_mismatch",
+                            (
+                                f"fetched source pull request #{source.number} refs"
+                                " do not match the reviewed SHAs"
+                            ),
+                        )
+                    expected_source_paths = tuple(sorted(source.changed_paths))
+                    if not patch:
+                        return self._promotion_blocked(
+                            "source_pr_empty_delta",
+                            (
+                                f"source pull request #{source.number} has no changes"
+                                " after its merge base"
+                            ),
+                        )
+                    if source_paths != expected_source_paths:
+                        return self._promotion_blocked(
+                            "source_delta_mismatch",
+                            (
+                                f"source pull request #{source.number} paths do not"
+                                " match its reviewed Git delta"
+                            ),
+                        )
+                    deltas.append(patch)
+                    for path in expected_source_paths:
+                        expected_blob_heads[path] = source_head_sha
             except GitRemoteError as error:
                 return self._external_error(
                     "wt.promote", "source_delta_unavailable", str(error)
                 )
             except GitError as error:
                 return self._promotion_blocked("source_delta_unavailable", str(error))
-            if source_base_sha != source.base_sha or source_head_sha != source.head_sha:
-                return self._promotion_blocked(
-                    "source_sha_mismatch",
-                    "fetched source pull request refs do not match the reviewed SHAs",
-                )
-            expected_paths = tuple(sorted(source.changed_paths))
-            if not patch:
-                return self._promotion_blocked(
-                    "source_pr_empty_delta",
-                    "source pull request has no changes after its merge base",
-                )
-            if source_paths != expected_paths:
-                return self._promotion_blocked(
-                    "source_delta_mismatch",
-                    "source pull request paths do not match its reviewed Git delta",
-                )
 
-            lease = self._new_promotion_lease(source, target_ref, target_sha)
+            expected_blobs = self._promotion_net_blobs(
+                expected_blob_heads, target_sha
+            )
+            expected_paths = tuple(sorted(expected_blobs))
+            lease = self._new_promotion_lease(sources, target_ref, target_sha)
             branch_conflict = self._branch_conflict(lease.branch)
             if branch_conflict is not None:
                 return self._promotion_blocked(
@@ -340,7 +374,9 @@ class WorktreeService:
             try:
                 self.git.add_worktree(lease.worktree_path, lease.branch, target_sha)
             except GitError as error:
-                return self._promotion_blocked("worktree_conflict", str(error), lease=lease)
+                return self._promotion_blocked(
+                    "worktree_conflict", str(error), lease=lease
+                )
             try:
                 lease = replace(
                     lease, head_sha=self.git.head_sha(lease.worktree_path)
@@ -351,11 +387,12 @@ class WorktreeService:
                 return replace(result, command="wt.promote")
 
             try:
-                self.git.apply_indexed_patch(lease.worktree_path, patch)
+                for patch in deltas:
+                    self.git.apply_indexed_patch(lease.worktree_path, patch)
                 promotion_head = self.git.commit(
                     lease.worktree_path,
                     self._promotion_message(
-                        source=source,
+                        sources=sources,
                         target_sha=target_sha,
                         lease=lease,
                         target_branch=target_branch,
@@ -372,17 +409,20 @@ class WorktreeService:
                     return self._block_promotion_lease(
                         lease,
                         "promotion_delta_mismatch",
-                        "promotion paths do not exactly match the reviewed pull request",
+                        "promotion paths do not exactly match the reviewed pull requests",
                     )
                 if any(
-                    self.git.path_blob(source_head_sha, path)
+                    expected_blobs[path]
                     != self.git.path_blob(promotion_head, path)
                     for path in expected_paths
                 ):
                     return self._block_promotion_lease(
                         lease,
                         "promotion_content_mismatch",
-                        "promotion contents do not exactly match the reviewed pull request",
+                        (
+                            "promotion contents do not exactly match the ordered"
+                            " reviewed pull requests"
+                        ),
                     )
                 prepare_blocker = self._prepare_promotion(lease, force=True)
                 if prepare_blocker is not None:
@@ -407,7 +447,6 @@ class WorktreeService:
                     "registry_conflict", str(error), lease=lease
                 )
 
-
             try:
                 self.git.push_branch(lease.worktree_path, lease.branch)
             except GitError as error:
@@ -425,9 +464,9 @@ class WorktreeService:
                     target_pull_request = github.create_pr(
                         base=target_branch,
                         head=lease.branch,
-                        title=f"Promote PR #{source.number} to {target_branch}",
+                        title=self._promotion_title(source_numbers, target_branch),
                         body=self._promotion_body(
-                            source=source,
+                            sources=sources,
                             target_sha=target_sha,
                             lease=lease,
                         ),
@@ -2778,6 +2817,49 @@ class WorktreeService:
             lease=lease,
         )
 
+    @staticmethod
+    def _promotion_source_numbers(
+        source_pr: int | Sequence[int],
+    ) -> tuple[int, ...]:
+        if isinstance(source_pr, int) and not isinstance(source_pr, bool):
+            values: Sequence[int] = (source_pr,)
+        elif isinstance(source_pr, Sequence) and not isinstance(
+            source_pr, (str, bytes)
+        ):
+            values = source_pr
+        else:
+            raise ValueError(
+                "source pull request must be a positive integer or a non-empty"
+                " sequence of unique positive integers"
+            )
+        if (
+            not values
+            or any(
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value <= 0
+                for value in values
+            )
+            or len(set(values)) != len(values)
+        ):
+            raise ValueError(
+                "source pull request must be a positive integer or a non-empty"
+                " sequence of unique positive integers"
+            )
+        return tuple(values)
+
+    def _promotion_net_blobs(
+        self,
+        expected_blob_heads: Mapping[str, str],
+        target_sha: str,
+    ) -> dict[str, str | None]:
+        expected_blobs: dict[str, str | None] = {}
+        for path, source_head_sha in expected_blob_heads.items():
+            expected_blob = self.git.path_blob(source_head_sha, path)
+            if expected_blob != self.git.path_blob(target_sha, path):
+                expected_blobs[path] = expected_blob
+        return expected_blobs
+
     def _promotion_target_ref(self, target_branch: str) -> str:
         if not isinstance(target_branch, str) or not target_branch:
             raise ConfigError("target branch must be a non-empty string")
@@ -2792,6 +2874,27 @@ class WorktreeService:
         if configured is None and target_branch not in {"main", "master"}:
             raise ConfigError("target branch must be main or master")
         return target_ref
+
+    def _promotion_sources_blocker(
+        self, sources: Sequence[PullRequest], target_ref: str
+    ) -> CommandResult | None:
+        for source in sources:
+            blocker = self._promotion_source_blocker(source, target_ref)
+            if blocker is not None:
+                return blocker
+        for previous, current in zip(sources, sources[1:]):
+            if (
+                previous.merge_commit_sha is None
+                or previous.merge_commit_sha != current.base_sha
+            ):
+                return self._promotion_blocked(
+                    "source_pr_sequence_gap",
+                    (
+                        f"source pull request #{current.number} base does not match"
+                        f" merged pull request #{previous.number}"
+                    ),
+                )
+        return None
 
     def _promotion_source_blocker(
         self, source: PullRequest, target_ref: str
@@ -2849,10 +2952,15 @@ class WorktreeService:
         return None
 
     def _new_promotion_lease(
-        self, source: PullRequest, target_ref: str, target_sha: str
+        self,
+        sources: Sequence[PullRequest],
+        target_ref: str,
+        target_sha: str,
     ) -> Lease:
         target_branch = target_ref[len("origin/") :]
-        initiative = self._promotion_initiative(source.number, target_branch)
+        initiative = self._promotion_initiative(
+            tuple(source.number for source in sources), target_branch
+        )
         lease = Lease.new(
             repository_id=self.git.repository_id(),
             repository_name=self.git.repository_name(),
@@ -2865,7 +2973,7 @@ class WorktreeService:
             head_sha=target_sha,
             managed=True,
             owner_kind="awf",
-            source_pr=source.number,
+            source_pr=sources[0].number,
         )
         return replace(
             lease,
@@ -2873,8 +2981,12 @@ class WorktreeService:
         )
 
     @staticmethod
-    def _promotion_initiative(source_pr: int, target_branch: str) -> str:
-        return f"pr-{source_pr}-to-{target_branch}"
+    def _promotion_initiative(
+        source_prs: Sequence[int], target_branch: str
+    ) -> str:
+        prefix = "pr" if len(source_prs) == 1 else "prs"
+        numbers = "-".join(str(source_pr) for source_pr in source_prs)
+        return f"{prefix}-{numbers}-to-{target_branch}"
 
     @staticmethod
     def _promotion_branch(initiative: str) -> str:
@@ -2884,14 +2996,14 @@ class WorktreeService:
         self,
         lease: Lease,
         *,
-        source: PullRequest,
+        sources: Sequence[PullRequest],
         target_ref: str,
         expected_branch: str,
         github: GhClient,
         target_branch: str,
     ) -> CommandResult:
         if (
-            lease.source_pr != source.number
+            lease.source_pr != sources[0].number
             or lease.base_ref != target_ref
             or lease.branch != expected_branch
         ):
@@ -2927,7 +3039,7 @@ class WorktreeService:
             return self._recover_unrecorded_promotion_publish(
                 lease,
                 github=github,
-                source=source,
+                sources=sources,
                 target_branch=target_branch,
             )
         if lease.state is not LeaseState.ACTIVE:
@@ -2940,13 +3052,13 @@ class WorktreeService:
             return self._resume_promotion_publish(
                 lease,
                 github=github,
-                source_pr=source.number,
+                source_prs=tuple(source.number for source in sources),
                 target_branch=target_branch,
             )
         return self._recover_unrecorded_promotion_publish(
             lease,
             github=github,
-            source=source,
+            sources=sources,
             target_branch=target_branch,
         )
         
@@ -2955,7 +3067,7 @@ class WorktreeService:
         lease: Lease,
         *,
         github: GhClient,
-        source: PullRequest,
+        sources: Sequence[PullRequest],
         target_branch: str,
     ) -> CommandResult:
         try:
@@ -2981,28 +3093,26 @@ class WorktreeService:
                 promotion_head == target_sha
                 or _GIT_OBJECT_ID.fullmatch(promotion_head) is None
                 or _GIT_OBJECT_ID.fullmatch(target_sha) is None
-                or _GIT_OBJECT_ID.fullmatch(source.head_sha) is None
-                or _GIT_OBJECT_ID.fullmatch(source.base_sha) is None
+                or any(
+                    _GIT_OBJECT_ID.fullmatch(source.head_sha) is None
+                    or _GIT_OBJECT_ID.fullmatch(source.base_sha) is None
+                    for source in sources
+                )
             ):
                 return self._promotion_blocked(
                     "promotion_incomplete",
                     f"lease {lease.id} was not verified for publication",
                     lease=lease,
                 )
-            source_base_sha = self._promotion_source_base_from_message(
+            source_base_shas = self._promotion_source_bases_from_message(
                 self.git.commit_message(lease.worktree_path),
-                source=source,
+                sources=sources,
                 target_sha=target_sha,
                 lease=lease,
                 target_branch=target_branch,
             )
             if (
-                source_base_sha is None
-                or _GIT_OBJECT_ID.fullmatch(source_base_sha) is None
-                or (
-                    lease.state is LeaseState.BLOCKED
-                    and source_base_sha != source.base_sha
-                )
+                source_base_shas is None
                 or self.git.commit_parents(promotion_head) != (target_sha,)
             ):
                 return self._promotion_blocked(
@@ -3010,22 +3120,34 @@ class WorktreeService:
                     f"lease {lease.id} does not have exact promotion provenance",
                     lease=lease,
                 )
-            if self.git.fetch_ref(source_base_sha) != source_base_sha:
-                return self._promotion_blocked(
-                    "promotion_incomplete",
-                    f"lease {lease.id} does not have exact source provenance",
-                    lease=lease,
-                )
-            source_head_sha = self.git.fetch_ref(source.head_sha)
-            expected_paths = tuple(sorted(source.changed_paths))
+            expected_blob_heads: dict[str, str] = {}
+            for source, source_base_sha in zip(sources, source_base_shas):
+                if (
+                    (
+                        lease.state is LeaseState.BLOCKED
+                        and source_base_sha != source.base_sha
+                    )
+                    or self.git.fetch_ref(source_base_sha) != source_base_sha
+                    or self.git.fetch_ref(source.head_sha) != source.head_sha
+                ):
+                    return self._promotion_blocked(
+                        "promotion_incomplete",
+                        f"lease {lease.id} does not have exact source provenance",
+                        lease=lease,
+                    )
+                for path in source.changed_paths:
+                    expected_blob_heads[path] = source.head_sha
+            expected_blobs = self._promotion_net_blobs(
+                expected_blob_heads, target_sha
+            )
+            expected_paths = tuple(sorted(expected_blobs))
             if (
-                source_head_sha != source.head_sha
-                or self.git.changed_paths(
+                self.git.changed_paths(
                     lease.worktree_path, target_sha, promotion_head
                 )
                 != expected_paths
                 or any(
-                    self.git.path_blob(source_head_sha, path)
+                    expected_blobs[path]
                     != self.git.path_blob(promotion_head, path)
                     for path in expected_paths
                 )
@@ -3068,7 +3190,7 @@ class WorktreeService:
         return self._resume_promotion_publish(
             lease,
             github=github,
-            source_pr=source.number,
+            source_prs=tuple(source.number for source in sources),
             target_branch=target_branch,
         )
 
@@ -3077,7 +3199,7 @@ class WorktreeService:
         lease: Lease,
         *,
         github: GhClient,
-        source_pr: int,
+        source_prs: Sequence[int],
         target_branch: str,
     ) -> CommandResult:
         try:
@@ -3123,7 +3245,7 @@ class WorktreeService:
                 target_pull_request = github.create_pr(
                     base=target_branch,
                     head=lease.branch,
-                    title=f"Promote PR #{source_pr} to {target_branch}",
+                    title=self._promotion_title(source_prs, target_branch),
                     body=self.git.commit_message(lease.worktree_path),
                 )
             if (
@@ -3170,13 +3292,28 @@ class WorktreeService:
             )
         return CommandResult.ok("wt.promote", decision="ready", lease=lease)
     @staticmethod
+    def _promotion_title(
+        source_prs: Sequence[int], target_branch: str
+    ) -> str:
+        label = "PR" if len(source_prs) == 1 else "PRs"
+        numbers = ", ".join(f"#{source_pr}" for source_pr in source_prs)
+        return f"Promote {label} {numbers} to {target_branch}"
+
+    @staticmethod
     def _promotion_trailers(
-        *, source: PullRequest, target_sha: str, lease: Lease
+        *, sources: Sequence[PullRequest], target_sha: str, lease: Lease
     ) -> tuple[str, ...]:
+        source_trailers = tuple(
+            trailer
+            for source in sources
+            for trailer in (
+                f"AWF-Source-PR: {source.number}",
+                f"AWF-Source-Base: {source.base_sha}",
+                f"AWF-Source-Head: {source.head_sha}",
+            )
+        )
         return (
-            f"AWF-Source-PR: {source.number}",
-            f"AWF-Source-Base: {source.base_sha}",
-            f"AWF-Source-Head: {source.head_sha}",
+            *source_trailers,
             f"AWF-Target-Base: {target_sha}",
             f"AWF-Lease-ID: {lease.id}",
         )
@@ -3184,53 +3321,80 @@ class WorktreeService:
     def _promotion_message(
         self,
         *,
-        source: PullRequest,
+        sources: Sequence[PullRequest],
         target_sha: str,
         lease: Lease,
         target_branch: str,
     ) -> str:
         return "\n".join(
             (
-                f"Promote PR #{source.number} to {target_branch}",
+                self._promotion_title(
+                    tuple(source.number for source in sources),
+                    target_branch,
+                ),
                 "",
                 *self._promotion_trailers(
-                    source=source, target_sha=target_sha, lease=lease
+                    sources=sources, target_sha=target_sha, lease=lease
                 ),
             )
         )
 
-
     @staticmethod
-    def _promotion_source_base_from_message(
+    def _promotion_source_bases_from_message(
         message: str,
         *,
-        source: PullRequest,
+        sources: Sequence[PullRequest],
         target_sha: str,
         lease: Lease,
         target_branch: str,
-    ) -> str | None:
+    ) -> tuple[str, ...] | None:
         lines = message.splitlines()
-        source_base_prefix = "AWF-Source-Base: "
         if (
-            len(lines) != 7
-            or lines[0] != f"Promote PR #{source.number} to {target_branch}"
+            len(lines) != 3 * len(sources) + 4
+            or lines[0]
+            != WorktreeService._promotion_title(
+                tuple(source.number for source in sources),
+                target_branch,
+            )
             or lines[1] != ""
-            or lines[2] != f"AWF-Source-PR: {source.number}"
-            or not lines[3].startswith(source_base_prefix)
-            or _GIT_OBJECT_ID.fullmatch(lines[3][len(source_base_prefix) :]) is None
-            or lines[4] != f"AWF-Source-Head: {source.head_sha}"
-            or lines[5] != f"AWF-Target-Base: {target_sha}"
-            or lines[6] != f"AWF-Lease-ID: {lease.id}"
         ):
             return None
-        return lines[3][len(source_base_prefix) :]
+        source_base_shas: list[str] = []
+        offset = 2
+        for source in sources:
+            source_base_prefix = "AWF-Source-Base: "
+            if (
+                lines[offset] != f"AWF-Source-PR: {source.number}"
+                or not lines[offset + 1].startswith(source_base_prefix)
+                or _GIT_OBJECT_ID.fullmatch(
+                    lines[offset + 1][len(source_base_prefix) :]
+                )
+                is None
+                or lines[offset + 2]
+                != f"AWF-Source-Head: {source.head_sha}"
+            ):
+                return None
+            source_base_shas.append(
+                lines[offset + 1][len(source_base_prefix) :]
+            )
+            offset += 3
+        if (
+            lines[offset] != f"AWF-Target-Base: {target_sha}"
+            or lines[offset + 1] != f"AWF-Lease-ID: {lease.id}"
+        ):
+            return None
+        return tuple(source_base_shas)
 
     def _promotion_body(
-        self, *, source: PullRequest, target_sha: str, lease: Lease
+        self,
+        *,
+        sources: Sequence[PullRequest],
+        target_sha: str,
+        lease: Lease,
     ) -> str:
         return "\n".join(
             self._promotion_trailers(
-                source=source, target_sha=target_sha, lease=lease
+                sources=sources, target_sha=target_sha, lease=lease
             )
         )
 

@@ -405,6 +405,62 @@ class PromotionHarness:
         git_command(self.repo, "commit", "-q", "-m", "target feature")
         git_command(self.repo, "push", "-q", "origin", "main")
         git_command(self.repo, "checkout", "-q", "staging")
+
+    def add_followup_source(
+        self,
+        number: int = 373,
+        *,
+        feature_text: str | None = "feature updated\n",
+        include_followup: bool = True,
+    ) -> PullRequest:
+        git_command(self.repo, "checkout", "-q", "staging")
+        base_sha = git_command(self.repo, "rev-parse", "HEAD")
+        branch = f"feature/pr-{number}"
+        git_command(self.repo, "checkout", "-q", "-b", branch)
+        if feature_text is None:
+            (self.repo / "feature.txt").unlink()
+        else:
+            (self.repo / "feature.txt").write_text(
+                feature_text, encoding="utf-8"
+            )
+        changed_paths = ["feature.txt"]
+        if include_followup:
+            (self.repo / "followup.txt").write_text(
+                "followup\n", encoding="utf-8"
+            )
+            changed_paths.append("followup.txt")
+        git_command(self.repo, "add", "-A", *changed_paths)
+        git_command(self.repo, "commit", "-q", "-m", "source followup")
+        head_sha = git_command(self.repo, "rev-parse", "HEAD")
+        git_command(self.repo, "push", "-q", "-u", "origin", branch)
+        git_command(self.repo, "checkout", "-q", "staging")
+        git_command(
+            self.repo,
+            "merge",
+            "--no-ff",
+            "-q",
+            branch,
+            "-m",
+            "merge source followup",
+        )
+        merge_sha = git_command(self.repo, "rev-parse", "HEAD")
+        git_command(self.repo, "push", "-q", "origin", "staging")
+        source = PullRequest(
+            number=number,
+            state="MERGED",
+            base_ref="staging",
+            base_sha=base_sha,
+            head_ref=branch,
+            head_sha=head_sha,
+            merge_commit_sha=merge_sha,
+            review_decision="APPROVED",
+            checks_passed=True,
+            changed_paths=tuple(changed_paths),
+            url=f"https://github.example/acme/repo/pull/{number}",
+        )
+        self.github.prs[number] = source
+        return source
+
     def merged_promotion(self, mutation: str) -> Lease:
         if mutation == "deployment_unknown":
             self.configure(deployment_status_command=())
@@ -3274,6 +3330,138 @@ def test_promote_applies_only_source_pr_delta(
     assert "AWF-Source-PR: 372" in promotion_harness.github.create_calls[0]["body"]
     assert result.lease.state is LeaseState.PR_OPEN
     assert result.lease.target_pr == 900
+
+
+def test_promote_applies_ordered_multi_source_delta(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.add_followup_source()
+
+    result = promotion_harness.service.promote(
+        source_pr=(372, 373),
+        target_branch="main",
+        apply=True,
+    )
+
+    assert result.decision == "ready"
+    assert result.lease is not None
+    worktree = result.lease.worktree_path
+    assert (worktree / "feature.txt").read_text(encoding="utf-8") == "feature updated\n"
+    assert (worktree / "followup.txt").read_text(encoding="utf-8") == "followup\n"
+    assert not (worktree / "team.txt").exists()
+    assert promotion_harness.git.changed_paths(
+        worktree, result.lease.base_ref
+    ) == ("feature.txt", "followup.txt")
+    assert result.lease.branch == "awf/prs-372-373-to-main/promote"
+    body = promotion_harness.github.create_calls[0]["body"]
+    assert "AWF-Source-PR: 372" in body
+    assert "AWF-Source-PR: 373" in body
+
+
+def test_promote_accepts_multi_source_delta_with_no_net_path_change(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.add_followup_source(
+        feature_text=None,
+        include_followup=False,
+    )
+
+    result = promotion_harness.service.promote(
+        source_pr=(372, 373),
+        target_branch="main",
+        apply=True,
+    )
+
+    assert result.decision == "ready"
+    assert result.lease is not None
+    worktree = result.lease.worktree_path
+    assert not (worktree / "feature.txt").exists()
+    assert promotion_harness.git.changed_paths(
+        worktree, result.lease.base_ref
+    ) == ()
+
+
+def test_promote_recovers_multi_source_delta_with_no_net_path_change(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.add_followup_source(
+        feature_text=None,
+        include_followup=False,
+    )
+    promotion_harness.configure(
+        verify_production=(
+            (sys.executable, "-c", "import sys; sys.exit(1)"),
+        )
+    )
+
+    first = promotion_harness.service.promote(
+        source_pr=(372, 373),
+        target_branch="main",
+        apply=True,
+    )
+    promotion_harness.configure(
+        verify_production=((sys.executable, "-c", "pass"),)
+    )
+    second = promotion_harness.service.promote(
+        source_pr=(372, 373),
+        target_branch="main",
+        apply=True,
+    )
+
+    assert first.status == "blocked"
+    assert first.blockers[0]["code"] == "promotion_apply_failed"
+    assert second.decision == "ready"
+    assert second.lease is not None
+    assert second.lease.state is LeaseState.PR_OPEN
+    assert promotion_harness.github.create_calls[0]["body"].count(
+        "AWF-Source-PR:"
+    ) == 2
+
+
+@pytest.mark.parametrize(
+    "invalid_source",
+    [
+        pytest.param(True, id="true"),
+        pytest.param(False, id="false"),
+        pytest.param(1.5, id="float"),
+        pytest.param(None, id="none"),
+        pytest.param(object(), id="object"),
+        pytest.param((), id="empty"),
+        pytest.param((372, 372), id="duplicate"),
+        pytest.param((372, "373"), id="mixed"),
+    ],
+)
+def test_promote_rejects_invalid_source_pr_values(
+    promotion_harness: PromotionHarness,
+    invalid_source: object,
+) -> None:
+    result = promotion_harness.service.promote(
+        source_pr=invalid_source,  # type: ignore[arg-type]
+        target_branch="main",
+        apply=False,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "invalid_source_pr"
+
+
+def test_promote_rejects_gap_between_source_pull_requests(
+    promotion_harness: PromotionHarness,
+) -> None:
+    source = promotion_harness.add_followup_source()
+    promotion_harness.github.prs[source.number] = replace(
+        source,
+        base_sha="f" * 40,
+    )
+
+    result = promotion_harness.service.promote(
+        source_pr=(372, 373),
+        target_branch="main",
+        apply=False,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "source_pr_sequence_gap"
 
 
 def test_promote_prepares_worktree_before_production_verification(
