@@ -22,6 +22,7 @@ class WorktreeConfig:
     prepare_command: tuple[str, ...] = ()
     verify_production: tuple[tuple[str, ...], ...] = ()
     deployment_status_command: tuple[str, ...] = ()
+    source_review_policy: str = "approved"
 
 
 def _argv(value: object, field: str) -> tuple[str, ...]:
@@ -54,16 +55,24 @@ def load_worktree_config(repository_root: Path) -> WorktreeConfig:
 
     if not isinstance(loaded, dict):  # pragma: no cover - TOML documents are tables
         raise ConfigError("worktree configuration must be a TOML table")
-    _reject_unknown_keys(loaded, {"worktree", "prepare", "verify", "deployment"}, "top-level table")
+    _reject_unknown_keys(
+        loaded,
+        {"worktree", "prepare", "verify", "deployment", "promotion"},
+        "top-level table",
+    )
 
     worktree = _table(loaded.get("worktree"), "worktree")
     prepare = _table(loaded.get("prepare"), "prepare")
     verify = _table(loaded.get("verify"), "verify")
     deployment = _table(loaded.get("deployment"), "deployment")
+    promotion = _table(loaded.get("promotion"), "promotion")
     _reject_unknown_keys(worktree, {"default_base", "production_branch"}, "worktree field")
     _reject_unknown_keys(prepare, {"inputs", "command"}, "prepare field")
     _reject_unknown_keys(verify, {"production"}, "verify table")
     _reject_unknown_keys(deployment, {"status_command"}, "deployment field")
+    _reject_unknown_keys(
+        promotion, {"source_review_policy"}, "promotion field"
+    )
 
     production = _table(verify.get("production"), "verify.production")
     _reject_unknown_keys(production, {"commands"}, "verify.production field")
@@ -80,6 +89,12 @@ def load_worktree_config(repository_root: Path) -> WorktreeConfig:
         ),
         deployment_status_command=_argv(
             deployment.get("status_command"), "deployment.status_command"
+        ),
+        source_review_policy=_choice(
+            promotion.get("source_review_policy"),
+            "promotion.source_review_policy",
+            {"approved", "approved_or_self_merged"},
+            default="approved",
         ),
     )
 
@@ -107,6 +122,21 @@ def _optional_string(value: object, field: str) -> str | None:
         raise ConfigError(f"{field} must be a non-empty string")
     if "\0" in value:
         raise ConfigError(f"{field} must not contain an embedded NUL")
+    return value
+
+
+def _choice(
+    value: object,
+    field: str,
+    allowed: set[str],
+    *,
+    default: str,
+) -> str:
+    if value is None:
+        return default
+    if not isinstance(value, str) or value not in allowed:
+        choices = ", ".join(sorted(allowed))
+        raise ConfigError(f"{field} must be one of: {choices}")
     return value
 
 

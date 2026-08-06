@@ -10,7 +10,7 @@ def _looks_like_repo_root(path: Path) -> bool:
             (path / "claude" / "agents").is_dir(),
             (path / ".awf.toml").is_file(),
             (path / ".workflow").is_dir(),
-            (path / ".git").is_dir(),
+            (path / ".git").is_dir() or (path / ".git").is_file(),
         ]
     )
 
