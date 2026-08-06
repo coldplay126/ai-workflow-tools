@@ -382,6 +382,9 @@ class WorktreeService:
                         "promotion_content_mismatch",
                         "promotion contents do not exactly match the reviewed pull request",
                     )
+                prepare_blocker = self._prepare_promotion(lease, force=True)
+                if prepare_blocker is not None:
+                    return prepare_blocker
                 verification_actions = self._verify_promotion(lease.worktree_path)
             except (GitError, OSError, RuntimeError, subprocess.SubprocessError) as error:
                 return self._block_promotion_lease(
@@ -2995,6 +2998,9 @@ class WorktreeService:
                     f"lease {lease.id} does not have the exact reviewed delta",
                     lease=lease,
                 )
+            prepare_blocker = self._prepare_promotion(lease, force=True)
+            if prepare_blocker is not None:
+                return prepare_blocker
             self._verify_promotion(lease.worktree_path)
             lease = self.registry.transition(
                 lease.id,
@@ -3056,6 +3062,17 @@ class WorktreeService:
                     lease,
                     "promotion_head_mismatch",
                     "promotion worktree changed after verification",
+                )
+            prepare_blocker = self._prepare_promotion(lease, force=False)
+            if prepare_blocker is not None:
+                return prepare_blocker
+            try:
+                self._verify_promotion(lease.worktree_path)
+            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                return self._block_promotion_lease(
+                    lease,
+                    "promotion_verification_failed",
+                    str(error),
                 )
             target_pull_request = github.find_open_pr(
                 head=lease.branch, base=target_branch
@@ -3270,6 +3287,25 @@ class WorktreeService:
         return redacted.strip().encode("utf-8")[:512].decode(
             "utf-8", errors="ignore"
         )
+
+    def _prepare_promotion(
+        self, lease: Lease, *, force: bool
+    ) -> CommandResult | None:
+        prepare_error = self._prepare(lease, force=force)
+        if prepare_error is not None:
+            return self._block_promotion_lease(
+                lease,
+                "promotion_prepare_failed",
+                prepare_error,
+            )
+        if self.git.status_porcelain(lease.worktree_path):
+            return self._block_promotion_lease(
+                lease,
+                "promotion_prepare_dirty",
+                "promotion prepare command left uncommitted changes",
+            )
+        return None
+
 
     def _block_promotion_lease(
         self, lease: Lease, code: str, message: str

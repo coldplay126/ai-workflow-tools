@@ -3276,6 +3276,59 @@ def test_promote_applies_only_source_pr_delta(
     assert result.lease.target_pr == 900
 
 
+def test_promote_prepares_worktree_before_production_verification(
+    promotion_harness: PromotionHarness,
+) -> None:
+    prepared_path = promotion_harness.state_dir / "prepared.txt"
+    prepare_script = (
+        "from pathlib import Path; "
+        f"Path({str(prepared_path)!r}).write_text('ready', encoding='utf-8')"
+    )
+    verify_script = (
+        "from pathlib import Path; "
+        f"assert Path({str(prepared_path)!r}).read_text(encoding='utf-8') == 'ready'"
+    )
+    promotion_harness.configure(
+        prepare_command=(sys.executable, "-c", prepare_script),
+        verify_production=((sys.executable, "-c", verify_script),),
+    )
+
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert result.decision == "ready"
+    assert result.lease is not None
+    assert result.lease.state is LeaseState.PR_OPEN
+    assert prepared_path.read_text(encoding="utf-8") == "ready"
+
+
+def test_promote_rejects_dirty_prepare_output(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.configure(
+        prepare_command=(
+            sys.executable,
+            "-c",
+            "from pathlib import Path; Path('prepared.txt').write_text('dirty')",
+        ),
+    )
+
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "promotion_prepare_dirty"
+    assert result.lease is not None
+    assert result.lease.state is LeaseState.BLOCKED
+    assert promotion_harness.github.create_calls == []
+
+
 @pytest.mark.parametrize(
     "message",
     (
@@ -3711,9 +3764,27 @@ def test_promote_classifies_remote_fetch_failure_as_external(
     assert promotion_harness.registry.list_leases() == []
     assert len(promotion_harness.git.list_worktrees()) == 1
 
-def test_promote_retries_publish_after_a_transient_push_failure(
+def test_promote_retries_publish_and_prepares_when_marker_is_missing(
     promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    prepare_count = promotion_harness.state_dir / "prepare-retry-count.txt"
+    prepare_script = (
+        "from pathlib import Path; "
+        f"path = Path({str(prepare_count)!r}); "
+        "count = int(path.read_text(encoding='utf-8')) if path.exists() else 0; "
+        "path.write_text(str(count + 1), encoding='utf-8')"
+    )
+    verify_count = promotion_harness.state_dir / "verify-retry-count.txt"
+    verify_script = (
+        "from pathlib import Path; "
+        f"path = Path({str(verify_count)!r}); "
+        "count = int(path.read_text(encoding='utf-8')) if path.exists() else 0; "
+        "path.write_text(str(count + 1), encoding='utf-8')"
+    )
+    promotion_harness.configure(
+        prepare_command=(sys.executable, "-c", prepare_script),
+        verify_production=((sys.executable, "-c", verify_script),),
+    )
     original_push = promotion_harness.git.push_branch
 
     def fail_push(*_: object) -> None:
@@ -3726,6 +3797,10 @@ def test_promote_retries_publish_after_a_transient_push_failure(
         apply=True,
     )
     monkeypatch.setattr(promotion_harness.git, "push_branch", original_push)
+    assert first.lease is not None
+    (
+        promotion_harness.state_dir / "prepare" / f"{first.lease.id}.json"
+    ).unlink()
 
     second = promotion_harness.service.promote(
         source_pr=372,
@@ -3735,12 +3810,13 @@ def test_promote_retries_publish_after_a_transient_push_failure(
 
     assert first.status == "error"
     assert first.exit_code == 4
-    assert first.lease is not None
     assert first.lease.state is LeaseState.ACTIVE
     assert second.decision == "ready"
     assert second.lease is not None
     assert second.lease.state is LeaseState.PR_OPEN
     assert len(promotion_harness.github.create_calls) == 1
+    assert prepare_count.read_text(encoding="utf-8") == "2"
+    assert verify_count.read_text(encoding="utf-8") == "2"
 
 
 def test_promote_applies_aggregate_delta_containing_a_merge_commit(
@@ -3764,6 +3840,16 @@ def test_promote_applies_aggregate_delta_containing_a_merge_commit(
 def test_promote_recovers_when_pending_transition_fails(
     promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    prepare_count = promotion_harness.state_dir / "prepare-count.txt"
+    prepare_script = (
+        "from pathlib import Path; "
+        f"path = Path({str(prepare_count)!r}); "
+        "count = int(path.read_text(encoding='utf-8')) if path.exists() else 0; "
+        "path.write_text(str(count + 1), encoding='utf-8')"
+    )
+    promotion_harness.configure(
+        prepare_command=(sys.executable, "-c", prepare_script),
+    )
     original_transition = promotion_harness.registry.transition
 
     def fail_pending_transition(*args: object, **kwargs: object) -> Lease:
@@ -3794,6 +3880,7 @@ def test_promote_recovers_when_pending_transition_fails(
     assert second.lease is not None
     assert second.lease.state is LeaseState.PR_OPEN
     assert len(promotion_harness.github.create_calls) == 1
+    assert prepare_count.read_text(encoding="utf-8") == "2"
 
 
 def test_promote_recovers_pending_worktree_after_source_base_advances(
