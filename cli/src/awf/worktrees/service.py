@@ -12,7 +12,7 @@ import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from datetime import datetime, timedelta, timezone
 
 from .config import ConfigError, WorktreeConfig, load_worktree_config
@@ -212,6 +212,7 @@ class WorktreeService:
         self,
         *,
         source_pr: int | Sequence[int],
+        exclude_paths: Sequence[str] = (),
         target_branch: str,
         apply: bool,
     ) -> CommandResult:
@@ -219,6 +220,10 @@ class WorktreeService:
             source_numbers = self._promotion_source_numbers(source_pr)
         except ValueError as error:
             return self._promotion_blocked("invalid_source_pr", str(error))
+        try:
+            excluded_paths = self._promotion_excluded_paths(exclude_paths)
+        except ValueError as error:
+            return self._promotion_blocked("invalid_excluded_path", str(error))
         try:
             target_ref = self._promotion_target_ref(target_branch)
         except ConfigError as error:
@@ -235,8 +240,27 @@ class WorktreeService:
         source_blocker = self._promotion_sources_blocker(sources, target_ref)
         if source_blocker is not None:
             return source_blocker
+        reviewed_paths = {
+            path for source in sources for path in source.changed_paths
+        }
+        unknown_exclusions = tuple(
+            path for path in excluded_paths if path not in reviewed_paths
+        )
+        if unknown_exclusions:
+            return self._promotion_blocked(
+                "invalid_excluded_path",
+                "excluded paths must be reviewed paths from the source pull requests: "
+                + ", ".join(unknown_exclusions),
+            )
+        if reviewed_paths and reviewed_paths.issubset(excluded_paths):
+            return self._promotion_blocked(
+                "invalid_excluded_path",
+                "excluded paths must leave at least one reviewed path to promote",
+            )
         for source in sources:
-            invalid_oid = self._invalid_promotion_oid(source)
+            invalid_oid = self._invalid_promotion_oid(
+                source, require_merge=bool(excluded_paths)
+            )
             if invalid_oid is not None:
                 return self._promotion_blocked(
                     "source_pr_invalid_oid",
@@ -253,7 +277,9 @@ class WorktreeService:
                 target_sha = self.git.resolve_ref(target_ref)
             except GitError as error:
                 return self._promotion_blocked("target_ref_unavailable", str(error))
-            lease = self._new_promotion_lease(sources, target_ref, target_sha)
+            lease = self._new_promotion_lease(
+                sources, target_ref, target_sha, excluded_paths
+            )
             return CommandResult.ok(
                 "wt.promote",
                 decision="preview",
@@ -275,6 +301,7 @@ class WorktreeService:
                         ],
                         "source_base_sha": sources[0].base_sha,
                         "source_head_sha": sources[-1].head_sha,
+                        "excluded_paths": list(excluded_paths),
                         "target_branch": target_branch,
                         "target_base_sha": target_sha,
                     },
@@ -289,7 +316,9 @@ class WorktreeService:
             )
 
         repository_id = self.git.repository_id()
-        initiative = self._promotion_initiative(source_numbers, target_branch)
+        initiative = self._promotion_initiative(
+            source_numbers, target_branch, excluded_paths
+        )
         expected_branch = self._promotion_branch(initiative)
         with repository_lock(self.lock_dir / f"{repository_id}.lock"):
             active = self.registry.find_active(
@@ -299,6 +328,7 @@ class WorktreeService:
                 return self._reuse_promotion(
                     active,
                     sources=sources,
+                    excluded_paths=excluded_paths,
                     target_ref=target_ref,
                     expected_branch=expected_branch,
                     github=github,
@@ -306,11 +336,29 @@ class WorktreeService:
                 )
             try:
                 target_sha = self.git.fetch_ref(target_branch)
+                staging_sha = (
+                    self.git.fetch_ref(sources[0].base_ref)
+                    if excluded_paths
+                    else None
+                )
                 deltas: list[bytes] = []
                 expected_blob_heads: dict[str, str] = {}
                 for source in sources:
                     source_base_sha = self.git.fetch_ref(source.base_sha)
                     source_head_sha = self.git.fetch_ref(source.head_sha)
+                    source_merge_sha: str | None = None
+                    if excluded_paths:
+                        if source.merge_commit_sha is None:
+                            return self._promotion_blocked(
+                                "source_pr_invalid_oid",
+                                (
+                                    f"source pull request #{source.number} has"
+                                    " an invalid merge SHA"
+                                ),
+                            )
+                        source_merge_sha = self.git.fetch_ref(
+                            source.merge_commit_sha
+                        )
                     merge_base = self.git.merge_base(
                         source_base_sha, source_head_sha
                     )
@@ -324,12 +372,42 @@ class WorktreeService:
                     if (
                         source_base_sha != source.base_sha
                         or source_head_sha != source.head_sha
+                        or (
+                            source_merge_sha is not None
+                            and source_merge_sha != source.merge_commit_sha
+                        )
                     ):
                         return self._promotion_blocked(
                             "source_sha_mismatch",
                             (
                                 f"fetched source pull request #{source.number} refs"
                                 " do not match the reviewed SHAs"
+                            ),
+                        )
+                    if excluded_paths and merge_base != source_base_sha:
+                        return self._promotion_blocked(
+                            "source_base_not_ancestor",
+                            (
+                                f"source pull request #{source.number} base is not"
+                                " an ancestor of its reviewed head"
+                            ),
+                        )
+                    if (
+                        excluded_paths
+                        and source_merge_sha is not None
+                        and staging_sha is not None
+                        and (
+                            self.git.merge_base(source_base_sha, source_merge_sha)
+                            != source_base_sha
+                            or self.git.merge_base(source_merge_sha, staging_sha)
+                            != source_merge_sha
+                        )
+                    ):
+                        return self._promotion_blocked(
+                            "source_merge_not_in_staging",
+                            (
+                                f"source pull request #{source.number} merge commit"
+                                " is not in the configured staging history"
                             ),
                         )
                     expected_source_paths = tuple(sorted(source.changed_paths))
@@ -349,8 +427,47 @@ class WorktreeService:
                                 " match its reviewed Git delta"
                             ),
                         )
-                    deltas.append(patch)
-                    for path in expected_source_paths:
+                    if (
+                        excluded_paths
+                        and source_merge_sha is not None
+                        and any(
+                            self.git.path_blob(source_merge_sha, path)
+                            != self.git.path_blob(source_head_sha, path)
+                            for path in expected_source_paths
+                        )
+                    ):
+                        return self._promotion_blocked(
+                            "source_merge_delta_mismatch",
+                            (
+                                f"source pull request #{source.number} merged contents"
+                                " do not match its reviewed head"
+                            ),
+                        )
+                    included_source_paths = tuple(
+                        path
+                        for path in expected_source_paths
+                        if path not in excluded_paths
+                    )
+                    if included_source_paths:
+                        included_patch = (
+                            patch
+                            if not excluded_paths
+                            else self.git.binary_diff(
+                                merge_base,
+                                source_head_sha,
+                                paths=included_source_paths,
+                            )
+                        )
+                        if not included_patch:
+                            return self._promotion_blocked(
+                                "source_delta_mismatch",
+                                (
+                                    f"source pull request #{source.number} has no"
+                                    " included changes after path exclusions"
+                                ),
+                            )
+                        deltas.append(included_patch)
+                    for path in included_source_paths:
                         expected_blob_heads[path] = source_head_sha
             except GitRemoteError as error:
                 return self._external_error(
@@ -363,7 +480,9 @@ class WorktreeService:
                 expected_blob_heads, target_sha
             )
             expected_paths = tuple(sorted(expected_blobs))
-            lease = self._new_promotion_lease(sources, target_ref, target_sha)
+            lease = self._new_promotion_lease(
+                sources, target_ref, target_sha, excluded_paths
+            )
             branch_conflict = self._branch_conflict(lease.branch)
             if branch_conflict is not None:
                 return self._promotion_blocked(
@@ -393,6 +512,7 @@ class WorktreeService:
                     lease.worktree_path,
                     self._promotion_message(
                         sources=sources,
+                        excluded_paths=excluded_paths,
                         target_sha=target_sha,
                         lease=lease,
                         target_branch=target_branch,
@@ -467,6 +587,7 @@ class WorktreeService:
                         title=self._promotion_title(source_numbers, target_branch),
                         body=self._promotion_body(
                             sources=sources,
+                            excluded_paths=excluded_paths,
                             target_sha=target_sha,
                             lease=lease,
                         ),
@@ -2848,6 +2969,36 @@ class WorktreeService:
             )
         return tuple(values)
 
+    @staticmethod
+    def _promotion_excluded_paths(
+        exclude_paths: Sequence[str],
+    ) -> tuple[str, ...]:
+        error_message = (
+            "excluded paths must be a sequence of unique "
+            "repository-relative paths"
+        )
+        if isinstance(exclude_paths, (str, bytes)) or not isinstance(
+            exclude_paths, Sequence
+        ):
+            raise ValueError(error_message)
+        values = tuple(exclude_paths)
+        if any(not isinstance(path, str) for path in values):
+            raise ValueError(error_message)
+        if len(set(values)) != len(values):
+            raise ValueError(error_message)
+        for path in values:
+            parsed = PurePosixPath(path)
+            if (
+                not path
+                or "\0" in path
+                or path.splitlines() != [path]
+                or parsed.is_absolute()
+                or ".." in parsed.parts
+                or str(parsed) != path
+            ):
+                raise ValueError(error_message)
+        return tuple(sorted(values))
+
     def _promotion_net_blobs(
         self,
         expected_blob_heads: Mapping[str, str],
@@ -2941,14 +3092,22 @@ class WorktreeService:
         return None
 
     @staticmethod
-    def _invalid_promotion_oid(source: PullRequest) -> str | None:
+    def _invalid_promotion_oid(
+        source: PullRequest,
+        *,
+        require_merge: bool = False,
+    ) -> str | None:
         for name, value in (
             ("base SHA", source.base_sha),
             ("head SHA", source.head_sha),
             ("merge SHA", source.merge_commit_sha),
         ):
-            if value is not None and re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", value) is None:
+            if value is not None and re.fullmatch(
+                r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", value
+            ) is None:
                 return name
+        if require_merge and source.merge_commit_sha is None:
+            return "merge SHA"
         return None
 
     def _new_promotion_lease(
@@ -2956,10 +3115,13 @@ class WorktreeService:
         sources: Sequence[PullRequest],
         target_ref: str,
         target_sha: str,
+        excluded_paths: Sequence[str],
     ) -> Lease:
         target_branch = target_ref[len("origin/") :]
         initiative = self._promotion_initiative(
-            tuple(source.number for source in sources), target_branch
+            tuple(source.number for source in sources),
+            target_branch,
+            excluded_paths,
         )
         lease = Lease.new(
             repository_id=self.git.repository_id(),
@@ -2982,11 +3144,19 @@ class WorktreeService:
 
     @staticmethod
     def _promotion_initiative(
-        source_prs: Sequence[int], target_branch: str
+        source_prs: Sequence[int],
+        target_branch: str,
+        excluded_paths: Sequence[str] = (),
     ) -> str:
         prefix = "pr" if len(source_prs) == 1 else "prs"
         numbers = "-".join(str(source_pr) for source_pr in source_prs)
-        return f"{prefix}-{numbers}-to-{target_branch}"
+        initiative = f"{prefix}-{numbers}-to-{target_branch}"
+        if not excluded_paths:
+            return initiative
+        digest = hashlib.sha256(
+            "\0".join(excluded_paths).encode("utf-8")
+        ).hexdigest()[:16]
+        return f"{initiative}-except-{digest}"
 
     @staticmethod
     def _promotion_branch(initiative: str) -> str:
@@ -2997,6 +3167,7 @@ class WorktreeService:
         lease: Lease,
         *,
         sources: Sequence[PullRequest],
+        excluded_paths: Sequence[str],
         target_ref: str,
         expected_branch: str,
         github: GhClient,
@@ -3010,6 +3181,49 @@ class WorktreeService:
             return self._promotion_blocked(
                 "promotion_lease_conflict",
                 f"lease {lease.id} does not match the requested promotion",
+                lease=lease,
+            )
+        try:
+            promotion_message = self.git.commit_message(lease.worktree_path)
+        except GitError as error:
+            return self._promotion_blocked(
+                "promotion_lease_conflict", str(error), lease=lease
+            )
+        message_lines = promotion_message.splitlines()
+        excluded_path_prefix = "AWF-Excluded-Path: "
+        recorded_excluded_paths = tuple(
+            line[len(excluded_path_prefix) :]
+            for line in message_lines
+            if line.startswith(excluded_path_prefix)
+        )
+        if recorded_excluded_paths != tuple(excluded_paths):
+            return self._promotion_blocked(
+                "promotion_lease_conflict",
+                f"lease {lease.id} exclusions do not match the requested promotion",
+                lease=lease,
+            )
+        target_base_prefix = "AWF-Target-Base: "
+        target_base_line = message_lines[-2] if len(message_lines) >= 2 else ""
+        target_base_sha = (
+            target_base_line[len(target_base_prefix) :]
+            if target_base_line.startswith(target_base_prefix)
+            else ""
+        )
+        if (
+            _GIT_OBJECT_ID.fullmatch(target_base_sha) is None
+            or self._promotion_source_bases_from_message(
+                promotion_message,
+                sources=sources,
+                excluded_paths=excluded_paths,
+                target_sha=target_base_sha,
+                lease=lease,
+                target_branch=target_branch,
+            )
+            is None
+        ):
+            return self._promotion_blocked(
+                "promotion_incomplete",
+                f"lease {lease.id} does not have exact promotion provenance",
                 lease=lease,
             )
         if lease.state is LeaseState.PR_OPEN and lease.target_pr is not None:
@@ -3040,6 +3254,7 @@ class WorktreeService:
                 lease,
                 github=github,
                 sources=sources,
+                excluded_paths=excluded_paths,
                 target_branch=target_branch,
             )
         if lease.state is not LeaseState.ACTIVE:
@@ -3059,15 +3274,16 @@ class WorktreeService:
             lease,
             github=github,
             sources=sources,
+            excluded_paths=excluded_paths,
             target_branch=target_branch,
         )
-        
     def _recover_unrecorded_promotion_publish(
         self,
         lease: Lease,
         *,
         github: GhClient,
         sources: Sequence[PullRequest],
+        excluded_paths: Sequence[str],
         target_branch: str,
     ) -> CommandResult:
         try:
@@ -3107,6 +3323,7 @@ class WorktreeService:
             source_base_shas = self._promotion_source_bases_from_message(
                 self.git.commit_message(lease.worktree_path),
                 sources=sources,
+                excluded_paths=excluded_paths,
                 target_sha=target_sha,
                 lease=lease,
                 target_branch=target_branch,
@@ -3136,7 +3353,8 @@ class WorktreeService:
                         lease=lease,
                     )
                 for path in source.changed_paths:
-                    expected_blob_heads[path] = source.head_sha
+                    if path not in excluded_paths:
+                        expected_blob_heads[path] = source.head_sha
             expected_blobs = self._promotion_net_blobs(
                 expected_blob_heads, target_sha
             )
@@ -3301,7 +3519,11 @@ class WorktreeService:
 
     @staticmethod
     def _promotion_trailers(
-        *, sources: Sequence[PullRequest], target_sha: str, lease: Lease
+        *,
+        sources: Sequence[PullRequest],
+        excluded_paths: Sequence[str],
+        target_sha: str,
+        lease: Lease,
     ) -> tuple[str, ...]:
         source_trailers = tuple(
             trailer
@@ -3312,8 +3534,12 @@ class WorktreeService:
                 f"AWF-Source-Head: {source.head_sha}",
             )
         )
+        excluded_trailers = tuple(
+            f"AWF-Excluded-Path: {path}" for path in excluded_paths
+        )
         return (
             *source_trailers,
+            *excluded_trailers,
             f"AWF-Target-Base: {target_sha}",
             f"AWF-Lease-ID: {lease.id}",
         )
@@ -3322,6 +3548,7 @@ class WorktreeService:
         self,
         *,
         sources: Sequence[PullRequest],
+        excluded_paths: Sequence[str],
         target_sha: str,
         lease: Lease,
         target_branch: str,
@@ -3334,7 +3561,10 @@ class WorktreeService:
                 ),
                 "",
                 *self._promotion_trailers(
-                    sources=sources, target_sha=target_sha, lease=lease
+                    sources=sources,
+                    excluded_paths=excluded_paths,
+                    target_sha=target_sha,
+                    lease=lease,
                 ),
             )
         )
@@ -3344,13 +3574,14 @@ class WorktreeService:
         message: str,
         *,
         sources: Sequence[PullRequest],
+        excluded_paths: Sequence[str],
         target_sha: str,
         lease: Lease,
         target_branch: str,
     ) -> tuple[str, ...] | None:
         lines = message.splitlines()
         if (
-            len(lines) != 3 * len(sources) + 4
+            len(lines) != 3 * len(sources) + len(excluded_paths) + 4
             or lines[0]
             != WorktreeService._promotion_title(
                 tuple(source.number for source in sources),
@@ -3378,6 +3609,10 @@ class WorktreeService:
                 lines[offset + 1][len(source_base_prefix) :]
             )
             offset += 3
+        for excluded_path in excluded_paths:
+            if lines[offset] != f"AWF-Excluded-Path: {excluded_path}":
+                return None
+            offset += 1
         if (
             lines[offset] != f"AWF-Target-Base: {target_sha}"
             or lines[offset + 1] != f"AWF-Lease-ID: {lease.id}"
@@ -3389,12 +3624,16 @@ class WorktreeService:
         self,
         *,
         sources: Sequence[PullRequest],
+        excluded_paths: Sequence[str],
         target_sha: str,
         lease: Lease,
     ) -> str:
         return "\n".join(
             self._promotion_trailers(
-                sources=sources, target_sha=target_sha, lease=lease
+                sources=sources,
+                excluded_paths=excluded_paths,
+                target_sha=target_sha,
+                lease=lease,
             )
         )
 

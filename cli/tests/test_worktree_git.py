@@ -296,17 +296,21 @@ def test_git_client_applies_binary_patch_and_commits_from_a_worktree(tmp_path: P
     client.add_worktree(source, "awf/source", base)
     client.add_worktree(target, "awf/target", base)
     (source / "feature with spaces.txt").write_text("feature\n", encoding="utf-8")
-    git(source, "add", "feature with spaces.txt")
+    (source / "excluded.txt").write_text("excluded\n", encoding="utf-8")
+    git(source, "add", "feature with spaces.txt", "excluded.txt")
     source_head = git(source, "commit", "-q", "-m", "source feature") or git(
         source, "rev-parse", "HEAD"
     )
 
-    patch = client.binary_diff(base, source_head)
+    patch = client.binary_diff(
+        base, source_head, paths=("feature with spaces.txt",)
+    )
     client.apply_indexed_patch(target, patch)
     target_head = client.commit(target, "Apply source feature")
 
     assert client.merge_base(base, source_head) == base
     assert client.changed_paths(target, base) == ("feature with spaces.txt",)
+    assert not (target / "excluded.txt").exists()
     assert target_head == git(target, "rev-parse", "HEAD")
 
 

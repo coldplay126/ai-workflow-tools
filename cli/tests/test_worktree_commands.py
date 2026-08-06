@@ -512,6 +512,10 @@ def test_wt_promote_parser_surface() -> None:
             "372",
             "--source-pr",
             "373",
+            "--exclude-path",
+            "src/OpenApi.ts",
+            "--exclude-path",
+            "src/domains/fanLog/FanLogOpenApi.ts",
             "--to",
             "main",
             "--repo-root",
@@ -524,6 +528,10 @@ def test_wt_promote_parser_surface() -> None:
     assert args.command == "wt"
     assert args.wt_command == "promote"
     assert args.source_pr == [372, 373]
+    assert args.exclude_path == [
+        "src/OpenApi.ts",
+        "src/domains/fanLog/FanLogOpenApi.ts",
+    ]
     assert args.to == "main"
     assert args.repo_root == "/repo"
     assert args.apply is True

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 
 import hashlib
@@ -242,10 +242,23 @@ class GitClient:
             raise GitError("git ls-tree returned an invalid path record")
         return fields[2].decode("ascii", errors="strict")
 
-    def binary_diff(self, base: str, head: str) -> bytes:
-        return self._run(
-            "diff", "--binary", "--full-index", "--find-renames", f"{base}..{head}"
-        ).stdout
+    def binary_diff(
+        self,
+        base: str,
+        head: str,
+        *,
+        paths: Sequence[str] | None = None,
+    ) -> bytes:
+        args = [
+            "diff",
+            "--binary",
+            "--full-index",
+            "--find-renames",
+            f"{base}..{head}",
+        ]
+        if paths is not None:
+            args.extend(("--", *paths))
+        return self._run(*args).stdout
 
     def apply_indexed_patch(self, cwd: Path, patch: bytes) -> None:
         self._run("apply", "--3way", "--index", "-", cwd=cwd, input_bytes=patch)
