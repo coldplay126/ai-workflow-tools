@@ -689,13 +689,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     wt_promote_parser = wt_subparsers.add_parser(
         "promote",
-        help="Promote one approved staging pull request delta to production.",
+        help="Promote one or more ordered staging pull request deltas to production.",
     )
     wt_promote_parser.add_argument(
         "--source-pr",
         required=True,
+        action="append",
         type=int,
-        help="Merged, approved staging pull request number.",
+        help="Merged staging pull request number. Repeat in staging merge order.",
     )
     wt_promote_parser.add_argument(
         "--to",
