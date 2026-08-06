@@ -3649,6 +3649,309 @@ def test_promote_verifies_before_pushing_or_creating_a_pr(
     )
 
 
+def test_promote_retries_blocked_verification_failure_with_exact_provenance(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.configure(
+        verify_production=(
+            (
+                sys.executable,
+                "-c",
+                "import sys; sys.stderr.write('verification failed'); sys.exit(7)",
+            ),
+        )
+    )
+    first = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+    assert first.status == "blocked"
+    assert first.lease is not None
+    assert first.lease.state is LeaseState.BLOCKED
+
+    promotion_harness.configure(
+        verify_production=((sys.executable, "-c", "pass"),)
+    )
+    second = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert second.decision == "ready"
+    assert second.lease is not None
+    assert second.lease.state is LeaseState.PR_OPEN
+    assert len(promotion_harness.github.create_calls) == 1
+
+
+def test_promote_retries_blocked_transient_prepare_failure(
+    promotion_harness: PromotionHarness,
+) -> None:
+    prepare_count = promotion_harness.state_dir / "blocked-prepare-count.txt"
+    verify_count = promotion_harness.state_dir / "blocked-verify-count.txt"
+    prepare_script = (
+        "import sys; from pathlib import Path; "
+        f"path = Path({str(prepare_count)!r}); "
+        "count = int(path.read_text(encoding='utf-8')) if path.exists() else 0; "
+        "path.write_text(str(count + 1), encoding='utf-8'); "
+        "sys.exit(7) if count == 0 else None"
+    )
+    verify_script = (
+        "from pathlib import Path; "
+        f"path = Path({str(verify_count)!r}); "
+        "count = int(path.read_text(encoding='utf-8')) if path.exists() else 0; "
+        "path.write_text(str(count + 1), encoding='utf-8')"
+    )
+    promotion_harness.configure(
+        prepare_command=(sys.executable, "-c", prepare_script),
+        verify_production=((sys.executable, "-c", verify_script),),
+    )
+
+    first = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+    assert first.status == "blocked"
+    assert first.blockers[0]["code"] == "promotion_prepare_failed"
+
+    second = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert second.decision == "ready"
+    assert second.lease is not None
+    assert second.lease.state is LeaseState.PR_OPEN
+    assert prepare_count.read_text(encoding="utf-8") == "2"
+    assert verify_count.read_text(encoding="utf-8") == "2"
+    assert len(promotion_harness.github.create_calls) == 1
+
+
+def test_promote_retries_blocked_resume_verification_failure(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verify_count = promotion_harness.state_dir / "resume-verify-count.txt"
+    verify_script = (
+        "import sys; from pathlib import Path; "
+        f"path = Path({str(verify_count)!r}); "
+        "count = int(path.read_text(encoding='utf-8')) if path.exists() else 0; "
+        "path.write_text(str(count + 1), encoding='utf-8'); "
+        "sys.exit(7) if count == 1 else None"
+    )
+    promotion_harness.configure(
+        verify_production=((sys.executable, "-c", verify_script),)
+    )
+    original_push = promotion_harness.git.push_branch
+
+    def fail_push(*_: object) -> None:
+        raise GitError("transient remote failure")
+
+    monkeypatch.setattr(promotion_harness.git, "push_branch", fail_push)
+    first = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+    assert first.status == "error"
+    monkeypatch.setattr(promotion_harness.git, "push_branch", original_push)
+
+    second = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+    assert second.status == "blocked"
+    assert second.blockers[0]["code"] == "promotion_verification_failed"
+
+    third = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert third.decision == "ready"
+    assert third.lease is not None
+    assert third.lease.state is LeaseState.PR_OPEN
+    assert verify_count.read_text(encoding="utf-8") == "4"
+    assert len(promotion_harness.github.create_calls) == 1
+
+
+def test_promote_does_not_retry_blocked_verification_after_provenance_changes(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.configure(
+        verify_production=(
+            (
+                sys.executable,
+                "-c",
+                "import sys; sys.stderr.write('verification failed'); sys.exit(7)",
+            ),
+        )
+    )
+    first = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+    assert first.status == "blocked"
+    assert first.lease is not None
+    git_command(
+        first.lease.worktree_path,
+        "commit",
+        "--amend",
+        "-q",
+        "-m",
+        "tampered promotion",
+    )
+
+    promotion_harness.configure(
+        verify_production=((sys.executable, "-c", "pass"),)
+    )
+    second = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert second.status == "blocked"
+    assert second.blockers[0]["code"] == "promotion_incomplete"
+    assert promotion_harness.github.create_calls == []
+
+
+
+def test_promote_does_not_retry_blocked_verification_from_forged_target_parent(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.configure(
+        verify_production=(
+            (
+                sys.executable,
+                "-c",
+                "import sys; sys.stderr.write('verification failed'); sys.exit(7)",
+            ),
+        )
+    )
+    first = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+    assert first.status == "blocked"
+    assert first.lease is not None
+    worktree_path = first.lease.worktree_path
+    target_tree = git_command(worktree_path, "rev-parse", "HEAD^^{tree}")
+    foreign_target = git_command(
+        worktree_path,
+        "commit-tree",
+        target_tree,
+        "-m",
+        "foreign target",
+    )
+    promotion_tree = git_command(worktree_path, "rev-parse", "HEAD^{tree}")
+    source = promotion_harness.github.prs[372]
+    message = "\n".join(
+        (
+            "Promote PR #372 to main",
+            "",
+            "AWF-Source-PR: 372",
+            f"AWF-Source-Base: {source.base_sha}",
+            f"AWF-Source-Head: {source.head_sha}",
+            f"AWF-Target-Base: {foreign_target}",
+            f"AWF-Lease-ID: {first.lease.id}",
+        )
+    )
+    forged_promotion = git_command(
+        worktree_path,
+        "commit-tree",
+        promotion_tree,
+        "-p",
+        foreign_target,
+        "-m",
+        message,
+    )
+    git_command(worktree_path, "reset", "--hard", "-q", forged_promotion)
+    blocked = promotion_harness.registry.get_lease(first.lease.id)
+    assert blocked is not None
+    promotion_harness.registry.transition(
+        blocked.id,
+        LeaseState.BLOCKED,
+        expected_version=blocked.version,
+        event_type="promotion_blocked",
+        summary="promotion_apply_failed: production verification failed",
+        head_sha=forged_promotion,
+    )
+
+    promotion_harness.configure(
+        verify_production=((sys.executable, "-c", "pass"),)
+    )
+    second = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert second.status == "blocked"
+    assert second.blockers[0]["code"] == "promotion_incomplete"
+    assert promotion_harness.github.create_calls == []
+
+
+def test_promote_does_not_retry_blocked_verification_from_forged_source_base(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.configure(
+        verify_production=(
+            (
+                sys.executable,
+                "-c",
+                "import sys; sys.stderr.write('verification failed'); sys.exit(7)",
+            ),
+        )
+    )
+    first = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+    assert first.status == "blocked"
+    assert first.lease is not None
+    worktree_path = first.lease.worktree_path
+    source = promotion_harness.github.prs[372]
+    target_sha = git_command(worktree_path, "rev-parse", "HEAD^")
+    message = git_command(worktree_path, "log", "-1", "--format=%B").replace(
+        f"AWF-Source-Base: {source.base_sha}",
+        f"AWF-Source-Base: {target_sha}",
+    )
+    git_command(worktree_path, "commit", "--amend", "-q", "-m", message)
+    forged_promotion = git_command(worktree_path, "rev-parse", "HEAD")
+    blocked = promotion_harness.registry.get_lease(first.lease.id)
+    assert blocked is not None
+    promotion_harness.registry.transition(
+        blocked.id,
+        LeaseState.BLOCKED,
+        expected_version=blocked.version,
+        event_type="promotion_blocked",
+        summary="promotion_apply_failed: production verification failed",
+        head_sha=forged_promotion,
+    )
+
+    promotion_harness.configure(
+        verify_production=((sys.executable, "-c", "pass"),)
+    )
+    second = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert second.status == "blocked"
+    assert second.blockers[0]["code"] == "promotion_incomplete"
+    assert promotion_harness.github.create_calls == []
+
+
 def test_promote_reconciles_existing_pr_after_registry_transition_failure(
     promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:

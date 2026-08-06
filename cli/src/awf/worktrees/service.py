@@ -57,6 +57,8 @@ _PRODUCTION_VERIFY_TIMEOUT_SECONDS = 300.0
 _GITHUB_ACTOR_LOGIN = re.compile(
     r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}(?:\[bot\])?"
 )
+_GIT_OBJECT_ID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+
 
 
 def _same_github_actor(author: object, merger: object) -> bool:
@@ -2900,23 +2902,39 @@ class WorktreeService:
             )
         if lease.state is LeaseState.PR_OPEN and lease.target_pr is not None:
             return CommandResult.ok("wt.promote", decision="reuse", lease=lease)
-        if lease.state is LeaseState.BLOCKED:
+        try:
+            events = self.registry.list_events(lease.id)
+        except sqlite3.Error as error:
             return self._promotion_blocked(
-                "promotion_incomplete",
-                f"lease {lease.id} is blocked without an open target pull request",
-                lease=lease,
+                "promotion_reconciliation_failed", str(error), lease=lease
+            )
+        if lease.state is LeaseState.BLOCKED:
+            retryable_prefixes = (
+                "promotion_apply_failed: production verification failed",
+                "promotion_prepare_failed:",
+                "promotion_verification_failed:",
+            )
+            if not (
+                events
+                and events[-1].event_type == "promotion_blocked"
+                and events[-1].summary.startswith(retryable_prefixes)
+            ):
+                return self._promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} is blocked without an open target pull request",
+                    lease=lease,
+                )
+            return self._recover_unrecorded_promotion_publish(
+                lease,
+                github=github,
+                source=source,
+                target_branch=target_branch,
             )
         if lease.state is not LeaseState.ACTIVE:
             return self._promotion_blocked(
                 "promotion_incomplete",
                 f"lease {lease.id} is {lease.state.value} without an open target pull request",
                 lease=lease,
-            )
-        try:
-            events = self.registry.list_events(lease.id)
-        except sqlite3.Error as error:
-            return self._promotion_blocked(
-                "promotion_reconciliation_failed", str(error), lease=lease
             )
         if events and events[-1].event_type == "promotion_publish_pending":
             return self._resume_promotion_publish(
@@ -2954,7 +2972,18 @@ class WorktreeService:
                     lease=lease,
                 )
             promotion_head = self.git.head_sha(lease.worktree_path)
-            if promotion_head == lease.head_sha:
+            target_sha = (
+                self.git.fetch_ref(target_branch)
+                if lease.state is LeaseState.BLOCKED
+                else lease.head_sha
+            )
+            if (
+                promotion_head == target_sha
+                or _GIT_OBJECT_ID.fullmatch(promotion_head) is None
+                or _GIT_OBJECT_ID.fullmatch(target_sha) is None
+                or _GIT_OBJECT_ID.fullmatch(source.head_sha) is None
+                or _GIT_OBJECT_ID.fullmatch(source.base_sha) is None
+            ):
                 return self._promotion_blocked(
                     "promotion_incomplete",
                     f"lease {lease.id} was not verified for publication",
@@ -2963,11 +2992,19 @@ class WorktreeService:
             source_base_sha = self._promotion_source_base_from_message(
                 self.git.commit_message(lease.worktree_path),
                 source=source,
-                target_sha=lease.head_sha,
+                target_sha=target_sha,
                 lease=lease,
                 target_branch=target_branch,
             )
-            if source_base_sha is None:
+            if (
+                source_base_sha is None
+                or _GIT_OBJECT_ID.fullmatch(source_base_sha) is None
+                or (
+                    lease.state is LeaseState.BLOCKED
+                    and source_base_sha != source.base_sha
+                )
+                or self.git.commit_parents(promotion_head) != (target_sha,)
+            ):
                 return self._promotion_blocked(
                     "promotion_incomplete",
                     f"lease {lease.id} does not have exact promotion provenance",
@@ -2984,7 +3021,7 @@ class WorktreeService:
             if (
                 source_head_sha != source.head_sha
                 or self.git.changed_paths(
-                    lease.worktree_path, lease.head_sha, promotion_head
+                    lease.worktree_path, target_sha, promotion_head
                 )
                 != expected_paths
                 or any(
@@ -3162,6 +3199,7 @@ class WorktreeService:
             )
         )
 
+
     @staticmethod
     def _promotion_source_base_from_message(
         message: str,
@@ -3179,7 +3217,7 @@ class WorktreeService:
             or lines[1] != ""
             or lines[2] != f"AWF-Source-PR: {source.number}"
             or not lines[3].startswith(source_base_prefix)
-            or not lines[3][len(source_base_prefix) :]
+            or _GIT_OBJECT_ID.fullmatch(lines[3][len(source_base_prefix) :]) is None
             or lines[4] != f"AWF-Source-Head: {source.head_sha}"
             or lines[5] != f"AWF-Target-Base: {target_sha}"
             or lines[6] != f"AWF-Lease-ID: {lease.id}"
