@@ -411,24 +411,31 @@ class PromotionHarness:
         number: int = 373,
         *,
         feature_text: str | None = "feature updated\n",
+        change_feature: bool = True,
         include_followup: bool = True,
+        team_text: str | None = None,
     ) -> PullRequest:
         git_command(self.repo, "checkout", "-q", "staging")
         base_sha = git_command(self.repo, "rev-parse", "HEAD")
         branch = f"feature/pr-{number}"
         git_command(self.repo, "checkout", "-q", "-b", branch)
-        if feature_text is None:
-            (self.repo / "feature.txt").unlink()
-        else:
-            (self.repo / "feature.txt").write_text(
-                feature_text, encoding="utf-8"
-            )
-        changed_paths = ["feature.txt"]
+        changed_paths: list[str] = []
+        if change_feature:
+            if feature_text is None:
+                (self.repo / "feature.txt").unlink()
+            else:
+                (self.repo / "feature.txt").write_text(
+                    feature_text, encoding="utf-8"
+                )
+            changed_paths.append("feature.txt")
         if include_followup:
             (self.repo / "followup.txt").write_text(
                 "followup\n", encoding="utf-8"
             )
             changed_paths.append("followup.txt")
+        if team_text is not None:
+            (self.repo / "team.txt").write_text(team_text, encoding="utf-8")
+            changed_paths.append("team.txt")
         git_command(self.repo, "add", "-A", *changed_paths)
         git_command(self.repo, "commit", "-q", "-m", "source followup")
         head_sha = git_command(self.repo, "rev-parse", "HEAD")
@@ -3418,6 +3425,139 @@ def test_promote_recovers_multi_source_delta_with_no_net_path_change(
     ) == 2
 
 
+def test_promote_excludes_reviewed_paths_and_recovers_safely(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.add_followup_source(
+        change_feature=False,
+        include_followup=False,
+        team_text="team updated\n",
+    )
+    promotion_harness.configure(
+        verify_production=(
+            (sys.executable, "-c", "import sys; sys.exit(1)"),
+        )
+    )
+
+    first = promotion_harness.service.promote(
+        source_pr=(372, 373),
+        target_branch="main",
+        exclude_paths=("team.txt",),
+        apply=True,
+    )
+    promotion_harness.configure(
+        verify_production=((sys.executable, "-c", "pass"),)
+    )
+    second = promotion_harness.service.promote(
+        source_pr=(372, 373),
+        target_branch="main",
+        exclude_paths=("team.txt",),
+        apply=True,
+    )
+
+    assert first.status == "blocked"
+    assert second.decision == "ready"
+    assert second.lease is not None
+    worktree = second.lease.worktree_path
+    assert (worktree / "feature.txt").read_text(encoding="utf-8") == "feature\n"
+    assert not (worktree / "team.txt").exists()
+    assert promotion_harness.git.changed_paths(
+        worktree, second.lease.base_ref
+    ) == ("feature.txt",)
+    assert "-except-" in second.lease.branch
+    assert "AWF-Excluded-Path: team.txt" in (
+        promotion_harness.github.create_calls[0]["body"]
+    )
+
+
+def test_promote_rejects_reuse_with_different_path_exclusions(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    promotion_harness.add_followup_source(
+        change_feature=False,
+        include_followup=False,
+        team_text="team updated\n",
+    )
+    first = promotion_harness.service.promote(
+        source_pr=(372, 373),
+        target_branch="main",
+        exclude_paths=("team.txt",),
+        apply=True,
+    )
+    assert first.decision == "ready"
+    assert first.lease is not None
+    first_initiative = first.lease.initiative
+    monkeypatch.setattr(
+        WorktreeService,
+        "_promotion_initiative",
+        staticmethod(
+            lambda source_prs, target_branch, excluded_paths=(): first_initiative
+        ),
+    )
+
+    second = promotion_harness.service.promote(
+        source_pr=(372, 373),
+        target_branch="main",
+        exclude_paths=("feature.txt",),
+        apply=True,
+    )
+
+    assert second.status == "blocked"
+    assert second.blockers[0]["code"] == "promotion_lease_conflict"
+    assert len(promotion_harness.github.create_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "excluded_paths",
+    [
+        pytest.param(("missing.txt",), id="unreviewed"),
+        pytest.param(("feature.txt",), id="all-reviewed"),
+        pytest.param(("/absolute.txt",), id="absolute"),
+        pytest.param(("../parent.txt",), id="parent"),
+        pytest.param(("team.txt", "team.txt"), id="duplicate"),
+        pytest.param(("line\nbreak.txt",), id="newline"),
+        pytest.param("feature.txt", id="scalar-string"),
+        pytest.param((1,), id="non-string"),
+        pytest.param(None, id="none"),
+    ],
+)
+def test_promote_rejects_invalid_excluded_paths(
+    promotion_harness: PromotionHarness,
+    excluded_paths: object,
+) -> None:
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        exclude_paths=excluded_paths,  # type: ignore[arg-type]
+        apply=False,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "invalid_excluded_path"
+
+
+def test_promote_rejects_line_separator_in_reviewed_excluded_path(
+    promotion_harness: PromotionHarness,
+) -> None:
+    separator_path = "line\u2028break.txt"
+    source = promotion_harness.github.prs[372]
+    promotion_harness.github.prs[372] = replace(
+        source,
+        changed_paths=(*source.changed_paths, separator_path),
+    )
+
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        exclude_paths=(separator_path,),
+        apply=False,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "invalid_excluded_path"
+
+
 @pytest.mark.parametrize(
     "invalid_source",
     [
@@ -3445,6 +3585,26 @@ def test_promote_rejects_invalid_source_pr_values(
     assert result.blockers[0]["code"] == "invalid_source_pr"
 
 
+def test_promote_preserves_single_source_without_merge_commit(
+    promotion_harness: PromotionHarness,
+) -> None:
+    source = promotion_harness.github.prs[372]
+    promotion_harness.github.prs[372] = replace(
+        source,
+        merge_commit_sha=None,
+    )
+
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert result.decision == "ready"
+    assert result.lease is not None
+    assert result.lease.state is LeaseState.PR_OPEN
+
+
 def test_promote_rejects_gap_between_source_pull_requests(
     promotion_harness: PromotionHarness,
 ) -> None:
@@ -3462,6 +3622,58 @@ def test_promote_rejects_gap_between_source_pull_requests(
 
     assert result.status == "blocked"
     assert result.blockers[0]["code"] == "source_pr_sequence_gap"
+
+
+def test_promote_rejects_source_base_outside_reviewed_head_ancestry(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.add_followup_source(
+        change_feature=False,
+        include_followup=False,
+        team_text="team updated\n",
+    )
+    promotion_harness.make_target_conflict()
+    source = promotion_harness.github.prs[372]
+    promotion_harness.github.prs[372] = replace(
+        source,
+        base_sha=promotion_harness.git.resolve_ref("main"),
+    )
+
+    result = promotion_harness.service.promote(
+        source_pr=(372, 373),
+        target_branch="main",
+        exclude_paths=("team.txt",),
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "source_base_not_ancestor"
+
+
+def test_promote_rejects_merge_commit_outside_staging_history(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.add_followup_source(
+        change_feature=False,
+        include_followup=False,
+        team_text="team updated\n",
+    )
+    promotion_harness.make_target_conflict()
+    source = promotion_harness.github.prs[373]
+    promotion_harness.github.prs[373] = replace(
+        source,
+        merge_commit_sha=promotion_harness.git.resolve_ref("main"),
+    )
+
+    result = promotion_harness.service.promote(
+        source_pr=(372, 373),
+        target_branch="main",
+        exclude_paths=("team.txt",),
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "source_merge_not_in_staging"
 
 
 def test_promote_prepares_worktree_before_production_verification(

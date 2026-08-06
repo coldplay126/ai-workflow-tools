@@ -131,6 +131,7 @@ def run_wt_promote(args: argparse.Namespace) -> int:
         "wt.promote",
         lambda service: service.promote(
             source_pr=args.source_pr,
+            exclude_paths=args.exclude_path,
             target_branch=args.to,
             apply=args.apply,
         ),

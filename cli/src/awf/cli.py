@@ -699,6 +699,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Merged staging pull request number. Repeat in staging merge order.",
     )
     wt_promote_parser.add_argument(
+        "--exclude-path",
+        action="append",
+        default=[],
+        help=(
+            "Exact reviewed path to omit from every source delta. "
+            "Repeat for multiple paths."
+        ),
+    )
+    wt_promote_parser.add_argument(
         "--to",
         required=True,
         help="Production branch (main or master).",
