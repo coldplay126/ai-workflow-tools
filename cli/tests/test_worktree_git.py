@@ -12,6 +12,7 @@ import pytest
 
 from awf.worktrees.config import ConfigError, WorktreeConfig, load_worktree_config
 from awf.worktrees.git import (
+    GitCompleted,
     GitClient,
     GitError,
     GitRemoteError,
@@ -140,6 +141,74 @@ def test_git_client_reads_remote_branch_sha_and_missing_branch(tmp_path: Path) -
 
     assert client.remote_branch_sha("retry-target") == retry_sha
     assert client.remote_branch_sha("missing") is None
+
+
+def test_git_client_reads_sha256_remote_branch_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = GitClient(make_repository(tmp_path))
+    sha = "a" * 64
+
+    def ls_remote(*args: str, **_kwargs: object) -> GitCompleted:
+        assert args == (
+            "ls-remote",
+            "--heads",
+            "origin",
+            "refs/heads/retry-target",
+        )
+        return GitCompleted(
+            0, f"{sha}\trefs/heads/retry-target\n".encode("ascii"), b""
+        )
+
+    monkeypatch.setattr(client, "_run", ls_remote)
+
+    assert client.remote_branch_sha("retry-target") == sha
+
+
+@pytest.mark.parametrize(
+    ("record", "message"),
+    (
+        (
+            f"{'a' * 40}\trefs/heads/retry-target\n"
+            f"{'b' * 40}\trefs/heads/retry-target\n",
+            "multiple branch records",
+        ),
+        (f"{'a' * 40}\trefs/heads/other\n", "invalid branch record"),
+        (f"{'A' * 40}\trefs/heads/retry-target\n", "invalid branch record"),
+        (f"{'g' * 40}\trefs/heads/retry-target\n", "invalid branch record"),
+    ),
+)
+def test_git_client_rejects_malformed_remote_branch_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    record: str,
+    message: str,
+) -> None:
+    client = GitClient(make_repository(tmp_path))
+
+    def ls_remote(*_args: str, **_kwargs: object) -> GitCompleted:
+        return GitCompleted(0, record.encode("ascii"), b"")
+
+    monkeypatch.setattr(client, "_run", ls_remote)
+
+    with pytest.raises(GitRemoteError, match=message):
+        client.remote_branch_sha("retry-target")
+
+
+def test_git_client_normalizes_remote_branch_lookup_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = GitClient(make_repository(tmp_path))
+
+    def fail_ls_remote(*_args: str, **_kwargs: object) -> GitCompleted:
+        raise GitError("git ls-remote failed (128): transport failure")
+
+    monkeypatch.setattr(client, "_run", fail_ls_remote)
+
+    with pytest.raises(GitRemoteError, match="transport failure") as error:
+        client.remote_branch_sha("retry-target")
+
+    assert isinstance(error.value.__cause__, GitError)
 
 
 def test_git_client_adds_and_removes_worktrees(tmp_path: Path) -> None:
