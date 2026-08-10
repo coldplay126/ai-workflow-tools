@@ -3208,17 +3208,17 @@ class WorktreeService:
             if target_base_line.startswith(target_base_prefix)
             else ""
         )
+        recorded_source_base_shas = self._promotion_source_bases_from_message(
+            promotion_message,
+            sources=sources,
+            excluded_paths=excluded_paths,
+            target_sha=target_base_sha,
+            lease=lease,
+            target_branch=target_branch,
+        )
         if (
             _GIT_OBJECT_ID.fullmatch(target_base_sha) is None
-            or self._promotion_source_bases_from_message(
-                promotion_message,
-                sources=sources,
-                excluded_paths=excluded_paths,
-                target_sha=target_base_sha,
-                lease=lease,
-                target_branch=target_branch,
-            )
-            is None
+            or recorded_source_base_shas is None
         ):
             return self._promotion_blocked(
                 "promotion_incomplete",
@@ -3246,6 +3246,7 @@ class WorktreeService:
                     sources=sources,
                     excluded_paths=excluded_paths,
                     recorded_target_sha=target_base_sha,
+                    recorded_source_base_shas=recorded_source_base_shas,
                     target_branch=target_branch,
                 )
             retryable_prefixes = (
@@ -3299,6 +3300,7 @@ class WorktreeService:
         sources: Sequence[PullRequest],
         excluded_paths: Sequence[str],
         recorded_target_sha: str,
+        recorded_source_base_shas: Sequence[str],
         target_branch: str,
     ) -> CommandResult:
         old_head = self.git.head_sha(lease.worktree_path)
@@ -3325,6 +3327,14 @@ class WorktreeService:
             return self._promotion_blocked(
                 "promotion_incomplete",
                 f"lease {lease.id} target branch has not advanced",
+                lease=lease,
+            )
+        if recorded_source_base_shas != tuple(
+            source.base_sha for source in sources
+        ):
+            return self._promotion_blocked(
+                "promotion_incomplete",
+                f"lease {lease.id} source provenance changed",
                 lease=lease,
             )
 
