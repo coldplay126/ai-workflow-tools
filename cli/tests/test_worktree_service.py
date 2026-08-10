@@ -4198,6 +4198,16 @@ def test_promote_does_not_rebuild_content_mismatch_without_target_advance(
     assert first.blockers[0]["code"] == "promotion_content_mismatch"
     assert first.lease is not None
     blocked_head = first.lease.head_sha
+    assert any(
+        worktree.path == first.lease.worktree_path
+        for worktree in promotion_harness.git.list_worktrees()
+    )
+    assert promotion_harness.git.status_porcelain(first.lease.worktree_path) == ()
+    assert promotion_harness.git.head_sha(first.lease.worktree_path) == blocked_head
+    assert promotion_harness.git.commit_parents(blocked_head) == (
+        promotion_harness.git.resolve_ref("main"),
+    )
+
 
     second = promotion_harness.service.promote(
         source_pr=source.number,
@@ -4207,6 +4217,10 @@ def test_promote_does_not_rebuild_content_mismatch_without_target_advance(
 
     assert second.status == "blocked"
     assert second.blockers[0]["code"] == "promotion_incomplete"
+    assert second.blockers[0]["message"] == (
+        f"lease {first.lease.id} target branch has not advanced"
+    )
+
     assert promotion_harness.github.create_calls == []
     assert promotion_harness.git.head_sha(first.lease.worktree_path) == blocked_head
 
@@ -4225,10 +4239,22 @@ def test_promote_does_not_rebuild_dirty_content_mismatch_after_target_advances(
     assert first.blockers[0]["code"] == "promotion_content_mismatch"
     assert first.lease is not None
     blocked_head = first.lease.head_sha
-    promotion_harness.advance_target_prerequisite()
+    recorded_target_sha = promotion_harness.git.commit_parents(blocked_head)[0]
+    target_sha = promotion_harness.advance_target_prerequisite()
+    assert target_sha != recorded_target_sha
+    assert any(
+        worktree.path == first.lease.worktree_path
+        for worktree in promotion_harness.git.list_worktrees()
+    )
+    assert promotion_harness.git.head_sha(first.lease.worktree_path) == blocked_head
+    assert promotion_harness.git.commit_parents(blocked_head) == (
+        recorded_target_sha,
+    )
+
     (first.lease.worktree_path / "README.txt").write_text(
         "dirty\n", encoding="utf-8"
     )
+    assert promotion_harness.git.status_porcelain(first.lease.worktree_path)
 
     second = promotion_harness.service.promote(
         source_pr=source.number,
@@ -4238,6 +4264,10 @@ def test_promote_does_not_rebuild_dirty_content_mismatch_after_target_advances(
 
     assert second.status == "blocked"
     assert second.blockers[0]["code"] == "promotion_incomplete"
+    assert second.blockers[0]["message"] == (
+        f"lease {first.lease.id} worktree has uncommitted changes"
+    )
+
     assert promotion_harness.github.create_calls == []
     assert promotion_harness.git.head_sha(first.lease.worktree_path) == blocked_head
 
@@ -4264,6 +4294,8 @@ def test_promote_does_not_rebuild_content_mismatch_with_published_branch(
         "origin",
         first.lease.branch,
     )
+    assert promotion_harness.git.remote_branch_sha(first.lease.branch) == blocked_head
+
 
     second = promotion_harness.service.promote(
         source_pr=source.number,
@@ -4273,6 +4305,10 @@ def test_promote_does_not_rebuild_content_mismatch_with_published_branch(
 
     assert second.status == "blocked"
     assert second.blockers[0]["code"] == "promotion_incomplete"
+    assert second.blockers[0]["message"] == (
+        f"lease {first.lease.id} promotion branch is already published"
+    )
+
     assert promotion_harness.github.create_calls == []
     assert promotion_harness.git.head_sha(first.lease.worktree_path) == blocked_head
 
@@ -4291,6 +4327,10 @@ def test_promote_does_not_rebuild_content_mismatch_with_forged_parent(
     assert first.blockers[0]["code"] == "promotion_content_mismatch"
     assert first.lease is not None
     original_message = promotion_harness.git.commit_message(first.lease.worktree_path)
+    recorded_target_sha = promotion_harness.git.commit_parents(first.lease.head_sha)[
+        0
+    ]
+
     forged_parent = promotion_harness.git.resolve_ref("staging")
     promotion_tree = git_command(
         first.lease.worktree_path, "rev-parse", "HEAD^{tree}"
@@ -4304,12 +4344,14 @@ def test_promote_does_not_rebuild_content_mismatch_with_forged_parent(
         "-m",
         original_message,
     )
+    assert forged_parent != recorded_target_sha
+
     git_command(
         first.lease.worktree_path, "reset", "--hard", "-q", forged_head
     )
     blocked = promotion_harness.registry.get_lease(first.lease.id)
     assert blocked is not None
-    promotion_harness.registry.transition(
+    forged_lease = promotion_harness.registry.transition(
         blocked.id,
         LeaseState.BLOCKED,
         expected_version=blocked.version,
@@ -4317,7 +4359,16 @@ def test_promote_does_not_rebuild_content_mismatch_with_forged_parent(
         summary="promotion_content_mismatch: forged promotion parent",
         head_sha=forged_head,
     )
+
     promotion_harness.advance_target_prerequisite()
+    assert any(
+        worktree.path == first.lease.worktree_path
+        for worktree in promotion_harness.git.list_worktrees()
+    )
+    assert promotion_harness.git.status_porcelain(first.lease.worktree_path) == ()
+    assert promotion_harness.git.head_sha(first.lease.worktree_path) == forged_lease.head_sha
+    assert promotion_harness.git.commit_parents(forged_head) == (forged_parent,)
+
 
     second = promotion_harness.service.promote(
         source_pr=source.number,
@@ -4331,6 +4382,10 @@ def test_promote_does_not_rebuild_content_mismatch_with_forged_parent(
     assert promotion_harness.git.commit_parents(forged_head) == (forged_parent,)
     assert second.status == "blocked"
     assert second.blockers[0]["code"] == "promotion_incomplete"
+    assert second.blockers[0]["message"] == (
+        f"lease {first.lease.id} promotion parent does not match the recorded target base"
+    )
+
     assert promotion_harness.github.create_calls == []
     assert promotion_harness.git.head_sha(first.lease.worktree_path) == forged_head
 
@@ -4351,9 +4406,14 @@ def test_promote_does_not_rebuild_content_mismatch_after_source_provenance_chang
     blocked_head = first.lease.head_sha
     promotion_harness.advance_target_prerequisite()
     assert source.merge_commit_sha is not None
+    assert source.merge_commit_sha != source.head_sha
+    assert git_command(
+        promotion_harness.repo, "rev-parse", f"{source.merge_commit_sha}^{{commit}}"
+    ) == source.merge_commit_sha
     promotion_harness.github.prs[source.number] = replace(
-        source, base_sha=source.merge_commit_sha
+        source, head_sha=source.merge_commit_sha
     )
+
 
     second = promotion_harness.service.promote(
         source_pr=source.number,
@@ -4363,6 +4423,9 @@ def test_promote_does_not_rebuild_content_mismatch_after_source_provenance_chang
 
     assert second.status == "blocked"
     assert second.blockers[0]["code"] == "promotion_incomplete"
+    assert second.blockers[0]["message"] == (
+        f"lease {first.lease.id} does not have exact promotion provenance"
+    )
     assert promotion_harness.github.create_calls == []
     assert promotion_harness.git.head_sha(first.lease.worktree_path) == blocked_head
 
