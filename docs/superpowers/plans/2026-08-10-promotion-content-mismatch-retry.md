@@ -206,7 +206,7 @@ git commit -m "feat(worktrees): add guarded promotion reset primitives"
 
 In `_reuse_promotion()`, keep the existing provenance parsing. In the `LeaseState.BLOCKED` branch, inspect the latest event before the existing retryable-prefix check:
 
-```python
+```text
             latest = events[-1] if events else None
             if (
                 latest is not None
