@@ -292,7 +292,7 @@ class GitClient:
 
     def reset_hard(self, cwd: Path, ref: str) -> None:
         """Set a managed checkout to ref and discard tracked staged/unstaged changes."""
-        self._run("reset", "--hard", "-q", ref, cwd=cwd)
+        self._run("reset", "--hard", "-q", "--end-of-options", ref, cwd=cwd)
 
     def changed_paths(
         self,

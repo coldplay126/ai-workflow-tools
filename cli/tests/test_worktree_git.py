@@ -244,6 +244,23 @@ def test_git_client_hard_resets_worktree_to_ref_and_clears_tracked_changes(
     assert client.head_sha(worktree) == base_sha
     assert client.status_porcelain(worktree) == ()
 
+
+def test_git_client_rejects_leading_dash_reset_ref_without_discarding_changes(
+    tmp_path: Path,
+) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    readme = repo / "README.txt"
+    readme.write_text("staged\n", encoding="utf-8")
+    git(repo, "add", "README.txt")
+    readme.write_text("unstaged\n", encoding="utf-8")
+    dirty_status = client.status_porcelain()
+
+    with pytest.raises(GitError):
+        client.reset_hard(repo, "--recurse-submodules")
+
+    assert client.status_porcelain() == dirty_status
+
 def test_git_client_interprets_relative_worktree_paths_from_repository(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
