@@ -54,11 +54,15 @@ runtime_names=(claude agent-skills omp)
 runtime_roots=("$CLAUDE_DIR/skills" "$AGENTS_SKILLS_DIR" "$OMP_SKILLS_DIR")
 install_blocked=0
 for skill in "${SKILLS[@]}"; do
+  skill_source="$SCRIPT_DIR/claude/skills/$skill"
+  if [ "$skill" = "release-worktree-lifecycle" ]; then
+    skill_source="$SCRIPT_DIR/cli/src/awf/resources/release-worktree-lifecycle"
+  fi
   for index in "${!runtime_names[@]}"; do
     runtime="${runtime_names[$index]}"
     root="${runtime_roots[$index]}"
     if "$SCRIPT_DIR/scripts/install-skill-links.sh" \
-      "$SCRIPT_DIR/claude/skills/$skill" \
+      "$skill_source" \
       "$root"; then
       :
     else

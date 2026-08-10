@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+import awf.worktrees.service as service_module
 from awf.worktrees.config import WorktreeConfig
 from awf.worktrees.git import GitClient, GitError, GitRemoteError, GitWorktree
 from awf.worktrees.github import ExternalServiceError, PullRequest
@@ -148,6 +149,8 @@ class Harness:
             ),
         )
 
+
+
     def acquire(self, initiative: str):
         return self.service.acquire(
             initiative=initiative,
@@ -226,6 +229,27 @@ class Harness:
         lease = self.registry.get_lease(attached.id)
         assert lease is not None
         return lease
+
+
+def test_default_skill_source_uses_installable_package_resource(
+    harness: Harness,
+) -> None:
+    expected = (
+        Path(service_module.__file__).resolve().parents[1]
+        / "resources"
+        / "release-worktree-lifecycle"
+    ).resolve()
+
+    assert harness.service.skill_source_dir == expected
+    assert (expected / "SKILL.md").is_file()
+    repository_source = (
+        Path(__file__).resolve().parents[2]
+        / "claude"
+        / "skills"
+        / "release-worktree-lifecycle"
+        / "SKILL.md"
+    )
+    assert (expected / "SKILL.md").read_bytes() == repository_source.read_bytes()
 
 
 def matching_adoption_pr(

@@ -34,6 +34,9 @@ awf = "awf.cli:cli_entry"
 [tool.setuptools]
 package-dir = {"" = "src"}
 
+[tool.setuptools.package-data]
+awf = ["resources/release-worktree-lifecycle/*.md"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

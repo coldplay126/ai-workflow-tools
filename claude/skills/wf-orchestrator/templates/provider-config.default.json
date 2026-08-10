@@ -26,7 +26,13 @@
       "coordination_surface": "native",
       "execution_mode": "external_host",
       "capacity": 8,
-      "role_models": {}
+      "role_models": {
+        "plan_conformance": "@default",
+        "precision": "@default",
+        "quality_validation": "@slow",
+        "primary": "@slow",
+        "speed": "@smol"
+      }
     }
   },
   "providers": {

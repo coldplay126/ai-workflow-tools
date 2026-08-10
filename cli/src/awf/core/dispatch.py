@@ -534,11 +534,12 @@ class PiDispatch:
 def _run_omp_single(spec: WorkerSpec, cwd: str, options: OmpDispatchOptions) -> AgentResult:
     if options.config.coordination_surface == "native":
         return run_omp_native_batch(
-            _omp_native_tasks([spec]),
+            _omp_native_tasks([spec], options),
             cwd=cwd,
             config=options.config,
             model=options.model_for(spec.role),
             timeout_sec=spec.timeout_sec,
+            host_bridge=options.host_bridge,
         )[0]
     return run_omp_agent(
         spec.prompt,
@@ -563,7 +564,10 @@ def _resolve_omp_agent_type(spec: WorkerSpec) -> str:
     return spec.role.strip().lower().replace("_", "-") or "task"
 
 
-def _omp_native_tasks(workers: list[WorkerSpec]) -> list[OmpWorkerTask]:
+def _omp_native_tasks(
+    workers: list[WorkerSpec],
+    options: OmpDispatchOptions,
+) -> list[OmpWorkerTask]:
     tasks: list[OmpWorkerTask] = []
     for index, spec in enumerate(workers):
         output_schema = spec.output_schema
@@ -577,6 +581,7 @@ def _omp_native_tasks(workers: list[WorkerSpec]) -> list[OmpWorkerTask]:
                 role=spec.role,
                 prompt=spec.prompt,
                 agent_type=_resolve_omp_agent_type(spec),
+                model=options.role_models.get(spec.role),
                 output_schema=output_schema,
                 schema_mode=schema_mode,
                 isolated=spec.isolated,
@@ -611,7 +616,7 @@ class OmpDispatch:
                 completed: list[AgentResult] = []
                 for spec, task in zip(
                     workers,
-                    _omp_native_tasks(workers),
+                    _omp_native_tasks(workers, self._options),
                     strict=True,
                 ):
                     completed.extend(
@@ -628,7 +633,7 @@ class OmpDispatch:
             return [_run_omp_single(spec, cwd, self._options) for spec in workers]
         if self._options.config.coordination_surface == "native":
             return run_omp_native_batch(
-                _omp_native_tasks(workers),
+                _omp_native_tasks(workers, self._options),
                 cwd=cwd,
                 config=self._options.config,
                 model=self._options.config.model,

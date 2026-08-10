@@ -114,9 +114,8 @@ class WorktreeService:
         self.git_factory = git_factory
         self.skill_source_dir = (
             skill_source_dir
-            or Path(__file__).resolve().parents[4]
-            / "claude"
-            / "skills"
+            or Path(__file__).resolve().parents[1]
+            / "resources"
             / "release-worktree-lifecycle"
         ).resolve()
         self.home_dir = (home_dir or Path.home()).expanduser().resolve()

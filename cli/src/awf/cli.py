@@ -5,6 +5,8 @@ import os
 import sys
 from typing import Optional
 
+from awf import __version__
+
 from awf.commands.agents import run_agents_followup_omp, run_agents_sync_omp
 from awf.commands.analyze import run_analyze
 from awf.commands.chat import run_chat
@@ -91,6 +93,7 @@ def _confirm_execution(args: argparse.Namespace, routed_argv: list[str]) -> bool
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="awf", description="AWF workflow and analysis CLI.")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     chat_parser = subparsers.add_parser(

@@ -9,6 +9,7 @@ import pytest
 
 from awf.core.agent_runner import AgentResult
 from awf.core.dispatch import (
+    ChainedStep,
     OmpDispatch,
     OmpDispatchOptions,
     WorkerSpec,
@@ -18,6 +19,7 @@ from awf.core.dispatch import (
 )
 from awf.core.dispatch_provenance import write_omp_dispatch_provenance
 from awf.runners.omp import (
+    OmpExecutionResult,
     OmpRunnerConfig,
     OmpWorkerTask,
     build_omp_coordinator_prompt,
@@ -193,6 +195,60 @@ def _native_workers() -> list[OmpWorkerTask]:
             require_json=True,
         ),
     ]
+
+
+def _successful_current_host_bridge(calls: list[dict]):
+    def bridge(
+        *,
+        prompt,
+        workers,
+        cwd,
+        config,
+        model,
+        timeout_sec,
+        agent_model_overrides,
+    ):
+        immutable = False
+        try:
+            agent_model_overrides["unexpected"] = "mutated"
+        except TypeError:
+            immutable = True
+        calls.append(
+            {
+                "workers": [worker.name for worker in workers],
+                "overrides": dict(agent_model_overrides),
+                "immutable": immutable,
+            }
+        )
+        progress = [
+            {
+                "index": index,
+                "task_id": f"01CURRENT{index}",
+                "agent_name": worker.agent_type,
+                "status": "completed",
+                "resolved_model": worker.model,
+            }
+            for index, worker in enumerate(workers)
+        ]
+        envelope = {
+            "awf_omp_batch": 1,
+            "workers": [
+                {"name": worker.name, "result": {"conclusion": "PASS"}}
+                for worker in workers
+            ],
+        }
+        return OmpExecutionResult(
+            returncode=0,
+            stdout=json.dumps(envelope),
+            stderr="",
+            elapsed_sec=0.01,
+            metadata={
+                "session_id": "current-host-session",
+                "task_progress": progress,
+            },
+        )
+
+    return bridge
 
 
 def test_build_omp_print_command_uses_json_no_session_and_model():
@@ -565,7 +621,11 @@ def test_native_parallel_dispatch_invokes_omp_once_and_preserves_input_order(
             no_session=False,
             coordination_surface="native",
             capacity=4,
-        )
+        ),
+        role_models={
+            "reviewer": "openai-codex/gpt-review",
+            "verifier": "anthropic/claude-verify",
+        },
     )
     results = OmpDispatch(options).run(
         [
@@ -606,13 +666,49 @@ def test_native_parallel_dispatch_invokes_omp_once_and_preserves_input_order(
     assert '"agent":"code-reviewer"' in prompt_path.read_text(encoding="utf-8")
     assert json.loads(config_path.read_text(encoding="utf-8")) == {
         "task": {
+            "agentModelOverrides": {
+                "agent-sdk-verifier-py": "anthropic/claude-verify",
+                "code-reviewer": "openai-codex/gpt-review",
+            },
             "isolation": {
                 "mode": "auto",
                 "apply": False,
                 "merge": "patch",
-            }
+            },
         }
     }
+    assert results[0].metadata["requested_worker_model"] == "openai-codex/gpt-review"
+    assert results[1].metadata["requested_worker_model"] == "anthropic/claude-verify"
+
+
+def test_native_parallel_rejects_conflicting_models_for_same_agent(
+    tmp_path: Path,
+) -> None:
+    workers = [
+        OmpWorkerTask(
+            name="Awf000Plan",
+            role="plan",
+            prompt="plan",
+            agent_type="plan-validator",
+            model="openai-codex/gpt-review",
+        ),
+        OmpWorkerTask(
+            name="Awf001Verify",
+            role="verify",
+            prompt="verify",
+            agent_type="plan-validator",
+            model="anthropic/claude-verify",
+        ),
+    ]
+
+    results = run_omp_native_batch(
+        workers,
+        cwd=str(tmp_path),
+        config=OmpRunnerConfig(command=str(tmp_path / "missing-omp")),
+    )
+
+    assert all(result.returncode != 0 for result in results)
+    assert all("omp_worker_model_conflict" in result.stderr for result in results)
 
 
 def test_native_strict_schema_failure_and_permissive_metadata(tmp_path: Path):
@@ -1161,6 +1257,105 @@ def test_current_host_capability_mismatch_launches_no_subprocess(
     )
     assert result.returncode != 0
     assert "omp_same_host_capability_mismatch" in result.stderr
+
+
+def test_current_host_bridge_receives_immutable_worker_model_overrides(
+    tmp_path: Path,
+) -> None:
+    calls: list[dict] = []
+    dispatch = OmpDispatch(
+        OmpDispatchOptions(
+            config=OmpRunnerConfig(execution_mode="current_host"),
+            host_bridge=_successful_current_host_bridge(calls),
+            role_models={
+                "reviewer": "@default",
+                "verifier": "@slow",
+            },
+        )
+    )
+
+    results = dispatch.run(
+        [
+            WorkerSpec(
+                role="reviewer",
+                provider=object(),
+                prompt="review",
+                agent_type="code-reviewer",
+            ),
+            WorkerSpec(
+                role="verifier",
+                provider=object(),
+                prompt="verify",
+                agent_type="quality-validator",
+            ),
+        ],
+        cwd=str(tmp_path),
+        strategy="parallel",
+    )
+
+    assert [result.returncode for result in results] == [0, 0]
+    assert calls == [
+        {
+            "workers": ["Awf000Reviewer", "Awf001Verifier"],
+            "overrides": {
+                "code-reviewer": "@default",
+                "quality-validator": "@slow",
+            },
+            "immutable": True,
+        }
+    ]
+
+
+def test_current_host_chained_dispatch_forwards_bridge_without_override_leakage(
+    tmp_path: Path,
+) -> None:
+    calls: list[dict] = []
+    dispatch = OmpDispatch(
+        OmpDispatchOptions(
+            config=OmpRunnerConfig(execution_mode="current_host"),
+            host_bridge=_successful_current_host_bridge(calls),
+            role_models={
+                "precision": "@default",
+                "quality_validation": "@slow",
+            },
+        )
+    )
+    steps = [
+        ChainedStep(
+            role="precision",
+            factory=lambda _prior: WorkerSpec(
+                role="precision",
+                provider=object(),
+                prompt="precision",
+                agent_type="plan-validator",
+            ),
+        ),
+        ChainedStep(
+            role="quality_validation",
+            factory=lambda _prior: WorkerSpec(
+                role="quality_validation",
+                provider=object(),
+                prompt="quality",
+                agent_type="quality-validator",
+            ),
+        ),
+    ]
+
+    results = dispatch.run_chained(steps, cwd=str(tmp_path))
+
+    assert [result.returncode for result in results] == [0, 0]
+    assert calls == [
+        {
+            "workers": ["Awf000Precision"],
+            "overrides": {"plan-validator": "@default"},
+            "immutable": True,
+        },
+        {
+            "workers": ["Awf000QualityValidation"],
+            "overrides": {"quality-validator": "@slow"},
+            "immutable": True,
+        },
+    ]
 
 
 def test_steering_evidence_is_parsed_and_redacted_from_provenance(

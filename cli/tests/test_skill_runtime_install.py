@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -147,6 +149,66 @@ def test_setup_installs_exact_inventory_into_three_runtime_roots(tmp_path: Path)
     for root in roots:
         assert sorted(path.name for path in root.iterdir()) == EXPECTED_SKILLS
         assert all((root / skill / "SKILL.md").is_file() for skill in EXPECTED_SKILLS)
+        assert (root / "release-worktree-lifecycle").resolve() == (
+            REPO_ROOT
+            / "cli"
+            / "src"
+            / "awf"
+            / "resources"
+            / "release-worktree-lifecycle"
+        ).resolve()
+
+
+def test_built_wheel_resolves_packaged_release_skill(tmp_path: Path) -> None:
+    wheel_dir = tmp_path / "wheel"
+    completed = subprocess.run(
+        [
+            "uv",
+            "build",
+            "--wheel",
+            "--out-dir",
+            str(wheel_dir),
+        ],
+        cwd=REPO_ROOT / "cli",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    [wheel_path] = wheel_dir.glob("*.whl")
+    extracted = tmp_path / "extracted"
+    with zipfile.ZipFile(wheel_path) as wheel:
+        wheel.extractall(extracted)
+
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from pathlib import Path;"
+                "from awf.worktrees.registry import WorktreeRegistry;"
+                "from awf.worktrees.service import WorktreeService;"
+                "root=Path(__import__('sys').argv[1]);"
+                "service=WorktreeService("
+                "WorktreeRegistry(root/'registry.db'),None,"
+                "cache_dir=root/'cache',state_dir=root/'state',"
+                "lock_dir=root/'locks',home_dir=root/'home');"
+                "assert (service.skill_source_dir/'SKILL.md').is_file();"
+                "print(service.skill_source_dir)"
+            ),
+            str(tmp_path),
+        ],
+        env={
+            **os.environ,
+            "PYTHONPATH": str(extracted),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert probe.returncode == 0, probe.stderr
+    assert Path(probe.stdout.strip()).is_relative_to(extracted)
 
 
 def test_setup_reports_exact_blocked_runtime_and_continues_other_installs(

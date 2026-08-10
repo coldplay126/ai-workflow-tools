@@ -9,9 +9,10 @@ import signal
 import subprocess
 import tempfile
 import time
+from types import MappingProxyType
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Protocol, Sequence
+from typing import Any, Literal, Mapping, Protocol, Sequence
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
@@ -100,6 +101,7 @@ class OmpCurrentHostBridge(Protocol):
         config: OmpRunnerConfig,
         model: str | None,
         timeout_sec: int,
+        agent_model_overrides: Mapping[str, str],
     ) -> OmpExecutionResult: ...
 
 
@@ -111,6 +113,7 @@ class OmpWorkerTask:
     role: str
     prompt: str
     agent_type: str
+    model: str | None = None
     output_schema: JsonSchema = None
     schema_mode: SchemaMode = "permissive"
     isolated: bool | None = None
@@ -651,6 +654,7 @@ def _run_omp_native_host(
     model: str | None,
     timeout_sec: int,
     isolate_tasks: bool = False,
+    agent_model_overrides: dict[str, str] | None = None,
     resume_session_id: str | None = None,
 ) -> OmpExecutionResult:
     started = time.monotonic()
@@ -672,7 +676,20 @@ def _run_omp_native_host(
         command = build_omp_native_command(prompt_path, config, model=model)
         if resume_session_id is not None:
             command[-2:-2] = ["-r", resume_session_id]
+        settings: dict[str, Any] = {}
+        task_settings: dict[str, Any] = {}
+        if agent_model_overrides:
+            task_settings["agentModelOverrides"] = dict(
+                sorted(agent_model_overrides.items())
+            )
         if isolate_tasks:
+            task_settings["isolation"] = {
+                "mode": "auto",
+                "apply": False,
+                "merge": "patch",
+            }
+        if task_settings:
+            settings["task"] = task_settings
             with tempfile.NamedTemporaryFile(
                 prefix="awf-omp-settings-",
                 suffix=".json",
@@ -680,18 +697,7 @@ def _run_omp_native_host(
                 encoding="utf-8",
                 delete=False,
             ) as settings_handle:
-                json.dump(
-                    {
-                        "task": {
-                            "isolation": {
-                                "mode": "auto",
-                                "apply": False,
-                                "merge": "patch",
-                            }
-                        }
-                    },
-                    settings_handle,
-                )
+                json.dump(settings, settings_handle)
                 settings_handle.write("\n")
                 settings_path = Path(settings_handle.name)
             os.chmod(settings_path, 0o600)
@@ -760,6 +766,7 @@ def _run_omp_native_host(
     metadata.update(
         command=config.command,
         requested_model=model or config.model,
+        requested_worker_models=dict(sorted((agent_model_overrides or {}).items())),
         coordination_surface="native",
         execution_mode="external_host",
         resumed_session_id=resume_session_id,
@@ -954,6 +961,7 @@ def _worker_descriptor_hash(worker: OmpWorkerTask) -> str:
             "name": worker.name,
             "role": worker.role,
             "agent_type": worker.agent_type,
+            "model": worker.model,
             "prompt_sha256": _sha256_bytes(worker.prompt.encode("utf-8")),
             "output_schema_sha256": _sha256_json(worker.output_schema),
             "schema_mode": worker.schema_mode,
@@ -1356,6 +1364,7 @@ def _task_record(
 def _worker_metadata(
     execution: OmpExecutionResult,
     record: dict[str, Any] | None,
+    worker: OmpWorkerTask,
 ) -> dict[str, Any]:
     metadata = dict(execution.metadata)
     task_id = record.get("task_id") if record else None
@@ -1371,6 +1380,7 @@ def _worker_metadata(
         coordination_surface="native",
         coordinator_session_id=metadata.get("session_id"),
         coordinator_model=coordinator_model,
+        requested_worker_model=worker.model,
         task_id=task_id,
         agent_name=record.get("agent_name") if record else None,
         task_status=record.get("status") if record else None,
@@ -1445,6 +1455,22 @@ def run_omp_native_batch(
     cfg = config or OmpRunnerConfig.from_env()
     if len(workers) > cfg.capacity:
         return _capacity_failures(workers, cfg.capacity)
+    agent_model_overrides: dict[str, str] = {}
+    for worker in workers:
+        if worker.model is None:
+            continue
+        previous_model = agent_model_overrides.get(worker.agent_type)
+        if previous_model is not None and previous_model != worker.model:
+            return _native_failures(
+                workers,
+                (
+                    "omp_worker_model_conflict: native task settings cannot route "
+                    f"agent {worker.agent_type!r} to both {previous_model!r} "
+                    f"and {worker.model!r}"
+                ),
+                execution_mode=cfg.execution_mode,
+            )
+        agent_model_overrides[worker.agent_type] = worker.model
     effective_timeout = timeout_sec if timeout_sec is not None else cfg.timeout_sec
     prompt = build_omp_coordinator_prompt(workers, capacity=cfg.capacity)
     checkpoint_path: Path | None = None
@@ -1471,6 +1497,9 @@ def run_omp_native_batch(
                 config=cfg,
                 model=model,
                 timeout_sec=effective_timeout,
+                agent_model_overrides=MappingProxyType(
+                    dict(sorted(agent_model_overrides.items()))
+                ),
             )
         except Exception as exc:
             return _native_failures(
@@ -1488,6 +1517,7 @@ def run_omp_native_batch(
             execution,
             execution_mode="current_host",
             coordination_surface="native",
+            requested_worker_models=dict(sorted(agent_model_overrides.items())),
         )
     else:
         fingerprint, descriptor_hashes = _native_batch_identity(
@@ -1550,6 +1580,7 @@ def run_omp_native_batch(
                 recovery_rows,
                 capacity=cfg.capacity,
             )
+        agent_model_overrides = dict(sorted(agent_model_overrides.items()))
         execution = _run_omp_native_host(
             prompt,
             cwd=cwd,
@@ -1557,6 +1588,7 @@ def run_omp_native_batch(
             model=model,
             timeout_sec=effective_timeout,
             isolate_tasks=any(worker.isolated is True for worker in workers),
+            agent_model_overrides=agent_model_overrides,
             resume_session_id=recovery_session_id,
         )
 
@@ -1645,7 +1677,7 @@ def run_omp_native_batch(
     completed: list[AgentResult] = []
     for index, worker in enumerate(workers):
         record = _task_record(progress, index, worker.name)
-        metadata = _worker_metadata(execution, record)
+        metadata = _worker_metadata(execution, record, worker)
         item = indexed.get(worker.name) if indexed is not None else None
         if item is None:
             reason = batch_error or envelope_error or (

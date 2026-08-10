@@ -16,7 +16,7 @@ Claude Code(Master)가 프롬프트의 `#` 해시태그를 인식하여 Slave를
 Slave를 호출하기 전에 cmux-agent 활성 여부를 먼저 확인한다.
 
 1. **cmux-agent broker** (활성 run이 있을 때 — **권장**):
-   - 감지: `cmux-agent agents` 가 0 exit + worker 1개 이상 반환, 또는 cwd의 `.agent/control-plane.sqlite3` 존재
+   - 감지: `cmux-agent agents --json | jq -e '.agents | length > 0'`가 성공할 때만 활성으로 판정. cwd의 `.agent/control-plane.sqlite3` 존재만으로는 활성으로 판정하지 않음
    - 호출: `cmux-agent send <worker-name> "<prompt>"` 로 dispatch artifact 작성 → broker가 worker surface에 자동 주입
    - worker 이름 예: `worker-impl`, `worker-review`, `worker-verify`, `worker-investigate`
    - 장점: claude 본 세션이 다른 작업을 계속할 수 있음 (background tab에서 진행), 결과는 result artifact로 회수, 토큰 절감

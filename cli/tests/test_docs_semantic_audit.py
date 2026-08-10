@@ -230,6 +230,43 @@ def test_known_commands_match_argparse_surface() -> None:
     assert set(KNOWN_COMMANDS) == set(_subcommands(parser, "command"))
 
 
+def test_root_parser_exposes_package_version(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as raised:
+        build_parser().parse_args(["--version"])
+
+    assert raised.value.code == 0
+    assert capsys.readouterr().out == "awf 0.1.0\n"
+
+
+def test_multi_agent_snippet_requires_live_cmux_roster() -> None:
+    text = (REPO_ROOT / "snippets" / "claude-md-multi-agent.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "cmux-agent agents --json" in text
+    assert "jq -e '.agents | length > 0'" in text
+    assert "존재만으로는 활성으로 판정하지 않음" in text
+
+
+def test_default_omp_role_models_preserve_cross_provider_intent() -> None:
+    config = json.loads(
+        (
+            REPO_ROOT
+            / "claude"
+            / "skills"
+            / "wf-orchestrator"
+            / "templates"
+            / "provider-config.default.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    role_models = config["dispatch"]["omp"]["role_models"]
+    assert role_models["plan_conformance"] == "@default"
+    assert role_models["quality_validation"] == "@slow"
+    assert role_models["precision"] == "@default"
+    assert role_models["primary"] == "@slow"
+
+
 def test_cli_readme_mentions_current_command_surface() -> None:
     parser = build_parser()
     readme = CLI_README.read_text(encoding="utf-8")
