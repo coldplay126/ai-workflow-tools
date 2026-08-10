@@ -160,10 +160,14 @@ the configured staging base, and exact promotion-delta verification. The
 self-merge alternative fails closed if either GitHub actor login is missing or
 malformed; an `APPROVED` source does not need identity data.
 
-A repeated `wt promote --apply` can resume a blocked prepare-command or
-production-verification failure only when the managed worktree is clean and its
-promotion commit still has the exact source, target, lease, and reviewed-delta
-provenance. Other blocked promotion states remain fail-closed.
+A repeated `wt promote --apply` can resume a blocked `prepare-command` or
+`production-verification` failure only when the managed worktree is clean and
+its promotion commit still has exact provenance. It can also rebuild an
+unpublished `promotion_content_mismatch` lease when the target branch has
+advanced, the reviewed source SHAs are unchanged, and the original branch was
+never pushed. The rebuilt commit must pass the same exact path/blob and
+production checks before AWF publishes a pull request. Other blocked states
+remain fail-closed.
 
 Feature flow:
 
