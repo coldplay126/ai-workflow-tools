@@ -4265,7 +4265,7 @@ def test_promote_does_not_rebuild_dirty_content_mismatch_after_target_advances(
     assert second.status == "blocked"
     assert second.blockers[0]["code"] == "promotion_incomplete"
     assert second.blockers[0]["message"] == (
-        f"lease {first.lease.id} worktree has uncommitted changes"
+        f"lease {first.lease.id} was not verified for content-mismatch recovery"
     )
 
     assert promotion_harness.github.create_calls == []
@@ -4383,7 +4383,7 @@ def test_promote_does_not_rebuild_content_mismatch_with_forged_parent(
     assert second.status == "blocked"
     assert second.blockers[0]["code"] == "promotion_incomplete"
     assert second.blockers[0]["message"] == (
-        f"lease {first.lease.id} promotion parent does not match the recorded target base"
+        f"lease {first.lease.id} was not verified for content-mismatch recovery"
     )
 
     assert promotion_harness.github.create_calls == []

@@ -3305,28 +3305,15 @@ class WorktreeService:
     ) -> CommandResult:
         try:
             old_head = self.git.head_sha(lease.worktree_path)
-            if self._registered_worktree(lease) is None:
+            if (
+                self._registered_worktree(lease) is None
+                or self.git.status_porcelain(lease.worktree_path)
+                or old_head != lease.head_sha
+                or self.git.commit_parents(old_head) != (recorded_target_sha,)
+            ):
                 return self._promotion_blocked(
                     "promotion_incomplete",
-                    f"lease {lease.id} worktree is not registered for content-mismatch recovery",
-                    lease=lease,
-                )
-            if self.git.status_porcelain(lease.worktree_path):
-                return self._promotion_blocked(
-                    "promotion_incomplete",
-                    f"lease {lease.id} worktree has uncommitted changes",
-                    lease=lease,
-                )
-            if old_head != lease.head_sha:
-                return self._promotion_blocked(
-                    "promotion_incomplete",
-                    f"lease {lease.id} head does not match the blocked promotion",
-                    lease=lease,
-                )
-            if self.git.commit_parents(old_head) != (recorded_target_sha,):
-                return self._promotion_blocked(
-                    "promotion_incomplete",
-                    f"lease {lease.id} promotion parent does not match the recorded target base",
+                    f"lease {lease.id} was not verified for content-mismatch recovery",
                     lease=lease,
                 )
             if self.git.remote_branch_sha(lease.branch) is not None:
