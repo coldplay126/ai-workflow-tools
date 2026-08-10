@@ -3540,7 +3540,10 @@ class WorktreeService:
             expected_paths = tuple(sorted(expected_blobs))
             if (
                 self.git.changed_paths(
-                    lease.worktree_path, target_sha, promotion_head
+                    lease.worktree_path,
+                    target_sha,
+                    promotion_head,
+                    find_renames=True,
                 )
                 != expected_paths
                 or any(

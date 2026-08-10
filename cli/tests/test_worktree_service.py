@@ -4184,6 +4184,87 @@ def test_promote_rebuilds_content_mismatch_after_target_advances(
     ) == "copy=new\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nrank=new\n"
 
 
+
+def test_promote_recovers_content_mismatch_reviewed_rename_when_disabled(
+    promotion_harness: PromotionHarness,
+) -> None:
+    git_command(promotion_harness.repo, "checkout", "-q", "main")
+    (promotion_harness.repo / "feature.txt").write_text(
+        "copy=old\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nrank=old\n",
+        encoding="utf-8",
+    )
+    git_command(promotion_harness.repo, "add", "feature.txt")
+    git_command(
+        promotion_harness.repo, "commit", "-q", "-m", "production prerequisite old"
+    )
+    git_command(promotion_harness.repo, "push", "-q", "origin", "main")
+    git_command(promotion_harness.repo, "checkout", "-q", "staging")
+    (promotion_harness.repo / "feature.txt").write_text(
+        "copy=new\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nrank=old\n",
+        encoding="utf-8",
+    )
+    git_command(promotion_harness.repo, "add", "feature.txt")
+    git_command(
+        promotion_harness.repo, "commit", "-q", "-m", "staging prerequisite"
+    )
+    git_command(promotion_harness.repo, "push", "-q", "origin", "staging")
+    base_sha = git_command(promotion_harness.repo, "rev-parse", "HEAD")
+    git_command(promotion_harness.repo, "checkout", "-q", "-b", "feature/pr-373")
+    git_command(promotion_harness.repo, "mv", "feature.txt", "renamed.txt")
+    git_command(promotion_harness.repo, "commit", "-q", "-m", "rename source")
+    head_sha = git_command(promotion_harness.repo, "rev-parse", "HEAD")
+    git_command(
+        promotion_harness.repo, "push", "-q", "-u", "origin", "feature/pr-373"
+    )
+    git_command(promotion_harness.repo, "checkout", "-q", "staging")
+    git_command(
+        promotion_harness.repo,
+        "merge",
+        "--no-ff",
+        "-q",
+        "feature/pr-373",
+        "-m",
+        "merge renamed source",
+    )
+    merge_sha = git_command(promotion_harness.repo, "rev-parse", "HEAD")
+    git_command(promotion_harness.repo, "push", "-q", "origin", "staging")
+    git_command(promotion_harness.repo, "config", "diff.renames", "false")
+    source = PullRequest(
+        number=373,
+        state="MERGED",
+        base_ref="staging",
+        base_sha=base_sha,
+        head_ref="feature/pr-373",
+        head_sha=head_sha,
+        merge_commit_sha=merge_sha,
+        review_decision="APPROVED",
+        checks_passed=True,
+        changed_paths=("renamed.txt",),
+        url="https://github.example/acme/repo/pull/373",
+    )
+    promotion_harness.github.prs[source.number] = source
+
+    first = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+    assert first.status == "blocked"
+    assert first.blockers[0]["code"] == "promotion_content_mismatch"
+    assert first.lease is not None
+    target_sha = promotion_harness.advance_target_prerequisite()
+
+    second = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert second.decision == "ready"
+    assert second.lease is not None
+    assert second.lease.state is LeaseState.PR_OPEN
+    assert promotion_harness.git.commit_parents(second.lease.head_sha) == (target_sha,)
+    assert len(promotion_harness.github.create_calls) == 1
 def test_promote_does_not_rebuild_content_mismatch_without_target_advance(
     promotion_harness: PromotionHarness,
 ) -> None:
