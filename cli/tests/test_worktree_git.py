@@ -128,6 +128,20 @@ def test_git_client_reads_refs_and_nul_delimited_status(tmp_path: Path) -> None:
     assert client.status_porcelain() == ("?? file with spaces.txt",)
 
 
+def test_git_client_reads_remote_branch_sha_and_missing_branch(tmp_path: Path) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    git(repo, "checkout", "-q", "-b", "retry-target")
+    (repo / "retry.txt").write_text("retry\n", encoding="utf-8")
+    git(repo, "add", "retry.txt")
+    git(repo, "commit", "-q", "-m", "retry target")
+    retry_sha = client.head_sha()
+    git(repo, "push", "-q", "-u", "origin", "retry-target")
+
+    assert client.remote_branch_sha("retry-target") == retry_sha
+    assert client.remote_branch_sha("missing") is None
+
+
 def test_git_client_adds_and_removes_worktrees(tmp_path: Path) -> None:
     repo = make_repository(tmp_path)
     client = GitClient(repo)
@@ -139,6 +153,27 @@ def test_git_client_adds_and_removes_worktrees(tmp_path: Path) -> None:
     assert registered[worktree.resolve()].branch == "awf/test"
     client.remove_worktree(worktree)
     assert not worktree.exists()
+
+
+def test_git_client_hard_resets_worktree_to_ref_and_clears_tracked_changes(
+    tmp_path: Path,
+) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    worktree = tmp_path / "reset-worktree"
+    base_sha = client.head_sha()
+    client.add_worktree(worktree, "awf/reset", base_sha)
+    (worktree / "later.txt").write_text("later\n", encoding="utf-8")
+    git(worktree, "add", "later.txt")
+    git(worktree, "commit", "-q", "-m", "later")
+    (worktree / "README.txt").write_text("staged\n", encoding="utf-8")
+    git(worktree, "add", "README.txt")
+    (worktree / "later.txt").write_text("unstaged\n", encoding="utf-8")
+
+    client.reset_hard(worktree, base_sha)
+
+    assert client.head_sha(worktree) == base_sha
+    assert client.status_porcelain(worktree) == ()
 
 def test_git_client_interprets_relative_worktree_paths_from_repository(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

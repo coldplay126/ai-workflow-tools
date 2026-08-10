@@ -91,6 +91,33 @@ class GitClient:
             raise GitRemoteError(str(error)) from error
         return self._text(self._run("rev-parse", "FETCH_HEAD").stdout)
 
+    def remote_branch_sha(self, branch: str) -> str | None:
+        """Return the exact origin branch SHA, or None if it is absent.
+
+        Raise GitRemoteError when the origin lookup fails or returns malformed data.
+        """
+        ref = f"refs/heads/{branch}"
+        try:
+            completed = self._run("ls-remote", "--heads", "origin", ref)
+        except GitError as error:
+            raise GitRemoteError(str(error)) from error
+        if not completed.stdout:
+            return None
+        try:
+            rows = completed.stdout.decode("ascii", errors="strict").splitlines()
+        except UnicodeDecodeError as error:
+            raise GitRemoteError("git ls-remote returned an invalid branch record") from error
+        if len(rows) != 1:
+            raise GitRemoteError("git ls-remote returned multiple branch records")
+        oid, separator, returned_ref = rows[0].partition("\t")
+        if (
+            not separator
+            or returned_ref != ref
+            or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", oid) is None
+        ):
+            raise GitRemoteError("git ls-remote returned an invalid branch record")
+        return oid
+
 
     def resolve_ref(self, ref: str) -> str:
         return self._text(self._run("rev-parse", "--verify", ref).stdout)
@@ -262,6 +289,10 @@ class GitClient:
 
     def apply_indexed_patch(self, cwd: Path, patch: bytes) -> None:
         self._run("apply", "--3way", "--index", "-", cwd=cwd, input_bytes=patch)
+
+    def reset_hard(self, cwd: Path, ref: str) -> None:
+        """Set a managed checkout to ref and discard tracked staged/unstaged changes."""
+        self._run("reset", "--hard", "-q", ref, cwd=cwd)
 
     def changed_paths(
         self,
