@@ -4183,6 +4183,258 @@ def test_promote_rebuilds_content_mismatch_after_target_advances(
         encoding="utf-8"
     ) == "copy=new\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nrank=new\n"
 
+
+def test_promote_recovers_content_mismatch_with_fully_excluded_source(
+    promotion_harness: PromotionHarness,
+) -> None:
+    git_command(promotion_harness.repo, "checkout", "-q", "main")
+    (promotion_harness.repo / "feature.txt").write_text(
+        "copy=old\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nrank=old\n",
+        encoding="utf-8",
+    )
+    git_command(promotion_harness.repo, "add", "feature.txt")
+    git_command(
+        promotion_harness.repo, "commit", "-q", "-m", "production prerequisite old"
+    )
+    git_command(promotion_harness.repo, "push", "-q", "origin", "main")
+    git_command(promotion_harness.repo, "checkout", "-q", "staging")
+    (promotion_harness.repo / "feature.txt").write_text(
+        "copy=new\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nrank=old\n",
+        encoding="utf-8",
+    )
+    git_command(promotion_harness.repo, "add", "feature.txt")
+    git_command(
+        promotion_harness.repo, "commit", "-q", "-m", "staging prerequisite"
+    )
+    git_command(promotion_harness.repo, "push", "-q", "origin", "staging")
+    excluded = promotion_harness.add_followup_source(
+        373,
+        change_feature=False,
+        include_followup=False,
+        team_text="excluded team update\n",
+    )
+    source = promotion_harness.add_followup_source(
+        374,
+        feature_text=(
+            "copy=new\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nrank=new\n"
+        ),
+        include_followup=False,
+    )
+
+    first = promotion_harness.service.promote(
+        source_pr=(excluded.number, source.number),
+        exclude_paths=("team.txt",),
+        target_branch="main",
+        apply=True,
+    )
+    assert first.status == "blocked"
+    assert first.blockers[0]["code"] == "promotion_content_mismatch"
+    assert first.lease is not None
+    target_sha = promotion_harness.advance_target_prerequisite()
+
+    second = promotion_harness.service.promote(
+        source_pr=(excluded.number, source.number),
+        exclude_paths=("team.txt",),
+        target_branch="main",
+        apply=True,
+    )
+
+    assert second.decision == "ready"
+    assert second.lease is not None
+    assert second.lease.id == first.lease.id
+    assert promotion_harness.git.commit_parents(second.lease.head_sha) == (target_sha,)
+    assert not (second.lease.worktree_path / "team.txt").exists()
+    assert (second.lease.worktree_path / "feature.txt").read_text(
+        encoding="utf-8"
+    ) == "copy=new\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nrank=new\n"
+    assert len(promotion_harness.github.create_calls) == 1
+
+
+def test_promote_reports_content_mismatch_recovery_remote_preflight_failure(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = promotion_harness.add_content_mismatch_source()
+    first = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+    assert first.lease is not None
+    blocked_head = first.lease.head_sha
+    promotion_harness.advance_target_prerequisite()
+    original_fetch_ref = promotion_harness.git.fetch_ref
+
+    def fail_target_fetch(ref: str) -> str:
+        if ref == "main":
+            raise GitRemoteError("target unavailable")
+        return original_fetch_ref(ref)
+
+    monkeypatch.setattr(promotion_harness.git, "fetch_ref", fail_target_fetch)
+
+    second = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert second.status == "error"
+    assert second.blockers[0]["code"] == "promotion_recovery_failed"
+    assert promotion_harness.git.head_sha(first.lease.worktree_path) == blocked_head
+    assert promotion_harness.github.create_calls == []
+
+
+@pytest.mark.parametrize(
+    "error",
+    (
+        GitError("patch unavailable"),
+        OSError("patch unavailable"),
+        RuntimeError("patch unavailable"),
+        sqlite3.Error("patch unavailable"),
+    ),
+)
+def test_promote_blocks_content_mismatch_recovery_source_patch_failures(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+) -> None:
+    source = promotion_harness.add_content_mismatch_source()
+    first = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+    assert first.lease is not None
+    blocked_head = first.lease.head_sha
+    promotion_harness.advance_target_prerequisite()
+
+    def fail_patch(*_: object, **__: object) -> bytes:
+        raise error
+
+    monkeypatch.setattr(promotion_harness.git, "binary_diff", fail_patch)
+
+    second = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert second.status == "blocked"
+    assert second.blockers[0]["code"] == "promotion_recovery_failed"
+    assert promotion_harness.git.head_sha(first.lease.worktree_path) == blocked_head
+    assert promotion_harness.github.create_calls == []
+
+
+def test_promote_records_actual_head_when_content_mismatch_restore_fails(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = promotion_harness.add_content_mismatch_source()
+    first = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+    assert first.lease is not None
+    blocked_head = first.lease.head_sha
+    promotion_harness.advance_target_prerequisite()
+    original_transition = promotion_harness.registry.transition
+
+    def fail_rebuild_transition(*args: object, **kwargs: object) -> Lease:
+        summary = kwargs.get("summary")
+        if isinstance(summary, str) and summary.startswith(
+            "promotion_verification_failed: rebuilt"
+        ):
+            raise RuntimeError("recording failed")
+        return original_transition(*args, **kwargs)
+
+    monkeypatch.setattr(
+        promotion_harness.registry, "transition", fail_rebuild_transition
+    )
+    original_reset_hard = promotion_harness.git.reset_hard
+
+    def fail_restore(worktree_path: Path, ref: str) -> None:
+        if ref == blocked_head:
+            raise GitError("restore failed")
+        original_reset_hard(worktree_path, ref)
+
+    monkeypatch.setattr(promotion_harness.git, "reset_hard", fail_restore)
+
+    second = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert second.status == "blocked"
+    assert second.blockers[0]["code"] == "promotion_recovery_restore_failed"
+    assert "recording failed" in second.blockers[0]["message"]
+    assert "restore failed" in second.blockers[0]["message"]
+    reconciled = promotion_harness.registry.get_lease(first.lease.id)
+    assert reconciled is not None
+    assert reconciled.head_sha == promotion_harness.git.head_sha(
+        first.lease.worktree_path
+    )
+    assert reconciled.head_sha != blocked_head
+    latest = promotion_harness.registry.list_events(first.lease.id)[-1]
+    assert latest.event_type == "promotion_blocked"
+    assert latest.summary.startswith("promotion_recovery_restore_failed:")
+    assert promotion_harness.github.create_calls == []
+
+
+def test_promote_surfaces_content_mismatch_restore_reconciliation_failure(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = promotion_harness.add_content_mismatch_source()
+    first = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+    assert first.lease is not None
+    blocked_head = first.lease.head_sha
+    promotion_harness.advance_target_prerequisite()
+    original_transition = promotion_harness.registry.transition
+
+    def fail_rebuild_and_reconciliation(
+        *args: object, **kwargs: object
+    ) -> Lease:
+        summary = kwargs.get("summary")
+        if isinstance(summary, str) and summary.startswith(
+            "promotion_verification_failed: rebuilt"
+        ):
+            raise RuntimeError("recording failed")
+        if isinstance(summary, str) and summary.startswith(
+            "promotion_recovery_restore_failed:"
+        ):
+            raise RuntimeError("reconciliation failed")
+        return original_transition(*args, **kwargs)
+
+    monkeypatch.setattr(
+        promotion_harness.registry, "transition", fail_rebuild_and_reconciliation
+    )
+    original_reset_hard = promotion_harness.git.reset_hard
+
+    def fail_restore(worktree_path: Path, ref: str) -> None:
+        if ref == blocked_head:
+            raise GitError("restore failed")
+        original_reset_hard(worktree_path, ref)
+
+    monkeypatch.setattr(promotion_harness.git, "reset_hard", fail_restore)
+
+    second = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert second.status == "blocked"
+    assert second.blockers[0]["code"] == "promotion_recovery_restore_failed"
+    assert "recording failed" in second.blockers[0]["message"]
+    assert "restore failed" in second.blockers[0]["message"]
+    assert "reconciliation failed" in second.blockers[0]["message"]
+    assert promotion_harness.github.create_calls == []
 def test_promote_retries_blocked_transient_prepare_failure(
     promotion_harness: PromotionHarness,
 ) -> None:

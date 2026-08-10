@@ -3303,70 +3303,84 @@ class WorktreeService:
         recorded_source_base_shas: Sequence[str],
         target_branch: str,
     ) -> CommandResult:
-        old_head = self.git.head_sha(lease.worktree_path)
-        if (
-            self._registered_worktree(lease) is None
-            or self.git.status_porcelain(lease.worktree_path)
-            or old_head != lease.head_sha
-            or self.git.commit_parents(old_head) != (recorded_target_sha,)
-        ):
-            return self._promotion_blocked(
-                "promotion_incomplete",
-                f"lease {lease.id} was not verified for content-mismatch recovery",
-                lease=lease,
-            )
-        if self.git.remote_branch_sha(lease.branch) is not None:
-            return self._promotion_blocked(
-                "promotion_incomplete",
-                f"lease {lease.id} promotion branch is already published",
-                lease=lease,
-            )
-
-        current_target_sha = self.git.fetch_ref(target_branch)
-        if current_target_sha == recorded_target_sha:
-            return self._promotion_blocked(
-                "promotion_incomplete",
-                f"lease {lease.id} target branch has not advanced",
-                lease=lease,
-            )
-        if recorded_source_base_shas != tuple(
-            source.base_sha for source in sources
-        ):
-            return self._promotion_blocked(
-                "promotion_incomplete",
-                f"lease {lease.id} source provenance changed",
-                lease=lease,
-            )
-
-        patches: list[bytes] = []
-        for source in sources:
-            source_base_sha = self.git.fetch_ref(source.base_sha)
-            source_head_sha = self.git.fetch_ref(source.head_sha)
+        try:
+            old_head = self.git.head_sha(lease.worktree_path)
             if (
-                source_base_sha != source.base_sha
-                or source_head_sha != source.head_sha
+                self._registered_worktree(lease) is None
+                or self.git.status_porcelain(lease.worktree_path)
+                or old_head != lease.head_sha
+                or self.git.commit_parents(old_head) != (recorded_target_sha,)
+            ):
+                return self._promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} was not verified for content-mismatch recovery",
+                    lease=lease,
+                )
+            if self.git.remote_branch_sha(lease.branch) is not None:
+                return self._promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} promotion branch is already published",
+                    lease=lease,
+                )
+
+            current_target_sha = self.git.fetch_ref(target_branch)
+            if current_target_sha == recorded_target_sha:
+                return self._promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} target branch has not advanced",
+                    lease=lease,
+                )
+            if recorded_source_base_shas != tuple(
+                source.base_sha for source in sources
             ):
                 return self._promotion_blocked(
                     "promotion_incomplete",
                     f"lease {lease.id} source provenance changed",
                     lease=lease,
                 )
-            merge_base = self.git.merge_base(source_base_sha, source_head_sha)
-            included_paths = tuple(
-                path for path in source.changed_paths if path not in excluded_paths
-            )
-            patch = self.git.binary_diff(
-                merge_base,
-                source_head_sha,
-                paths=included_paths if excluded_paths else None,
-            )
-            if not patch:
-                return self._promotion_blocked(
-                    "promotion_incomplete",
-                    f"lease {lease.id} reviewed source patch is empty",
-                    lease=lease,
+
+            patches: list[bytes] = []
+            for source in sources:
+                source_base_sha = self.git.fetch_ref(source.base_sha)
+                source_head_sha = self.git.fetch_ref(source.head_sha)
+                if (
+                    source_base_sha != source.base_sha
+                    or source_head_sha != source.head_sha
+                ):
+                    return self._promotion_blocked(
+                        "promotion_incomplete",
+                        f"lease {lease.id} source provenance changed",
+                        lease=lease,
+                    )
+                merge_base = self.git.merge_base(source_base_sha, source_head_sha)
+                included_paths = tuple(
+                    path for path in source.changed_paths if path not in excluded_paths
                 )
-            patches.append(patch)
+                if not included_paths:
+                    continue
+                patch = self.git.binary_diff(
+                    merge_base,
+                    source_head_sha,
+                    paths=included_paths if excluded_paths else None,
+                )
+                if not patch:
+                    return self._promotion_blocked(
+                        "promotion_incomplete",
+                        f"lease {lease.id} reviewed source patch is empty",
+                        lease=lease,
+                    )
+                patches.append(patch)
+        except GitRemoteError as error:
+            return self._external_error(
+                "wt.promote",
+                "promotion_recovery_failed",
+                str(error),
+                lease=lease,
+            )
+        except (GitError, OSError, RuntimeError, sqlite3.Error) as error:
+            return self._promotion_blocked(
+                "promotion_recovery_failed", str(error), lease=lease
+            )
 
         try:
             self.git.reset_hard(lease.worktree_path, current_target_sha)
@@ -3398,8 +3412,40 @@ class WorktreeService:
         except (GitError, OSError, RuntimeError, sqlite3.Error) as error:
             try:
                 self.git.reset_hard(lease.worktree_path, old_head)
-            except GitError:
-                pass
+            except (GitError, OSError, RuntimeError, sqlite3.Error) as restore_error:
+                actual_head: str | None = None
+                actual_head_error: Exception | None = None
+                try:
+                    actual_head = self.git.head_sha(lease.worktree_path)
+                except (GitError, OSError, RuntimeError, sqlite3.Error) as head_error:
+                    actual_head_error = head_error
+                summary = (
+                    "promotion_recovery_restore_failed: rebuild failed: "
+                    f"{error}; restore failed: {restore_error}"
+                )
+                reconciliation_error: Exception | None = None
+                try:
+                    lease = self.registry.transition(
+                        lease.id,
+                        LeaseState.BLOCKED,
+                        expected_version=lease.version,
+                        event_type="promotion_blocked",
+                        summary=summary,
+                        observed_head_sha=actual_head,
+                        head_sha=actual_head,
+                    )
+                except (OSError, RuntimeError, sqlite3.Error) as transition_error:
+                    reconciliation_error = transition_error
+                message = f"rebuild failed: {error}; restore failed: {restore_error}"
+                if actual_head_error is not None:
+                    message += f"; actual head unavailable: {actual_head_error}"
+                if reconciliation_error is not None:
+                    message += (
+                        f"; registry reconciliation failed: {reconciliation_error}"
+                    )
+                return self._promotion_blocked(
+                    "promotion_recovery_restore_failed", message, lease=lease
+                )
             return self._promotion_blocked(
                 "promotion_recovery_failed", str(error), lease=lease
             )
