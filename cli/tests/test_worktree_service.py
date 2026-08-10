@@ -430,6 +430,47 @@ class PromotionHarness:
         git_command(self.repo, "push", "-q", "origin", "main")
         git_command(self.repo, "checkout", "-q", "staging")
 
+    def add_content_mismatch_source(self, number: int = 373) -> PullRequest:
+        git_command(self.repo, "checkout", "-q", "main")
+        (self.repo / "feature.txt").write_text(
+            "copy=old\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nrank=old\n",
+            encoding="utf-8",
+        )
+        git_command(self.repo, "add", "feature.txt")
+        git_command(self.repo, "commit", "-q", "-m", "production prerequisite old")
+        git_command(self.repo, "push", "-q", "origin", "main")
+
+        git_command(self.repo, "checkout", "-q", "staging")
+        (self.repo / "feature.txt").write_text(
+            "copy=new\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nrank=old\n",
+            encoding="utf-8",
+        )
+        git_command(self.repo, "add", "feature.txt")
+        git_command(self.repo, "commit", "-q", "-m", "staging prerequisite")
+        git_command(self.repo, "push", "-q", "origin", "staging")
+        return self.add_followup_source(
+            number,
+            feature_text=(
+                "copy=new\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nrank=new\n"
+            ),
+            change_feature=True,
+            include_followup=False,
+        )
+
+    def advance_target_prerequisite(self) -> str:
+        git_command(self.repo, "checkout", "-q", "main")
+        (self.repo / "feature.txt").write_text(
+            "copy=new\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nrank=old\n",
+            encoding="utf-8",
+        )
+        git_command(self.repo, "add", "feature.txt")
+        git_command(self.repo, "commit", "-q", "-m", "land production prerequisite")
+        target_sha = git_command(self.repo, "rev-parse", "HEAD")
+        git_command(self.repo, "push", "-q", "origin", "main")
+        git_command(self.repo, "checkout", "-q", "staging")
+        return target_sha
+
+
     def add_followup_source(
         self,
         number: int = 373,
@@ -4108,6 +4149,39 @@ def test_promote_retries_blocked_verification_failure_with_exact_provenance(
     assert second.lease.state is LeaseState.PR_OPEN
     assert len(promotion_harness.github.create_calls) == 1
 
+
+
+def test_promote_rebuilds_content_mismatch_after_target_advances(
+    promotion_harness: PromotionHarness,
+) -> None:
+    source = promotion_harness.add_content_mismatch_source()
+    first = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+    assert first.status == "blocked"
+    assert first.blockers[0]["code"] == "promotion_content_mismatch"
+    assert first.lease is not None
+    blocked_head = first.lease.head_sha
+    target_sha = promotion_harness.advance_target_prerequisite()
+
+    second = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert second.decision == "ready"
+    assert second.lease is not None
+    assert second.lease.id == first.lease.id
+    assert second.lease.state is LeaseState.PR_OPEN
+    assert second.lease.head_sha != blocked_head
+    assert promotion_harness.git.commit_parents(second.lease.head_sha) == (target_sha,)
+    assert len(promotion_harness.github.create_calls) == 1
+    assert (second.lease.worktree_path / "feature.txt").read_text(
+        encoding="utf-8"
+    ) == "copy=new\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nrank=new\n"
 
 def test_promote_retries_blocked_transient_prepare_failure(
     promotion_harness: PromotionHarness,
