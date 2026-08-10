@@ -3234,6 +3234,20 @@ class WorktreeService:
                 "promotion_reconciliation_failed", str(error), lease=lease
             )
         if lease.state is LeaseState.BLOCKED:
+            latest = events[-1] if events else None
+            if (
+                latest is not None
+                and latest.event_type == "promotion_blocked"
+                and latest.summary.startswith("promotion_content_mismatch:")
+            ):
+                return self._rebuild_content_mismatch_promotion(
+                    lease,
+                    github=github,
+                    sources=sources,
+                    excluded_paths=excluded_paths,
+                    recorded_target_sha=target_base_sha,
+                    target_branch=target_branch,
+                )
             retryable_prefixes = (
                 "promotion_apply_failed: production verification failed",
                 "promotion_prepare_failed:",
@@ -3268,6 +3282,116 @@ class WorktreeService:
                 github=github,
                 source_prs=tuple(source.number for source in sources),
                 target_branch=target_branch,
+            )
+        return self._recover_unrecorded_promotion_publish(
+            lease,
+            github=github,
+            sources=sources,
+            excluded_paths=excluded_paths,
+            target_branch=target_branch,
+        )
+
+    def _rebuild_content_mismatch_promotion(
+        self,
+        lease: Lease,
+        *,
+        github: GhClient,
+        sources: Sequence[PullRequest],
+        excluded_paths: Sequence[str],
+        recorded_target_sha: str,
+        target_branch: str,
+    ) -> CommandResult:
+        old_head = self.git.head_sha(lease.worktree_path)
+        if (
+            self._registered_worktree(lease) is None
+            or self.git.status_porcelain(lease.worktree_path)
+            or old_head != lease.head_sha
+            or self.git.commit_parents(old_head) != (recorded_target_sha,)
+        ):
+            return self._promotion_blocked(
+                "promotion_incomplete",
+                f"lease {lease.id} was not verified for content-mismatch recovery",
+                lease=lease,
+            )
+        if self.git.remote_branch_sha(lease.branch) is not None:
+            return self._promotion_blocked(
+                "promotion_incomplete",
+                f"lease {lease.id} promotion branch is already published",
+                lease=lease,
+            )
+
+        current_target_sha = self.git.fetch_ref(target_branch)
+        if current_target_sha == recorded_target_sha:
+            return self._promotion_blocked(
+                "promotion_incomplete",
+                f"lease {lease.id} target branch has not advanced",
+                lease=lease,
+            )
+
+        patches: list[bytes] = []
+        for source in sources:
+            source_base_sha = self.git.fetch_ref(source.base_sha)
+            source_head_sha = self.git.fetch_ref(source.head_sha)
+            if (
+                source_base_sha != source.base_sha
+                or source_head_sha != source.head_sha
+            ):
+                return self._promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} source provenance changed",
+                    lease=lease,
+                )
+            merge_base = self.git.merge_base(source_base_sha, source_head_sha)
+            included_paths = tuple(
+                path for path in source.changed_paths if path not in excluded_paths
+            )
+            patch = self.git.binary_diff(
+                merge_base,
+                source_head_sha,
+                paths=included_paths if excluded_paths else None,
+            )
+            if not patch:
+                return self._promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} reviewed source patch is empty",
+                    lease=lease,
+                )
+            patches.append(patch)
+
+        try:
+            self.git.reset_hard(lease.worktree_path, current_target_sha)
+            for patch in patches:
+                self.git.apply_indexed_patch(lease.worktree_path, patch)
+            promotion_head = self.git.commit(
+                lease.worktree_path,
+                self._promotion_message(
+                    sources=sources,
+                    excluded_paths=excluded_paths,
+                    target_sha=current_target_sha,
+                    lease=lease,
+                    target_branch=target_branch,
+                ),
+                allow_empty=True,
+            )
+            lease = self.registry.transition(
+                lease.id,
+                LeaseState.BLOCKED,
+                expected_version=lease.version,
+                event_type="promotion_blocked",
+                summary=(
+                    "promotion_verification_failed: rebuilt content-mismatch "
+                    "promotion on advanced target"
+                ),
+                observed_head_sha=old_head,
+                head_sha=promotion_head,
+            )
+        except (GitError, OSError, RuntimeError, sqlite3.Error) as error:
+            try:
+                self.git.reset_hard(lease.worktree_path, old_head)
+            except GitError:
+                pass
+            return self._promotion_blocked(
+                "promotion_recovery_failed", str(error), lease=lease
             )
         return self._recover_unrecorded_promotion_publish(
             lease,
