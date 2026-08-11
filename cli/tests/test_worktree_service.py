@@ -430,6 +430,47 @@ class PromotionHarness:
         git_command(self.repo, "push", "-q", "origin", "main")
         git_command(self.repo, "checkout", "-q", "staging")
 
+    def add_content_mismatch_source(self, number: int = 373) -> PullRequest:
+        git_command(self.repo, "checkout", "-q", "main")
+        (self.repo / "feature.txt").write_text(
+            "copy=old\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nrank=old\n",
+            encoding="utf-8",
+        )
+        git_command(self.repo, "add", "feature.txt")
+        git_command(self.repo, "commit", "-q", "-m", "production prerequisite old")
+        git_command(self.repo, "push", "-q", "origin", "main")
+
+        git_command(self.repo, "checkout", "-q", "staging")
+        (self.repo / "feature.txt").write_text(
+            "copy=new\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nrank=old\n",
+            encoding="utf-8",
+        )
+        git_command(self.repo, "add", "feature.txt")
+        git_command(self.repo, "commit", "-q", "-m", "staging prerequisite")
+        git_command(self.repo, "push", "-q", "origin", "staging")
+        return self.add_followup_source(
+            number,
+            feature_text=(
+                "copy=new\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nrank=new\n"
+            ),
+            change_feature=True,
+            include_followup=False,
+        )
+
+    def advance_target_prerequisite(self) -> str:
+        git_command(self.repo, "checkout", "-q", "main")
+        (self.repo / "feature.txt").write_text(
+            "copy=new\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nrank=old\n",
+            encoding="utf-8",
+        )
+        git_command(self.repo, "add", "feature.txt")
+        git_command(self.repo, "commit", "-q", "-m", "land production prerequisite")
+        target_sha = git_command(self.repo, "rev-parse", "HEAD")
+        git_command(self.repo, "push", "-q", "origin", "main")
+        git_command(self.repo, "checkout", "-q", "staging")
+        return target_sha
+
+
     def add_followup_source(
         self,
         number: int = 373,
@@ -4109,6 +4150,617 @@ def test_promote_retries_blocked_verification_failure_with_exact_provenance(
     assert len(promotion_harness.github.create_calls) == 1
 
 
+
+def test_promote_rebuilds_content_mismatch_after_target_advances(
+    promotion_harness: PromotionHarness,
+) -> None:
+    source = promotion_harness.add_content_mismatch_source()
+    first = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+    assert first.status == "blocked"
+    assert first.blockers[0]["code"] == "promotion_content_mismatch"
+    assert first.lease is not None
+    blocked_head = first.lease.head_sha
+    target_sha = promotion_harness.advance_target_prerequisite()
+
+    second = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert second.decision == "ready"
+    assert second.lease is not None
+    assert second.lease.id == first.lease.id
+    assert second.lease.state is LeaseState.PR_OPEN
+    assert second.lease.head_sha != blocked_head
+    assert promotion_harness.git.commit_parents(second.lease.head_sha) == (target_sha,)
+    assert len(promotion_harness.github.create_calls) == 1
+    assert (second.lease.worktree_path / "feature.txt").read_text(
+        encoding="utf-8"
+    ) == "copy=new\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nrank=new\n"
+
+
+
+def test_promote_recovers_content_mismatch_reviewed_rename_when_disabled(
+    promotion_harness: PromotionHarness,
+) -> None:
+    git_command(promotion_harness.repo, "checkout", "-q", "main")
+    (promotion_harness.repo / "feature.txt").write_text(
+        "copy=old\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nrank=old\n",
+        encoding="utf-8",
+    )
+    git_command(promotion_harness.repo, "add", "feature.txt")
+    git_command(
+        promotion_harness.repo, "commit", "-q", "-m", "production prerequisite old"
+    )
+    git_command(promotion_harness.repo, "push", "-q", "origin", "main")
+    git_command(promotion_harness.repo, "checkout", "-q", "staging")
+    (promotion_harness.repo / "feature.txt").write_text(
+        "copy=new\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nrank=old\n",
+        encoding="utf-8",
+    )
+    git_command(promotion_harness.repo, "add", "feature.txt")
+    git_command(
+        promotion_harness.repo, "commit", "-q", "-m", "staging prerequisite"
+    )
+    git_command(promotion_harness.repo, "push", "-q", "origin", "staging")
+    base_sha = git_command(promotion_harness.repo, "rev-parse", "HEAD")
+    git_command(promotion_harness.repo, "checkout", "-q", "-b", "feature/pr-373")
+    git_command(promotion_harness.repo, "mv", "feature.txt", "renamed.txt")
+    git_command(promotion_harness.repo, "commit", "-q", "-m", "rename source")
+    head_sha = git_command(promotion_harness.repo, "rev-parse", "HEAD")
+    git_command(
+        promotion_harness.repo, "push", "-q", "-u", "origin", "feature/pr-373"
+    )
+    git_command(promotion_harness.repo, "checkout", "-q", "staging")
+    git_command(
+        promotion_harness.repo,
+        "merge",
+        "--no-ff",
+        "-q",
+        "feature/pr-373",
+        "-m",
+        "merge renamed source",
+    )
+    merge_sha = git_command(promotion_harness.repo, "rev-parse", "HEAD")
+    git_command(promotion_harness.repo, "push", "-q", "origin", "staging")
+    git_command(promotion_harness.repo, "config", "diff.renames", "false")
+    source = PullRequest(
+        number=373,
+        state="MERGED",
+        base_ref="staging",
+        base_sha=base_sha,
+        head_ref="feature/pr-373",
+        head_sha=head_sha,
+        merge_commit_sha=merge_sha,
+        review_decision="APPROVED",
+        checks_passed=True,
+        changed_paths=("renamed.txt",),
+        url="https://github.example/acme/repo/pull/373",
+    )
+    promotion_harness.github.prs[source.number] = source
+
+    first = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+    assert first.status == "blocked"
+    assert first.blockers[0]["code"] == "promotion_content_mismatch"
+    assert first.lease is not None
+    target_sha = promotion_harness.advance_target_prerequisite()
+
+    second = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert second.decision == "ready"
+    assert second.lease is not None
+    assert second.lease.state is LeaseState.PR_OPEN
+    assert promotion_harness.git.commit_parents(second.lease.head_sha) == (target_sha,)
+    assert len(promotion_harness.github.create_calls) == 1
+def test_promote_does_not_rebuild_content_mismatch_without_target_advance(
+    promotion_harness: PromotionHarness,
+) -> None:
+    source = promotion_harness.add_content_mismatch_source()
+    first = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert first.status == "blocked"
+    assert first.blockers[0]["code"] == "promotion_content_mismatch"
+    assert first.lease is not None
+    blocked_head = first.lease.head_sha
+    assert any(
+        worktree.path == first.lease.worktree_path
+        for worktree in promotion_harness.git.list_worktrees()
+    )
+    assert promotion_harness.git.status_porcelain(first.lease.worktree_path) == ()
+    assert promotion_harness.git.head_sha(first.lease.worktree_path) == blocked_head
+    assert promotion_harness.git.commit_parents(blocked_head) == (
+        promotion_harness.git.resolve_ref("main"),
+    )
+
+
+    second = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert second.status == "blocked"
+    assert second.blockers[0]["code"] == "promotion_incomplete"
+    assert second.blockers[0]["message"] == (
+        f"lease {first.lease.id} target branch has not advanced"
+    )
+
+    assert promotion_harness.github.create_calls == []
+    assert promotion_harness.git.head_sha(first.lease.worktree_path) == blocked_head
+
+
+def test_promote_does_not_rebuild_dirty_content_mismatch_after_target_advances(
+    promotion_harness: PromotionHarness,
+) -> None:
+    source = promotion_harness.add_content_mismatch_source()
+    first = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert first.status == "blocked"
+    assert first.blockers[0]["code"] == "promotion_content_mismatch"
+    assert first.lease is not None
+    blocked_head = first.lease.head_sha
+    recorded_target_sha = promotion_harness.git.commit_parents(blocked_head)[0]
+    target_sha = promotion_harness.advance_target_prerequisite()
+    assert target_sha != recorded_target_sha
+    assert any(
+        worktree.path == first.lease.worktree_path
+        for worktree in promotion_harness.git.list_worktrees()
+    )
+    assert promotion_harness.git.head_sha(first.lease.worktree_path) == blocked_head
+    assert promotion_harness.git.commit_parents(blocked_head) == (
+        recorded_target_sha,
+    )
+
+    (first.lease.worktree_path / "README.txt").write_text(
+        "dirty\n", encoding="utf-8"
+    )
+    assert promotion_harness.git.status_porcelain(first.lease.worktree_path)
+
+    second = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert second.status == "blocked"
+    assert second.blockers[0]["code"] == "promotion_incomplete"
+    assert second.blockers[0]["message"] == (
+        f"lease {first.lease.id} was not verified for content-mismatch recovery"
+    )
+
+    assert promotion_harness.github.create_calls == []
+    assert promotion_harness.git.head_sha(first.lease.worktree_path) == blocked_head
+
+
+def test_promote_does_not_rebuild_content_mismatch_with_published_branch(
+    promotion_harness: PromotionHarness,
+) -> None:
+    source = promotion_harness.add_content_mismatch_source()
+    first = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert first.status == "blocked"
+    assert first.blockers[0]["code"] == "promotion_content_mismatch"
+    assert first.lease is not None
+    blocked_head = first.lease.head_sha
+    promotion_harness.advance_target_prerequisite()
+    git_command(
+        first.lease.worktree_path,
+        "push",
+        "-q",
+        "origin",
+        first.lease.branch,
+    )
+    assert promotion_harness.git.remote_branch_sha(first.lease.branch) == blocked_head
+
+
+    second = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert second.status == "blocked"
+    assert second.blockers[0]["code"] == "promotion_incomplete"
+    assert second.blockers[0]["message"] == (
+        f"lease {first.lease.id} promotion branch is already published"
+    )
+
+    assert promotion_harness.github.create_calls == []
+    assert promotion_harness.git.head_sha(first.lease.worktree_path) == blocked_head
+
+
+def test_promote_does_not_rebuild_content_mismatch_with_forged_parent(
+    promotion_harness: PromotionHarness,
+) -> None:
+    source = promotion_harness.add_content_mismatch_source()
+    first = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert first.status == "blocked"
+    assert first.blockers[0]["code"] == "promotion_content_mismatch"
+    assert first.lease is not None
+    original_message = promotion_harness.git.commit_message(first.lease.worktree_path)
+    recorded_target_sha = promotion_harness.git.commit_parents(first.lease.head_sha)[
+        0
+    ]
+
+    forged_parent = promotion_harness.git.resolve_ref("staging")
+    promotion_tree = git_command(
+        first.lease.worktree_path, "rev-parse", "HEAD^{tree}"
+    )
+    forged_head = git_command(
+        first.lease.worktree_path,
+        "commit-tree",
+        promotion_tree,
+        "-p",
+        forged_parent,
+        "-m",
+        original_message,
+    )
+    assert forged_parent != recorded_target_sha
+
+    git_command(
+        first.lease.worktree_path, "reset", "--hard", "-q", forged_head
+    )
+    blocked = promotion_harness.registry.get_lease(first.lease.id)
+    assert blocked is not None
+    forged_lease = promotion_harness.registry.transition(
+        blocked.id,
+        LeaseState.BLOCKED,
+        expected_version=blocked.version,
+        event_type="promotion_blocked",
+        summary="promotion_content_mismatch: forged promotion parent",
+        head_sha=forged_head,
+    )
+
+    promotion_harness.advance_target_prerequisite()
+    assert any(
+        worktree.path == first.lease.worktree_path
+        for worktree in promotion_harness.git.list_worktrees()
+    )
+    assert promotion_harness.git.status_porcelain(first.lease.worktree_path) == ()
+    assert promotion_harness.git.head_sha(first.lease.worktree_path) == forged_lease.head_sha
+    assert promotion_harness.git.commit_parents(forged_head) == (forged_parent,)
+
+
+    second = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert promotion_harness.git.commit_message(
+        first.lease.worktree_path
+    ) == original_message
+    assert promotion_harness.git.commit_parents(forged_head) == (forged_parent,)
+    assert second.status == "blocked"
+    assert second.blockers[0]["code"] == "promotion_incomplete"
+    assert second.blockers[0]["message"] == (
+        f"lease {first.lease.id} was not verified for content-mismatch recovery"
+    )
+
+    assert promotion_harness.github.create_calls == []
+    assert promotion_harness.git.head_sha(first.lease.worktree_path) == forged_head
+
+
+def test_promote_does_not_rebuild_content_mismatch_after_source_provenance_changes(
+    promotion_harness: PromotionHarness,
+) -> None:
+    source = promotion_harness.add_content_mismatch_source()
+    first = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert first.status == "blocked"
+    assert first.blockers[0]["code"] == "promotion_content_mismatch"
+    assert first.lease is not None
+    blocked_head = first.lease.head_sha
+    promotion_harness.advance_target_prerequisite()
+    assert source.merge_commit_sha is not None
+    assert source.merge_commit_sha != source.head_sha
+    assert git_command(
+        promotion_harness.repo, "rev-parse", f"{source.merge_commit_sha}^{{commit}}"
+    ) == source.merge_commit_sha
+    promotion_harness.github.prs[source.number] = replace(
+        source, head_sha=source.merge_commit_sha
+    )
+
+
+    second = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert second.status == "blocked"
+    assert second.blockers[0]["code"] == "promotion_incomplete"
+    assert second.blockers[0]["message"] == (
+        f"lease {first.lease.id} does not have exact promotion provenance"
+    )
+    assert promotion_harness.github.create_calls == []
+    assert promotion_harness.git.head_sha(first.lease.worktree_path) == blocked_head
+
+def test_promote_recovers_content_mismatch_with_fully_excluded_source(
+    promotion_harness: PromotionHarness,
+) -> None:
+    git_command(promotion_harness.repo, "checkout", "-q", "main")
+    (promotion_harness.repo / "feature.txt").write_text(
+        "copy=old\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nrank=old\n",
+        encoding="utf-8",
+    )
+    git_command(promotion_harness.repo, "add", "feature.txt")
+    git_command(
+        promotion_harness.repo, "commit", "-q", "-m", "production prerequisite old"
+    )
+    git_command(promotion_harness.repo, "push", "-q", "origin", "main")
+    git_command(promotion_harness.repo, "checkout", "-q", "staging")
+    (promotion_harness.repo / "feature.txt").write_text(
+        "copy=new\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nrank=old\n",
+        encoding="utf-8",
+    )
+    git_command(promotion_harness.repo, "add", "feature.txt")
+    git_command(
+        promotion_harness.repo, "commit", "-q", "-m", "staging prerequisite"
+    )
+    git_command(promotion_harness.repo, "push", "-q", "origin", "staging")
+    excluded = promotion_harness.add_followup_source(
+        373,
+        change_feature=False,
+        include_followup=False,
+        team_text="excluded team update\n",
+    )
+    source = promotion_harness.add_followup_source(
+        374,
+        feature_text=(
+            "copy=new\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nrank=new\n"
+        ),
+        include_followup=False,
+    )
+
+    first = promotion_harness.service.promote(
+        source_pr=(excluded.number, source.number),
+        exclude_paths=("team.txt",),
+        target_branch="main",
+        apply=True,
+    )
+    assert first.status == "blocked"
+    assert first.blockers[0]["code"] == "promotion_content_mismatch"
+    assert first.lease is not None
+    target_sha = promotion_harness.advance_target_prerequisite()
+
+    second = promotion_harness.service.promote(
+        source_pr=(excluded.number, source.number),
+        exclude_paths=("team.txt",),
+        target_branch="main",
+        apply=True,
+    )
+
+    assert second.decision == "ready"
+    assert second.lease is not None
+    assert second.lease.id == first.lease.id
+    assert promotion_harness.git.commit_parents(second.lease.head_sha) == (target_sha,)
+    assert not (second.lease.worktree_path / "team.txt").exists()
+    assert (second.lease.worktree_path / "feature.txt").read_text(
+        encoding="utf-8"
+    ) == "copy=new\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nrank=new\n"
+    assert len(promotion_harness.github.create_calls) == 1
+
+
+def test_promote_reports_content_mismatch_recovery_remote_preflight_failure(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = promotion_harness.add_content_mismatch_source()
+    first = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+    assert first.lease is not None
+    blocked_head = first.lease.head_sha
+    promotion_harness.advance_target_prerequisite()
+    original_fetch_ref = promotion_harness.git.fetch_ref
+
+    def fail_target_fetch(ref: str) -> str:
+        if ref == "main":
+            raise GitRemoteError("target unavailable")
+        return original_fetch_ref(ref)
+
+    monkeypatch.setattr(promotion_harness.git, "fetch_ref", fail_target_fetch)
+
+    second = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert second.status == "error"
+    assert second.blockers[0]["code"] == "promotion_recovery_failed"
+    assert promotion_harness.git.head_sha(first.lease.worktree_path) == blocked_head
+    assert promotion_harness.github.create_calls == []
+
+
+@pytest.mark.parametrize(
+    "error",
+    (
+        GitError("patch unavailable"),
+        OSError("patch unavailable"),
+        RuntimeError("patch unavailable"),
+        sqlite3.Error("patch unavailable"),
+    ),
+)
+def test_promote_blocks_content_mismatch_recovery_source_patch_failures(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+) -> None:
+    source = promotion_harness.add_content_mismatch_source()
+    first = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+    assert first.lease is not None
+    blocked_head = first.lease.head_sha
+    promotion_harness.advance_target_prerequisite()
+
+    def fail_patch(*_: object, **__: object) -> bytes:
+        raise error
+
+    monkeypatch.setattr(promotion_harness.git, "binary_diff", fail_patch)
+
+    second = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert second.status == "blocked"
+    assert second.blockers[0]["code"] == "promotion_recovery_failed"
+    assert promotion_harness.git.head_sha(first.lease.worktree_path) == blocked_head
+    assert promotion_harness.github.create_calls == []
+
+
+def test_promote_records_actual_head_when_content_mismatch_restore_fails(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = promotion_harness.add_content_mismatch_source()
+    first = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+    assert first.lease is not None
+    blocked_head = first.lease.head_sha
+    promotion_harness.advance_target_prerequisite()
+    original_transition = promotion_harness.registry.transition
+
+    def fail_rebuild_transition(*args: object, **kwargs: object) -> Lease:
+        summary = kwargs.get("summary")
+        if isinstance(summary, str) and summary.startswith(
+            "promotion_verification_failed: rebuilt"
+        ):
+            raise RuntimeError("recording failed")
+        return original_transition(*args, **kwargs)
+
+    monkeypatch.setattr(
+        promotion_harness.registry, "transition", fail_rebuild_transition
+    )
+    original_reset_hard = promotion_harness.git.reset_hard
+
+    def fail_restore(worktree_path: Path, ref: str) -> None:
+        if ref == blocked_head:
+            raise GitError("restore failed")
+        original_reset_hard(worktree_path, ref)
+
+    monkeypatch.setattr(promotion_harness.git, "reset_hard", fail_restore)
+
+    second = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert second.status == "blocked"
+    assert second.blockers[0]["code"] == "promotion_recovery_restore_failed"
+    assert "recording failed" in second.blockers[0]["message"]
+    assert "restore failed" in second.blockers[0]["message"]
+    reconciled = promotion_harness.registry.get_lease(first.lease.id)
+    assert reconciled is not None
+    assert reconciled.head_sha == promotion_harness.git.head_sha(
+        first.lease.worktree_path
+    )
+    assert reconciled.head_sha != blocked_head
+    latest = promotion_harness.registry.list_events(first.lease.id)[-1]
+    assert latest.event_type == "promotion_blocked"
+    assert latest.summary.startswith("promotion_recovery_restore_failed:")
+    assert promotion_harness.github.create_calls == []
+
+
+def test_promote_surfaces_content_mismatch_restore_reconciliation_failure(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = promotion_harness.add_content_mismatch_source()
+    first = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+    assert first.lease is not None
+    blocked_head = first.lease.head_sha
+    promotion_harness.advance_target_prerequisite()
+    original_transition = promotion_harness.registry.transition
+
+    def fail_rebuild_and_reconciliation(
+        *args: object, **kwargs: object
+    ) -> Lease:
+        summary = kwargs.get("summary")
+        if isinstance(summary, str) and summary.startswith(
+            "promotion_verification_failed: rebuilt"
+        ):
+            raise RuntimeError("recording failed")
+        if isinstance(summary, str) and summary.startswith(
+            "promotion_recovery_restore_failed:"
+        ):
+            raise RuntimeError("reconciliation failed")
+        return original_transition(*args, **kwargs)
+
+    monkeypatch.setattr(
+        promotion_harness.registry, "transition", fail_rebuild_and_reconciliation
+    )
+    original_reset_hard = promotion_harness.git.reset_hard
+
+    def fail_restore(worktree_path: Path, ref: str) -> None:
+        if ref == blocked_head:
+            raise GitError("restore failed")
+        original_reset_hard(worktree_path, ref)
+
+    monkeypatch.setattr(promotion_harness.git, "reset_hard", fail_restore)
+
+    second = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert second.status == "blocked"
+    assert second.blockers[0]["code"] == "promotion_recovery_restore_failed"
+    assert "recording failed" in second.blockers[0]["message"]
+    assert "restore failed" in second.blockers[0]["message"]
+    assert "reconciliation failed" in second.blockers[0]["message"]
+    assert promotion_harness.github.create_calls == []
 def test_promote_retries_blocked_transient_prepare_failure(
     promotion_harness: PromotionHarness,
 ) -> None:
