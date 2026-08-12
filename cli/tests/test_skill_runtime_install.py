@@ -159,6 +159,28 @@ def test_setup_installs_exact_inventory_into_three_runtime_roots(tmp_path: Path)
         ).resolve()
 
 
+def test_setup_ignores_unrelated_command_files(tmp_path: Path) -> None:
+    unrelated = tmp_path / "home" / ".claude" / "commands" / "sc" / "analyze.md"
+    unrelated.parent.mkdir(parents=True)
+    unrelated.write_text("unrelated command\n")
+
+    completed = run_setup(tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Commands는 deprecated되었습니다." not in completed.stdout
+
+
+def test_setup_warns_for_legacy_awf_command_files(tmp_path: Path) -> None:
+    legacy = tmp_path / "home" / ".claude" / "commands" / "analysis.md"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("legacy AWF command\n")
+
+    completed = run_setup(tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Commands는 deprecated되었습니다." in completed.stdout
+
+
 def test_built_wheel_resolves_packaged_release_skill(tmp_path: Path) -> None:
     wheel_dir = tmp_path / "wheel"
     completed = subprocess.run(

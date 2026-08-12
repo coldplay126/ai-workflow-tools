@@ -138,13 +138,23 @@ done
 # 2. Commands → Skills 마이그레이션 안내
 echo ""
 echo "[4/4] 기존 Commands 확인 중..."
-if [ -d "$CLAUDE_DIR/commands" ] && ls "$CLAUDE_DIR/commands"/wf*.md "$CLAUDE_DIR/commands"/analysis.md 2>/dev/null | head -1 > /dev/null 2>&1; then
-  echo "  ⚠ ~/.claude/commands/ 에 기존 command 파일이 있습니다."
+legacy_command_found=0
+if [ -d "$CLAUDE_DIR/commands" ]; then
+  for legacy_command in "$CLAUDE_DIR"/commands/wf*.md "$CLAUDE_DIR"/commands/analysis.md; do
+    if [ -e "$legacy_command" ] || [ -L "$legacy_command" ]; then
+      legacy_command_found=1
+      break
+    fi
+  done
+fi
+
+if [ "$legacy_command_found" -eq 1 ]; then
+  echo "  ⚠ ~/.claude/commands/ 에 기존 AWF command 파일이 있습니다."
   echo "    Commands는 deprecated되었습니다. Skills로 마이그레이션되었으므로"
   echo "    기존 command 심링크를 삭제해도 됩니다:"
   echo "    rm ~/.claude/commands/wf*.md ~/.claude/commands/analysis.md"
 else
-  echo "  ✓ 마이그레이션 불필요 (기존 commands 없음)"
+  echo "  ✓ 마이그레이션 불필요 (기존 AWF commands 없음)"
 fi
 
 # 3. 안내
