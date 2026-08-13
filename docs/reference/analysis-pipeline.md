@@ -229,13 +229,13 @@ unit discovery를 호출하지 않는다.
     "bundle": { "status": "completed", "fileCount": 13, "lineCount": 720, "tokenEstimate": 5400, "configHash": "sha256:..." },
     "analyze": {
       "stage1": { "status": "completed", "provider": "codex", "errorMessage": "", "retryCount": 0 },
-      "stage2": { "status": "completed", "provider": "sonnet", "errorMessage": "", "retryCount": 0 },
+      "stage2": { "status": "completed", "provider": "claude:sonnet", "errorMessage": "", "retryCount": 0 },
       "stage3": { "status": "failed", "provider": "opus", "reason": "reference expansion live stage3 validation failed", "errorMessage": "provider_timeout", "retryCount": 1 }
     },
     "output": { "status": "failed", "errorMessage": "provider_timeout" }
   },
   "artifacts": {
-    "result_file": ".tmp/result-stage2-sonnet.txt",
+    "result_file": ".tmp/result-stage2-claude_sonnet.txt",
     "stage3_final": ".tmp/stage3-final.md"
   }
 }

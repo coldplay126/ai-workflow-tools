@@ -418,7 +418,7 @@ Secondary evaluator(read-only 권한)로 4개 신규 파일과 기존 딥다이�
 1. `.analysis-state.json` 존재 확인
 2. 존재하고 완료(`layers.output.status == "completed"`)이면:
    - `hashes.json`의 파일 해시와 **현재 소스 파일 해시**, `layers.bundle.configHash`와 현재 bundle 설정 해시를 비교
-   - source/config generation이 동일하고 required Stage 3이 failed가 아니면 분석 skip (기존 결과 재사용)
+   - source/config generation이 동일하고 Stage 3이 failed가 아니면 분석 skip (기존 결과 재사용)
    - source 또는 config 변경 → re-analyze. Stage 2/3 retry budget을 0으로 reset
 3. 존재하고 미완료(`layers.output.status != "completed"`)이면:
    - `currentLayer`, `currentStage`, `mode` 복원
