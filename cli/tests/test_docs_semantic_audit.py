@@ -244,6 +244,7 @@ def test_analysis_generation_integrity_docs_share_contract() -> None:
         REPO_ROOT / "docs" / "reference" / "analysis-pipeline.md",
         REPO_ROOT / "docs" / "patterns" / "analysis-pipeline" / "02-stages.md",
         REPO_ROOT / "docs" / "patterns" / "analysis-pipeline" / "03-resume-optimization.md",
+        REPO_ROOT / "docs" / "specs" / "ai-context-specification.md",
         REPO_ROOT / "claude" / "skills" / "analysis" / "reference.md",
     )
     obsolete = "status가 `\"failed\"`인 단계의 artifact → 삭제"

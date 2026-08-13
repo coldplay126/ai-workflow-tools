@@ -98,6 +98,7 @@ Stage 2와 Stage 3은 다음 불변식을 따른다.
 4. Stage 2/3 성공 또는 새 source/config generation은 해당 retry budget을 reset한다.
 
 상태 필드와 artifact 경로는 reference 문서를 참조한다.
+
 ---
 
 ## Stage 3: 교차 검증 (고비용 Provider)
