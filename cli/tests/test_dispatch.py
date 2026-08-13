@@ -64,7 +64,7 @@ class _FakeProvider:
         self._stdout = stdout
         self._delay = delay
 
-    def complete(self, prompt, *, cwd=None, add_dirs=None):
+    def complete(self, prompt, *, cwd=None, add_dirs=None, timeout_sec=None):
         if self._delay:
             time.sleep(self._delay)
         return _Result(stdout=self._stdout)
@@ -171,7 +171,7 @@ def test_inline_dispatch_sequential_runs_serially():
             self.name = name
             self.role = role
 
-        def complete(self, prompt, *, cwd=None, add_dirs=None):
+        def complete(self, prompt, *, cwd=None, add_dirs=None, timeout_sec=None):
             with lock:
                 order.append(self.role)
             time.sleep(0.02)

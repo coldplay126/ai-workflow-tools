@@ -1722,7 +1722,7 @@ def run_omp_native_batch(
         if isinstance(result_value, str):
             stdout = result_value
             embedded = _parse_json_value(result_value)
-            parsed = result_value if embedded is None else embedded
+            raw_parsed = result_value if embedded is None else embedded
         else:
             stdout = (
                 json.dumps(
@@ -1733,15 +1733,25 @@ def run_omp_native_batch(
                 if has_result
                 else ""
             )
-            parsed = result_value
+            raw_parsed = result_value
+        object_contract_error = (
+            "require_json expected a JSON object"
+            if worker.require_json and not isinstance(raw_parsed, dict)
+            else None
+        )
+        parsed = None if object_contract_error is not None else raw_parsed
         validation_errors = validate_json_schema(
-            parsed,
+            raw_parsed,
             worker.output_schema,
         )
+        if object_contract_error is not None:
+            validation_errors.append(object_contract_error)
         metadata["schema_validation"] = {
             "mode": worker.schema_mode,
             "valid": (
-                not validation_errors if worker.output_schema is not None else None
+                not validation_errors
+                if worker.output_schema is not None or object_contract_error is not None
+                else None
             ),
             "errors": validation_errors,
         }
@@ -1779,7 +1789,7 @@ def run_omp_native_batch(
                 and not isinstance(raw_returncode, bool)
                 else 0
             )
-        parse_error = bool(worker.require_json and parsed is None)
+        parse_error = object_contract_error is not None
         error_text = str(item.get("error") or "")
         if validation_errors and worker.schema_mode == "strict":
             parse_error = True

@@ -28,15 +28,18 @@ class AgentResult:
 
     @property
     def conclusion(self) -> str:
-        if self.parsed:
-            return str(self.parsed.get("conclusion", ""))
-        return ""
+        if not isinstance(self.parsed, dict):
+            return ""
+        return str(self.parsed.get("conclusion", ""))
 
     @property
     def findings(self) -> list[dict]:
-        if self.parsed:
-            return list(self.parsed.get("findings", []))
-        return []
+        if not isinstance(self.parsed, dict):
+            return []
+        findings = self.parsed.get("findings", [])
+        if not isinstance(findings, list):
+            return []
+        return [finding for finding in findings if isinstance(finding, dict)]
 
     @property
     def has_critical(self) -> bool:
@@ -108,10 +111,15 @@ def run_agent(
         if on_progress and supports_streaming:
             result = _run_agent_streaming(provider, prompt, cwd, add_dirs, timeout_sec, on_progress)
         else:
-            result = provider.complete(prompt, cwd=cwd, add_dirs=add_dirs)
+            result = provider.complete(
+                prompt,
+                cwd=cwd,
+                add_dirs=add_dirs,
+                timeout_sec=timeout_sec,
+            )
 
         elapsed = time.monotonic() - started
-        timed_out = elapsed > timeout_sec
+        timed_out = elapsed > timeout_sec or result.returncode == 124
 
         stdout = (result.stdout or "").strip()
         stderr = (result.stderr or "").strip()

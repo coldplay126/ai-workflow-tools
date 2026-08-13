@@ -144,6 +144,24 @@ def test_all_pass_preserves_existing_semantics():
     )
 
 
+def test_explicit_fail_prefix_is_not_misclassified_as_pass():
+    failing = _result("fail", "FAIL: tests did not pass")
+
+    assert judge([failing]) == ("FAIL", "all failing agents agree")
+
+
+def test_explicit_pass_fail_prefixes_are_a_disagreement():
+    verdict, reason = judge(
+        [
+            _result("pass", "PASS: tests passed"),
+            _result("fail", "FAIL: tests did not pass"),
+        ]
+    )
+
+    assert verdict == "ESCALATE"
+    assert "PASS=['pass'], FAIL=['fail']" in reason
+
+
 def test_single_agent_honors_explicit_fail_conclusion():
     failing = _result(
         "only",

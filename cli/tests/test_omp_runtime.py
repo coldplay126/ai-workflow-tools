@@ -762,6 +762,53 @@ def test_native_strict_schema_failure_and_permissive_metadata(tmp_path: Path):
     assert results[1].metadata["schema_validation"]["valid"] is False
 
 
+def test_native_require_json_rejects_non_object_with_permissive_schema(
+    tmp_path: Path,
+) -> None:
+    fake = _write_fake_native_omp(
+        tmp_path / "omp",
+        envelope={
+            "awf_omp_batch": 1,
+            "workers": [
+                {
+                    "name": "ScalarWorker",
+                    "result": ["not", "an", "object"],
+                }
+            ],
+        },
+        agents=[
+            {
+                "index": 0,
+                "id": "01SCALAR",
+                "agent": "task",
+                "status": "completed",
+            }
+        ],
+    )
+
+    result = run_omp_native_batch(
+        [
+            OmpWorkerTask(
+                name="ScalarWorker",
+                role="reviewer",
+                prompt="review",
+                agent_type="task",
+                require_json=True,
+                output_schema=True,
+                schema_mode="permissive",
+            )
+        ],
+        cwd=str(tmp_path),
+        config=OmpRunnerConfig(command=str(fake)),
+    )[0]
+
+    assert result.parsed is None
+    assert result.parse_error is True
+    assert result.stdout == '["not","an","object"]'
+    assert result.metadata["task_id"] == "01SCALAR"
+    assert result.metadata["schema_validation"]["valid"] is False
+
+
 def test_native_partial_envelope_preserves_success_and_marks_missing_worker(
     tmp_path: Path,
 ):

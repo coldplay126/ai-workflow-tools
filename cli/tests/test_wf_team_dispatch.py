@@ -38,7 +38,13 @@ class _FakeProvider:
         self.name = name
         self._output = json.dumps(output)
 
-    def complete(self, prompt: str, cwd: str | None = None, add_dirs: list | None = None):
+    def complete(
+        self,
+        prompt: str,
+        cwd: str | None = None,
+        add_dirs: list | None = None,
+        timeout_sec: int | None = None,
+    ):
         return _FakeResult(self._output)
 
 
