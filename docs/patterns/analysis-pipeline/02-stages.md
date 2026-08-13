@@ -160,3 +160,15 @@ Fanout 패턴으로 분할하여 병렬 처리한 후 병합한다.
 | 하위 그룹 간 중복 claim | 최종 Analysis Judge가 중복 제거 |
 | 하위 그룹 간 모순 | 최종 Analysis Judge가 confidence 기준으로 해결 |
 | 하위 그룹 경계의 파일 의존성 | context 파일로 인접 그룹의 시그니처 제공 |
+
+### 실패와 취소 규칙
+
+- writer 목록이 비었거나 writer id/prompt가 malformed이면 fanout은 예외를
+  외부로 던지지 않는다. `(None, "fanout_unavailable:...", metadata)`를
+  반환하고 `metadata.status`를 `fallback`으로 기록한다.
+- provider가 실행된 뒤 반환한 실패는 fanout 설정 오류로 바꾸지 않는다.
+  기존 provider result와 diagnostic을 보존한다.
+- service 전체 `--all` 실행에서 child가 exit code `130`을 반환하면 취소로
+  간주한다. 후속 child와 domain 사이 delay는 실행하지 않는다.
+- 같은 service/domain의 mutating analysis는 `.analysis-run.lock`으로
+  직렬화한다. status와 dry-run을 포함한 read-only 경로는 lock 밖에 둔다.

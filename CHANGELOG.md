@@ -8,6 +8,18 @@
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-08-13
+
+### Fixed
+
+- 비어 있거나 malformed인 Stage 2 fanout writer 설정을 구조화 fallback으로 변환하고 provider 실행 실패의 기존 진단은 보존합니다.
+- `awf analyze --all` child의 exit code `130`을 후속 domain이나 delay 없이 즉시 전파합니다.
+- 같은 service/domain의 mutating analysis를 nonblocking lock으로 직렬화해 중복 provider 실행과 state 경합을 막습니다.
+
+### Documentation
+
+- fanout fallback, same-domain exclusive mutation, `--all` 취소 전파 계약을 CLI, reference, pattern 문서에 반영했습니다.
+
 ## [0.1.2] - 2026-08-13
 
 ### Fixed

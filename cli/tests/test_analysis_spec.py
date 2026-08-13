@@ -29,7 +29,7 @@ from awf.core.skills import (
     skill_search_paths,
 )
 from awf.core.analysis_state import get_required_output_files
-from awf.core.analysis_fanout import get_writer_configs, get_judge_prompt_name
+from awf.core.analysis_fanout import get_writer_configs, get_judge_prompt_name, run_stage2_fanout
 
 
 # ---------------------------------------------------------------------------
@@ -581,30 +581,84 @@ def test_a6_002_undefined_writer_not_called():
     assert "performance" not in doc_ids
 
 
-def test_a6_002_zero_writer_guard():
-    """Writer가 없는 mode는 Stage 2 fanout 진입 시 ValueError로 차단된다."""
+def test_a6_002_zero_writer_falls_back_without_running_provider():
+    """Writer가 없는 mode는 single-agent fallback 계약을 반환한다."""
     clear_cache()
-    from awf.core.analysis_fanout import run_stage2_fanout
-
     ctx = _make_analysis_context(Path("/tmp/dummy"), "review")
+    calls = []
+
     for mode in ("review", "investigate"):
         ctx.analysis_mode = mode
-        try:
-            run_stage2_fanout(
-                context=ctx,
-                provider=None,
-                provider_factory=None,
-                provider_name="dummy",
-                add_dirs=[],
-                stage1_memo_text="",
-                domain_bundle_text="",
-                runner=lambda *a: (None, 0.0),
-                save_additional_result=lambda *a: None,
-            )
-            assert False, f"{mode} should raise ValueError before provider runs"
-        except ValueError as e:
-            assert "No writer configs" in str(e)
-            assert mode in str(e)
+        result, error, metadata = run_stage2_fanout(
+            context=ctx,
+            provider=None,
+            provider_factory=None,
+            provider_name="dummy",
+            add_dirs=[],
+            stage1_memo_text="",
+            domain_bundle_text="",
+            runner=lambda *args: calls.append(args),
+            save_additional_result=lambda *args: None,
+        )
+
+        assert result is None
+        assert error.startswith("fanout_unavailable:")
+        assert metadata["status"] == "fallback"
+
+    assert calls == []
+
+
+def test_a6_002_malformed_writer_config_falls_back_without_running_provider(monkeypatch):
+    """손상된 Writer 설정도 provider 실행 전 fallback한다."""
+    ctx = _make_analysis_context(Path("/tmp/dummy"), "document")
+    calls = []
+    monkeypatch.setattr(
+        "awf.core.analysis_fanout.get_writer_configs",
+        lambda mode: [{"id": "missing-prompt"}],
+    )
+
+    result, error, metadata = run_stage2_fanout(
+        context=ctx,
+        provider=None,
+        provider_factory=None,
+        provider_name="dummy",
+        add_dirs=[],
+        stage1_memo_text="",
+        domain_bundle_text="",
+        runner=lambda *args: calls.append(args),
+        save_additional_result=lambda *args: None,
+    )
+
+    assert result is None
+    assert error.startswith("fanout_unavailable:")
+    assert metadata["status"] == "fallback"
+    assert calls == []
+
+def test_a6_002_provider_execution_failure_keeps_existing_result_contract():
+    """유효한 Writer 실행 실패는 config fallback으로 바뀌지 않는다."""
+    from awf.providers.base import ProviderResult
+
+    clear_cache()
+    ctx = _make_analysis_context(Path("/tmp/dummy"), "document")
+    ctx.repo_root = Path("/tmp")
+    ctx.service = "service"
+    ctx.domain = "orders"
+    result, error, metadata = run_stage2_fanout(
+        context=ctx,
+        provider=None,
+        provider_factory=None,
+        provider_name="dummy",
+        add_dirs=[],
+        stage1_memo_text="",
+        domain_bundle_text="",
+        runner=lambda *args: (ProviderResult(returncode=1, stdout="", stderr="provider failed"), 0.0),
+        save_additional_result=lambda *args: None,
+    )
+
+    assert result is None
+    assert error.startswith("writer_partial_failure:")
+    assert not error.startswith("fanout_unavailable:")
+    assert metadata.get("status") is None
 
 
 # ===========================================================================

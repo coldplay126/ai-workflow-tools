@@ -220,19 +220,10 @@ def run_stage2_fanout(
           → (optional) Fallback Writer + Judge re-run
           → Final 4-file output
     """
-    # Load mode contract dynamically
+    # Load and validate the Writer contract before any provider execution.
     analysis_mode = context.analysis_mode
-    writer_configs = get_writer_configs(analysis_mode)
-    if not writer_configs:
-        raise ValueError(
-            f"No writer configs for mode '{analysis_mode}'. "
-            f"Mode contract must define at least one writer for Stage 2 fanout."
-        )
-    output_files = get_required_output_files(analysis_mode)
-    judge_prompt_name = get_judge_prompt_name(analysis_mode)
-
     metadata: dict[str, Any] = {
-        "writerCount": len(writer_configs),
+        "writerCount": 0,
         "executionMode": "parallel_v2",
         "analysisMode": analysis_mode,
         "consistencyPassed": False,
@@ -242,6 +233,33 @@ def run_stage2_fanout(
         "fallbackTriggered": False,
         "fallbackFiles": [],
     }
+    try:
+        writer_configs = get_writer_configs(analysis_mode)
+        if not isinstance(writer_configs, list) or not writer_configs:
+            raise ValueError(
+                f"No writer configs for mode '{analysis_mode}'. "
+                f"Mode contract must define at least one writer for Stage 2 fanout."
+            )
+        writer_ids: set[str] = set()
+        for writer_config in writer_configs:
+            if not isinstance(writer_config, dict):
+                raise ValueError("Writer config must be an object.")
+            writer_id = writer_config.get("id")
+            prompt_name = writer_config.get("prompt")
+            if not isinstance(writer_id, str) or not writer_id.strip():
+                raise ValueError("Writer config must define a non-empty string id.")
+            if not isinstance(prompt_name, str) or not prompt_name.strip():
+                raise ValueError("Writer config must define a non-empty string prompt.")
+            if writer_id in writer_ids:
+                raise ValueError(f"Writer config id is duplicated: {writer_id}.")
+            writer_ids.add(writer_id)
+    except Exception as exc:
+        metadata["status"] = "fallback"
+        return None, f"fanout_unavailable:{exc}", metadata
+
+    metadata["writerCount"] = len(writer_configs)
+    output_files = get_required_output_files(analysis_mode)
+    judge_prompt_name = get_judge_prompt_name(analysis_mode)
 
     def _emit(event_type: EventType, *, data: dict[str, Any]) -> None:
         if processor is None or task_id is None:

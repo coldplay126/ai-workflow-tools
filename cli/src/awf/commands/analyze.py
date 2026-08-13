@@ -59,6 +59,7 @@ from awf.core.readiness import maybe_doctor_hint
 from awf.core.state_updater import AnalysisStateUpdater
 from awf.core.task import TaskConstraints, TaskContext, TaskDefinition, TaskType, resolve_execution_mode
 from awf.commands.ready_gate import enforce_ready_gate
+from awf.worktrees.locking import repository_lock
 from awf.providers.base import ProviderCapability
 from awf.providers.registry import ProviderRegistry, UnknownProviderError
 
@@ -466,6 +467,39 @@ def run_analyze(args: argparse.Namespace) -> int:
         print(prompt)
         if args.dry_run:
             return 0
+
+    try:
+        with repository_lock(context.ai_context_dir / ".analysis-run.lock", blocking=False):
+            return _run_analyze_domain_mutation(
+                args,
+                config=config,
+                context=context,
+                pipeline_config=pipeline_config,
+                execution_mode=execution_mode,
+                non_interactive=non_interactive,
+                output_format=output_format,
+                _original_stdout=_original_stdout,
+                _analysis_started_at=_analysis_started_at,
+                prompt=prompt,
+            )
+    except BlockingIOError:
+        print("error: analysis already running for service/domain", file=sys.stderr)
+        return 4
+
+
+def _run_analyze_domain_mutation(
+    args: argparse.Namespace,
+    *,
+    config,
+    context: AnalysisContext,
+    pipeline_config: dict,
+    execution_mode: str | None,
+    non_interactive: bool,
+    output_format: str,
+    _original_stdout,
+    _analysis_started_at: float,
+    prompt: str,
+) -> int:
 
     ensure_ai_context_dirs(context)
     domain_files, discovery = collect_domain_files(context)
@@ -1407,7 +1441,6 @@ def run_analyze(args: argparse.Namespace) -> int:
             print(hint, file=sys.stderr)
     return result.returncode
 
-
 def _run_analyze_all(args: argparse.Namespace) -> int:
     """Analyze all domains in a service sequentially with delay between each."""
     import copy
@@ -1451,6 +1484,8 @@ def _run_analyze_all(args: argparse.Namespace) -> int:
 
         try:
             rc = run_analyze(domain_args)
+            if rc == 130:
+                return 130
             if rc == 0:
                 succeeded.append(domain_name)
                 print(f"  result: completed", file=sys.stderr)

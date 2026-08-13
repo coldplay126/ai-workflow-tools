@@ -64,6 +64,19 @@ Status: 미정.
 prompt와 경로를 구조화 출력한다. 설정이 비어 있어도 dry-run 단계에서는 AI
 unit discovery를 호출하지 않는다.
 
+## 0.2 실행 배타성과 중단
+
+같은 service/domain을 변경하는 `awf analyze` 실행은
+`.ai-context/<service>/<domain>/.analysis-run.lock`을 nonblocking으로
+획득한다. 다른 프로세스가 lock을 보유하면 provider 실행 전에
+`analysis already running`을 stderr에 기록하고 exit code `4`를 반환한다.
+lock은 정상 반환과 예외 모두에서 해제된다.
+
+`--status`, `--dry-run`, `--check`, `--catalog`, `--cycles`는 state를 변경하지
+않으므로 이 lock을 획득하지 않는다. `awf analyze --all`은 child domain이 exit
+code `130`으로 끝나면 남은 domain이나 delay를 실행하지 않고 `130`을 그대로
+반환한다.
+
 ---
 
 ## 1. 규모 분류 임계값

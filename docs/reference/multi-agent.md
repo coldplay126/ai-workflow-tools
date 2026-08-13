@@ -208,6 +208,12 @@ string, number 같은 non-object 값은 `parsed=None`, `parse_error=true`로
 정규화하며 raw output은 evidence로 남긴다. `AgentResult`와 `TeamRunner`도
 non-object parsed 값을 성공 결과로 합성하지 않는다.
 
+Analysis Stage 2 fanout은 writer configuration을 provider 호출 전에 검증한다.
+writer가 없거나 malformed이면 `fanout_unavailable:` diagnostic과
+`metadata.status=fallback`을 반환해 single-agent Stage 2로 전환한다.
+provider 실행 후 발생한 실패는 configuration fallback으로 다시 쓰지 않고
+원래 result contract를 유지한다.
+
 ---
 
 ## 9. Workflow multi-provider synthesis 출력
