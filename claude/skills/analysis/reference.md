@@ -6,7 +6,7 @@
 
 ## .ai-context 폴더 구조
 
-분석 결과는 `analysis-docs/{service}/{domain}/.ai-context/`에 저장됩니다:
+분석 결과의 주요 파일은 `analysis-docs/{service}/{domain}/.ai-context/`에 저장됩니다:
 
 ```
 analysis-docs/{service}/{domain}/.ai-context/
@@ -16,12 +16,13 @@ analysis-docs/{service}/{domain}/.ai-context/
 ├── external-integration.md    ← 외부 서비스 호출, SQS 이벤트
 ├── ANALYSIS_REPORT.md         ← 분석 리포트 (통계, 변경점, 기술 부채)
 ├── analysis-config.json       ← 도메인별 오버라이드 설정 (선택)
-├── .analysis-state.json       ← 파이프라인 상태 (재개용)
-└── .tmp/                      ← 중간 산출물 (완료 시 삭제)
+├── .analysis-state.json       ← 파이프라인 상태와 generation 정보 (재개용)
+└── .tmp/                      ← 중간 산출물
     ├── stage1-analysis.md     ← Stage 1 결과
     ├── stage2-draft.md        ← Stage 2 초안
-    ├── stage3-final.md        ← Stage 3 결과 (조건부 실행 시)
-    └── hashes.json            ← 증분 분석용 SHA-256 (삭제 안 됨)
+    ├── result-stage2-<provider>.txt ← Stage 2 raw result (출력 복구용)
+    ├── stage3-final.md        ← Stage 3 결과 또는 보존된 진단 artifact
+    └── hashes.json            ← 증분 분석용 SHA-256
 ```
 
 ---
@@ -54,14 +55,17 @@ analysis-docs/{service}/{domain}/.ai-context/
    - state 파일에서 `currentLayer`, `currentStage`, `mode` 확인
    - `summaries` 필드를 읽어 이전 단계 컨텍스트를 복원
    - `.ai-context/.tmp/` 디렉토리의 중간 산출물 확인
-   - **stale artifact 검증** (`.tmp/` 정리):
-     - `.tmp/` 내 각 artifact와 state의 단계별 status 대조
-     - status가 `"failed"`인 단계의 artifact → 삭제 (재생성 대상)
-     - status가 `"completed"`인 단계의 artifact → 유지
-     - artifact가 존재하지만 state에 기록이 없는 파일 → 삭제 (orphan)
+   - **artifact 상태 검증**:
+     - `artifacts.result_file`은 `stage1.status = "completed"`, `stage2.status`가 `in_progress` 또는 `completed`, output 부재, `.tmp/hashes.json`과 `layers.bundle.configHash`가 현재 source/config generation과 일치할 때만 출력 복구에 사용
+     - source hash 또는 bundle config가 달라지면 저장된 Stage 2 result와 bundle을 무효화하고 새 generation으로 진행
+     - Stage 3이 failed면 state가 가리키는 diagnostic artifact를 삭제하지 않는다
+     - state에 기록되지 않은 Stage 2 prompt/result/draft는 orphan으로 정리한다
    - **failed 상태 처리**:
-     - `retryCount < 2`인 failed 단계 → 해당 단계부터 재시도, `retryCount` 증가
-     - `retryCount >= 2`인 failed 단계 → 스킵하고 다음 단계로 진행, 사용자에게 경고
+     - failed Stage 2 또는 required Stage 3은 `retryCount`를 포함한 상태를 확인해 해당 Stage부터 재개한다
+     - `retryCount >= 2`인 failed Stage 2 또는 required Stage 3 → 자동 재시도를 멈추고 state와 diagnostic artifact를 확인하도록 안내
+     - required Stage 3 failed는 Stage 2 output이 완전해도 output을 failed로 유지한다. 이후 Stage 3 성공 또는 정책상 skip이 필요하다
+   - **retry budget reset**:
+     - Stage 2/3 성공 또는 source/config 변경으로 새 generation이 시작되면 해당 `retryCount`를 0으로 설정
    - **미완료 단계부터 재개** (Layer 1부터 재시작하지 않음)
    - 사용자에게 재개 상태를 알림: `"⏩ 이전 실행 감지: {currentLayer} Stage {currentStage}부터 재개합니다."`
    - failed 상태가 있으면 추가 알림: `"⚠️ {stage}가 실패 상태 (retryCount: {N}). 재시도합니다."`
@@ -297,12 +301,14 @@ Layer 3 진입 전, 다음 게이트를 순서대로 실행:
 
 **종합**: 에이전트 결과를 4개 파일로 파싱 → 📄 `.tmp/stage2-draft.md`
 
+현재 Stage 2 attempt의 파싱 결과가 required output 4종을 모두 포함해야 완료다. `missing_files`가 있으면 이전 실행의 `.ai-context` 파일이 남아 있어도 `analyze.stage2.status`와 `layers.output.status`를 failed로 두고 `missing_required_outputs:` 진단을 기록한다.
+
 **Stage 2 파싱 실패 시 fallback**:
 1. `===FILE:===` 구분자 파싱 실패 → 동일 에이전트에 `"===FILE: {filename}=== 구분자를 정확히 사용하여 4개 파일을 다시 출력하세요."` 재요청 (1회)
 2. 재실패 → 4개 파일(`api-spec.json`, `data-model.md`, `domain-overview.md`, `external-integration.md`)을 개별 프롬프트로 분할 실행
 3. 개별 실행도 실패 → `analyze.stage2.status = "failed"`, `errorMessage` 기록
 
-**상태 전이**: `analyze.stage2.status = "completed"`, `summaries.stage2` 기록
+**상태 전이**: `analyze.stage2.status = "completed"`, `summaries.stage2` 기록. 성공 시 `retryCount = 0`.
 
 #### Stage 3: 크로스서비스 분석 — Opus (조건부 실행)
 
@@ -321,7 +327,9 @@ Layer 3 진입 전, 다음 게이트를 순서대로 실행:
 
 **산출물**: 최종 `.ai-context` 4개 파일 수정사항 + 크로스서비스 의존성 맵 → 📄 `.tmp/stage3-final.md`
 
-**상태 전이**: `analyze.stage3.status = "completed"`, `summaries.stage3` 기록
+required Stage 3 provider가 실패하면 `analyze.stage3.status = "failed"`, `reason`, `errorMessage`, `retryCount`을 기록하고 `layers.output.status`도 failed로 둔다. 기존 `artifacts.stage3_final` 진단 artifact는 보존한다. 재개는 같은 generation에서 Stage 3부터 시도하며, 성공 또는 routing 정책의 skip만 이 실패 상태를 해제한다.
+
+**상태 전이**: `analyze.stage3.status = "completed"`, `summaries.stage3` 기록. 성공 시 `retryCount = 0`.
 
 ### Layer 4: Output (문서 생성)
 
@@ -361,11 +369,11 @@ Layer 3 진입 전, 다음 게이트를 순서대로 실행:
    - lightweight PASS 후 → Codex(read-only)에게 최종 4개 파일과 기존 딥다이브를 비교 요청
    - PASS → 완료, FAIL → 피드백과 함께 Stage 2 1회 재실행
 
-6. **정리**: `.tmp/` 디렉토리 삭제 (hashes.json 제외)
+6. **정리**: state가 참조하지 않는 Stage 2 prompt/result/draft만 정리한다. `hashes.json`과 failed Stage 3 diagnostic artifact는 유지한다.
 
 7. **결과 표시**: 생성된 파일 목록과 요약 통계 출력
 
-**상태 전이**: `layers.output.status = "completed"`, `completedAt` 기록
+**상태 전이**: current Stage 2 payload의 required output이 모두 있고 required Stage 3이 failed가 아닐 때만 `layers.output.status = "completed"`, `completedAt` 기록
 
 ---
 
@@ -386,11 +394,11 @@ Layer 3 진입 전, 다음 게이트를 순서대로 실행:
   "currentStage": 1,
   "layers": {
     "input":   { "status": "pending|completed" },
-    "bundle":  { "status": "pending|completed", "fileCount": 0 },
+    "bundle":  { "status": "pending|completed", "fileCount": 0, "lineCount": 0, "tokenEstimate": 0, "configHash": "" },
     "analyze": {
       "stage1": { "status": "pending|in_progress|completed|skipped|failed", "provider": "codex|sonnet", "errorMessage": "", "retryCount": 0 },
       "stage2": { "status": "pending|in_progress|completed|failed", "provider": "sonnet|opus", "errorMessage": "", "retryCount": 0 },
-      "stage3": { "status": "pending|in_progress|completed|skipped|failed", "provider": "opus", "reason": "", "errorMessage": "", "retryCount": 0 }
+      "stage3": { "status": "pending|in_progress|completed|skipped|scaffold|failed", "provider": "opus", "reason": "", "errorMessage": "", "retryCount": 0 }
     },
     "output":  { "status": "pending|in_progress|completed|failed", "errorMessage": "" }
   },
@@ -402,6 +410,7 @@ Layer 3 진입 전, 다음 게이트를 순서대로 실행:
   "artifacts": {
     "stage1_memo": ".tmp/stage1-analysis.md",
     "stage2_draft": ".tmp/stage2-draft.md",
+    "result_file": ".tmp/result-stage2-<provider>.txt",
     "stage3_final": ".tmp/stage3-final.md"
   }
 }

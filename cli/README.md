@@ -506,16 +506,15 @@ provider stdout/stderr는 `.workflow/tmp/result-<phase>-<provider>.txt`에 저�
 - `.ai-context/.tmp/stage2-draft.md`
 - `.ai-context/.tmp/stage3-final.md` (Stage 3 실행 시)
 
-Stage 2 결과가 `===FILE: ...===` 형식을 따르면 필수 산출물 4종을 실제 `.ai-context/` 파일로 분리 저장합니다.
-`stage1/stage2/stage3` 상태와 bundle `configHash`도 `.analysis-state.json`에 기록됩니다.
+Stage 2 결과가 `===FILE: ...===` 형식을 따르면 필수 산출물 4종을 실제 `.ai-context/` 파일로 분리 저장합니다. 완료 판정은 이전 실행에서 남은 파일이 아니라 현재 Stage 2 payload가 4종을 모두 공급했는지로 결정됩니다. 누락 시 `stage2.errorMessage`과 `output.errorMessage`에 `missing_required_outputs:` 진단을 남기고 두 상태를 failed로 설정합니다.
+`.analysis-state.json`에는 `layers.bundle.configHash`, `stage1/stage2/stage3` 상태, Stage 2/3의 `retryCount`, `stage3.reason`, `stage3.errorMessage`, `artifacts.result_file`, `artifacts.stage3_final`이 기록됩니다.
 Stage 3은 provider에 따라 두 경로로 동작합니다.
 - `claude-code`, `claude-sdk`: Stage 3 cross-service validation을 한 번 더 실행하고 `stage3.status = completed`
 - 그 외 provider: scaffold 메모만 남기고 `stage3.status = scaffold`
-필수 산출물 4종이 모두 생성되면 `layers.output.status = completed`로 마감하고, 아니면 failed로 남겨 resume 가능한 흔적을 유지합니다.
-이미 완료된 `.ai-context`가 있으면 provider를 다시 호출하지 않고 종료합니다.
-이전에 저장된 stage2 결과가 있고 출력물만 비어 있으면, 저장된 결과를 다시 파싱해 산출물 복구를 먼저 시도합니다.
-bundle 관련 설정이 바뀌면 기존 bundle은 무효화 후 재생성합니다.
-`stage2.retryCount >= 2`인 failed 상태는 자동 재시도를 막고 비정상 종료합니다.
+필수 산출물 4종이 현재 Stage 2 payload에서 모두 생성되면 `layers.output.status = completed`로 마감하고, 아니면 failed로 남겨 resume 가능한 흔적을 유지합니다. required Stage 3이 failed이면 Stage 2 출력이 완전해도 output은 failed이며 `artifacts.stage3_final`이 가리키는 진단 파일을 보존합니다. 이후 Stage 3 성공 또는 정책상 skip만 이 실패 상태를 해제합니다.
+완료된 `.ai-context`는 required output, 저장된 source hash, `configHash`가 모두 현재 generation과 일치하고 failed Stage 3이 없을 때만 provider 실행을 건너뜁니다.
+출력물만 비어 있을 때는 `artifacts.result_file`의 저장된 Stage 2 결과를 다시 파싱해 복구를 시도합니다. 이 재사용은 Stage 1 완료와 source/config generation 일치를 전제로 하며, source hash나 bundle 설정이 바뀌면 저장 결과를 버립니다.
+Stage 2 또는 Stage 3이 성공하거나 source/config 변경으로 새 generation이 시작되면 해당 `retryCount`는 0으로 재설정됩니다. `stage2.retryCount >= 2` 또는 required Stage 3의 `stage3.retryCount >= 2`이면 자동 재시도는 중단됩니다.
 
 설정 예시:
 

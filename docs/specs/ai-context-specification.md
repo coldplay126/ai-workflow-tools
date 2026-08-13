@@ -15,14 +15,14 @@ analysis-docs/{service}/{domain}/.ai-context/
 ├── external-integration.md    ← 외부 API, SQS, 웹훅, S2S 호출 (Markdown)
 ├── ANALYSIS_REPORT.md         ← 자동 생성 분석 리포트 (요약 통계, 변경점, 기술 부채)
 ├── analysis-config.json       ← 도메인별 오버라이드 설정 (선택)
-├── .analysis-state.json       ← 파이프라인 상태 (자동 생성, resume용)
-└── .tmp/                      ← 중간 산출물 (완료 시 삭제, hashes.json만 보존)
+├── .analysis-state.json       ← 파이프라인 상태와 generation 정보 (자동 생성, resume용)
+└── .tmp/                      ← 중간 산출물
     ├── domain-bundle.xml      ← Stage 2 입력용 도메인 XML 번들
     ├── project-bundle.xml     ← Stage 3 입력용 프로젝트 XML 번들 (Stage 3 승격 시)
     ├── stage1-analysis.md     ← Stage 1 출력 (파일별 분석)
     ├── stage2-draft.md        ← Stage 2 출력 (도메인 합성 초안)
-    ├── stage3-final.md        ← Stage 3 출력 (크로스서비스 검증, Stage 3 승격 시)
-    └── hashes.json            ← SHA-256 파일 해시 (증분 분석용, 보존)
+    ├── stage3-final.md        ← Stage 3 결과 또는 보존된 진단 artifact
+    └── hashes.json            ← SHA-256 파일 해시 (증분 분석용)
 ```
 
 ### 1.1 Markdown frontmatter
@@ -369,13 +369,15 @@ Stage 1 분석 결과로 enriched된 unit 전체 번들. Stage 2 provider에 전
 }
 ```
 
-**Cleanup 정책**:
+**저장 정책**:
 
 | 상태 | 번들 처리 |
 |------|----------|
-| 미완료 / 실패 | 유지 (resume 시 재사용) |
-| 성공 완료 | 삭제 (기존 `.tmp/` cleanup 계약 준수) |
-| `debug_keep_bundle: true` | 성공 시에도 보존 (디버깅용 opt-in) |
+| source/config generation 일치 | state가 참조하는 bundle 유지 및 재사용 |
+| source hash 또는 `configHash` 불일치 | bundle 무효화 후 재생성 |
+| state에 기록되지 않은 Stage 2 prompt/result/draft | 고아 artifact로 정리 |
+
+`domain-bundle.xml`과 `project-bundle.xml`은 state가 참조하는 동안 `.tmp/`에 유지한다.
 
 > **주의**: `.tmp/`는 소스코드 원문을 포함하므로 반드시 `.gitignore` 대상이어야 한다. 대규모 번들의 경우 선택적으로 `.xml.gz` 압축을 적용할 수 있다(MAY).
 
@@ -403,8 +405,9 @@ Secondary evaluator(read-only 권한)로 4개 신규 파일과 기존 딥다이�
 
 - Lightweight 실패 → Stage 2 재실행 (누락 목록 포함)
 - Full 검증 실패 → Stage 2 재실행 (피드백 포함)
-- 단계당 최대 1회 재시도
-- 재시도 후에도 실패 → 상태 기록, 경고 표시, 계속 진행
+- Stage 2 current payload에 required output이 누락되면 이전 output 파일이 있어도 `analyze.stage2.status`와 `layers.output.status`를 failed로 유지하고 `missing_required_outputs:`를 기록
+- required Stage 3 실패 → `reason`, `errorMessage`, `retryCount`과 diagnostic artifact를 보존하고 `layers.output.status`를 failed로 유지
+- `retryCount >= 2`인 failed Stage 2 또는 required Stage 3 → 자동 재시도 중단
 
 ---
 
@@ -414,26 +417,25 @@ Secondary evaluator(read-only 권한)로 4개 신규 파일과 기존 딥다이�
 
 1. `.analysis-state.json` 존재 확인
 2. 존재하고 완료(`layers.output.status == "completed"`)이면:
-   - `hashes.json`의 파일 해시와 **현재 소스 파일 해시 비교**
-   - 해시 동일 → 분석 skip (기존 결과 재사용)
-   - **해시 변경 → re-analyze** (기존 결과는 Stage 2 context로 보존)
+   - `hashes.json`의 파일 해시와 **현재 소스 파일 해시**, `layers.bundle.configHash`와 현재 bundle 설정 해시를 비교
+   - source/config generation이 동일하고 Stage 3이 failed가 아니면 분석 skip (기존 결과 재사용)
+   - source 또는 config 변경 → re-analyze. Stage 2/3 retry budget을 0으로 reset
 3. 존재하고 미완료(`layers.output.status != "completed"`)이면:
    - `currentLayer`, `currentStage`, `mode` 복원
    - **번들 유효성 검사**:
-     - `layers.bundle.status == "completed"`이고 `.tmp/domain-bundle.xml`이 존재하면:
-       - `layers.bundle.configHash`와 현재 설정 해시 비교
-       - 일치 + `hashes.json` 파일 해시 변경 없음 → 번들 재사용, Layer 2 건너뛰기
-       - 불일치 → 번들 삭제, Layer 2 재실행
-     - deep 모드에서 `.tmp/project-bundle.xml`이 존재하면:
-       - `layers.bundle.configHash`와 현재 설정 해시 비교
-       - 일치 + `hashes.json` 파일 해시 변경 없음 → project bundle 재사용, Stage 3 입력으로 사용
-       - 불일치 → project bundle 삭제, 필요 시 재생성
-   - `.tmp/` 중간 산출물과 state의 stage status 대조:
-     - `"failed"` → 삭제 (재생성)
-     - `"completed"` → 유지
-     - 산출물 존재하나 state 기록 없음 → 삭제 (고아)
-   - `retryCount < 2` → 해당 stage 재실행, retryCount 증가
-   - `retryCount >= 2` → stage 건너뛰기, 경고
+     - `layers.bundle.status == "completed"`이고 state가 가리키는 domain/project bundle이 존재하면:
+       - `layers.bundle.configHash`와 현재 설정 해시, `hashes.json`과 현재 source hash를 비교
+       - 모두 일치 → bundle 재사용
+       - 불일치 → bundle 무효화 후 Layer 2에서 재생성
+   - **Stage 2 저장 result 검증**:
+     - `artifacts.result_file`은 Stage 1 completed, output 부재, 동일 source/config generation일 때만 output 복구에 재사용
+     - 현재 Stage 2 payload의 required output이 누락되면 기존 output 파일이 있어도 Stage 2와 output을 failed로 유지
+   - **Stage 3 실패 처리**:
+     - required Stage 3이 failed면 `reason`, `errorMessage`, `retryCount`, diagnostic artifact를 유지하고 Stage 3부터 재개
+     - Stage 3 성공 또는 정책상 skip만 output 진행을 허용
+   - state에 기록되지 않은 Stage 2 prompt/result/draft는 고아 artifact로 정리
+   - `retryCount >= 2`인 failed Stage 2 또는 required Stage 3은 자동 재시도를 중단
+   - 성공한 Stage 2/3은 해당 `retryCount`를 0으로 reset
    - Layer 1부터 재시작하지 않고 미완료 stage부터 재개
 4. 존재하지 않으면: Layer 1부터 시작
 

@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from awf.core.analysis_resume import finalize_analysis_run
 from awf.core.analysis_outputs import (
+    analyze_stage2_output,
     generate_analysis_report,
     write_stage2_outputs,
 )
@@ -68,6 +70,55 @@ None.
     assert "domain: quest-challenge\n" in overview
     assert "source_state: .analysis-state.json\n" in overview
     assert strip_markdown_frontmatter(overview).startswith("# Domain Overview")
+
+
+def test_current_attempt_missing_required_output_cannot_complete_over_old_files(tmp_path: Path):
+    context = _Context(tmp_path)
+    for filename in (
+        "api-spec.json",
+        "data-model.md",
+        "domain-overview.md",
+        "external-integration.md",
+    ):
+        (context.ai_context_dir / filename).write_text("old output", encoding="utf-8")
+    raw = """===FILE: api-spec.json===
+{"endpoints": []}
+
+===FILE: data-model.md===
+# Data Model
+
+===FILE: domain-overview.md===
+# Domain Overview
+"""
+
+    output_summary = analyze_stage2_output(raw, context.analysis_mode)
+    write_stage2_outputs(context, raw)
+
+    finalized = finalize_analysis_run(
+        context,
+        "fixture",
+        0,
+        missing_output_files=output_summary["missing_files"],
+    )
+
+    assert finalized["layers"]["analyze"]["stage2"]["status"] == "failed"
+    assert finalized["layers"]["output"]["status"] == "failed"
+    assert "external-integration.md" in finalized["layers"]["output"]["errorMessage"]
+
+
+def test_provider_error_beats_missing_current_outputs(tmp_path: Path):
+    context = _Context(tmp_path)
+
+    finalized = finalize_analysis_run(
+        context,
+        "fixture",
+        1,
+        "provider connection failed",
+        missing_output_files=["external-integration.md"],
+    )
+
+    assert finalized["layers"]["analyze"]["stage2"]["errorMessage"] == "provider connection failed"
+    assert finalized["layers"]["output"]["errorMessage"] == "provider connection failed"
 
 
 def test_strip_markdown_frontmatter_keeps_plain_horizontal_rule():

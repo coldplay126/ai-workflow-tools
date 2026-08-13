@@ -485,6 +485,7 @@ def run_analyze(args: argparse.Namespace) -> int:
             f"Glob patterns: {', '.join(str(p) for p in discovery.get('glob_patterns', [])[:5])}",
             file=sys.stderr,
         )
+    current_attempt_missing_files = get_required_output_files(context.analysis_mode)
     resume = resolve_analysis_resume(context, current_file_entries=domain_files)
     print(f"resume_mode: {_resume_mode_label(resume)}")
     for message in resume["messages"]:
@@ -502,6 +503,12 @@ def run_analyze(args: argparse.Namespace) -> int:
         if not non_interactive:
             print("next_step: inspect the saved result/prompt files or switch to Claude Code /analysis for manual recovery", file=sys.stderr)
         return 1
+    if resume["stage3_retry_blocked"]:
+        state = load_analysis_state(context)
+        print(f"state_file: {context.ai_context_dir / '.analysis-state.json'}")
+        print(f"output_status: {state.get('layers', {}).get('output', {}).get('status')}")
+        print("error: stage3 retry limit reached; preserving the failed diagnostic state.", file=sys.stderr)
+        return 1
 
     if resume["reused_result"]:
         state = load_analysis_state(context)
@@ -509,6 +516,7 @@ def run_analyze(args: argparse.Namespace) -> int:
         if raw_result:
             save_stage2_draft(context, raw_result)
             output_summary = analyze_stage2_output(raw_result, context.analysis_mode)
+            current_attempt_missing_files = output_summary["missing_files"]
             write_stage2_outputs(context, raw_result)
             if output_summary["missing_files"]:
                 print(
@@ -516,7 +524,12 @@ def run_analyze(args: argparse.Namespace) -> int:
                     + ", ".join(output_summary["missing_files"]),
                     file=sys.stderr,
                 )
-            finalized = finalize_analysis_run(context, state.get("layers", {}).get("analyze", {}).get("stage2", {}).get("provider", "resume"), 0)
+            finalized = finalize_analysis_run(
+                context,
+                state.get("layers", {}).get("analyze", {}).get("stage2", {}).get("provider", "resume"),
+                0,
+                missing_output_files=current_attempt_missing_files,
+            )
             print(f"state_file: {context.ai_context_dir / '.analysis-state.json'}")
             print(f"output_status: {finalized.get('layers', {}).get('output', {}).get('status')}")
             if finalized.get("layers", {}).get("output", {}).get("status") == "completed":
@@ -1069,6 +1082,7 @@ def run_analyze(args: argparse.Namespace) -> int:
     if result.stdout:
         save_stage2_draft(context, result.stdout)
         output_summary = analyze_stage2_output(result.stdout, context.analysis_mode)
+        current_attempt_missing_files = output_summary["missing_files"]
         write_stage2_outputs(context, result.stdout)
         processor.emit(
             event_type=EventType.STAGE_COMPLETED,
@@ -1119,7 +1133,7 @@ def run_analyze(args: argparse.Namespace) -> int:
                         print(f"multi_agent_{agent.role}: {agent.provider_name} ({agent.elapsed_sec:.1f}s)", file=sys.stderr)
                 print(f"multi_agent_judge: {multi_result.judge_verdict} ({multi_result.judge_reason})", file=sys.stderr)
 
-        if context.mode == "deep" and not resume.get("stage3_retry_blocked"):
+        if context.mode == "deep":
             processor.emit(
                 event_type=EventType.STAGE_STARTED,
                 task_id=analyze_task_id,
@@ -1236,8 +1250,6 @@ def run_analyze(args: argparse.Namespace) -> int:
                 source="cli",
                 data={"stage": "stage3"},
             )
-        elif resume.get("stage3_retry_blocked"):
-            print("stage3_blocked: retry limit reached; keeping failed state", file=sys.stderr)
         else:
             mark_stage3_skipped(context, "stage3 skipped: no reference expansion targets")
 
@@ -1312,6 +1324,8 @@ def run_analyze(args: argparse.Namespace) -> int:
                 save_analysis_result(context, candidate, secondary_result.stdout)
                 save_stage2_draft(context, secondary_result.stdout)
                 write_stage2_outputs(context, secondary_result.stdout)
+                output_summary = analyze_stage2_output(secondary_result.stdout, context.analysis_mode)
+                current_attempt_missing_files = output_summary["missing_files"]
                 result = type(result)(
                     returncode=0,
                     stdout=secondary_result.stdout,
@@ -1335,6 +1349,7 @@ def run_analyze(args: argparse.Namespace) -> int:
         provider_name,
         result.returncode,
         result.stderr or "",
+        missing_output_files=current_attempt_missing_files,
     )
     print(f"state_file: {context.ai_context_dir / '.analysis-state.json'}")
     print(f"output_status: {finalized.get('layers', {}).get('output', {}).get('status')}")

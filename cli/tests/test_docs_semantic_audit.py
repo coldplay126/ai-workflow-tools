@@ -235,7 +235,46 @@ def test_root_parser_exposes_package_version(capsys: pytest.CaptureFixture[str])
         build_parser().parse_args(["--version"])
 
     assert raised.value.code == 0
-    assert capsys.readouterr().out == "awf 0.1.0\n"
+    assert capsys.readouterr().out == "awf 0.1.1\n"
+
+
+def test_analysis_generation_integrity_docs_share_contract() -> None:
+    paths = (
+        REPO_ROOT / "cli" / "README.md",
+        REPO_ROOT / "docs" / "reference" / "analysis-pipeline.md",
+        REPO_ROOT / "docs" / "patterns" / "analysis-pipeline" / "02-stages.md",
+        REPO_ROOT / "docs" / "patterns" / "analysis-pipeline" / "03-resume-optimization.md",
+        REPO_ROOT / "docs" / "specs" / "ai-context-specification.md",
+        REPO_ROOT / "claude" / "skills" / "analysis" / "reference.md",
+    )
+    obsolete = "status가 `\"failed\"`인 단계의 artifact → 삭제"
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        assert obsolete not in text
+        assert "Stage 3" in text
+
+    stages = paths[2].read_text(encoding="utf-8")
+    for invariant in (
+        "현재 attempt가 mode의 모든 required output을 공급",
+        "같은 source/config generation에서만 재사용",
+        "진단 artifact와 실패 상태를 보존",
+        "새 source/config generation은 해당 retry budget을 reset",
+    ):
+        assert invariant in stages
+
+
+def test_release_metadata_versions_match() -> None:
+    assert (REPO_ROOT / "cli" / "pyproject.toml").read_text(encoding="utf-8").count(
+        'version = "0.1.1"'
+    ) == 1
+    assert (REPO_ROOT / "cli" / "src" / "awf" / "__init__.py").read_text(
+        encoding="utf-8"
+    ).count('__version__ = "0.1.1"') == 1
+    assert (REPO_ROOT / "cli" / "uv.lock").read_text(encoding="utf-8").count(
+        'version = "0.1.1"'
+    ) >= 1
+    changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "## [0.1.1] - 2026-08-13" in changelog
 
 
 def test_multi_agent_snippet_requires_live_cmux_roster() -> None:

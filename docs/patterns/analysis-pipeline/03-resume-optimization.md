@@ -10,16 +10,21 @@
 
 ### 재개 판정
 
-상태 파일에 기록된 마지막 완료 Stage와 현재 파일 해시를 비교하여 재개 지점을 결정한다.
+상태 파일의 마지막 완료 Stage, `.tmp/hashes.json`의 source hash, `layers.bundle.configHash`를 비교하여 재개 지점을 결정한다.
 
 ### 보존 규칙
 
 | 항목 | 재개 시 | 이유 |
 |------|--------|------|
 | Layer 1 결과 (파일 목록) | 보존 | 파일 시스템 상태 불변 |
-| Layer 2 결과 (번들) | 보존 | 해시 불변이면 번들도 동일 |
+| Layer 2 결과 (번들) | config hash 불변이면 보존 | 같은 설정에서만 번들이 동일 |
 | Stage 1 결과 (observation) | 파일 단위로 보존 | 완료된 파일의 observation은 캐시 유효 |
-| Stage 2 결과 (Writer/Judge) | 재실행 | 부분 완료 상태를 신뢰할 수 없음 |
+| Stage 2 result | 같은 source/config generation에서 output이 없을 때만 복구에 재사용 | 저장 raw result가 현재 입력에 대응할 때만 신뢰 가능 |
+| failed required Stage 3 artifact | 보존 | 실패 원인과 재시도 상태를 진단해야 함 |
+
+source hash나 bundle config가 바뀌면 Stage 2 저장 result를 폐기하고 새 generation으로 분석한다. 이때 Stage 2/3의 `retryCount`는 0으로 reset한다. 성공한 Stage 2/3도 해당 Stage의 retry budget을 reset한다.
+
+required Stage 3이 failed이면 output도 failed다. resume은 `reason`, `errorMessage`, `retryCount`, `artifacts.stage3_final`을 유지한 채 Stage 3부터 재시도한다. Stage 3이 성공하거나 정책이 skipped로 표시할 때만 output으로 진행한다.
 
 상태 파일 JSON 구조는 reference 문서를 참조한다.
 
@@ -84,7 +89,7 @@ Stage 1의 파일별 observation 결과를 캐시하여 재사용한다.
 - 캐시 키는 파일의 content_hash이다
 - 파일 내용이 변하지 않으면 observation을 재활용한다
 - 캐시 단위는 파일이다 (분석 단위 전체가 아님)
-- Stage 1 캐시만 재사용 가능하다. Stage 2는 반드시 재실행한다 (입력이 달라지므로)
+- Stage 1 캐시는 파일 단위로 재사용한다. Stage 2는 현재 attempt의 payload를 다시 검증하며, 저장 raw result는 같은 source/config generation에서 output 복구가 필요할 때만 재사용한다.
 
 ### 무효화 조건
 
@@ -93,7 +98,7 @@ Stage 1의 파일별 observation 결과를 캐시하여 재사용한다.
 | content_hash 불일치 | 캐시 무효, 재분석 |
 | 캐시 파일 부재 | 신규 분석 |
 | 캐시 파일 손상 | 폐기 후 재분석 |
-| 분석 설정 변경 | 전체 캐시 무효화 |
+| 분석 설정 변경 | bundle과 Stage 2 저장 result 무효화, 새 generation 시작 |
 
 캐시 저장 형식 및 경로 상세는 reference 문서를 참조한다.
 
