@@ -14,6 +14,7 @@
 
 - 현재 Stage 2 attempt가 모든 required output을 제공하지 않으면 이전 output 파일이 남아 있어도 분석을 failed로 유지합니다.
 - Stage 2 저장 result는 동일 source/config generation에서만 재사용하고, required Stage 3 실패의 state와 diagnostic artifact를 보존합니다.
+- Stage 2/3 성공과 새 source/config generation 시작 시 해당 `retryCount`가 reset되도록 정리했습니다.
 
 ### Documentation
 

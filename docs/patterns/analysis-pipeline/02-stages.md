@@ -92,6 +92,8 @@ Analysis Judge는 모든 Writer의 출력을 수신하여 최종 산출물을 �
 
 Stage 2와 Stage 3은 다음 불변식을 따른다.
 
+required Stage 3은 현재 routing 정책이 실행 대상으로 결정한 Stage 3이다. `stage3_force`, `related_domains >= 3`, scale routing으로 실행된 경우가 여기에 해당한다. policy skip된 Stage 3은 required가 아니다.
+
 1. Stage 2 payload는 현재 attempt가 mode의 모든 required output을 공급할 때만 complete다. 이전 attempt에서 남은 파일은 완료 판정에 사용하지 않는다.
 2. 저장된 Stage 2 result는 같은 source/config generation에서만 재사용한다.
 3. required Stage 3이 failed이면 이후 Stage 3 attempt가 성공하거나 정책상 skipped가 될 때까지 failed다. 진단 artifact와 실패 상태를 보존한다.

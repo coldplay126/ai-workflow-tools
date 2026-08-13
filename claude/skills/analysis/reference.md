@@ -6,7 +6,7 @@
 
 ## .ai-context 폴더 구조
 
-분석 결과는 `analysis-docs/{service}/{domain}/.ai-context/`에 저장됩니다:
+분석 결과의 주요 파일은 `analysis-docs/{service}/{domain}/.ai-context/`에 저장됩니다:
 
 ```
 analysis-docs/{service}/{domain}/.ai-context/
@@ -56,7 +56,7 @@ analysis-docs/{service}/{domain}/.ai-context/
    - `summaries` 필드를 읽어 이전 단계 컨텍스트를 복원
    - `.ai-context/.tmp/` 디렉토리의 중간 산출물 확인
    - **artifact 상태 검증**:
-     - `artifacts.result_file`은 `stage1.status = "completed"`이고 `.tmp/hashes.json`과 `layers.bundle.configHash`가 현재 source/config generation과 일치할 때만 출력 복구에 사용
+     - `artifacts.result_file`은 `stage1.status = "completed"`, `stage2.status`가 `in_progress` 또는 `completed`, output 부재, `.tmp/hashes.json`과 `layers.bundle.configHash`가 현재 source/config generation과 일치할 때만 출력 복구에 사용
      - source hash 또는 bundle config가 달라지면 저장된 Stage 2 result와 bundle을 무효화하고 새 generation으로 진행
      - Stage 3이 failed면 state가 가리키는 diagnostic artifact를 삭제하지 않는다
      - state에 기록되지 않은 Stage 2 prompt/result/draft는 orphan으로 정리한다
