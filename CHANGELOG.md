@@ -8,6 +8,21 @@
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-08-13
+
+### Fixed
+
+- source hash baseline을 성공한 final output 뒤에만 갱신해 provider 실패가 마지막 성공 baseline을 덮지 않도록 했습니다.
+- JSON-mode analysis의 stdout redirect를 mutation scope로 제한하고 최종 stdout에는 envelope 하나만 기록합니다.
+- cross 실패 시 `auto_downgrade()`가 선택한 precise 또는 solo target을 실제로 한 번 실행하고 mode와 reason에 같은 target을 남깁니다.
+- high-severity finding 비교에 정규화된 위치와 description을 포함합니다.
+- `--yolo` permission mode를 fanout provider instance마다 적용합니다.
+- Claude Code와 Codex의 streaming 실행이 non-streaming과 같은 effort, schema, add-dir, stdin 계약을 사용합니다.
+
+### Documentation
+
+- success-only hash baseline, JSON stream, downgrade, finding signature, fanout permission, streaming option 계약을 README와 analysis/multi-agent 문서에 반영했습니다.
+
 ## [0.1.3] - 2026-08-13
 
 ### Fixed

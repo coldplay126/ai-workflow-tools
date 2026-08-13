@@ -332,6 +332,37 @@ def run_multi_agent(
             f"Valid modes: {', '.join(sorted(VALID_MODES))}"
         )
 
+    if mode == "cross":
+        fallback_target = auto_downgrade("cross", result.agents)
+        if fallback_target:
+            fallback_timeouts = {
+                **DEFAULT_TIMEOUTS.get(fallback_target, {}),
+                **(timeout_overrides or {}),
+            }
+            if fallback_target == "precise":
+                result = _run_precise(
+                    registry,
+                    primary_provider,
+                    prompt,
+                    cwd,
+                    fallback_timeouts,
+                    add_dirs,
+                    codex_reasoning=_codex_re,
+                    allow_downgrade=False,
+                )
+            else:
+                result = _run_solo(
+                    primary_provider,
+                    prompt,
+                    cwd,
+                    fallback_timeouts,
+                    add_dirs,
+                )
+            result.judge_reason = (
+                f"auto_downgrade: cross → {fallback_target}; {result.judge_reason}"
+            )
+            mode = result.mode
+
     # Print token usage summary
     entries = result.usage_entries()
     if entries:
@@ -917,12 +948,18 @@ def _run_quick(registry, prompt: str, cwd: str, timeouts: dict, add_dirs: list[s
     )
 
 
-def _run_precise(registry, primary_provider, prompt: str, cwd: str, timeouts: dict, add_dirs: list[str] | None, *, codex_reasoning: str | None = None) -> MultiAgentResult:
+def _run_precise(registry, primary_provider, prompt: str, cwd: str, timeouts: dict, add_dirs: list[str] | None, *, codex_reasoning: str | None = None, allow_downgrade: bool = True) -> MultiAgentResult:
     """Precise mode: codex analysis → primary verification."""
     codex = _get_codex_provider(registry, reasoning_effort=codex_reasoning)
     if not codex:
-        print("warning: codex not available for precise mode, running solo", file=sys.stderr)
-        return _run_solo(primary_provider, prompt, cwd, timeouts, add_dirs)
+        print("warning: codex not available for precise mode", file=sys.stderr)
+        if allow_downgrade:
+            return _run_solo(primary_provider, prompt, cwd, timeouts, add_dirs)
+        return MultiAgentResult(
+            mode="precise",
+            judge_verdict="FAIL",
+            judge_reason="codex provider unavailable for precise fallback",
+        )
 
     _force_codex_read_only(codex)
     # Track cumulative timeout budget
@@ -941,9 +978,7 @@ def _run_precise(registry, primary_provider, prompt: str, cwd: str, timeouts: di
     )
     _print_agent_summary(codex_result)
 
-    # Check for downgrade
-    downgrade = auto_downgrade("precise", [codex_result])
-    if downgrade:
+    if allow_downgrade and auto_downgrade("precise", [codex_result]):
         return _run_solo(primary_provider, prompt, cwd, timeouts, add_dirs)
 
     # Step 2: Primary verification with codex result
@@ -1067,15 +1102,6 @@ def _run_cross(
     # Sort by provider name for deterministic ordering (prevents non-deterministic judge input)
     agents.sort(key=lambda a: a.provider_name)
 
-    # Check for downgrade
-    downgrade = auto_downgrade("cross", agents)
-    if downgrade:
-        return MultiAgentResult(
-            mode="cross",
-            agents=agents,
-            judge_verdict="FAIL",
-            judge_reason="auto_downgrade to solo",
-        )
 
     # Judge
     verdict, reason = judge(agents)

@@ -258,7 +258,7 @@ code `130`으로 끝나면 남은 domain이나 delay를 실행하지 않고 `130
 
 | 상태/파일 | 재개에서의 용도 |
 |-----------|----------------|
-| `.tmp/hashes.json` | 현재 source generation과 비교할 파일 해시 |
+| `.tmp/hashes.json` | 마지막으로 output이 `completed`된 source generation과 비교할 파일 해시 |
 | `layers.bundle.configHash` | 현재 bundle 설정 generation과 비교할 해시 |
 | `artifacts.result_file` | 출력 복구에 사용할 저장된 Stage 2 raw result |
 | `layers.analyze.stage2.status`, `retryCount`, `errorMessage` | Stage 2 재시도와 `missing_required_outputs:` 진단 |
@@ -270,6 +270,16 @@ code `130`으로 끝나면 남은 domain이나 delay를 실행하지 않고 `130
 Stage 2 finalization은 현재 payload의 `missing_files`를 사용한다. 누락된 required output이 있으면 이전 실행의 파일이 남아 있어도 Stage 2와 output을 failed로 두고 `missing_required_outputs:` 진단을 기록한다.
 
 required Stage 3이 failed이면 `layers.output.status`도 failed로 유지한다. `errorMessage`, `reason`, `retryCount`, `artifacts.stage3_final`은 보존하며, 이후 Stage 3 성공 또는 정책상 skip에서만 진행할 수 있다. Stage 2/3 성공과 source 또는 bundle config 변경으로 시작한 새 generation은 각 retry budget을 0으로 재설정한다.
+
+source drift는 실행 시작 시 계산하지만 `.tmp/hashes.json`은 final output이
+`completed`된 뒤에만 갱신한다. provider 실패, retry block, Stage 3 실패는 이전
+성공 baseline을 그대로 둔다. Stage 1 transitive invalidation도 새 baseline을
+publish하기 전의 해시와 import graph를 사용한다.
+
+`--output-format json`의 provider-backed 성공 경로는 stdout에 최종 JSON
+envelope 하나만 쓰고 진행 로그와 진단을 stderr에 쓴다. redirect는 mutation
+scope에만 적용하므로 early return, lock 충돌, 예외 뒤에도 호출자의
+`sys.stdout` 객체가 바뀌지 않는다.
 
 ---
 

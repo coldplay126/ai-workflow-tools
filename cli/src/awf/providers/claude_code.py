@@ -14,7 +14,7 @@ from typing import Iterator, Optional
 from awf.core.events import EventType, ExecutionEvent, EventStream
 from awf.core.task import TaskDefinition, TaskType
 from awf.providers.base import GatewayProvider, ProviderCapability, ProviderResult
-from awf.providers.subprocess_provider import SubprocessProvider
+from awf.providers.subprocess_provider import SpawnSpec, SubprocessProvider
 
 
 def _now_iso() -> str:
@@ -277,6 +277,25 @@ class ClaudeCodeProvider(SubprocessProvider, GatewayProvider):
                 return
         self.flags.extend(["--model", model])
 
+    def build_spawn_spec(
+        self,
+        prompt: str,
+        *,
+        add_dirs: list[str] | None = None,
+        stream_json: bool = False,
+    ) -> SpawnSpec:
+        """Build the shared Claude Code invocation used by complete and streaming runs."""
+        del stream_json
+        cmd = [self.command, *self.flags]
+        if self.effort:
+            cmd.extend(["--effort", self.effort])
+        for directory in add_dirs or []:
+            cmd.extend(["--add-dir", directory])
+        if self.json_schema:
+            cmd.extend(["--json-schema", self.json_schema])
+        cmd.append(prompt)
+        return SpawnSpec(argv=cmd)
+
     def complete(
         self,
         prompt: str,
@@ -286,18 +305,11 @@ class ClaudeCodeProvider(SubprocessProvider, GatewayProvider):
         timeout_sec: int | None = None,
     ) -> ProviderResult:
         effective_timeout = timeout_sec if timeout_sec is not None else self.timeout_sec
-        cmd = [self.command, *self.flags]
-        if self.effort:
-            cmd.extend(["--effort", self.effort])
-        for directory in add_dirs or []:
-            cmd.extend(["--add-dir", directory])
-        if self.json_schema:
-            cmd.extend(["--json-schema", self.json_schema])
-        cmd.append(prompt)
+        spawn_spec = self.build_spawn_spec(prompt, add_dirs=add_dirs)
         try:
             started_at = time.monotonic()
             process = subprocess.Popen(
-                cmd,
+                spawn_spec.argv,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,

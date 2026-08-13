@@ -1,9 +1,38 @@
 from __future__ import annotations
 
+import os
 import subprocess
+from dataclasses import dataclass
 from typing import Optional
 
 from awf.providers.base import ProviderCapability, ProviderResult
+
+
+@dataclass
+class SpawnSpec:
+    """Provider-owned subprocess invocation and its input/output transport."""
+
+    argv: list[str]
+    stdin: str | None = None
+    output_path: str | None = None
+
+    def captured_output_or(self, stdout: str) -> str:
+        if not self.output_path:
+            return stdout
+        try:
+            with open(self.output_path, "r", encoding="utf-8") as saved:
+                captured = saved.read()
+        except FileNotFoundError:
+            return stdout
+        return captured if captured.strip() else stdout
+
+    def cleanup(self) -> None:
+        if not self.output_path:
+            return
+        try:
+            os.unlink(self.output_path)
+        except FileNotFoundError:
+            pass
 
 
 class SubprocessProvider:

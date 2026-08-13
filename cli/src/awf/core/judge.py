@@ -41,11 +41,24 @@ def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
-def _finding_signature(item: dict[str, Any]) -> tuple[str, str, str]:
+def _normalized_finding_locations(item: dict[str, Any]) -> str:
+    values = item.get("locations")
+    if not isinstance(values, list):
+        values = [item.get("location", "")]
+    normalized = {
+        str(value).strip().replace("\\", "/")
+        for value in values
+        if str(value).strip()
+    }
+    return "|".join(sorted(normalized))
+
+
+def _finding_signature(item: dict[str, Any]) -> tuple[str, str, str, str]:
     return (
         str(item.get("severity", "")),
         str(item.get("category", "")),
-        str(item.get("summary", "")),
+        _normalized_finding_locations(item),
+        str(item.get("description") or item.get("summary") or ""),
     )
 
 

@@ -167,36 +167,29 @@ def run_agent(
 
 def _run_agent_streaming(provider, prompt, cwd, add_dirs, timeout_sec, on_progress):
     """Run subprocess provider with real-time stderr streaming."""
-    import subprocess
-    import selectors
     import os
-    import tempfile
+    import selectors
+    import subprocess
 
     from awf.providers.base import ProviderResult
+    from awf.providers.subprocess_provider import SpawnSpec
 
     provider_name = getattr(provider, "name", "unknown")
-    cmd = [provider.command, *provider.flags]
-
-    # Codex uses --output-last-message for result capture
-    output_path = None
-    if provider_name == "codex":
-        handle = tempfile.NamedTemporaryFile(prefix="awf-agent-", suffix=".txt", delete=False)
-        output_path = handle.name
-        handle.close()
-        if "--json" not in cmd:
-            cmd.append("--json")
-        cmd.extend(["--output-last-message", output_path])
-
-    if add_dirs:
-        for d in add_dirs:
-            cmd.extend(["--add-dir", d])
-
-    cmd.append(prompt)
+    build_spawn_spec = getattr(provider, "build_spawn_spec", None)
+    if callable(build_spawn_spec):
+        spawn_spec = build_spawn_spec(prompt, add_dirs=add_dirs, stream_json=True)
+    else:
+        command = [provider.command, *provider.flags]
+        for directory in add_dirs or []:
+            command.extend(["--add-dir", directory])
+        command.append(prompt)
+        spawn_spec = SpawnSpec(argv=command)
 
     started = time.monotonic()
     try:
         process = subprocess.Popen(
-            cmd,
+            spawn_spec.argv,
+            stdin=subprocess.PIPE if spawn_spec.stdin is not None else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -204,35 +197,63 @@ def _run_agent_streaming(provider, prompt, cwd, add_dirs, timeout_sec, on_progre
             bufsize=1,
         )
     except FileNotFoundError:
+        spawn_spec.cleanup()
         return ProviderResult(returncode=127, stdout="", stderr=f"{provider_name} not found: {provider.command}")
 
-    stdout_chunks = []
-    stderr_chunks = []
-    sel = selectors.DefaultSelector()
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+    selector = selectors.DefaultSelector()
     if process.stdout:
-        sel.register(process.stdout, selectors.EVENT_READ, data="stdout")
+        selector.register(process.stdout, selectors.EVENT_READ, data="stdout")
     if process.stderr:
-        sel.register(process.stderr, selectors.EVENT_READ, data="stderr")
+        selector.register(process.stderr, selectors.EVENT_READ, data="stderr")
 
+    stdin_stream = process.stdin
+    stdin_data: memoryview | None = None
+    stdin_offset = 0
+    if stdin_stream is not None:
+        stdin_data = memoryview((spawn_spec.stdin or "").encode())
+        if stdin_data:
+            os.set_blocking(stdin_stream.fileno(), False)
+            selector.register(stdin_stream, selectors.EVENT_WRITE, data="stdin")
+        else:
+            stdin_stream.close()
+
+    returncode: int | None = None
+    timeout_stderr: str | None = None
     try:
-        while sel.get_map():
+        while selector.get_map():
             elapsed = time.monotonic() - started
             if elapsed > timeout_sec:
                 process.kill()
-                return ProviderResult(returncode=124, stdout="".join(stdout_chunks), stderr=f"timed out after {timeout_sec}s")
+                returncode = 124
+                timeout_stderr = f"timed out after {timeout_sec}s"
+                break
 
-            events = sel.select(timeout=1.0)
+            events = selector.select(timeout=1.0)
             if not events:
                 if process.poll() is not None:
                     break
-                # Progress callback
                 on_progress(time.monotonic() - started, None)
                 continue
 
             for key, _ in events:
+                if key.data == "stdin":
+                    try:
+                        written = os.write(key.fileobj.fileno(), stdin_data[stdin_offset:])
+                    except BrokenPipeError:
+                        selector.unregister(key.fileobj)
+                        key.fileobj.close()
+                        continue
+                    stdin_offset += written
+                    if stdin_offset == len(stdin_data):
+                        selector.unregister(key.fileobj)
+                        key.fileobj.close()
+                    continue
+
                 chunk = key.fileobj.readline()
                 if chunk == "":
-                    sel.unregister(key.fileobj)
+                    selector.unregister(key.fileobj)
                     continue
                 if key.data == "stdout":
                     stdout_chunks.append(chunk)
@@ -246,27 +267,27 @@ def _run_agent_streaming(provider, prompt, cwd, add_dirs, timeout_sec, on_progre
                     if line:
                         on_progress(time.monotonic() - started, line)
 
-        returncode = process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        returncode = 124
-
-    stdout = "".join(stdout_chunks)
-    # Codex: read result from output file
-    if output_path:
-        try:
-            if os.path.exists(output_path):
-                with open(output_path, "r", encoding="utf-8") as f:
-                    captured = f.read()
-                if captured.strip():
-                    stdout = captured
-        finally:
+        if returncode is None:
             try:
-                os.unlink(output_path)
-            except FileNotFoundError:
-                pass
+                returncode = process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                returncode = 124
+                timeout_stderr = f"timed out after {timeout_sec}s"
+        else:
+            process.wait(timeout=5)
 
-    return ProviderResult(returncode=returncode, stdout=stdout, stderr="".join(stderr_chunks))
+        stdout = spawn_spec.captured_output_or("".join(stdout_chunks))
+        return ProviderResult(
+            returncode=returncode,
+            stdout=stdout,
+            stderr=timeout_stderr or "".join(stderr_chunks),
+        )
+    finally:
+        if stdin_stream is not None and not stdin_stream.closed:
+            stdin_stream.close()
+        selector.close()
+        spawn_spec.cleanup()
 
 
 def _codex_json_event_label(line: str) -> str | None:

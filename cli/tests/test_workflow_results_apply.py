@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from awf.core.judge import synthesize_workflow_multi_provider_results
+from awf.core.judge import _finding_signature, synthesize_workflow_multi_provider_results
 from awf.core.workflow_results import (
     apply_workflow_result,
     render_impl_report,
@@ -265,3 +265,69 @@ def test_apply_workflow_result_rejects_unknown_phase(tmp_path: Path) -> None:
     with pytest.raises(ValueError) as exc:
         apply_workflow_result(str(repo), "approve", str(result_file))
     assert "apply-result supports" in str(exc.value)
+
+def test_finding_signature_sorts_locations_and_uses_description_summary_fallback() -> None:
+    finding = {
+        "severity": "HIGH",
+        "category": "security",
+        "locations": ["src/z.py:9", "src/a.py:2"],
+        "description": "authorization bypass",
+    }
+    expected = (
+        "HIGH",
+        "security",
+        "src/a.py:2|src/z.py:9",
+        "authorization bypass",
+    )
+
+    assert _finding_signature(finding) == expected
+    assert _finding_signature(
+        {**finding, "description": "", "summary": "authorization bypass"}
+    ) == expected
+
+
+def test_review_high_findings_with_different_locations_are_a_mismatch(tmp_path: Path) -> None:
+    repo = _make_workflow_root(tmp_path)
+    coverage = {
+        "total_requirements": 1,
+        "mapped_requirements": 1,
+        "percentage": 100,
+        "gaps": [],
+    }
+    finding = {
+        "severity": "HIGH",
+        "category": "security",
+        "description": "authorization bypass",
+    }
+    primary = tmp_path / "primary.json"
+    secondary = tmp_path / "secondary.json"
+    primary.write_text(
+        json.dumps(
+            {
+                "conclusion": "PASS",
+                "coverage": coverage,
+                "findings": [{**finding, "location": "src/auth.py:12"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    secondary.write_text(
+        json.dumps(
+            {
+                "conclusion": "PASS",
+                "coverage": coverage,
+                "findings": [{**finding, "location": "src/session.py:44"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    synthesis = synthesize_workflow_multi_provider_results(
+        str(repo),
+        "review",
+        str(primary),
+        str(secondary),
+    )
+
+    assert synthesis["judge_passed"] is False
+    assert "high_severity_findings_mismatch" in synthesis["judge_reasons"]

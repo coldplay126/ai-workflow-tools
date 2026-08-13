@@ -22,7 +22,8 @@
 - `awf "<자연어 요청>"`: Phase 5 자연어 라우팅의 현재 버전. 안전한 조회 의도(`wf status`, `config show`, `skills list`, `mcp list`, session list/show)는 직접 디스패치하고, 명시적 analyze/review/verify 의도는 기본적으로 `--dry-run`으로 보낸다. `실행`/`run`이 포함되면 실제 `analyze`/`wf next` 실행으로 라우팅한다. 서비스명이 생략된 analyze 요청은 알려진 alias와 `analysis-docs/_templates/analysis-config.json`의 domain/service catalog를 기준으로 기본 service를 추론할 수 있고, 일부 service/domain/analyze keyword 오타도 보수적으로 보정한다. 그 외는 기본적으로 `chat --message`로 보낸다
 - `awf analyze <service> <domain> [--mode solo|quick|precise|cross|critical] [--non-interactive] [--no-ready-gate]`: provider 위임 분석. 이전 분석이 있고 소스가 변경되었으면 변경 파일만 Stage 1 재분석 (incremental). Provider-backed 실행은 기본적으로 `awf ready --gate analysis`를 먼저 통과해야 한다
 - `awf analyze <service> <domain> --dry-run --output-format json`: provider 호출 없이 deterministic discovery로 prompt와 경로를 구조화 JSON으로 출력한다. 설정이 비어 있는 repo에서도 dry-run은 AI unit discovery를 호출하지 않는다
-- `awf analyze <service> --check`: drift detection. 소스 파일 해시와 `.tmp/hashes.json` 비교로 stale 단위 탐지
+- `awf analyze <service> <domain> --output-format json`: 최종 결과가 생성되면 stdout에 JSON envelope 하나만 쓰고 진행 로그와 진단은 stderr에 유지한다
+- `awf analyze <service> --check`: 마지막으로 `completed`된 분석이 publish한 `.tmp/hashes.json`과 현재 source를 비교한다. 실패한 재분석은 baseline을 갱신하지 않는다
 - `awf analyze <service> --catalog`: 서비스 전체 분석 현황. config의 단위 정의(분모) + .ai-context(분자) join
 - `awf analyze <service> --cycles`: 저장된 import graph 기준 순환 의존성 리포트
 - `awf wf init <concept> [--no-ready-gate]`: `.workflow` 초기화 + `.work_history/` 세션 자동 생성. 기본적으로 `awf ready --gate workflow-init`를 먼저 통과해야 한다
@@ -116,6 +117,12 @@ streaming 경로는 기존 deadline을 유지한다.
 OMP worker에서 `require_json=true`이면 `dict`만 구조화 결과로 인정한다.
 list, string, number와 fenced non-object JSON은 `parse_error=true`로
 정규화하되 raw stdout은 진단 근거로 보존한다.
+
+Claude Code와 Codex의 streaming 실행은 non-streaming `complete()`와 같은
+provider-owned spawn specification을 사용한다. Claude Code의 `--effort`,
+`--json-schema`, `--add-dir`와 Codex의 reasoning effort, `--output-schema`,
+`--add-dir`가 두 경로에서 동일하다. Codex prompt는 argv가 아니라 stdin으로
+전달한다.
 
 ### Managed release worktrees (`awf wt`)
 
@@ -595,7 +602,7 @@ MCP-backed tool guidance는 [awf CLI architecture](../docs/architecture/awf-cli-
 `gemini`는 Gemini CLI 기반 provider입니다. 모델을 비워두면 Gemini CLI Auto에 맡기고, 특정 모델을 고정할 때만 `provider.gemini.model` 또는 `AWF_GEMINI_MODEL`을 설정합니다.
 `openai`도 optional provider이지만 현재는 실운영 우선순위 밖의 experimental provider입니다.
 `analyze`와 `wf next`는 provider 실행 전에 `permissions`를 검사합니다. `claude-sdk`와 `openai`의 tool loop는 `tool:file.read`, `tool:file.glob`, `tool:file.grep`, `tool:git.diff`, `tool:git.log` 권한도 함께 검사합니다. 필요하면 `--yolo`로 일시 우회할 수 있습니다.
-`claude-code`는 기본적으로 Claude Code의 `default` permission mode를 사용합니다. 자동화 환경에서 권한 확인을 우회해야 할 때만 `--yolo`를 사용하면 `bypassPermissions`로 전환됩니다.
+`claude-code`는 기본적으로 Claude Code의 `default` permission mode를 사용합니다. 자동화 환경에서 권한 확인을 우회해야 할 때만 `--yolo`를 사용하면 root provider와 Stage 2 fanout factory가 만든 모든 provider instance를 `bypassPermissions`로 전환합니다.
 `--add-dir`는 provider 시작 시간이 길어질 수 있어 기본값이 `off`입니다. 분석 대상이 prompt에 충분히 임베딩되지 않았고 외부 sibling repo 접근이 필요할 때만 `awf analyze ... --provider-add-dirs minimal` 또는 `full`을 사용합니다. `minimal`은 외부 project root만 제한적으로 추가하고, `AWF_PROVIDER_ADD_DIRS_MAX`로 개수를 제한할 수 있습니다.
 현재 실환경 기준으로 `claude-code` analyze는 small domain + standard mode에 더 적합하며, large/deep 분석은 timeout 가능성이 있습니다.
 현재 chat usage 리포트는 provider-native usage가 있으면 그 값을 우선 사용하고, 없으면 `len(text) // 4` 기반 estimated token으로 fallback합니다. cost는 optional provider pricing 설정 기반 estimated cost입니다.

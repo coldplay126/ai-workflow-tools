@@ -17,11 +17,28 @@ class TestClaudeCodeProviderEffort:
         provider = ClaudeCodeProvider(command="echo", flags=["--print"], effort="max")
         assert provider.effort == "max"
 
-    def test_effort_in_complete_cmd(self):
-        provider = ClaudeCodeProvider(command="echo", flags=["--print"], effort="max")
-        # complete() builds cmd with --effort flag; verify by checking attributes
-        assert provider.effort == "max"
-        assert provider.command == "echo"
+    def test_build_spawn_spec_preserves_effort_dirs_schema_and_prompt(self):
+        provider = ClaudeCodeProvider(
+            command="claude",
+            flags=["--print"],
+            effort="max",
+            json_schema="/tmp/claude-schema.json",
+        )
+
+        spawn_spec = provider.build_spawn_spec("review", add_dirs=["/tmp/docs"], stream_json=True)
+
+        assert spawn_spec.argv == [
+            "claude",
+            "--print",
+            "--effort",
+            "max",
+            "--add-dir",
+            "/tmp/docs",
+            "--json-schema",
+            "/tmp/claude-schema.json",
+            "review",
+        ]
+        assert spawn_spec.stdin is None
 
     def test_set_permission_mode_replaces_existing_flag(self):
         provider = ClaudeCodeProvider(command="echo", flags=["--print", "--permission-mode", "default"])
@@ -57,6 +74,7 @@ class TestCodexProviderEffort:
         provider = CodexProvider(
             command="codex",
             flags=["exec", "--sandbox", "read-only"],
+            reasoning_effort="xhigh",
             output_schema_path="/tmp/awf-schema.json",
         )
         completed = SimpleNamespace(returncode=0, stdout="{}", stderr="")
@@ -68,6 +86,8 @@ class TestCodexProviderEffort:
         assert cmd[:3] == ["codex", "exec", "--sandbox"]
         assert ["--add-dir", "/tmp/docs"] == cmd[cmd.index("--add-dir"):cmd.index("--add-dir") + 2]
         assert ["--output-schema", "/tmp/awf-schema.json"] == cmd[cmd.index("--output-schema"):cmd.index("--output-schema") + 2]
+        assert ["-c", "model_reasoning_effort=xhigh"] == cmd[cmd.index("-c"):cmd.index("-c") + 2]
+        assert run_mock.call_args.kwargs["input"] == "prompt"
         assert cmd[-1] == "-"
 
 

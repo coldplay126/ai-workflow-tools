@@ -10,10 +10,13 @@ from pathlib import Path
 from fixture_support import ANALYSIS_RESULT, ROOT, prepare_analysis_docs_fixture
 
 
-def _run_analyze(tmp_docs_root: Path) -> subprocess.CompletedProcess[str]:
+def _run_analyze(
+    tmp_docs_root: Path, *, fixture_returncode: int = 0
+) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT / "cli" / "src")
     env["AWF_FIXTURE_RESULT_FILE"] = str(ANALYSIS_RESULT)
+    env["AWF_FIXTURE_RETURNCODE"] = str(fixture_returncode)
     return subprocess.run(
         [
             sys.executable,
@@ -61,6 +64,25 @@ def main() -> int:
         print(f"first_stage2={state['layers']['analyze']['stage2']['status']}")
         print(f"first_stage3={state['layers']['analyze']['stage3']['status']}")
         print(f"first_domain_bundle={state['artifacts']['domain_bundle']}")
+        hashes_path = ai_context_dir / ".tmp" / "hashes.json"
+        baseline_hashes = hashes_path.read_bytes()
+        handler_path = tmp_dir / "_sample-api-src" / "src" / "domain" / "quest-challenge" / "handler.py"
+        handler_path.write_text(
+            "def start_quest(user_id: str) -> dict:\n"
+            "    return {'user_id': user_id, 'status': 'failed'}\n",
+            encoding="utf-8",
+        )
+
+        failed = _run_analyze(tmp_dir, fixture_returncode=1)
+        if failed.returncode != 1:
+            print(failed.stdout, end="")
+            if failed.stderr:
+                print(failed.stderr, file=sys.stderr, end="")
+            return failed.returncode or 1
+        if hashes_path.read_bytes() != baseline_hashes:
+            print("hashes baseline changed after provider failure", file=sys.stderr)
+            return 1
+        print("hashes_preserved_after_failure=true")
 
         second = _run_analyze(tmp_dir)
         print(second.stdout, end="")

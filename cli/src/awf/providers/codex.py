@@ -7,7 +7,7 @@ import tempfile
 from typing import Optional
 
 from awf.providers.base import ProviderCapability, ProviderResult
-from awf.providers.subprocess_provider import SubprocessProvider
+from awf.providers.subprocess_provider import SpawnSpec, SubprocessProvider
 
 
 class CodexProvider(SubprocessProvider):
@@ -43,6 +43,28 @@ class CodexProvider(SubprocessProvider):
                 return
         self.flags.extend(["--sandbox", sandbox])
 
+    def build_spawn_spec(
+        self,
+        prompt: str,
+        *,
+        add_dirs: list[str] | None = None,
+        stream_json: bool = False,
+    ) -> SpawnSpec:
+        """Build the shared Codex invocation used by complete and streaming runs."""
+        with tempfile.NamedTemporaryFile(prefix="awf-codex-last-", suffix=".txt", delete=False) as handle:
+            output_path = handle.name
+        cmd = [self.command, *self.flags]
+        if stream_json and "--json" not in cmd:
+            cmd.append("--json")
+        if self.reasoning_effort:
+            cmd.extend(["-c", f"model_reasoning_effort={self.reasoning_effort}"])
+        for directory in add_dirs or []:
+            cmd.extend(["--add-dir", directory])
+        if self.output_schema_path:
+            cmd.extend(["--output-schema", self.output_schema_path])
+        cmd.extend(["--output-last-message", output_path, "-"])
+        return SpawnSpec(argv=cmd, stdin=prompt, output_path=output_path)
+
     def complete(
         self,
         prompt: str,
@@ -52,25 +74,15 @@ class CodexProvider(SubprocessProvider):
         timeout_sec: int | None = None,
     ) -> ProviderResult:
         effective_timeout = timeout_sec if timeout_sec is not None else self.timeout_sec
-        with tempfile.NamedTemporaryFile(prefix="awf-codex-last-", suffix=".txt", delete=False) as handle:
-            output_path = handle.name
+        spawn_spec = self.build_spawn_spec(prompt, add_dirs=add_dirs)
         try:
-            # Pass prompt via stdin ("-") to avoid OS argument length limits
-            cmd = [self.command, *self.flags]
-            if self.reasoning_effort:
-                cmd.extend(["-c", f"model_reasoning_effort={self.reasoning_effort}"])
-            for directory in add_dirs or []:
-                cmd.extend(["--add-dir", directory])
-            if self.output_schema_path:
-                cmd.extend(["--output-schema", self.output_schema_path])
-            cmd.extend(["--output-last-message", output_path, "-"])
             try:
                 completed = subprocess.run(
-                    cmd,
+                    spawn_spec.argv,
                     check=False,
                     capture_output=True,
                     text=True,
-                    input=prompt,
+                    input=spawn_spec.stdin,
                     cwd=cwd,
                     timeout=effective_timeout,
                 )
@@ -86,19 +98,10 @@ class CodexProvider(SubprocessProvider):
                     stdout="",
                     stderr=f"provider_timeout: codex timed out after {effective_timeout}s",
                 )
-            stdout = completed.stdout
-            if os.path.exists(output_path):
-                with open(output_path, "r", encoding="utf-8") as saved:
-                    captured = saved.read()
-                    if captured.strip():
-                        stdout = captured
             return ProviderResult(
                 returncode=completed.returncode,
-                stdout=stdout,
+                stdout=spawn_spec.captured_output_or(completed.stdout),
                 stderr=completed.stderr,
             )
         finally:
-            try:
-                os.unlink(output_path)
-            except FileNotFoundError:
-                pass
+            spawn_spec.cleanup()
