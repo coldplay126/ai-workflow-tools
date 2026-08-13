@@ -532,8 +532,15 @@ Agent Card에 `"hil": true`인 Phase는 항상 인라인 실행.
       "command": "omp",
       "no_session": false,
       "coordination_surface": "native",
+      "execution_mode": "external_host",
       "capacity": 8,
-      "role_models": {}
+      "role_models": {
+        "plan_conformance": "@default",
+        "precision": "@default",
+        "quality_validation": "@slow",
+        "primary": "@slow",
+        "speed": "@smol"
+      }
     }
   },
   "providers": {

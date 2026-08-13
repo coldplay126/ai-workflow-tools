@@ -43,6 +43,23 @@ Slave를 호출하기 전에 cmux-agent 활성 여부를 먼저 확인한다.
 2. Step 2 — Claude(Master): Codex 결과 기반 종합 판정 + 영향도 분석
 3. 4-Block Format: 결론/근거/리스크/실행안
 
+### Judge Rules
+
+`#cross`와 `#critical` 결과는 다음 순서로 판정합니다:
+
+1. `CRITICAL` 또는 `HIGH` finding이 하나라도 있으면 **FAIL**
+2. `category:location` 기준으로 중복 제거한 `MAJOR` 또는 `MEDIUM` finding이
+   2건 이상이면 **FAIL**
+3. PASS/FAIL 불일치에서 재현 가능하고 근거가 연결된 FAIL evidence score가
+   3 이상이면 **FAIL**
+4. 근거가 약하거나 재현할 수 없는 불일치, 또는 PASS와 invalid 결과의 조합은
+   **ESCALATE**
+5. 모든 명시적 결론이 FAIL이면 **FAIL**, 모든 유효 결론이 PASS이면 **PASS**
+
+이 절의 Codex sandbox `read-only`는 hashtag protocol이 직접 호출하는 분석
+Slave에만 적용합니다. `awf wf`가 phase provider를 실행할 때는 review/verify만
+read-only이고, 쓰기가 필요한 phase는 workspace-write 정책을 사용합니다.
+
 ### 자동 승격/다운그레이드
 
 승격 (더 신중하게):
