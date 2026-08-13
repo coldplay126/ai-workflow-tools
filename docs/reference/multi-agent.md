@@ -211,7 +211,7 @@ synthesis shape로 선택 결과를 반환한다:
   "judge_passed": true,
   "judge_reasons": [],
   "selected_provider": "primary",
-  "selected_result_path": ".workflow/tmp/result-review.json",
+  "selected_result_path": ".workflow/tmp/result-review-r0-<epoch>-codex.txt",
   "final_passed": true,
   "synthesis_reasons": ["primary_retained_after_consensus"],
   "selection_summary": "primary retained after consensus"
