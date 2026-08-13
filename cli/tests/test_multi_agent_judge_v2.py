@@ -2,7 +2,8 @@
 
 import pytest
 
-from awf.core.agent_runner import AgentResult
+from awf.core import multi_agent
+from awf.core.agent_runner import AgentResult, MultiAgentResult
 from awf.core.multi_agent import _record_dispatch_complete_safe, judge
 
 
@@ -323,3 +324,56 @@ def test_equal_evidence_scores_choose_first_failing_agent_in_input_order():
 
     assert verdict == "FAIL"
     assert reason.startswith("grounded disagreement: first-fail ")
+
+def test_cross_auto_downgrade_runs_precise_once_and_preserves_target_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    calls: list[str] = []
+    cross_failure = MultiAgentResult(
+        mode="cross",
+        agents=[
+            AgentResult("codex", "plan_conformance", "", "timeout", 124, 0.1, timed_out=True),
+            AgentResult("sonnet", "quality_validation", "", "timeout", 124, 0.1, timed_out=True),
+        ],
+        judge_verdict="FAIL",
+        judge_reason="all agents failed",
+    )
+    precise_pass = MultiAgentResult(
+        mode="precise",
+        agents=[_result("codex", "PASS"), _result("primary", "PASS")],
+        judge_verdict="PASS",
+        judge_reason="all agents agree",
+        selected_agent="primary",
+        combined_output='{"conclusion":"PASS"}',
+    )
+
+    monkeypatch.setattr(multi_agent, "validate_providers_for_mode", lambda *_args: [])
+    monkeypatch.setattr(multi_agent, "_run_cross", lambda *_args, **_kwargs: cross_failure)
+
+    fallback_options: list[bool] = []
+
+    def _run_precise(*_args, **kwargs) -> MultiAgentResult:
+        calls.append("precise")
+        fallback_options.append(kwargs["allow_downgrade"])
+        return precise_pass
+
+    monkeypatch.setattr(multi_agent, "_run_precise", _run_precise)
+    from awf.core import review_output
+
+    monkeypatch.setattr(review_output, "save_review_output", lambda *_args, **_kwargs: None)
+
+    result = multi_agent.run_multi_agent(
+        "cross",
+        "review this change",
+        primary_provider=object(),
+        registry=object(),
+        config={},
+        cwd=str(tmp_path),
+    )
+
+    assert fallback_options == [False]
+    assert calls == ["precise"]
+    assert result.mode == "precise"
+    assert result.agents == precise_pass.agents
+    assert result.judge_reason == "auto_downgrade: cross → precise; all agents agree"

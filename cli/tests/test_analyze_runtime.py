@@ -179,3 +179,32 @@ def test_json_mode_print_prompt_writes_context_to_stderr(tmp_path: Path) -> None
     assert json.loads(completed.stdout)["status"] == "completed"
     assert "=== awf analyze context ===" not in completed.stdout
     assert "=== awf analyze context ===" in completed.stderr
+
+def test_yolo_fanout_provider_factory_applies_bypass_permissions_to_every_instance() -> None:
+    from awf.providers.claude_code import ClaudeCodeProvider
+
+    class Registry:
+        def __init__(self) -> None:
+            self.instances: list[ClaudeCodeProvider] = []
+
+        def get(self, provider_name: str) -> ClaudeCodeProvider:
+            assert provider_name == "claude-code"
+            provider = ClaudeCodeProvider(
+                command="claude",
+                flags=["--print", "--permission-mode", "default"],
+            )
+            self.instances.append(provider)
+            return provider
+
+    registry = Registry()
+    make_factory = getattr(analyze, "_make_fanout_provider_factory", None)
+
+    assert make_factory is not None
+    factory = make_factory(registry, "claude-code", yolo=True)
+    providers = [factory() for _ in range(4)]
+
+    assert providers == registry.instances
+    assert all(
+        provider.flags == ["--print", "--permission-mode", "bypassPermissions"]
+        for provider in providers
+    )

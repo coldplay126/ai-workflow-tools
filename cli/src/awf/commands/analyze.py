@@ -277,6 +277,14 @@ def _apply_provider_permission_mode(provider, *, yolo: bool) -> None:
     if yolo and hasattr(provider, "set_permission_mode"):
         provider.set_permission_mode("bypassPermissions")
 
+def _make_fanout_provider_factory(registry, provider_name: str, *, yolo: bool):
+    def factory():
+        provider = registry.get(provider_name)
+        _apply_provider_permission_mode(provider, yolo=yolo)
+        return provider
+
+    return factory
+
 
 def _is_under(path: Path, root: Path) -> bool:
     try:
@@ -1015,7 +1023,11 @@ def _run_analyze_domain_mutation(
             fanout_result, fanout_error, fanout_metadata = run_stage2_fanout(
                 context=context,
                 provider=provider,
-                provider_factory=lambda: registry.get(provider_name),
+                provider_factory=_make_fanout_provider_factory(
+                    registry,
+                    provider_name,
+                    yolo=bool(getattr(args, "yolo", False)),
+                ),
                 provider_name=provider_name,
                 add_dirs=add_dirs,
                 stage1_memo_text=stage1_memo_text,
