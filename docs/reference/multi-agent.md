@@ -196,6 +196,18 @@ AWF `TeamRunner`는 Python control loop와 file blackboard를 사용한다. Clau
 }
 ```
 
+`conclusion`은 공백 제거와 대문자 변환 후 normalized `PASS`/`FAIL` prefix로
+분류한다. `FAIL: tests did not pass` 같은 명시적 FAIL은 PASS로 오인하지
+않는다. PASS/FAIL이 충돌하면 disagreement 규칙을 적용하고, 알 수 없는
+structured conclusion은 fail closed로 처리한다.
+
+`WorkerSpec.timeout_sec`는 provider `complete()` 호출에 그대로 전달된다.
+provider `returncode == 124`와 local deadline 초과는 모두 timeout이다.
+`require_json=true`인 OMP native/print 결과는 JSON object여야 한다. list,
+string, number 같은 non-object 값은 `parsed=None`, `parse_error=true`로
+정규화하며 raw output은 evidence로 남긴다. `AgentResult`와 `TeamRunner`도
+non-object parsed 값을 성공 결과로 합성하지 않는다.
+
 ---
 
 ## 9. Workflow multi-provider synthesis 출력
