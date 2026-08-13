@@ -8,6 +8,17 @@
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-13
+
+### Fixed
+
+- 현재 Stage 2 attempt가 모든 required output을 제공하지 않으면 이전 output 파일이 남아 있어도 분석을 failed로 유지합니다.
+- Stage 2 저장 result는 동일 source/config generation에서만 재사용하고, required Stage 3 실패의 state와 diagnostic artifact를 보존합니다.
+
+### Documentation
+
+- analysis resume, generation, Stage 3 failure, retry budget 상태 계약을 CLI, reference, pattern, skill 문서에 반영했습니다.
+
 ## [0.1.0] - 2026-08-13
 
 첫 문서화된 릴리스 스냅샷입니다. 이 체인지로그를 만들기 전에는 Git 태그와

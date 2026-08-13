@@ -230,7 +230,23 @@ unit discovery를 호출하지 않는다.
 }
 ```
 
----
+## 9.1 Generation 상태와 재개
+
+| 상태/파일 | 재개에서의 용도 |
+|-----------|----------------|
+| `.tmp/hashes.json` | 현재 source generation과 비교할 파일 해시 |
+| `layers.bundle.configHash` | 현재 bundle 설정 generation과 비교할 해시 |
+| `artifacts.result_file` | 출력 복구에 사용할 저장된 Stage 2 raw result |
+| `layers.analyze.stage2.status`, `retryCount`, `errorMessage` | Stage 2 재시도와 `missing_required_outputs:` 진단 |
+| `layers.analyze.stage3.status`, `reason`, `errorMessage`, `retryCount` | required Stage 3 실패·정책 skip·재시도 상태 |
+| `artifacts.stage3_final` | 보존되는 Stage 3 진단 artifact 경로 |
+
+저장된 Stage 2 result는 Stage 1이 completed이고 output이 없을 때만 복구 후보가 된다. `.tmp/hashes.json`의 source와 `layers.bundle.configHash`가 현재 generation과 모두 일치해야 재사용하며, 어느 하나라도 달라지면 raw result를 폐기한다.
+
+Stage 2 finalization은 현재 payload의 `missing_files`를 사용한다. 누락된 required output이 있으면 이전 실행의 파일이 남아 있어도 Stage 2와 output을 failed로 두고 `missing_required_outputs:` 진단을 기록한다.
+
+required Stage 3이 failed이면 `layers.output.status`도 failed로 유지한다. `errorMessage`, `reason`, `retryCount`, `artifacts.stage3_final`은 보존하며, 이후 Stage 3 성공 또는 정책상 skip에서만 진행할 수 있다. Stage 2/3 성공과 source 또는 bundle config 변경으로 시작한 새 generation은 각 retry budget을 0으로 재설정한다.
+
 
 ## 10. Observation 캐시 저장 형식
 
