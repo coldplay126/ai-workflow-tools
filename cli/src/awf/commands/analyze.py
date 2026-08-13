@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import argparse
 import json
 import os
@@ -407,12 +408,9 @@ def run_analyze(args: argparse.Namespace) -> int:
     execution_mode = _resolve_analysis_mode(args)
     non_interactive = _is_non_interactive(args)
 
-    # JSON mode: redirect all progress output to stderr, reserve stdout for final JSON
+    # JSON mode: reserve stdout for the final envelope.
     output_format = getattr(args, "output_format", "text")
-    _original_stdout = None
-    if output_format == "json":
-        _original_stdout = sys.stdout
-        sys.stdout = sys.stderr
+    _original_stdout = sys.stdout
 
     try:
         config = load_awf_config(args.repo_root)
@@ -437,8 +435,7 @@ def run_analyze(args: argparse.Namespace) -> int:
     prompt = build_prompt(context, execution_mode=execution_mode, native=(_default_provider == "claude-code"))
 
     if args.print_prompt or args.dry_run:
-        if args.dry_run and output_format == "json" and _original_stdout:
-            sys.stdout = _original_stdout
+        if args.dry_run and output_format == "json":
             print(json.dumps({
                 "command": "analyze",
                 "service": context.service,
@@ -452,36 +449,46 @@ def run_analyze(args: argparse.Namespace) -> int:
                 "domain_directories": context.domain_directories,
                 "all_directories": context.all_directories,
                 "prompt": prompt,
-            }, ensure_ascii=False, indent=2))
+            }, ensure_ascii=False, indent=2), file=_original_stdout)
             return 0
-        print("=== awf analyze context ===")
-        print(f"repo_root: {context.repo_root}")
-        print(f"docs_root: {context.docs_root}")
-        print(f"github_root: {context.github_root}")
-        print(f"ai_context_dir: {context.ai_context_dir}")
-        print(f"mode: {context.mode}")
-        print(f"execution_mode: {execution_mode or 'default'}")
-        print(f"domain_directories: {json.dumps(context.domain_directories, ensure_ascii=False)}")
-        print(f"all_directories: {json.dumps(context.all_directories, ensure_ascii=False)}")
-        print()
-        print(prompt)
-        if args.dry_run:
-            return 0
+        with (
+            contextlib.redirect_stdout(sys.stderr)
+            if output_format == "json"
+            else contextlib.nullcontext()
+        ):
+            print("=== awf analyze context ===")
+            print(f"repo_root: {context.repo_root}")
+            print(f"docs_root: {context.docs_root}")
+            print(f"github_root: {context.github_root}")
+            print(f"ai_context_dir: {context.ai_context_dir}")
+            print(f"mode: {context.mode}")
+            print(f"execution_mode: {execution_mode or 'default'}")
+            print(f"domain_directories: {json.dumps(context.domain_directories, ensure_ascii=False)}")
+            print(f"all_directories: {json.dumps(context.all_directories, ensure_ascii=False)}")
+            print()
+            print(prompt)
+            if args.dry_run:
+                return 0
 
     try:
         with repository_lock(context.ai_context_dir / ".analysis-run.lock", blocking=False):
-            return _run_analyze_domain_mutation(
-                args,
-                config=config,
-                context=context,
-                pipeline_config=pipeline_config,
-                execution_mode=execution_mode,
-                non_interactive=non_interactive,
-                output_format=output_format,
-                _original_stdout=_original_stdout,
-                _analysis_started_at=_analysis_started_at,
-                prompt=prompt,
-            )
+            with (
+                contextlib.redirect_stdout(sys.stderr)
+                if output_format == "json"
+                else contextlib.nullcontext()
+            ):
+                return _run_analyze_domain_mutation(
+                    args,
+                    config=config,
+                    context=context,
+                    pipeline_config=pipeline_config,
+                    execution_mode=execution_mode,
+                    non_interactive=non_interactive,
+                    output_format=output_format,
+                    _original_stdout=_original_stdout,
+                    _analysis_started_at=_analysis_started_at,
+                    prompt=prompt,
+                )
     except BlockingIOError:
         print("error: analysis already running for service/domain", file=sys.stderr)
         return 4
@@ -519,6 +526,8 @@ def _run_analyze_domain_mutation(
             f"Glob patterns: {', '.join(str(p) for p in discovery.get('glob_patterns', [])[:5])}",
             file=sys.stderr,
         )
+    previous_hashes = load_hashes_file(context)
+    hashes_have_changed = hashes_changed(context, domain_files)
     current_attempt_missing_files = get_required_output_files(context.analysis_mode)
     resume = resolve_analysis_resume(context, current_file_entries=domain_files)
     print(f"resume_mode: {_resume_mode_label(resume)}")
@@ -567,6 +576,8 @@ def _run_analyze_domain_mutation(
             print(f"state_file: {context.ai_context_dir / '.analysis-state.json'}")
             print(f"output_status: {finalized.get('layers', {}).get('output', {}).get('status')}")
             if finalized.get("layers", {}).get("output", {}).get("status") == "completed":
+                hashes_path = save_hashes_file(context, domain_files)
+                print(f"hashes_file: {hashes_path}")
                 _accumulate_knowledge_safe(context)
                 _record_analysis_complete_safe(
                     context, started_at=_analysis_started_at, mode="resume"
@@ -584,10 +595,6 @@ def _run_analyze_domain_mutation(
         data={"stage": "stage1", "description": "build analysis context and prompt"},
     )
 
-    previous_hashes = load_hashes_file(context)
-    hashes_have_changed = hashes_changed(context, domain_files)
-    hashes_path = save_hashes_file(context, domain_files)
-    print(f"hashes_file: {hashes_path}")
     if hashes_have_changed:
         print("hashes_changed: true")
     file_count = len(domain_files)
@@ -1391,6 +1398,8 @@ def _run_analyze_domain_mutation(
     if event_summary:
         print(event_summary, file=sys.stderr)
     if finalized.get('layers', {}).get('output', {}).get('status') == 'completed':
+        hashes_path = save_hashes_file(context, domain_files)
+        print(f"hashes_file: {hashes_path}")
         report_path = generate_analysis_report(context, finalized)
         if report_path:
             print(f"analysis_report: {report_path}")
@@ -1410,10 +1419,8 @@ def _run_analyze_domain_mutation(
                 "next_step: inspect .analysis-state.json and .ai-context/.tmp to decide whether to retry or switch to Claude Code /analysis",
                 file=sys.stderr,
             )
-    # JSON output mode: restore stdout and print clean JSON
-    if output_format == "json" and _original_stdout:
-        sys.stdout = _original_stdout
-        import json as json_mod
+    # JSON output mode: write the final envelope to the caller's original stream.
+    if output_format == "json":
         output_files = []
         for fname in ["api-spec.json", "data-model.md", "domain-overview.md", "external-integration.md", "ANALYSIS_REPORT.md"]:
             fpath = context.ai_context_dir / fname
@@ -1430,7 +1437,7 @@ def _run_analyze_domain_mutation(
             "ai_context_dir": str(context.ai_context_dir),
             "elapsed_sec": round(stage2_elapsed, 1) if 'stage2_elapsed' in dir() else None,
         }
-        print(json_mod.dumps(json_result, ensure_ascii=False, indent=2))
+        print(json.dumps(json_result, ensure_ascii=False, indent=2), file=_original_stdout)
     else:
         if result.stdout:
             print(result.stdout.rstrip())
