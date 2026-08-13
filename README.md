@@ -164,7 +164,11 @@ awf ready --repo-root .
 ```
 
 `--output-format json`을 붙인 dry-run은 자동화에서 소비할 수 있는 구조화된
-prompt preview를 출력합니다. `.workflow/`가 프로젝트 `.gitignore`에 있으면
+prompt preview를 출력합니다. provider-backed `awf analyze`가 최종 결과를
+생성하면 stdout에는 JSON envelope 하나만 쓰고 진행 로그와 진단은 stderr로
+보냅니다. source hash baseline은 output이 `completed`일 때만 갱신하므로 실패한
+재분석이 마지막 성공 baseline을 덮지 않습니다. `.workflow/`가 프로젝트
+`.gitignore`에 있으면
 `awf ready`가 local-only workflow state 경고를 표시합니다. `awf wf next`는
 in_progress phase에 30분 이내 fresh result가 있으면 abort + apply-result 힌트를
 보여줍니다 (`--force`로 override 가능). verify phase는 3회 째부터 경고, 6회
@@ -416,7 +420,11 @@ awf ready --repo-root .
 ```
 
 Dry-runs with `--output-format json` emit structured prompt previews for
-automation. If `.workflow/` is ignored by the target repo's `.gitignore`,
+automation. When provider-backed `awf analyze` produces a final result, stdout
+contains one JSON envelope while progress and diagnostics stay on stderr.
+Source hash baselines advance only after a `completed` output, so a failed
+reanalyze does not overwrite the last successful baseline. If `.workflow/` is
+ignored by the target repo's `.gitignore`,
 `awf ready` reports that workflow state is local-only. `awf wf next` aborts
 with an apply-result hint if an in_progress phase has a fresh result file
 on disk (override with `--force`); verify gets a warning at the 3rd

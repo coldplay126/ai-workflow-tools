@@ -24,6 +24,11 @@
 
 source hash나 bundle config가 바뀌면 Stage 2 저장 result를 폐기하고 새 generation으로 분석한다. 이때 Stage 2/3의 `retryCount`는 0으로 reset한다. 성공한 Stage 2/3도 해당 Stage의 retry budget을 reset한다.
 
+`.tmp/hashes.json`은 마지막 성공 generation의 baseline이다. 현재 source의
+drift는 provider 실행 전에 계산하지만 새 해시는 final output이 `completed`된
+후에만 저장한다. 실패한 재분석은 baseline을 바꾸지 않으며, transitive
+invalidation은 실행 시작 시 읽은 이전 baseline을 사용한다.
+
 required Stage 3이 failed이면 output도 failed다. resume은 `reason`, `errorMessage`, `retryCount`, `artifacts.stage3_final`을 유지한 채 Stage 3부터 재시도한다. Stage 3이 성공하거나 정책이 skipped로 표시할 때만 output으로 진행한다.
 
 상태 파일 JSON 구조는 reference 문서를 참조한다.

@@ -100,9 +100,9 @@ AWF `TeamRunner`는 Python control loop와 file blackboard를 사용한다. Clau
 
 | 상황 | 강등 경로 |
 |------|----------|
-| 보조 에이전트 타임아웃 | 다음 fallback 모드 |
-| JSON 파싱 실패 | 다음 fallback 모드 |
-| 전체 에이전트 실패 | solo |
+| 보조 에이전트 타임아웃 | 다음 configured fallback 모드 |
+| JSON 파싱 실패 | 다음 configured fallback 모드 |
+| 전체 에이전트 실패 | 다음 configured fallback 모드를 한 번 실행 |
 
 ---
 
@@ -115,6 +115,10 @@ AWF `TeamRunner`는 Python control loop와 file blackboard를 사용한다. Clau
 | precise | solo |
 | quick | solo |
 | solo | (없음, 최종 모드) |
+
+runtime은 `auto_downgrade()`가 반환한 target을 실제로 한 번 실행한다. 예를 들어
+cross 실패의 첫 target은 precise이며 결과의 `mode`, provenance, reason도
+`cross → precise`를 기록한다. fallback 실행 안에서는 재귀 강등하지 않는다.
 
 ---
 
@@ -213,6 +217,17 @@ writer가 없거나 malformed이면 `fanout_unavailable:` diagnostic과
 `metadata.status=fallback`을 반환해 single-agent Stage 2로 전환한다.
 provider 실행 후 발생한 실패는 configuration fallback으로 다시 쓰지 않고
 원래 result contract를 유지한다.
+
+review/verify의 high-severity finding 비교는 `severity`, `category`,
+`description`(없으면 `summary`)과 위치를 함께 signature로 사용한다. 단일
+`location`은 정규화하고, `locations` 배열은 정렬한다. 설명이 같아도 위치가
+다르면 같은 finding으로 합치지 않는다.
+
+`--yolo` permission mode는 root provider뿐 아니라 analysis fanout factory가
+생성하는 모든 provider instance에 적용한다. Streaming Claude Code/Codex도
+non-streaming 호출과 같은 provider-owned spawn specification을 사용한다.
+Claude Code effort/schema/add-dir와 Codex reasoning/schema/add-dir가
+streaming에서 누락되지 않으며 Codex prompt는 stdin으로 전달한다.
 
 ---
 

@@ -27,6 +27,10 @@ graph TD
 
 구체적 fallback 경로, 트리거 조건, 의사결정 흐름은 reference 문서를 참조한다.
 
+실행 중 강등은 chain을 설명만 바꾸는 것이 아니라 반환된 target을 실제로 한 번
+호출한다. `cross → precise`라면 result mode와 reason도 precise 실행을 가리킨다.
+fallback 내부의 추가 실패는 같은 호출에서 재귀 강등하지 않는다.
+
 ---
 
 ## 2. Timeout Budget Inheritance
@@ -41,6 +45,16 @@ graph TD
 - streaming 실행은 local deadline을 유지한다
 - 잔여 budget이 다음 단계 최소 시간 미만이면 남은 단계를 건너뛰거나 fallback한다
 - 전체 budget 소진 시 즉시 Fallback 모드로 강등한다
+
+### Streaming option parity
+
+- provider가 command argv와 stdin/output transport를 하나의 spawn
+  specification으로 만든다
+- non-streaming `complete()`와 streaming runner가 같은 specification을 쓴다
+- Claude Code의 effort, JSON schema, add-dir를 streaming에서도 유지한다
+- Codex의 reasoning effort, output schema, add-dir를 유지하고 prompt는 stdin으로
+  전달한다
+- permission mode는 fanout factory가 만든 각 provider에도 다시 적용한다
 
 ### Budget 초과 시 동작
 
