@@ -58,6 +58,11 @@ flowchart TD
 `CRITICAL`/`HIGH`와 다중 `MAJOR`/`MEDIUM`은 실행 실패나 parse error가 있어도
 fail closed로 처리한다. 심각한 finding을 invalid 실행이라는 이유로 버리지 않는다.
 
+결론 분류는 `strip().upper()` 뒤 normalized `PASS`/`FAIL` prefix를 확인한다.
+부분 문자열 검색은 사용하지 않는다. 예를 들어 `FAIL: tests did not pass`는
+명시적 FAIL이고, PASS agent와 함께 들어오면 Rule 4~5의 disagreement로
+처리한다. 알 수 없는 structured conclusion은 유효한 PASS가 아니다.
+
 ## 2. Disagreement evidence score
 
 점수는 PASS/FAIL 불일치에서만 사용한다. confidence만으로 FAIL을 확정하지 않는다.

@@ -102,6 +102,21 @@ model을 지정하면 `omp_worker_model_conflict`로 worker 실행 전에 차단
 `execution_mode = "current_host"`는 host의 `task`/`hub` bridge가 있을 때만
 유효하며, bridge가 없다고 nested subprocess나 inline으로 우회하지 않는다.
 
+### Multi-agent result and timeout contracts
+
+멀티에이전트 판정은 공백을 제거하고 대문자로 정규화한 `PASS`/`FAIL`
+prefix를 사용한다. 따라서 `FAIL: tests did not pass`는 PASS 문자열을
+포함하더라도 FAIL이며, PASS와 FAIL이 함께 들어오면 disagreement 규칙을
+적용한다. 알 수 없는 결론은 통과시키지 않는다.
+
+`WorkerSpec.timeout_sec`는 non-streaming provider 호출까지 전달된다. provider
+`returncode == 124`는 실제 경과 시간과 관계없이 timeout으로 기록하고,
+streaming 경로는 기존 deadline을 유지한다.
+
+OMP worker에서 `require_json=true`이면 `dict`만 구조화 결과로 인정한다.
+list, string, number와 fenced non-object JSON은 `parse_error=true`로
+정규화하되 raw stdout은 진단 근거로 보존한다.
+
 ### Managed release worktrees (`awf wt`)
 
 `awf wt` is the CLI authority for leased Git worktrees. It keeps each managed

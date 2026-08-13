@@ -36,6 +36,9 @@ graph TD
 ### 원칙
 
 - 전체 예산(budget)을 설정하고, 각 단계가 소비한 시간을 차감한다
+- `WorkerSpec.timeout_sec`를 non-streaming provider `complete()`까지 전달한다
+- provider `returncode == 124`는 경과 시간과 무관하게 timeout으로 분류한다
+- streaming 실행은 local deadline을 유지한다
 - 잔여 budget이 다음 단계 최소 시간 미만이면 남은 단계를 건너뛰거나 fallback한다
 - 전체 budget 소진 시 즉시 Fallback 모드로 강등한다
 

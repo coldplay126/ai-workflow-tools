@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 from awf.core.agent_runner import AgentResult, MultiAgentResult, run_agent
+from awf.core.judge import _conclusion_status
 
 
 def _record_dispatch_complete_safe(
@@ -478,7 +479,7 @@ def _agent_conclusion(agent: AgentResult) -> str:
     parsed = agent.parsed
     if not isinstance(parsed, dict):
         return ""
-    return str(parsed.get("conclusion", "")).upper()
+    return _conclusion_status(parsed)
 
 
 def _evidence_text(value: Any) -> str:
@@ -614,9 +615,9 @@ def judge(agents: list[AgentResult]) -> tuple[str, str]:
     failing_agents: list[AgentResult] = []
     for agent in agents:
         conclusion = _agent_conclusion(agent)
-        if "PASS" in conclusion:
+        if conclusion == "PASS":
             conclusions.setdefault("PASS", []).append(agent.provider_name)
-        elif "FAIL" in conclusion:
+        elif conclusion == "FAIL":
             conclusions.setdefault("FAIL", []).append(agent.provider_name)
             failing_agents.append(agent)
     if len(conclusions) > 1:

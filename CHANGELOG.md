@@ -8,6 +8,19 @@
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-13
+
+### Fixed
+
+- 멀티에이전트 결론을 normalized prefix로 분류해 명시적 FAIL을 문장 안의 PASS 문자열 때문에 통과시키지 않습니다.
+- worker timeout을 provider 호출에 전달하고 `returncode == 124`를 timeout으로 기록합니다.
+- OMP native/print의 required JSON 결과가 object가 아니면 fail closed로 처리하며 raw evidence는 보존합니다.
+- `AgentResult`와 team artifact 저장 경로가 non-object parsed 값을 성공으로 합성하지 않도록 방어했습니다.
+
+### Documentation
+
+- judge precedence, timeout inheritance, OMP JSON object 경계 계약을 CLI, reference, pattern 문서에 반영했습니다.
+
 ## [0.1.1] - 2026-08-13
 
 ### Fixed
