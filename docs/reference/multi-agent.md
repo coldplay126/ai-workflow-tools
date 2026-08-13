@@ -12,8 +12,11 @@
 |--------|------|-----------|
 | `awf` | workflow/gate/control plane. `.workflow`, `.ai-context`, `.awf-operations`의 canonical state를 소유 | 구현됨 |
 | `inline` | 같은 프로세스에서 provider 호출을 병렬/순차 실행 | 구현됨 |
+| OMP print adapter | worker별 print-mode subprocess 실행 | 구현됨, legacy capability |
+| OMP native coordinator | 단일 host의 `task` batch, role별 model, schema/isolation, checkpoint/follow-up 관리 | 구현됨, 기본 dispatch surface |
 | `cmux-agent` | 여러 터미널 surface와 worker lifecycle 관리 | 구현됨 |
-| `Pi` | per-worker terminal harness 후보. session tree/context engineering은 Pi가 소유하고, awf는 gate/state/provenance만 소유 | opt-in print-mode dispatch 구현 (`surface_preference=pi`) |
+| AWF `TeamRunner` | file blackboard 기반 turn orchestration과 종료 조건 관리 | 구현됨 |
+| legacy Pi | per-worker terminal harness. awf는 gate/state/provenance를 소유 | opt-in print-mode dispatch (`surface_preference=pi`) |
 
 ### 패턴 비교
 
@@ -24,7 +27,14 @@
 | **컨텍스트** | 부모 세션 내 실행 | 각자 독립 컨텍스트 | 완전 분리된 시스템 |
 | **조율** | 부모가 전부 관리 | 자율 조율 (태스크 자기 할당) | Agent Card 발견 + 메시지 교환 |
 | **비용** | 낮음 (결과 요약) | 높음 (세션당 전체 컨텍스트) | 시스템에 따라 다름 |
-| **상태** | 구현됨 (Agent 도구) | 실험적 (CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS) | 미도입 |
+| **상태** | 구현됨 (subagent/OMP task) | AWF `TeamRunner` 구현됨; Claude experimental Agent Teams는 별도 외부 runtime | 미도입 |
+
+이 표의 "에이전트 팀"은 AWF의 `TeamRunner` 패턴과 vendor runtime을 구분한다.
+AWF `TeamRunner`는 Python control loop와 file blackboard를 사용한다. Claude의
+`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`는 AWF 구현 전제나 기본 dispatch surface가
+아니다. 현재 기본 실행 surface는 OMP native coordinator다. 세부 capability
+행렬은 [`docs/architecture/03-multi-agent.md`](../architecture/03-multi-agent.md)를
+기준으로 한다.
 
 ### 에이전트 팀 도입 후보
 
@@ -188,20 +198,35 @@
 
 ---
 
-## 9. Judge 출력 스키마
+## 9. Workflow multi-provider synthesis 출력
+
+review/verify의 runtime judge는 단일 `rule_1..5` verdict object를 반환하지 않는다.
+각 provider의 deterministic gate 결과와 phase별 불일치 이유를 계산한 뒤 다음
+synthesis shape로 선택 결과를 반환한다:
 
 ```json
 {
-  "verdict": "PASS | FAIL",
-  "rule_triggered": "rule_1 | rule_2 | rule_3 | rule_4 | rule_5",
-  "reason": "판정 사유",
-  "findings_summary": {
-    "total": 5, "critical": 1, "high": 0, "medium": 2, "low": 2, "deduplicated": 1
-  },
-  "agent_conclusions": { "agent_a": "FAIL", "agent_b": "PASS" },
-  "tie_break_applied": false
+  "primary_gate_passed": true,
+  "secondary_gate_passed": true,
+  "judge_passed": true,
+  "judge_reasons": [],
+  "selected_provider": "primary",
+  "selected_result_path": ".workflow/tmp/result-review.json",
+  "final_passed": true,
+  "synthesis_reasons": ["primary_retained_after_consensus"],
+  "selection_summary": "primary retained after consensus"
 }
 ```
+
+review는 CRITICAL finding, HIGH count/signature mismatch, provider conclusion
+conflict를 검사한다. verify는 scope violation, compliance failure, CRITICAL
+quality count와 provider 간 count mismatch를 검사한다. provider 하나의 gate가
+실패하고 다른 provider가 통과하면 통과한 결과를 선택할 수 있지만,
+`judge_reasons`는 원래 불일치 근거를 보존한다.
+
+`#precise`/`#cross`/`#critical` host protocol의 4-block 출력과 severity judge는
+별도 계약이다. 해당 정책은 `claude/skills/multi-agent/SKILL.md`와
+`snippets/claude-md-multi-agent.md`를 기준으로 한다.
 
 ---
 

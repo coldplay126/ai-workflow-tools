@@ -6,8 +6,9 @@
 - `ready`/`doctor`: repo-level deterministic preflight, runtime diagnostics, dispatch surface/Pi readiness 요약을 제공
 - `analyze`: document-mode `.ai-context` 생성, resume/incremental, transitive invalidation, Stage 2 fan-out, Stage 3 conditional routing 지원
 - `wf`: gated init/status/next/apply-result/reset, manual decide, ready gates, scope expansion/check, deterministic gate helpers 지원
+- `agents`: OMP agent 동기화와 persisted native worker follow-up 지원
+- `wt`: managed worktree lease, ordered staging PR-chain promotion, reviewed-path exclusion, evidence-gated cleanup 지원
 - `wiki`/`cmux`: operations telemetry/wiki compile, cmux observability, Pi opt-in field-smoke evidence 소비 지원
-
 최근 문서:
 - [Gateway Migration Checklist](../docs/manuals/06-gateway-migration-checklist.md)
 - [awf CLI Architecture](../docs/architecture/awf-cli-architecture.md)
@@ -15,6 +16,7 @@
 - [Provider Contract](../docs/specs/provider-contract.md)
 
 현재 CLI 표면:
+- `awf --version`: 설치된 `awf-cli` 패키지 버전 출력
 - `awf chat [--message ...] [--session-id ...] [--latest]`: Phase 5 chat session mode. SQLite에 세션/메시지를 저장하고 provider를 단일 턴 또는 최소 REPL로 호출하며, message-count threshold를 넘으면 turn 전 auto-compaction을 수행한다. compaction은 가능하면 provider-assisted summary를 사용하고, 실패하면 heuristic summary로 fallback한다. 각 turn에는 estimated input/output token과 session 누적 estimated cost를 함께 남긴다
 - `awf chat --list-sessions | --show-session <id> | --show-latest | --compact-session <id> | --compact-latest`: session 조회/재개/수동 요약 압축 경로. session별 estimated token/cost usage도 함께 확인할 수 있고, compaction 결과에는 `summary_mode`가 포함된다
 - `awf "<자연어 요청>"`: Phase 5 자연어 라우팅의 현재 버전. 안전한 조회 의도(`wf status`, `config show`, `skills list`, `mcp list`, session list/show)는 직접 디스패치하고, 명시적 analyze/review/verify 의도는 기본적으로 `--dry-run`으로 보낸다. `실행`/`run`이 포함되면 실제 `analyze`/`wf next` 실행으로 라우팅한다. 서비스명이 생략된 analyze 요청은 알려진 alias와 `analysis-docs/_templates/analysis-config.json`의 domain/service catalog를 기준으로 기본 service를 추론할 수 있고, 일부 service/domain/analyze keyword 오타도 보수적으로 보정한다. 그 외는 기본적으로 `chat --message`로 보낸다
@@ -37,7 +39,7 @@
 - `awf config show`: 3-level merge 결과와 resolved path 확인
 - `awf skills list`: supported search paths에서 `SKILL.md`를 탐색해 skill 목록 출력
 - `awf agents sync-omp [--dry-run] [--force] [--json]`: `claude/agents/*.md`를 OMP-native `.omp/agents/*.md`로 결정적으로 변환한다. 생성 manifest에 등록된 파일만 갱신·삭제하며, 수동 OMP agent와 이름이 충돌하면 `--force` 없이는 중단한다
-- `awf agents followup-omp (--run <run-id-or-json> --role <role> | --task-id <id>) (--message <text> | --message-file <path>) [--json]`: persisted OMP host session을 resume해 exact task를 먼저 steer/revive한다. original registry agent가 없을 때만 exact history에서 lineage-linked successor 한 개를 만들 수 있으며 successor는 original agent가 아니다. provenance inspect는 read-only이고 worker/follow-up은 `.workflow/state.json`, gate, scope hash, approve/done을 갱신하지 않는다(모두 parent-only)
+- `awf agents followup-omp (--run <run-id-or-json> --role <role> | --task-id <id>) (--message <text> | --message-file <path>) [--json]`: persisted OMP host session이나 strict schema 검증을 통과한 native checkpoint에서 exact task를 먼저 steer/revive한다. `--run` + `--role`이 둘 이상의 worker와 일치하면 추측하지 않고 차단한다. original registry agent가 없을 때만 exact history에서 lineage-linked successor 한 개를 만들 수 있으며 successor는 original agent가 아니다. provenance inspect는 read-only이고 worker/follow-up은 `.workflow/state.json`, gate, scope hash, approve/done을 갱신하지 않는다(모두 parent-only)
 - `awf mcp list`: merged config의 MCP 서버 registry 출력
 - `awf mcp check <name>`: transport별 최소 연결 확인
   - `stdio`: 실제 `initialize` handshake + optional `tools/list`, `resources/list`
@@ -66,6 +68,40 @@
 - `permissions.allowed_tools` / `disabled_tools` / `yolo`: provider 실행 전 최소 권한 검사
 - `tools/` 모듈: `read/write/glob/grep/git diff/log` 기본 계층 추가 (Phase 2 groundwork)
 
+### Runtime installation
+
+`../setup.sh`는 editable `awf` tool을 설치하고 모든 bundled skill을
+`~/.claude/skills`, `~/.agents/skills`, `~/.omp/agent/skills`에 연결한다.
+`AGENTS_SKILLS_DIR`와 `OMP_SKILLS_DIR`로 후자의 두 root를 바꿀 수 있다.
+동명 사용자 파일이나 디렉터리는 보존하며
+`AWF_SKILL_INSTALL_RESULT ... user_owned`를 출력한 뒤 exit `3`으로 종료한다.
+
+`release-worktree-lifecycle`의 installable source는
+`src/awf/resources/release-worktree-lifecycle/`이다. 이 디렉터리는 wheel
+package data에 포함되므로 설치형 CLI도 release skill을 찾을 수 있다.
+
+### OMP native role/model routing
+
+기본 설정은 `coordination_surface = "native"`,
+`execution_mode = "external_host"`이다. 역할별 worker model은
+`.workflow/provider-config.json`의 `dispatch.omp.role_models`에서 정한다:
+
+```json
+{
+  "plan_conformance": "@default",
+  "precision": "@default",
+  "quality_validation": "@slow",
+  "primary": "@slow",
+  "speed": "@smol"
+}
+```
+
+native batch는 이 매핑을 OMP `task.agentModelOverrides`로 전달하고 provenance에
+`requested_worker_model`을 남긴다. 같은 batch에서 동일 agent type에 서로 다른
+model을 지정하면 `omp_worker_model_conflict`로 worker 실행 전에 차단한다.
+`execution_mode = "current_host"`는 host의 `task`/`hub` bridge가 있을 때만
+유효하며, bridge가 없다고 nested subprocess나 inline으로 우회하지 않는다.
+
 ### Managed release worktrees (`awf wt`)
 
 `awf wt` is the CLI authority for leased Git worktrees. It keeps each managed
@@ -75,7 +111,7 @@ nine subcommands are:
 | Command | Purpose |
 |---------|---------|
 | `awf wt acquire` | Preview or create/reuse a feature, promotion, or scratch lease. |
-| `awf wt promote` | Preview or promote one approved, merged staging PR delta to a production branch. |
+| `awf wt promote` | Preview or promote one or more ordered, approved/accepted, merged staging PR deltas to a production branch, with optional exact reviewed-path exclusions. |
 | `awf wt finish` | Preview or remove one proven-safe managed lease for a merged PR. |
 | `awf wt gc` | Preview or remove stale, proven-safe merged leases; `--merged` is required. |
 | `awf wt import` | Inventory existing direct-child repository worktrees and optionally register them as imported leases. |
@@ -160,18 +196,31 @@ the configured staging base, and exact promotion-delta verification. The
 self-merge alternative fails closed if either GitHub actor login is missing or
 malformed; an `APPROVED` source does not need identity data.
 
-A repeated `wt promote --apply` can resume a blocked `prepare-command` or
-`production-verification` failure only when the managed worktree is clean and
-its promotion commit still has exact provenance. It can rebuild a
-`promotion_content_mismatch` lease only when the latest registry event type is
-`promotion_blocked` and its summary starts with `promotion_content_mismatch:`,
-the registered worktree is clean and retains its recorded head with the
-recorded target SHA as its sole parent, the current target SHA differs from the
-recorded target SHA, the reviewed source base/head SHAs are unchanged, and the
-promotion branch is absent from `origin`. The
-rebuilt commit must pass the same exact path/blob and
-production checks before AWF publishes a pull request. Other blocked states
-remain fail-closed.
+`--source-pr` is repeatable. Supply PRs in staging merge order; every previous
+PR merge SHA must equal the next PR base SHA or promotion stops with
+`source_pr_sequence_gap`. Preview JSON reports `source_prs` and each source
+base/head/merge SHA.
+
+`--exclude-path` is also repeatable. Each value must be a unique, exact,
+repository-relative path reviewed in at least one source PR. Unknown paths,
+duplicates, absolute/traversal paths, and exclusions that remove every reviewed
+path are blocked. Exclusions apply to the ordered source deltas; AWF never
+replaces this with a wholesale staging merge.
+
+Promotion runs the configured `prepare.command` and
+`verify.production.commands` before publication. A repeated
+`wt promote --apply` may resume only a verified prepare, production-verification,
+or publication failure when the managed worktree is clean and its promotion
+commit still has the exact source chain, exclusions, target, lease, and reviewed
+delta provenance. It can rebuild a `promotion_content_mismatch` lease only when
+the latest registry event type is `promotion_blocked` and its summary starts
+with `promotion_content_mismatch:`, the registered worktree is clean and retains
+its recorded head with the recorded target SHA as its sole parent, the current
+target SHA differs from the recorded target SHA, the reviewed source base/head
+SHAs are unchanged, and the promotion branch is absent from `origin`. The
+rebuilt commit must pass the same exact path/blob and production checks before
+AWF publishes a pull request. A prepare command that leaves the worktree dirty
+is blocked. Other blocked promotion states remain fail-closed.
 
 Feature flow:
 
@@ -257,9 +306,17 @@ gates. MUST NOT use direct Git or filesystem cleanup.
 Promotion and finish flow:
 
 ```bash
-# The source PR must satisfy the repository's review policy, checks, and staging base.
-awf wt promote --source-pr 372 --to main --json
-awf wt promote --source-pr 372 --to main --apply --json
+# Repeat --source-pr in staging merge order. Every source must satisfy the
+# configured review policy, checks, and staging base.
+awf wt promote --source-pr 372 --source-pr 381 --to main --json
+awf wt promote --source-pr 372 --source-pr 381 --to main --apply --json
+
+# Exclude only exact paths reviewed in those source PRs; at least one reviewed
+# path must remain.
+awf wt promote --source-pr 372 --source-pr 381 \
+  --exclude-path docs/internal-runbook.md --to main --json
+awf wt promote --source-pr 372 --source-pr 381 \
+  --exclude-path docs/internal-runbook.md --to main --apply --json
 
 # After the promotion PR has merged, refresh its repository-configured status.
 awf wt status --repo-root . --refresh --json

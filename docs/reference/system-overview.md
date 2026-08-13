@@ -11,11 +11,11 @@
 | Workflow 상태 | `.workflow/state.json` | Phase 진행, Gate 결과 |
 | Workflow 산출물 | `.workflow/artifacts/` | spec, plan, review-report 등 |
 | Workflow 계약 | `.workflow/agent-cards/` | Phase별 런타임 계약 |
-| Analysis 상태 | `.analysis-state.json` | Stage 진행 상태 |
-| Analysis 산출물 | `.ai-context/` | 분석 산출물 4파일 |
-| Analysis 임시 | `.tmp/` | Stage 1 XML, hashes |
-| 작업 이력 | `.work_history/` | 누적 이력 |
-| 프로젝트 지식 | `project-context.md` | 도메인 지식 |
+| Analysis 상태 | `<docs_root>/<service>/<unit>/.ai-context/.analysis-state.json` | unit별 Stage 진행 상태 |
+| Analysis 산출물 | `<docs_root>/<service>/<unit>/.ai-context/` | 분석 문서와 JSON 산출물 |
+| Analysis 임시 | `<docs_root>/<service>/<unit>/.ai-context/.tmp/` | Stage 1 XML, hashes, import graph |
+| 작업 이력 | `.work_history/` | 누적 workflow 이력 |
+| 프로젝트 지식 | `<docs_root>/<service>/project-context.md` | 서비스 단위 누적 지식 |
 
 `.workflow/`가 target repo의 `.gitignore`에 포함되어 있으면 workflow state는
 local-only 운영 상태로 취급한다. `awf ready`는 이 경우 warning을 표시하지만,
@@ -67,6 +67,7 @@ workflow 실행 자체를 막지는 않는다.
 | `claude-sdk` | SDKProvider |
 | `claude:sonnet` | SubprocessProvider (alias) |
 | `codex` | SubprocessProvider |
+| `gemini` | SubprocessProvider |
 | `openai` | SubprocessProvider |
 | `fixture` | FixtureProvider |
 
@@ -76,8 +77,15 @@ workflow 실행 자체를 막지는 않는다.
 
 | 우선순위 | 경로 |
 |---------|------|
-| 1 | `~/.claude/skills/` |
-| 2 | `./claude/skills/` |
+| 1 | `$AWF_SKILLS_DIR` (설정된 경우) |
+| 2 | `~/.config/awf/skills/` |
+| 3 | `<repo>/.awf/skills/` |
+| 4 | `~/.claude/skills/` |
+| 5 | `<repo>/claude/skills/` |
+| 6 | `<repo>/.claude/skills/` |
+
+동일한 skill 이름은 먼저 발견된 경로가 우선한다. `awf skills list --json`의
+`search_paths`에서 현재 해석 순서를 확인할 수 있다.
 
 ---
 

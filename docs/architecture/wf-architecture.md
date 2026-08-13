@@ -18,12 +18,12 @@ done (P7)  | —    | 완료                 | —
 
 | Gate | 조건 |
 |------|------|
-| **G1** | spec/plan/tasks.md 존재, `[NEEDS CLARIFICATION]` 없음, task ≥ 1 |
-| **G2** | CRITICAL 0건, HIGH 해결/확인, coverage ≥ 80% |
+| **G1** | `spec.md`, `plan.md`, `tasks.md`, `test-criteria.md` 존재, `[NEEDS CLARIFICATION]` 0건, task ≥ 1, spec의 모든 `FR-*`가 plan/tasks/test-criteria에 태깅됨 |
+| **G2** | CRITICAL 0건, HIGH 해결/확인, coverage ≥ 80%, multi-LLM HIGH 이상 review conflict 0건. 마지막 조건은 dual-mode judge synthesis가 강제하며 solo gate evaluator에서는 아직 모델링되지 않음 |
 | **G3** | 사용자 승인 + scope hash 계산 |
-| **G4** | 모든 task `[X]`, lint 에러 0건, 각 phase에 commit 존재 |
-| **G5** | `awf wf scope-check` (planned ∪ expanded 결정론적 비교) 위반 0건, spec 준수율 ≥ 90%, CRITICAL 품질 이슈 0건 |
-| **G6** | 회귀 테스트 통과, 수락 테스트 통과, 수동 항목 서명 |
+| **G4** | pending task 0건, `lint_clean`, `build_passed`, commit ≥ 1 |
+| **G5** | `awf wf scope-check` 위반 0건, compliance fail 0건·준수율 ≥ 90%, CRITICAL 품질 이슈 0건 |
+| **G6** | suite 실패 0건, regression 0건, acceptance item ≥ 1 및 전부 통과, coverage ≥ 70% |
 
 ## .workflow/ 디렉토리 구조
 
@@ -37,6 +37,7 @@ done (P7)  | —    | 완료                 | —
 │   ├── spec.md                 ← P1: 요구사항, 사용자 스토리, 수락 기준
 │   ├── plan.md                 ← P1: 기술 계획
 │   ├── tasks.md                ← P1: 작업 분해
+│   ├── test-criteria.md        ← P1: FR별 수락·회귀 검증 기준
 │   ├── allowed-files.json      ← P1: planned_files + 선택적 expanded_files (graph 확장) + graph_expansion audit
 │   ├── review-report.md        ← P2: 교차 검증 결과
 │   ├── approval.json           ← P3: 승인 기록 + scope hash
@@ -73,9 +74,17 @@ done (P7)  | —    | 완료                 | —
 
 ### 기본 provider-config.json
 
+현재 기본값의 단일 소스는
+`claude/skills/wf-orchestrator/templates/provider-config.default.json`이다.
+아래는 실행 surface와 worker model에 영향을 주는 부분만 발췌한 것이다.
+provider와 `phase_models` 전체 값은 원본 template을 확인한다.
+
 ```json
 {
-  "version": "2.0.0",
+  "version": "2.3.0",
+  "team_selection": {
+    "enabled": true
+  },
   "phase_routing": {
     "plan":    { "mode": "inline" },
     "review":  { "mode": "dual", "primary": "inline", "secondary": "codex" },
@@ -85,17 +94,33 @@ done (P7)  | —    | 완료                 | —
     "test":    { "mode": "inline" },
     "done":    { "mode": "inline" }
   },
-  "providers": {
-    "codex": {
-      "type": "mcp",
-      "tool": "mcp__codex__codex",
-      "timeout_seconds": 300
+  "dispatch": {
+    "surface_preference": "omp",
+    "routing": {
+      "priority": ["omp", "inline", "cmux", "pi"]
+    },
+    "omp": {
+      "command": "omp",
+      "no_session": false,
+      "coordination_surface": "native",
+      "execution_mode": "external_host",
+      "capacity": 8,
+      "role_models": {
+        "plan_conformance": "@default",
+        "precision": "@default",
+        "quality_validation": "@slow",
+        "primary": "@slow",
+        "speed": "@smol"
+      }
     }
-  },
-  "fallback_chain": ["codex", "claude:sonnet"],
-  "defaults": { "mode": "inline", "timeout_seconds": 300 }
+  }
 }
 ```
+
+`role_models`는 phase/provider 선택과 별도로 native worker의 모델 의도를
+보존한다. 동일 agent type에 상충하는 model이 매핑되면 native batch는
+`omp_worker_model_conflict`로 fail closed한다. `execution_mode`를
+`current_host`로 바꾸려면 현재 host의 `task`/`hub` bridge가 필요하다.
 
 프로젝트에 맞게 `.workflow/provider-config.json`을 수정할 수 있습니다.
 

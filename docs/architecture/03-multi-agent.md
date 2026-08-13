@@ -179,6 +179,26 @@ cost_estimate: ~$0.0630
 | Gemini CLI subagents | mapped/external | specialist-as-tool → parent result mapping | 없음 |
 | Google ADK | mapped/external | application workflow graph/event/session → orchestration mapping | 없음 |
 
+### Native OMP 역할별 model 무결성
+
+기본 provider template은 worker 역할과 model alias를 분리한다.
+
+| AWF worker role | OMP model alias |
+|-----------------|-----------------|
+| `plan_conformance`, `precision` | `@default` |
+| `quality_validation`, `primary` | `@slow` |
+| `speed` | `@smol` |
+
+`OmpDispatch`는 role mapping을 `OmpWorkerTask.model`에 보존한다. external-host
+native coordinator는 임시 OMP config의 `task.agentModelOverrides`로 이를
+전달하고, current-host bridge에는 정렬된 immutable mapping을 넘긴다. 결과
+provenance에는 `requested_worker_model`이 기록된다.
+
+OMP override key는 AWF role이 아니라 최종 agent type이다. 같은 native batch에서
+동일 agent type에 서로 다른 model을 요구하면 어느 쪽도 임의 선택하지 않고
+`omp_worker_model_conflict`로 batch 전체를 차단한다. 이 검사는 cross-provider
+검증이 coordinator 기본 model 하나로 축소되는 것을 막는다.
+
 ## OMP와 벤더 멀티에이전트 비교 (2026-07-29)
 
 | 항목 | OMP | Claude Code / Agent SDK | Codex | Gemini CLI / Google ADK |
@@ -253,16 +273,24 @@ OMP는 범용 **멀티에이전트 실행 커널**, awf는 개발 수명주기�
 
 #### 현재 통합 경계
 
-`OmpDispatch`는 worker마다 독립 `omp --mode json -p ...`를 실행하는 **print adapter**로
-남는다. 별도의 OMP native coordinator는 병렬 batch마다 단일 host session을 열고 그
-host가 한 번의 `task` batch를 호출하게 한다. 두 경로 모두 `AgentResult`로 정규화하지만,
-strict schema, worker isolation, structured batch cancellation, `task_id`,
-`agent://`/`history://`, durable follow-up은 native surface에만 있다.
+`OmpDispatch`는 `coordination_surface`에 따라 두 경로를 사용한다. print
+adapter는 worker별 `omp --mode json -p ...` subprocess를 실행한다. native
+coordinator는 external-host 모드에서 병렬 batch마다 단일 OMP host session을
+열고 한 번의 `task` batch를 호출한다. current-host 모드는 현재 host가 제공한
+`task`/`hub` bridge만 사용하며, bridge가 없을 때 nested subprocess나 inline으로
+조용히 fallback하지 않는다.
 
-awf는 계속 `.workflow/state.json`, phase transition, scope hash, approve/done gate와
-최종 judge를 소유한다. OMP session/registry와 follow-up handle은 provenance/evidence일
-뿐 canonical workflow state나 parent-only 승인 권한을 대체하지 않는다. 최적 구조는
-**awf가 state/gate/judge를 소유하고 OMP가 fan-out/session/isolation을 소유하는 것**이다.
+두 경로 모두 `AgentResult`로 정규화하지만 strict schema, worker isolation,
+structured batch cancellation, role별 immutable model override, `task_id`,
+`agent://`/`history://`, durable checkpoint/follow-up은 native surface에만 있다.
+checkpoint와 dispatch provenance는 strict schema 및 worker identity 검증을
+통과해야 follow-up 입력으로 사용할 수 있다.
+
+awf는 계속 `.workflow/state.json`, phase transition, scope hash, approve/done
+gate와 최종 judge를 소유한다. OMP session/registry와 follow-up handle은
+provenance/evidence일 뿐 canonical workflow state나 parent-only 승인 권한을
+대체하지 않는다. 최적 구조는 **awf가 state/gate/judge를 소유하고 OMP가
+fan-out/session/isolation을 소유하는 것**이다.
 
 ### awf/wf 구현 상태와 다음 우선순위
 
@@ -280,6 +308,7 @@ awf는 계속 `.workflow/state.json`, phase transition, scope hash, approve/done
 | 완료 | P2 | evidence-aware judge v2 | critical/high와 다중 major는 fail closed, grounded disagreement는 FAIL, 약하거나 재현 불가한 disagreement는 `revalidation_required` ESCALATE |
 | 완료 | P2 | cross-runtime conformance | 하나의 offline corpus로 모든 로컬 surface를 fake 실행하고 Claude/Codex/Gemini/ADK는 mapped/external로만 기록 |
 | 완료 | P3 | durable agent follow-up | provenance v2 handle/lineage로 OMP host session을 resume하고 steer/revive하되 approve/done은 parent-only로 유지 |
+| 완료 | P2 | OMP worker model integrity | `dispatch.omp.role_models`를 native agent override로 전달하고 requested model을 provenance에 기록; 동일 agent type의 상충 model은 실행 전 fail closed |
 
 ### 안전 경계
 
