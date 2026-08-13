@@ -579,8 +579,6 @@ def test_a3_001_stage2_reuse_rejected_when_config_changed():
         assert not result_path.exists()
 
 
-
-
 def test_a3_001_stage2_retry_blocked_resets_for_changed_sources():
     """A new source generation resets the exhausted Stage 2 retry budget."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -615,6 +613,75 @@ def test_a3_001_stage2_retry_blocked_resets_for_changed_config():
 
         assert not result["blocked_by_retry_limit"]
         assert result["state"]["layers"]["analyze"]["stage2"]["retryCount"] == 0
+
+
+def test_a3_001_stage2_success_and_source_generation_reset_retry_count():
+    """A new source generation starts from zero after successful Stage 2."""
+    with tempfile.TemporaryDirectory() as tmp:
+        ctx = _FakeContext(Path(tmp))
+        state = _make_analysis_state(stage2_status="failed", output_status="pending")
+        state["layers"]["analyze"]["stage2"]["retryCount"] = 1
+        for filename in (
+            "api-spec.json",
+            "data-model.md",
+            "domain-overview.md",
+            "external-integration.md",
+        ):
+            (ctx.ai_context_dir / filename).write_text("current output", encoding="utf-8")
+        (ctx.ai_context_dir / ".tmp" / "hashes.json").write_text(
+            json.dumps({"files": [{"path": "source.py", "sha256": "old"}]}),
+            encoding="utf-8",
+        )
+        _save_state(ctx, state)
+
+        completed = finalize_analysis_run(ctx, "fixture", 0)
+        assert completed["layers"]["analyze"]["stage2"]["retryCount"] == 0
+
+        resumed = resolve_analysis_resume(
+            ctx,
+            current_file_entries=[{"path": "source.py", "sha256": "new"}],
+        )
+        assert not resumed["skip_provider"]
+        assert resumed["state"]["layers"]["analyze"]["stage2"]["retryCount"] == 0
+
+        failed = finalize_analysis_run(ctx, "fixture", 1, "new generation failure")
+        assert failed["layers"]["analyze"]["stage2"]["retryCount"] == 1
+
+
+def test_a3_001_stage2_config_generation_resets_successful_retry_count():
+    """A config generation change opens a new Stage 2 run from zero retries."""
+    with tempfile.TemporaryDirectory() as tmp:
+        ctx = _FakeContext(Path(tmp))
+        state = _make_analysis_state(stage2_status="completed", output_status="completed")
+        state["layers"]["analyze"]["stage2"]["retryCount"] = 2
+        state["layers"]["bundle"]["configHash"] = "old-config-hash"
+        state["artifacts"]["domain_bundle"] = ".tmp/domain-bundle.xml"
+        (ctx.ai_context_dir / ".tmp" / "domain-bundle.xml").write_text(
+            "old bundle",
+            encoding="utf-8",
+        )
+        for filename in (
+            "api-spec.json",
+            "data-model.md",
+            "domain-overview.md",
+            "external-integration.md",
+        ):
+            (ctx.ai_context_dir / filename).write_text("current output", encoding="utf-8")
+        (ctx.ai_context_dir / ".tmp" / "hashes.json").write_text(
+            json.dumps({"files": [{"path": "source.py", "sha256": "current"}]}),
+            encoding="utf-8",
+        )
+        _save_state(ctx, state)
+
+        resumed = resolve_analysis_resume(
+            ctx,
+            current_file_entries=[{"path": "source.py", "sha256": "current"}],
+        )
+
+        assert not resumed["skip_provider"]
+        assert resumed["state"]["layers"]["analyze"]["stage2"]["retryCount"] == 0
+
+
 def test_a3_001_stage2_reuse_blocked_without_stage1():
     """stage1 incomplete + stage2 result 존재 → stage2 결과 폐기."""
     with tempfile.TemporaryDirectory() as tmp:

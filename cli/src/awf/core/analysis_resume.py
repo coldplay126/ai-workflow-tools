@@ -175,21 +175,18 @@ def _resolve_analysis_resume_locked(context, current_file_entries, deps) -> dict
             deps["save_state"](context, state)
             messages.append(f"resume: stage3 failed previously (retryCount={stage3_retry_count}); will retry stage3.")
 
-    if (
-        output_status == "completed"
-        and deps["output_files_present"](context)
-        and saved_hashes
-        and not stage3_requires_attention
-    ):
-        if files_changed:
-            messages.append("resume: source files changed since last analysis; re-analyzing.")
-            # Reset bundle and analyze layers so stale data is not reused
+    if output_status == "completed" and deps["output_files_present"](context):
+        if files_changed or bundle_invalidated:
+            generation_reason = "source files changed" if files_changed else "bundle config changed"
+            messages.append(f"resume: {generation_reason} since last analysis; re-analyzing.")
+            # Reset bundle and analyze layers so stale data is not reused.
             state["layers"]["bundle"]["status"] = "pending"
             state["layers"]["analyze"]["stage2"]["status"] = "pending"
+            state["layers"]["analyze"]["stage2"]["retryCount"] = 0
             state["layers"]["output"]["status"] = "pending"
             state["completedAt"] = None
             deps["save_state"](context, state)
-        else:
+        elif saved_hashes and not stage3_requires_attention:
             messages.append("resume: existing completed .ai-context detected; skipping provider run.")
             return {
                 "state": state,
@@ -299,6 +296,8 @@ def _finalize_analysis_run_locked(
         and not missing_output_files
         and deps["output_files_present"](context)
     )
+    if output_complete:
+        state["layers"]["analyze"]["stage2"]["retryCount"] = 0
     if stage3.get("status") == "failed" and output_complete:
         state["currentLayer"] = "analyze"
         state["currentStage"] = 3
