@@ -228,6 +228,13 @@ def _resolve_analysis_resume_locked(context, current_file_entries, deps) -> dict
 
     if str(stage2.get("status", "pending")) == "failed":
         retry_count = int(stage2.get("retryCount", 0) or 0)
+        if files_changed or bundle_invalidated:
+            retry_count = 0
+            state["layers"]["analyze"]["stage2"]["retryCount"] = retry_count
+            generation_reason = "source files changed" if files_changed else "bundle config changed"
+            messages.append(
+                f"resume: stage2 failure belongs to a previous generation ({generation_reason}); retry budget reset."
+            )
         if retry_count >= 2:
             blocked_by_retry_limit = True
             messages.append(f"resume: stage2 retryCount={retry_count}; automatic retry is blocked.")
@@ -319,11 +326,12 @@ def _finalize_analysis_run_locked(
         state["completedAt"] = None
         existing_stage2_error = str(state["layers"]["analyze"]["stage2"].get("errorMessage", "") or "")
         existing_output_error = str(state["layers"]["output"].get("errorMessage", "") or "")
-        resolved_error = missing_error or error_message or existing_stage2_error or "Provider run completed without required outputs."
+        provider_error = error_message if returncode != 0 else ""
+        resolved_error = provider_error or missing_error or existing_stage2_error or "Provider run completed without required outputs."
         state["layers"]["analyze"]["stage2"]["status"] = "failed"
         state["layers"]["analyze"]["stage2"]["errorMessage"] = resolved_error
         state["layers"]["output"]["status"] = "failed"
-        state["layers"]["output"]["errorMessage"] = missing_error or error_message or existing_output_error or "Required .ai-context outputs not found."
+        state["layers"]["output"]["errorMessage"] = provider_error or missing_error or existing_output_error or "Required .ai-context outputs not found."
         retry = int(state["layers"]["analyze"]["stage2"].get("retryCount", 0) or 0)
         state["layers"]["analyze"]["stage2"]["retryCount"] = retry + 1
     state["layers"]["analyze"]["stage2"]["provider"] = provider_name

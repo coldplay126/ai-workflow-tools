@@ -138,6 +138,7 @@ def save_stage3_final(
     state["layers"]["analyze"]["stage3"]["provider"] = provider_name
     state["layers"]["analyze"]["stage3"]["reason"] = reason
     state["layers"]["analyze"]["stage3"]["errorMessage"] = ""
+    state["layers"]["analyze"]["stage3"]["retryCount"] = 0
     if content.strip():
         state["summaries"]["stage3"] = content.splitlines()[0].strip()
     elif status == "scaffold":
@@ -185,6 +186,7 @@ def mark_stage3_skipped(context, reason: str) -> dict:
     state = deps["load_state"](context)
     state["layers"]["analyze"]["stage3"]["status"] = "skipped"
     state["layers"]["analyze"]["stage3"]["reason"] = reason
+    state["layers"]["analyze"]["stage3"]["retryCount"] = 0
     state["summaries"]["stage3"] = reason
     state["artifacts"]["stage3_final"] = None
     deps["save_state"](context, state)

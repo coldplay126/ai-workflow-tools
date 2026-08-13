@@ -1133,7 +1133,7 @@ def run_analyze(args: argparse.Namespace) -> int:
                         print(f"multi_agent_{agent.role}: {agent.provider_name} ({agent.elapsed_sec:.1f}s)", file=sys.stderr)
                 print(f"multi_agent_judge: {multi_result.judge_verdict} ({multi_result.judge_reason})", file=sys.stderr)
 
-        if context.mode == "deep" and not resume.get("stage3_retry_blocked"):
+        if context.mode == "deep":
             processor.emit(
                 event_type=EventType.STAGE_STARTED,
                 task_id=analyze_task_id,
@@ -1250,8 +1250,6 @@ def run_analyze(args: argparse.Namespace) -> int:
                 source="cli",
                 data={"stage": "stage3"},
             )
-        elif resume.get("stage3_retry_blocked"):
-            print("stage3_blocked: retry limit reached; keeping failed state", file=sys.stderr)
         else:
             mark_stage3_skipped(context, "stage3 skipped: no reference expansion targets")
 

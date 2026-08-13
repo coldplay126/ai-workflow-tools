@@ -106,6 +106,21 @@ def test_current_attempt_missing_required_output_cannot_complete_over_old_files(
     assert "external-integration.md" in finalized["layers"]["output"]["errorMessage"]
 
 
+
+def test_provider_error_beats_missing_current_outputs(tmp_path: Path):
+    context = _Context(tmp_path)
+
+    finalized = finalize_analysis_run(
+        context,
+        "fixture",
+        1,
+        "provider connection failed",
+        missing_output_files=["external-integration.md"],
+    )
+
+    assert finalized["layers"]["analyze"]["stage2"]["errorMessage"] == "provider connection failed"
+    assert finalized["layers"]["output"]["errorMessage"] == "provider connection failed"
+
 def test_strip_markdown_frontmatter_keeps_plain_horizontal_rule():
     text = "---\nnot metadata\n---\n# Body\n"
 

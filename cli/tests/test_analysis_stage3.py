@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from awf.core.analysis_resume import finalize_analysis_run, resolve_analysis_resume
 from awf.core.analysis_state import should_run_stage3
+from awf.core.analysis_store import mark_stage3_skipped, save_stage3_final
 
 
 # ===========================================================================
@@ -379,6 +380,34 @@ def test_a3_001_stage3_failed_retry_blocked_3():
         assert result["stage3_retry_blocked"]
 
 
+def test_a3_001_stage3_completion_resets_retry_count():
+    """A completed Stage 3 clears the retry budget from prior failures."""
+    with tempfile.TemporaryDirectory() as tmp:
+        ctx = _FakeContext(Path(tmp))
+        state = _make_analysis_state(stage3_status="failed", stage3_retry_count=2)
+        _save_state(ctx, state)
+
+        save_stage3_final(ctx, "validated", provider_name="fixture")
+
+        saved_state = _load_state(ctx)
+        assert saved_state["layers"]["analyze"]["stage3"]["status"] == "completed"
+        assert saved_state["layers"]["analyze"]["stage3"]["retryCount"] == 0
+
+
+def test_a3_001_stage3_policy_skip_resets_retry_count():
+    """An explicit Stage 3 policy skip clears its exhausted retry budget."""
+    with tempfile.TemporaryDirectory() as tmp:
+        ctx = _FakeContext(Path(tmp))
+        state = _make_analysis_state(stage3_status="failed", stage3_retry_count=2)
+        _save_state(ctx, state)
+
+        mark_stage3_skipped(ctx, "stage3 policy skipped")
+
+        saved_state = _load_state(ctx)
+        assert saved_state["layers"]["analyze"]["stage3"]["status"] == "skipped"
+        assert saved_state["layers"]["analyze"]["stage3"]["retryCount"] == 0
+
+
 def test_a3_001_stage3_completed_no_rerun():
     """stage3 completed → 재실행 없음 (output completed일 때 skip_provider)."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -550,6 +579,42 @@ def test_a3_001_stage2_reuse_rejected_when_config_changed():
         assert not result_path.exists()
 
 
+
+
+def test_a3_001_stage2_retry_blocked_resets_for_changed_sources():
+    """A new source generation resets the exhausted Stage 2 retry budget."""
+    with tempfile.TemporaryDirectory() as tmp:
+        ctx = _FakeContext(Path(tmp))
+        state = _make_analysis_state(stage2_status="failed")
+        state["layers"]["analyze"]["stage2"]["retryCount"] = 2
+        (ctx.ai_context_dir / ".tmp" / "hashes.json").write_text(
+            json.dumps({"files": [{"path": "source.py", "sha256": "old"}]}),
+            encoding="utf-8",
+        )
+        _save_state(ctx, state)
+
+        result = resolve_analysis_resume(
+            ctx,
+            current_file_entries=[{"path": "source.py", "sha256": "new"}],
+        )
+
+        assert not result["blocked_by_retry_limit"]
+        assert result["state"]["layers"]["analyze"]["stage2"]["retryCount"] == 0
+
+
+def test_a3_001_stage2_retry_blocked_resets_for_changed_config():
+    """A new config generation resets the exhausted Stage 2 retry budget."""
+    with tempfile.TemporaryDirectory() as tmp:
+        ctx = _FakeContext(Path(tmp))
+        state = _make_analysis_state(stage2_status="failed")
+        state["layers"]["analyze"]["stage2"]["retryCount"] = 2
+        state["layers"]["bundle"]["configHash"] = "old-config-hash"
+        _save_state(ctx, state)
+
+        result = resolve_analysis_resume(ctx)
+
+        assert not result["blocked_by_retry_limit"]
+        assert result["state"]["layers"]["analyze"]["stage2"]["retryCount"] == 0
 def test_a3_001_stage2_reuse_blocked_without_stage1():
     """stage1 incomplete + stage2 result 존재 → stage2 결과 폐기."""
     with tempfile.TemporaryDirectory() as tmp:
