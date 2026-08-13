@@ -92,19 +92,38 @@ awf wt finish --repo-root <repo-root> --pr <merged-pr> --apply --json
 
 ## Production promotion
 
-A production promotion MUST contain the source PR delta only, never the entire staging branch. Preview the isolated promotion first:
+A production promotion MUST contain only the ordered source PR deltas, never
+the entire staging branch. `--source-pr` is repeatable and MUST follow staging
+merge order. Every previous PR merge SHA MUST equal the next PR base SHA; a gap
+is `blocked`.
+
+`--exclude-path` is repeatable. Every excluded value MUST be a unique, exact,
+repository-relative path reviewed in the source PRs, and at least one reviewed
+path MUST remain. MUST NOT use exclusions to substitute an unreviewed delta.
+For a single-source promotion with no exclusions, pass one `--source-pr` and
+omit `--exclude-path`.
+
+Preview the isolated promotion:
 
 ```sh
 awf wt promote --source-pr <number> --to <branch> --repo-root <repo-root> --json
 ```
 
-Confirm the source PR and target branch in the JSON result, then explicitly create the managed promotion PR:
+Confirm the ordered `source_prs`, each source base/head/merge SHA, excluded
+paths, and target branch in the JSON result. Each source MUST satisfy the
+configured review policy, checks, and staging base. The promotion MUST pass the
+configured prepare and production verification commands; a prepare command
+that leaves the worktree dirty is `blocked`. Only then explicitly create the
+managed promotion PR:
 
 ```sh
 awf wt promote --source-pr <number> --to <branch> --repo-root <repo-root> --apply --json
 ```
 
-If `promote --apply` returns `ready`, MUST use or report the returned lease and MUST NOT repeat `--apply`.
+If `promote --apply` returns `ready`, MUST use or report the returned lease and
+MUST NOT repeat `--apply`. A blocked promotion is resumable only through the
+CLI's verified prepare, verification, or publication recovery paths; MUST NOT
+manually repair or recreate its lease.
 
 ## Deployment verification
 

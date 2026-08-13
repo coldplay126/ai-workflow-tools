@@ -19,7 +19,7 @@ ai-workflow-tools/
 ├── docs/           # Architecture, specs, and operating guides
 ├── snippets/       # CLAUDE.md snippets
 ├── templates/      # cmux protocol templates
-└── setup.sh        # awf CLI + Claude skills/agents + OMP agents installer
+└── setup.sh        # awf CLI + shared skills/agents + OMP agents installer
 ```
 
 ### 기능 지도
@@ -36,7 +36,7 @@ ai-workflow-tools/
 | 멀티에이전트 | review/verify, cross/critical 모드에서 독립 평가와 synthesis를 수행 | subagent 결과 envelope, judge verdict, fallback chain | [Multi-Agent Reference](docs/reference/multi-agent.md) |
 | OMP / `cmux-agent` / legacy Pi | OMP host-native `task`/`hub` 또는 `surface_preference=omp` NDJSON adapter, cmux worker runtime, legacy Pi adapter를 실행 surface로 제공 | `.workflow/artifacts/dispatch/omp-*.json`, OMP agent/history URI, `.agent/events.jsonl`, Pi smoke result | [Multi-Agent Architecture](docs/architecture/03-multi-agent.md), [cmux Quickstart](docs/manuals/cmux-agent-quickstart.md), [Pi 검증](docs/manuals/pi-field-validation.md) |
 | `awf wiki` | 작업 중 생긴 운영 evidence와 결정 기록을 프로젝트 로컬 wiki로 누적 | `.awf-operations/events/*.jsonl`, `wiki/decisions/*`, compiled operations pages | [CLI Architecture](docs/architecture/awf-cli-architecture.md) |
-| `awf wt` | Git worktree lease 생성·재사용, staging PR의 production promotion, 증거 기반 정리를 수행 | worktree registry, managed lease, promotion PR, deployment health evidence | [release worktree CLI](cli/README.md#managed-release-worktrees-awf-wt) |
+| `awf wt` | Git worktree lease 생성·재사용, 순서가 보장된 staging PR 체인 promotion, 안전한 단건 정리와 stale merged lease GC를 수행 | worktree registry, managed lease, promotion PR, deployment health evidence | [release worktree CLI](cli/README.md#managed-release-worktrees-awf-wt) |
 | Claude/Codex 통합 | Claude skills, Codex runner 규칙, snippets를 통해 같은 계약을 다른 agent 환경에서 사용 | `claude/skills/*`, `codex/*`, `snippets/*` | [Claude Code Setup](#claude-code-setup) |
 
 ### 작동 방식 요약
@@ -63,7 +63,7 @@ workflow review/verify, critical mode 같은 고위험 구간에서 실행 품�
 | 멀티에이전트 검증 | review/verify 또는 고위험 분석을 교차 검증할 때 | `phase/run request → subagents → judge/synthesis → gate result` | result envelope, verdict, fallback decision |
 | OMP/cmux/Pi 실행 | OMP native agent, worker terminal, legacy Pi runner를 사용할 때 | `ready → host task 또는 dispatch preference → worker run → evidence 확인` | `agent://`/`history://`, `.agent/events.jsonl`, Pi smoke evidence |
 | 운영 wiki | 반복 작업의 evidence와 결정을 남길 때 | `events 기록 → wiki compile → decision 작성 → wiki lint` | `.awf-operations/events/*`, `wiki/decisions/*`, operations pages |
-| 릴리스 worktree | feature worktree를 얻고 staging PR을 main/master로 promotion한 뒤 안전하게 정리할 때 | `wt acquire → wt promote → status --refresh → wt finish` | managed lease, promotion PR, repository rollout evidence |
+| 릴리스 worktree | feature worktree를 얻거나 staging PR 체인을 main/master로 promotion한 뒤 단건 또는 일괄 정리할 때 | `status --refresh → wt acquire/link-pr 또는 wt promote → wt finish`, 일괄 정리는 `wt gc --merged` preview/apply | managed lease, promotion PR, repository rollout evidence |
 | Claude/Codex 통합 | CLI 계약을 agent 환경에서 재사용할 때 | `setup/snippets/skills → awf ready → awf/analyze/wf 계약 실행` | `claude/skills/*`, `codex/*`, project-local artifacts |
 
 ### 설치와 CLI
@@ -75,6 +75,7 @@ cd ai-workflow-tools
 
 # setup.sh가 안내한 ~/.local/bin이 PATH에 없다면 한 번만 추가
 export PATH="$HOME/.local/bin:$PATH"
+awf --version
 awf --help
 awf ready --repo-root /path/to/your-project
 ```
@@ -85,16 +86,30 @@ awf ready --repo-root /path/to/your-project
 uv run --project cli --no-editable --reinstall-package awf-cli awf --help
 ```
 
-`setup.sh`는 `awf`를 `uv tool`로 설치하고 Claude skills/agents와 AWF용 OMP
-task agents를 사용자 설정에 연결합니다. 이후 일반 사용자는 이 저장소 안에서
-`uv run`을 사용할 필요가 없습니다.
+`setup.sh`는 `awf`를 editable `uv tool`로 설치하고, 저장소의 모든 AWF
+skill을 `~/.claude/skills`, `~/.agents/skills`, `~/.omp/agent/skills`에
+각각 연결합니다. `AGENTS_SKILLS_DIR`와 `OMP_SKILLS_DIR`로 후자의 두 설치
+루트를 바꿀 수 있습니다. 동명 사용자 파일이나 디렉터리는 덮어쓰지 않으며,
+`AWF_SKILL_INSTALL_RESULT`에 `user_owned`를 기록하고 exit `3`으로
+종료합니다. Claude agents와 생성된 AWF용 OMP task agents도 사용자 설정에
+연결됩니다. 이후 일반 사용자는 이 저장소 안에서 `uv run`을 사용할 필요가
+없습니다.
 
 릴리스 작업에서 `release-worktree-lifecycle` 스킬은 agent가 어떤 `awf wt`
 명령을 호출할지 안내하고, 안전 판정·상태 기록·변경은 CLI가 수행합니다.
-`setup.sh`는 Claude 스킬을 `~/.claude/skills`에, Agent Skills 호환
-`release-worktree-lifecycle` 스킬을 `~/.agents/skills`에 연결합니다. OMP는
-Agent Skills provider를 통해 후자의 스킬을 발견합니다. `awf wt import`로 등록한
+실제 설치 원본은 wheel에 포함되는
+`cli/src/awf/resources/release-worktree-lifecycle/`이며, `setup.sh`는 이
+원본을 세 skill runtime에 모두 연결합니다. `awf wt import`로 등록한
 worktree는 `awf wt adopt`하기 전까지 unmanaged 상태입니다.
+
+`awf wt promote`의 `--source-pr`는 staging merge 순서대로 반복할 수
+있습니다. `--exclude-path`도 반복할 수 있지만, source PR에서 review된 정확한
+repository-relative 경로만 허용되며 전체 reviewed delta를 제외할 수는 없습니다.
+
+stale merged lease의 일괄 정리는 `awf wt gc --merged --older-than 7d`로
+수행합니다. `--dry-run --json`으로 먼저 확인한 뒤 `--apply --json`을
+명시해야 하며, merged PR·clean worktree·deployment health 증거가 부족한 lease는
+삭제하지 않고 blocker로 보존합니다.
 
 AWF는 범용 배포 오케스트레이터가 아닙니다. 기존 CI/배포 시스템 주변에서
 repository-configured verification/status argv 명령만 실행하며, healthy
@@ -165,6 +180,13 @@ OMP는 사용자가 별도 workflow 명령을 입력하는 제품이 아니라 A
 awf doctor --repo-root . --probe
 awf wf next --repo-root . --mode cross
 ```
+
+기본 OMP native 설정은 역할별 모델 의도를 보존합니다.
+`plan_conformance`와 `precision`은 `@default`,
+`quality_validation`과 `primary`는 `@slow`, `speed`는 `@smol`을
+사용합니다. native coordinator는 이 값을 worker agent별 immutable model
+override로 전달합니다. 같은 agent type에 서로 다른 모델이 매핑되면 worker를
+실행하지 않고 `omp_worker_model_conflict`로 차단합니다.
 
 `setup.sh`가 AWF용 OMP agent 정의를 사용자 영역에 이미 설치합니다. 프로젝트가
 자체 `.claude/agents/*.md`를 추가한 경우에만 다음 명령으로 project-local OMP
@@ -252,7 +274,7 @@ ai-workflow-tools/
 ├── docs/           # Architecture, specs, and operating guides
 ├── snippets/       # CLAUDE.md snippets
 ├── templates/      # cmux protocol templates
-└── setup.sh        # Claude Code skill/agent symlink installer
+└── setup.sh        # awf CLI + shared skills/agents + OMP agents installer
 ```
 
 ## Project Map
@@ -270,7 +292,7 @@ multi-agent review, dispatch surfaces, and local operating evidence.
 | Multi-agent | Run independent evaluation and synthesis for review/verify and cross/critical modes | subagent result envelopes, judge verdicts, fallback chains | [Multi-Agent Reference](docs/reference/multi-agent.md) |
 | OMP / `cmux-agent` / legacy Pi | Use OMP host-native `task`/`hub` or the `surface_preference=omp` NDJSON adapter, the cmux worker runtime, or the legacy Pi adapter | `.workflow/artifacts/dispatch/omp-*.json`, OMP agent/history URIs, `.agent/events.jsonl`, Pi smoke results | [Multi-Agent Architecture](docs/architecture/03-multi-agent.md), [cmux Quickstart](docs/manuals/cmux-agent-quickstart.md), [Pi validation](docs/manuals/pi-field-validation.md) |
 | `awf wiki` | Capture operating evidence and decisions in a local project wiki | `.awf-operations/events/*.jsonl`, `wiki/decisions/*`, compiled operations pages | [CLI Architecture](docs/architecture/awf-cli-architecture.md) |
-| `awf wt` | Create or reuse Git-worktree leases, promote staging PR deltas, and clean up only with evidence | worktree registry, managed lease, promotion PR, deployment-health evidence | [release worktree CLI](cli/README.md#managed-release-worktrees-awf-wt) |
+| `awf wt` | Create or reuse Git-worktree leases, promote ordered staging PR chains, finish one proven-safe lease, or garbage-collect stale merged leases | worktree registry, managed lease, promotion PR, deployment-health evidence | [release worktree CLI](cli/README.md#managed-release-worktrees-awf-wt) |
 | Claude/Codex integration | Reuse the same contracts from Claude skills, Codex runner rules, and snippets | `claude/skills/*`, `codex/*`, `snippets/*` | [Claude Code Setup](#claude-code-setup) |
 
 ## How It Fits Together
@@ -296,17 +318,18 @@ dispatch, cmux, and legacy Pi are execution surfaces; awf owns canonical state.
 | Multi-agent validation | Cross-check review/verify or high-risk analysis | `phase/run request → subagents → judge/synthesis → gate result` | result envelopes, verdict, fallback decision |
 | OMP/cmux/Pi execution | Use OMP native agents, worker terminals, or the legacy Pi runner | `ready → host task or dispatch preference → worker run → inspect evidence` | `agent://`/`history://`, `.agent/events.jsonl`, Pi smoke evidence |
 | Operations wiki | Preserve recurring evidence and decisions | `record events → wiki compile → write decision → wiki lint` | `.awf-operations/events/*`, `wiki/decisions/*`, operations pages |
-| Release worktrees | Create a feature worktree, promote a staging PR to main/master, then clean up safely | `wt acquire → wt promote → status --refresh → wt finish` | managed lease, promotion PR, repository rollout evidence |
+| Release worktrees | Create a feature worktree or promote an ordered staging PR chain, then finish one lease or collect stale merged leases | `status --refresh → wt acquire/link-pr or wt promote → wt finish`; bulk cleanup uses preview/apply `wt gc --merged` | managed lease, promotion PR, repository rollout evidence |
 | Claude/Codex integration | Reuse the CLI contracts inside agent environments | `setup/snippets/skills → awf ready → run awf/analyze/wf contracts` | `claude/skills/*`, `codex/*`, project-local artifacts |
 
 ## CLI
 
 ```bash
-uv run --project cli awf --help
-uv run --project cli awf ready --repo-root .
-uv run --project cli awf doctor --repo-root . --json --ci
-uv run --project cli awf wf status --repo-root .
-uv run --project cli awf analyze sample-api health --repo-root . --dry-run
+awf --version
+awf --help
+awf ready --repo-root .
+awf doctor --repo-root . --json --ci
+awf wf status --repo-root .
+awf analyze sample-api health --repo-root . --dry-run
 ```
 
 Use a freshly reinstalled wheel only when validating package contents:
@@ -319,11 +342,24 @@ The Python package is `awf-cli`, and the console entrypoint is `awf`.
 
 For release work, the `release-worktree-lifecycle` skill tells an agent which
 `awf wt` command to call; the CLI makes the safety decisions, records state,
-and performs mutations. `setup.sh` links Claude skills into
-`~/.claude/skills` and the Agent Skills-compatible
-`release-worktree-lifecycle` skill into `~/.agents/skills`; OMP discovers it
-through its Agent Skills provider. A worktree
-registered by `awf wt import` remains unmanaged until `awf wt adopt`.
+and performs mutations. Its installable source is packaged at
+`cli/src/awf/resources/release-worktree-lifecycle/`. `setup.sh` links every
+bundled AWF skill into `~/.claude/skills`, `~/.agents/skills`, and
+`~/.omp/agent/skills`. Override the latter two roots with
+`AGENTS_SKILLS_DIR` and `OMP_SKILLS_DIR`. User-owned files or directories are
+preserved; a collision emits `AWF_SKILL_INSTALL_RESULT ... user_owned` and
+exits with code `3`. A worktree registered by `awf wt import` remains unmanaged
+until `awf wt adopt`.
+
+`awf wt promote` accepts repeated `--source-pr` arguments in staging merge
+order. Repeated `--exclude-path` arguments may name only exact,
+repository-relative paths reviewed in those source PRs, and at least one
+reviewed path must remain in the promotion.
+
+Bulk cleanup uses `awf wt gc --merged --older-than 7d`. Preview with
+`--dry-run --json`, then pass `--apply --json` explicitly. Leases without
+merged-PR, clean-worktree, and deployment-health evidence are preserved and
+reported as blockers.
 
 AWF is not a generic deployment orchestrator. It runs repository-configured
 verification and status argv commands around the existing CI and deployment
@@ -384,16 +420,21 @@ with an apply-result hint if an in_progress phase has a fresh result file
 on disk (override with `--force`); verify gets a warning at the 3rd
 execution and a hard abort at the 6th to prevent verify fix-loop spirals.
 
-To use the OMP adapter, synchronize agent definitions, verify model/auth, and
-select the surface in the workflow provider config:
+OMP is an internal secondary/team-worker surface selected by AWF. The generated
+provider config uses native coordination on an external host by default.
+`dispatch.omp.role_models` preserves the intended worker model by role:
+`plan_conformance` and `precision` use `@default`,
+`quality_validation` and `primary` use `@slow`, and `speed` uses `@smol`.
+The native coordinator passes these values as immutable per-agent model
+overrides. Conflicting models for the same agent type fail before launch with
+`omp_worker_model_conflict`.
+
+`setup.sh` installs the AWF OMP agent definitions. Run the following only when
+the project adds its own `.claude/agents/*.md` files:
 
 ```bash
 awf agents sync-omp --repo-root .
 awf doctor --repo-root . --probe
-# .workflow/provider-config.json: dispatch.surface_preference = "omp"
-# .workflow/provider-config.json: dispatch.omp.coordination_surface = "native"
-# .workflow/provider-config.json: dispatch.omp.no_session = false
-# .workflow/provider-config.json: dispatch.omp.capacity = 8
 ```
 
 OMP native dispatch stores redacted schema-v2 records in
@@ -528,7 +569,7 @@ if 0, fall back to MCP. See `snippets/claude-md-multi-agent.md` and the resoluti
 ./setup.sh
 ```
 
-The setup script links the skills under `claude/skills/` and agents under `claude/agents/` into `~/.claude`. It does not register any company-specific MCP server.
+The setup script installs the editable `awf` tool, links every bundled skill into the Claude, Agent Skills, and OMP skill roots, links Claude agents, and generates/links AWF OMP agents. It preserves user-owned skill paths and does not register any company-specific MCP server.
 
 Optional snippets:
 

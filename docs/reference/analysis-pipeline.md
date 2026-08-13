@@ -70,18 +70,20 @@ unit discovery를 호출하지 않는다.
 
 | 규모 | 파일 수 | 전략 |
 |------|--------|------|
-| small | 1-10 | 코드 전문 포함, 최소 Stage |
-| standard | 11-30 | observation 기반, Writer/Judge 합성 |
-| large | 30+ | observation 기반, Fanout 병렬, 교차 검증 |
+| small | ≤ 10 | 코드 전문 포함, 최소 Stage |
+| standard | 11부터 configured large threshold까지 | observation 기반, Writer/Judge 합성 |
+| large | configured large threshold 초과 | observation 기반, Fanout 병렬, 교차 검증 |
 
-설정 기본값: `fanout_large_file_threshold = 80` (config.py 기본값, 코드 상수는 30)
+`analysis.fanout_large_file_threshold` 기본값은 `80`이므로 기본 설정에서는
+11-80개가 standard, 81개부터 large다. 코드 상수 `30`은 설정 키를 읽을 수
+없는 경우의 fallback이며 운영 기본값이 아니다.
 
 ---
 
 ## 2. 규모별 비교표
 
-| 항목 | small (1-10) | standard (11-30) | large (30+) |
-|------|-------------|------------------|-------------|
+| 항목 | small (≤10) | standard (기본 11-80) | large (기본 81+) |
+|------|-------------|------------------------|------------------|
 | Stage 1 Provider | 저비용 | 저비용 | 저비용 |
 | Stage 2 Provider | 중비용 | 중비용 | 중비용 |
 | Stage 3 Provider | -† | -† | 고비용 |
