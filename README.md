@@ -1,6 +1,6 @@
 # ai-workflow-tools
 
-[한국어](#한국어) | [English](#english)
+[한국어](#한국어) | [English](#english) | [Changelog](CHANGELOG.md)
 
 ## 한국어
 
@@ -12,6 +12,7 @@ prompt를 한 곳에 모아 재사용 가능한 자동화 루프를 제공합니
 
 ```text
 ai-workflow-tools/
+├── CHANGELOG.md   # 릴리스별 주요 변경사항
 ├── cli/            # Python CLI: awf analyze, awf wf, awf chat, awf doctor
 ├── claude/         # Claude Code skills and agent definitions
 ├── codex/          # Codex runner and delegated worker rules
@@ -267,6 +268,7 @@ This repository keeps the reusable workflow contracts, provider adapters, CLI, a
 
 ```text
 ai-workflow-tools/
+├── CHANGELOG.md   # notable changes by release
 ├── cli/            # Python CLI: awf analyze, awf wf, awf chat, awf doctor
 ├── claude/         # Claude Code skills and agent definitions
 ├── codex/          # Codex runner and delegated worker rules
