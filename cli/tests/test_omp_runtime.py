@@ -29,6 +29,7 @@ from awf.runners.omp import (
     parse_omp_task_events,
     parse_omp_steering_evidence,
     run_omp_native_batch,
+    run_omp_agent,
     validate_json_schema,
 )
 
@@ -323,6 +324,25 @@ def test_omp_print_dispatch_runs_worker_and_preserves_provenance(tmp_path: Path)
     assert result.metadata["coordination_surface"] == "print"
     assert result.input_tokens == 11
     assert result.output_tokens == 7
+
+
+def test_omp_print_require_json_rejects_fenced_json_list(tmp_path: Path) -> None:
+    response = """```json
+["not", "an", "object"]
+```"""
+    fake = _write_fake_omp(tmp_path / "omp", response=response)
+
+    result = run_omp_agent(
+        "review",
+        role="reviewer",
+        cwd=str(tmp_path),
+        require_json=True,
+        config=OmpRunnerConfig(command=str(fake)),
+    )
+
+    assert result.stdout == response
+    assert result.parsed is None
+    assert result.parse_error is True
 
 
 def test_select_dispatch_uses_omp_only_when_explicit_and_available(tmp_path: Path):
@@ -808,6 +828,45 @@ def test_native_require_json_rejects_non_object_with_permissive_schema(
     assert result.metadata["task_id"] == "01SCALAR"
     assert result.metadata["schema_validation"]["valid"] is False
 
+
+def test_native_require_json_rejects_string_json_list_and_preserves_raw_output(
+    tmp_path: Path,
+) -> None:
+    raw_result = '["not","an","object"]'
+    fake = _write_fake_native_omp(
+        tmp_path / "omp",
+        envelope={
+            "awf_omp_batch": 1,
+            "workers": [{"name": "StringWorker", "result": raw_result}],
+        },
+        agents=[
+            {
+                "index": 0,
+                "id": "01STRING",
+                "agent": "task",
+                "status": "completed",
+            }
+        ],
+    )
+
+    result = run_omp_native_batch(
+        [
+            OmpWorkerTask(
+                name="StringWorker",
+                role="reviewer",
+                prompt="review",
+                agent_type="task",
+                require_json=True,
+            )
+        ],
+        cwd=str(tmp_path),
+        config=OmpRunnerConfig(command=str(fake)),
+    )[0]
+
+    assert result.stdout == raw_result
+    assert result.parsed is None
+    assert result.parse_error is True
+    assert result.metadata["schema_validation"]["valid"] is False
 
 def test_native_partial_envelope_preserves_success_and_marks_missing_worker(
     tmp_path: Path,

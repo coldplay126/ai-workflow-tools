@@ -31,6 +31,7 @@ from awf.core.team_runner import (
     _enforce_worker_write_scope,
     _record_omp_team_provenance,
     run_team,
+    _save_worker_output,
 )
 
 
@@ -498,6 +499,89 @@ def test_team_combined_output_fails_closed_on_missing_gate_metrics():
         assert payload["quality"]["complete"] is False
         assert any("fail closed" in risk for risk in payload["risks"])
 
+
+@pytest.mark.parametrize(
+    ("parsed", "stdout"),
+    [
+        ([], "[]"),
+        (["not", "a", "worker result"], '["not","a","worker result"]'),
+    ],
+)
+def test_save_worker_output_fails_closed_for_non_object_parsed(
+    parsed: object,
+    stdout: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        bb = _make_bb(Path(tmp))
+        result = AgentResult(
+            provider_name="fixture",
+            role="reviewer",
+            stdout=stdout,
+            stderr="",
+            returncode=0,
+            elapsed_sec=0.0,
+            parsed=parsed,
+        )
+
+        _save_worker_output(bb, 1, "reviewer", result)
+
+        payload = json.loads(
+            bb.discussion_path(1, "reviewer", "json").read_text(encoding="utf-8")
+        )
+        assert payload["conclusion"] == "FAIL"
+        assert payload["findings"][0]["severity"] == "CRITICAL"
+        assert payload["raw_output"] == stdout
+
+
+def test_save_worker_output_preserves_dict_and_unstyled_success_contract() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        bb = _make_bb(Path(tmp))
+        structured = {
+            "conclusion": "PASS",
+            "findings": [],
+            "evidence": ["structured"],
+        }
+
+        _save_worker_output(
+            bb,
+            1,
+            "structured",
+            AgentResult(
+                provider_name="fixture",
+                role="structured",
+                stdout=json.dumps(structured),
+                stderr="",
+                returncode=0,
+                elapsed_sec=0.0,
+                parsed=structured,
+            ),
+        )
+        _save_worker_output(
+            bb,
+            1,
+            "unstyled",
+            AgentResult(
+                provider_name="fixture",
+                role="unstyled",
+                stdout="plain stdout",
+                stderr="",
+                returncode=0,
+                elapsed_sec=0.0,
+            ),
+        )
+
+        structured_payload = json.loads(
+            bb.discussion_path(1, "structured", "json").read_text(encoding="utf-8")
+        )
+        unstyled_payload = json.loads(
+            bb.discussion_path(1, "unstyled", "json").read_text(encoding="utf-8")
+        )
+        assert structured_payload == structured
+        assert unstyled_payload == {
+            "conclusion": "PASS",
+            "findings": [],
+            "raw_output": "plain stdout",
+        }
 
 def _git_patch(repo: Path, relative_path: str, replacement: str) -> Path:
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)

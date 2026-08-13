@@ -801,6 +801,17 @@ def _parse_json_value(text: str) -> Any:
         return None
 
 
+def _normalize_worker_json(
+    value: Any,
+    *,
+    require_json: bool,
+) -> tuple[Any, bool]:
+    """Apply the worker JSON-object contract without dropping raw stdout."""
+    if require_json and not isinstance(value, dict):
+        return None, True
+    return value, False
+
+
 def parse_omp_native_envelope(
     text: str,
 ) -> tuple[dict[str, dict[str, Any]] | None, str | None]:
@@ -1734,12 +1745,15 @@ def run_omp_native_batch(
                 else ""
             )
             raw_parsed = result_value
+        parsed, object_contract_failed = _normalize_worker_json(
+            raw_parsed,
+            require_json=worker.require_json,
+        )
         object_contract_error = (
             "require_json expected a JSON object"
-            if worker.require_json and not isinstance(raw_parsed, dict)
+            if object_contract_failed
             else None
         )
-        parsed = None if object_contract_error is not None else raw_parsed
         validation_errors = validate_json_schema(
             raw_parsed,
             worker.output_schema,
@@ -1789,7 +1803,7 @@ def run_omp_native_batch(
                 and not isinstance(raw_returncode, bool)
                 else 0
             )
-        parse_error = object_contract_error is not None
+        parse_error = object_contract_failed
         error_text = str(item.get("error") or "")
         if validation_errors and worker.schema_mode == "strict":
             parse_error = True
@@ -1846,7 +1860,11 @@ def run_omp_agent(
         model=model,
         timeout_sec=timeout_sec,
     )
-    parsed = _try_parse_json(result.stdout) if result.stdout else None
+    raw_parsed = _try_parse_json(result.stdout) if result.stdout else None
+    parsed, parse_error = _normalize_worker_json(
+        raw_parsed,
+        require_json=require_json,
+    )
     provider = str(result.metadata.get("provider") or "")
     return AgentResult(
         provider_name=f"omp:{provider}" if provider else "omp",
@@ -1856,7 +1874,7 @@ def run_omp_agent(
         returncode=result.returncode,
         elapsed_sec=result.elapsed_sec,
         timed_out=result.returncode == 124 and "timeout" in result.stderr.lower(),
-        parse_error=bool(result.stdout and require_json and parsed is None),
+        parse_error=parse_error,
         parsed=parsed,
         input_tokens=result.input_tokens,
         output_tokens=result.output_tokens,

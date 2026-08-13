@@ -767,8 +767,16 @@ def _save_worker_output(bb: Blackboard, turn: int, role: str, result: AgentResul
                           "location": role, "description": f"Worker '{role}' output is not valid JSON",
                           "suggestion": "Check protocol output format instructions"}],
         })
-    elif result.parsed:
+    elif isinstance(result.parsed, dict):
         bb.write_findings(turn, role, result.parsed)
+    elif result.parsed is not None:
+        bb.write_findings(turn, role, {
+            "conclusion": "FAIL",
+            "findings": [{"severity": "CRITICAL", "category": "worker_invalid_json_object",
+                          "location": role, "description": f"Worker '{role}' output is not a JSON object",
+                          "suggestion": "Check protocol output format instructions"}],
+            "raw_output": result.stdout[:2000],
+        })
     else:
         # Has stdout but no parsed JSON and no parse_error flag — wrap as non-blocking
         bb.write_findings(turn, role, {
