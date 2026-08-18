@@ -297,6 +297,7 @@ def test_analysis_runtime_recovery_docs_share_contract() -> None:
         "fanout-consistency",
         "`original_claims`",
         "문서 전체",
+        "실제 재실행 Writer 결과",
     ):
         assert invariant in combined
 

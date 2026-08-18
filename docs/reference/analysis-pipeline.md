@@ -84,6 +84,9 @@ code `130`으로 끝나면 남은 domain이나 delay를 실행하지 않고 `130
 merged claim ID를 만들면 `original_claims`의 Writer-qualified reference(예:
 `structure:S1`)를 실제 Writer claim과 대조한다. legacy direct claim ID의
 evidence와 `source_files` 비교도 유지한다.
+code fallback으로 Writer를 재실행한 경우 fallback Judge와 evidence integrity
+검증은 모두 교체된 Writer 결과를 사용한다. 최초 Writer 결과는 이 검증에
+재사용하지 않는다.
 
 필수 산출물 누락, 빈 내용, JSON object가 아닌 `api-spec.json`은 성공으로
 게시하지 않는다. `api-spec.json`이 문서 전체를 감싼 정확한 `json` Markdown

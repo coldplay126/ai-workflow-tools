@@ -8,6 +8,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- code fallback 후 Judge evidence provenance를 최초 Writer 결과가 아니라 실제 재실행 Writer 결과와 대조해 잘못된 `unknown_claim_id`·`evidence_modified` 경고를 방지합니다.
+
 ## [0.1.6] - 2026-08-13
 
 ### Fixed
