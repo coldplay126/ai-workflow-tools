@@ -1004,6 +1004,108 @@ def test_a5_001_merged_claim_rejects_unknown_original_claim():
     assert validate_evidence_integrity([], judge) == ["unknown_claim_id:structure:FAKE1"]
 
 
+def test_a5_001_fallback_judge_validates_replacement_writer_results(tmp_path):
+    """fallback Judge의 provenance는 실제 재실행 Writer 결과를 기준으로 검증한다."""
+    from awf.providers.base import ProviderResult
+
+    def writer_output(claim, output_files):
+        sections = "\n".join(
+            f"===FILE: {file_name}===\n# {file_name}"
+            for file_name in output_files
+        )
+        return f"```json\n{json.dumps({'claims': [claim]})}\n```\n{sections}\n"
+
+    def judge_output(original_claim, fallback_files):
+        metadata = {
+            "verdict": "merged",
+            "merged_claims": [
+                {
+                    "id": "M1",
+                    "original_claims": [original_claim],
+                    "resolution": "selected",
+                }
+            ],
+            "consistency_checks": [],
+            "code_fallback_files": fallback_files,
+        }
+        return (
+            f"```json\n{json.dumps(metadata)}\n```\n"
+            '===FILE: api-spec.json===\n{"endpoints": []}\n'
+            "===FILE: data-model.md===\n# Data model\n"
+            "===FILE: domain-overview.md===\n# Domain overview\n"
+            "===FILE: external-integration.md===\n# External integration\n"
+        )
+
+    initial_structure = writer_output(
+        {
+            "id": "S1",
+            "type": "endpoint",
+            "claim": "POST /quests",
+            "evidence": "src/a.py:1",
+            "source_files": ["src/a.py"],
+            "confidence": "low",
+        },
+        ["api-spec.json", "data-model.md"],
+    )
+    fallback_structure = writer_output(
+        {
+            "id": "S2",
+            "type": "endpoint",
+            "claim": "POST /quests",
+            "evidence": "src/a.py:2",
+            "source_files": ["src/a.py"],
+            "confidence": "high",
+        },
+        ["api-spec.json", "data-model.md"],
+    )
+    behavior = writer_output(
+        {
+            "id": "B1",
+            "type": "business_logic",
+            "claim": "starts a quest",
+            "evidence": "src/b.py:1",
+            "source_files": ["src/b.py"],
+            "confidence": "high",
+        },
+        ["domain-overview.md", "external-integration.md"],
+    )
+
+    def runner(_provider, _prompt, _cwd, _add_dirs, label):
+        if label.endswith("fallback writer structure"):
+            output = fallback_structure
+        elif label.endswith("writer structure"):
+            output = initial_structure
+        elif label.endswith("writer behavior"):
+            output = behavior
+        elif label.endswith("stage2 judge-fallback"):
+            output = judge_output("structure:S2", [])
+        else:
+            output = judge_output("structure:S1", ["src/a.py"])
+        return ProviderResult(returncode=0, stdout=output, stderr=""), 0.01
+
+    context = _make_analysis_context(tmp_path / ".ai-context", "document")
+    context.repo_root = tmp_path
+    context.github_root = tmp_path
+    context.service = "service"
+    context.domain = "orders"
+    result, error, metadata = run_stage2_fanout(
+        context=context,
+        provider=None,
+        provider_factory=None,
+        provider_name="fixture",
+        add_dirs=[],
+        stage1_memo_text="memo",
+        domain_bundle_text="bundle",
+        runner=runner,
+        save_additional_result=lambda *_args: tmp_path / "artifact",
+    )
+
+    assert error is None
+    assert result is not None
+    assert metadata["fallbackTriggered"] is True
+    assert "evidenceViolations" not in metadata
+
+
 def test_a5_001_verdict_change_allowed():
     """evidence 유지 + verdict만 변경은 허용 (violations 없음)."""
     from awf.core.analysis_writer import Claim, WriterResult, JudgeResult, validate_evidence_integrity

@@ -451,7 +451,9 @@ def run_stage2_fanout(
                 # Replace original writer results with fallback versions (not merge)
                 # This ensures Judge only sees the improved fallback version, not both
                 fallback_ids = {wr.writer for wr in fallback_writer_results}
-                merged_results = [wr for wr in writer_results if wr.writer not in fallback_ids] + fallback_writer_results
+                writer_results = [
+                    wr for wr in writer_results if wr.writer not in fallback_ids
+                ] + fallback_writer_results
 
                 # Re-run Judge with updated results
                 judge_result = _run_judge(
@@ -459,7 +461,7 @@ def run_stage2_fanout(
                     provider=provider,
                     provider_name=provider_name,
                     add_dirs=add_dirs,
-                    writer_results=merged_results,
+                    writer_results=writer_results,
                     runner=runner,
                     save_additional_result=save_additional_result,
                     _emit=_emit,
