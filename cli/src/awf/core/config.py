@@ -172,6 +172,22 @@ def _resolve_github_root(repo_root: Path, explicit_github_root: Optional[str]) -
     return repo_root.parent.resolve()
 
 
+def resolve_analysis_roots(
+    repo_root: Optional[str] = None,
+    docs_root: Optional[str] = None,
+    github_root: Optional[str] = None,
+) -> tuple[Path, Path, Path]:
+    root = find_repo_root(repo_root)
+    awf_config = load_awf_config(str(root))
+    docs_override = docs_root or awf_config.path_override("analysis_docs")
+    github_override = github_root or awf_config.path_override("awf_github")
+    return (
+        root,
+        _resolve_docs_root(root, docs_override),
+        _resolve_github_root(root, github_override),
+    )
+
+
 def _expand_placeholders(value: str, github_root: Path) -> str:
     return value.replace("${AWF_GITHUB_ROOT}", str(github_root))
 
@@ -243,12 +259,11 @@ def resolve_analysis_context(
     github_root: Optional[str] = None,
     use_ai_discovery: bool = True,
 ) -> AnalysisContext:
-    root = find_repo_root(repo_root)
-    awf_config = load_awf_config(str(root))
-    docs_override = docs_root or awf_config.path_override("analysis_docs")
-    github_override = github_root or awf_config.path_override("awf_github")
-    docs = _resolve_docs_root(root, docs_override)
-    gh_root = _resolve_github_root(root, github_override)
+    root, docs, gh_root = resolve_analysis_roots(
+        repo_root=repo_root,
+        docs_root=docs_root,
+        github_root=github_root,
+    )
     analysis_config_path = docs / "_templates" / "analysis-config.json"
     analysis_pipeline_path = docs / "_templates" / "analysis-pipeline.json"
 

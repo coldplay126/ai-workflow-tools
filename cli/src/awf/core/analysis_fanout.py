@@ -471,6 +471,8 @@ def run_stage2_fanout(
         consistency_summary = analyze_stage2_consistency(combined_output, analysis_mode=analysis_mode)
         metadata["consistencyPassed"] = bool(consistency_summary["passed"])
         metadata["consistencyIssues"] = list(consistency_summary["issues"])
+        if not consistency_summary["passed"]:
+            return None, "consistency_check_failed:" + ",".join(consistency_summary["issues"]), metadata
 
         from awf.providers.base import ProviderResult
         return ProviderResult(returncode=0, stdout=combined_output, stderr=""), None, metadata

@@ -477,7 +477,7 @@ Phase 4 mode UX의 현재 매핑:
 - `awf analyze --mode cross`: 가능한 경우 secondary provider를 한 번 더 실행해 Stage 2 필수 산출물 세트를 보수적으로 교차 검증
 - Stage 3은 CLI flag가 아니라 내부 라우팅 결과다. `related_domains`나 `stage3_force`가 있으면 internal deep context를 켜고, `should_run_stage3`가 retry block, `stage3_force`, `related_domains >= 3`, `stage_routing.{scale}.stage3` 순으로 실행 여부를 결정한다
 - Stage 2 fan-out은 `[analysis.layer3] fanout_enabled=false`일 때만 명시적으로 꺼진다. 켜진 상태에서 writer 목록이 비었거나 malformed이면 provider를 호출하지 않고 `fanout_unavailable:` 진단을 남긴 뒤 single-agent Stage 2로 fallback한다
-- fan-out이 실제로 선택되면 현재는 synthesizer 1회 → writer 4개 병렬 실행 → post-writer consistency pass 순으로 진행하고, provider 실행 실패는 기존 result contract를 보존한 채 single-agent Stage 2로 fallback한다
+- fan-out이 실제로 선택되면 structure/behavior writer를 병렬 실행하고 Judge가 필수 산출물을 병합한 뒤 local consistency check를 적용한다. provider 실패나 필수 산출물 누락, malformed `api-spec.json` 같은 consistency 실패는 불완전한 결과를 게시하지 않고 진단을 보존한 채 single-agent Stage 2로 fallback한다. 성공한 fan-out의 실제 경과 시간은 Stage 2 event와 JSON envelope의 `elapsed_sec`에 기록한다
 - 같은 service/domain의 mutating analysis는 `.analysis-run.lock`을 nonblocking으로 획득한 한 프로세스만 실행한다. 충돌한 실행은 provider 호출 전에 `analysis already running`과 exit code `4`를 반환한다. `--status`, `--dry-run`, `--check`, `--catalog`, `--cycles`는 read-only라 이 lock을 사용하지 않는다
 - `awf analyze --all`의 child가 exit code `130`을 반환하면 후속 domain과 delay 없이 즉시 전체 실행도 `130`으로 종료한다
 - `awf wf next --mode critical`: `codex` 우선, `claude:sonnet` fallback을 우선순위로 올리고 더 엄격한 gate 관점을 prompt에 추가

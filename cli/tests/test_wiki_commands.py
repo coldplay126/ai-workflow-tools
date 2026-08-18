@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import sys
 from pathlib import Path
@@ -296,7 +297,7 @@ def test_compile_handler_writes_pages_for_each_event_type(tmp_path):
     from awf.core.operational_metrics import record_event
     from awf.core.wiki import wiki_root
 
-    now = "2026-05-15T12:00:00+00:00"
+    now = datetime.now(timezone.utc).isoformat()
     record_event(tmp_path, "stage1_invalidation", {
         "service": "x", "transitive_enabled": True,
         "direct_count": 1, "indirect_count": 1, "invalidating_count": 1,
@@ -321,7 +322,7 @@ def test_compile_handler_topic_flag_restricts(tmp_path):
     from awf.core.operational_metrics import record_event
     from awf.core.wiki import wiki_root
 
-    now = "2026-05-15T12:00:00+00:00"
+    now = datetime.now(timezone.utc).isoformat()
     record_event(tmp_path, "stage1_invalidation", {
         "direct_count": 1, "indirect_count": 1, "invalidating_count": 1,
         "unchanged_count": 0, "deleted_count": 0, "transitive_enabled": True,
@@ -353,7 +354,7 @@ def test_compile_handler_dry_run_writes_nothing_but_reports(tmp_path, capsys):
     from awf.core.operational_metrics import record_event
     from awf.core.wiki import wiki_root
 
-    now = "2026-05-15T12:00:00+00:00"
+    now = datetime.now(timezone.utc).isoformat()
     record_event(tmp_path, "dual_strategy_engaged",
                  {"phase": "review", "promoted_from": "solo", "promoted_to": "cross"},
                  ts=now)
@@ -370,7 +371,7 @@ def test_compile_handler_json_output_is_machine_parseable(tmp_path, capsys):
     from awf.commands.wiki import run_wiki_compile
     from awf.core.operational_metrics import record_event
 
-    now = "2026-05-15T12:00:00+00:00"
+    now = datetime.now(timezone.utc).isoformat()
     record_event(tmp_path, "dispatch_complete", {
         "backend": "cmux", "strategy": "single", "mode": "cross",
         "worker_count": 1, "success_count": 1, "timed_out_count": 0,

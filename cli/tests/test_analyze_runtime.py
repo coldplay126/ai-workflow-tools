@@ -208,3 +208,72 @@ def test_yolo_fanout_provider_factory_applies_bypass_permissions_to_every_instan
         provider.flags == ["--print", "--permission-mode", "bypassPermissions"]
         for provider in providers
     )
+
+
+def test_fanout_elapsed_uses_measured_wall_time(monkeypatch) -> None:
+    expected_result = object()
+    expected_metadata = {"executionMode": "parallel_v2"}
+    monotonic_values = iter((10.0, 12.75))
+    monkeypatch.setattr(analyze.time_mod, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(
+        analyze,
+        "run_stage2_fanout",
+        lambda **_kwargs: (expected_result, None, expected_metadata),
+    )
+
+    result, error, metadata, elapsed = analyze._run_stage2_fanout_with_elapsed(marker="value")
+
+    assert result is expected_result
+    assert error is None
+    assert metadata is expected_metadata
+    assert elapsed == 2.75
+
+
+def test_service_docs_root_resolution_does_not_probe_placeholder_domain(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    repo_root = tmp_path / "repo"
+    docs_root = tmp_path / "analysis-docs"
+    github_root = tmp_path / "github"
+    (repo_root / ".git").mkdir(parents=True)
+    (docs_root / "_templates").mkdir(parents=True)
+    github_root.mkdir()
+    (docs_root / "_templates" / "analysis-config.json").write_text(
+        json.dumps({"service_map": {"service": str(repo_root)}}),
+        encoding="utf-8",
+    )
+    (docs_root / "_templates" / "analysis-pipeline.json").write_text("{}", encoding="utf-8")
+    args = argparse.Namespace(
+        service="service",
+        repo_root=str(repo_root),
+        docs_root=str(docs_root),
+        github_root=str(github_root),
+    )
+
+    resolved_docs, resolved_github, service = analyze._resolve_service_docs_root(args)
+
+    assert (resolved_docs, resolved_github, service) == (docs_root, github_root, "service")
+    assert "__placeholder__" not in capsys.readouterr().err
+
+
+def test_service_drift_check_rejects_unknown_service(tmp_path: Path, capsys) -> None:
+    repo_root = tmp_path / "repo"
+    docs_root = tmp_path / "analysis-docs"
+    github_root = tmp_path / "github"
+    (repo_root / ".git").mkdir(parents=True)
+    (docs_root / "_templates").mkdir(parents=True)
+    github_root.mkdir()
+    (docs_root / "_templates" / "analysis-config.json").write_text(
+        json.dumps({"service_map": {"configured": str(repo_root)}}),
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(
+        service="missing",
+        repo_root=str(repo_root),
+        docs_root=str(docs_root),
+        github_root=str(github_root),
+    )
+
+    assert analyze._run_drift_check(args) == 2
+    assert "Unknown service `missing`" in capsys.readouterr().err
