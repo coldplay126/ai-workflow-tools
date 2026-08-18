@@ -661,11 +661,10 @@ def test_a6_002_provider_execution_failure_keeps_existing_result_contract():
     assert metadata.get("status") is None
 
 
-def test_a6_002_invalid_composed_output_fails_fanout(tmp_path):
-    """Judge output consistency failure must not publish a successful result."""
+def _run_v2_fanout_fixture(tmp_path, api_spec_text):
     from awf.providers.fixture import _build_v2_judge_fixture, _build_v2_writer_fixture
 
-    (tmp_path / "api-spec.json").write_text("```json\n{}\n```\n", encoding="utf-8")
+    (tmp_path / "api-spec.json").write_text(api_spec_text, encoding="utf-8")
     for file_name in ("data-model.md", "domain-overview.md", "external-integration.md"):
         (tmp_path / file_name).write_text(f"# {file_name}\n", encoding="utf-8")
 
@@ -673,6 +672,7 @@ def test_a6_002_invalid_composed_output_fails_fanout(tmp_path):
     ctx.repo_root = tmp_path
     ctx.service = "service"
     ctx.domain = "orders"
+    saved_artifacts = []
 
     def runner(_provider, _prompt, _cwd, _add_dirs, label):
         if label.endswith("writer structure"):
@@ -695,6 +695,10 @@ def test_a6_002_invalid_composed_output_fails_fanout(tmp_path):
             result = _build_v2_judge_fixture(tmp_path, 0, None)
         return result, 0.01
 
+    def save_artifact(_context, _provider_name, content, suffix):
+        saved_artifacts.append((suffix, content))
+        return tmp_path / suffix
+
     result, error, metadata = run_stage2_fanout(
         context=ctx,
         provider=None,
@@ -704,13 +708,65 @@ def test_a6_002_invalid_composed_output_fails_fanout(tmp_path):
         stage1_memo_text="memo",
         domain_bundle_text="bundle",
         runner=runner,
-        save_additional_result=lambda *_args: tmp_path / "artifact",
+        save_additional_result=save_artifact,
+    )
+    return result, error, metadata, saved_artifacts
+
+
+def test_a6_002_exact_json_fence_is_normalized_before_publish(tmp_path):
+    from awf.core.analysis_outputs import parse_stage2_output
+
+    result, error, metadata, _ = _run_v2_fanout_fixture(
+        tmp_path,
+        '```json\n{"endpoints": []}\n```\n',
+    )
+
+    assert error is None
+    assert result is not None
+    api_spec = parse_stage2_output(result.stdout)["api-spec.json"]
+    assert json.loads(api_spec) == {"endpoints": []}
+    assert "```" not in api_spec
+    assert metadata["consistencyPassed"] is True
+
+
+def test_a6_002_fenced_non_object_json_fails_and_preserves_diagnostic(tmp_path):
+    result, error, metadata, saved_artifacts = _run_v2_fanout_fixture(
+        tmp_path,
+        "```json\n[]\n```\n",
+    )
+
+    assert result is None
+    assert error == "consistency_check_failed:invalid_api_spec_json"
+    assert metadata["consistencyPassed"] is False
+    assert metadata["consistencyArtifactSuffix"] == "fanout-consistency"
+    diagnostic = next(content for suffix, content in saved_artifacts if suffix == "fanout-consistency")
+    assert "===FILE: api-spec.json===\n[]" in diagnostic
+
+
+def test_a6_002_malformed_fenced_json_fails_and_preserves_diagnostic(tmp_path):
+    result, error, metadata, saved_artifacts = _run_v2_fanout_fixture(
+        tmp_path,
+        '```json\n{"endpoints": [}\n```\n',
     )
 
     assert result is None
     assert error == "consistency_check_failed:invalid_api_spec_json"
     assert metadata["consistencyPassed"] is False
     assert metadata["consistencyIssues"] == ["invalid_api_spec_json"]
+    assert metadata["consistencyArtifactSuffix"] == "fanout-consistency"
+    diagnostic = next(content for suffix, content in saved_artifacts if suffix == "fanout-consistency")
+    assert '```json\n{"endpoints": [}\n```' in diagnostic
+
+
+def test_a6_002_json_fence_with_surrounding_prose_is_not_normalized(tmp_path):
+    result, error, metadata, _ = _run_v2_fanout_fixture(
+        tmp_path,
+        'Generated result:\n```json\n{"endpoints": []}\n```\n',
+    )
+
+    assert result is None
+    assert error == "consistency_check_failed:invalid_api_spec_json"
+    assert metadata["consistencyPassed"] is False
 
 
 # ===========================================================================
@@ -874,6 +930,78 @@ def test_a5_001_unknown_claim_id_fails():
     )
     violations = validate_evidence_integrity([wr], jr)
     assert "unknown_claim_id:FAKE1" in violations
+
+
+def test_a5_001_legacy_claim_missing_evidence_fields_fails():
+    """legacy direct claim은 evidence 필드 누락도 변경으로 진단한다."""
+    from awf.core.analysis_writer import Claim, WriterResult, JudgeResult, validate_evidence_integrity
+
+    writer = WriterResult(
+        writer="structure",
+        claims=[Claim("S1", "endpoint", "POST /api", "ctrl.ts:15", ["src/ctrl.ts"], "high")],
+        output_sections={},
+        raw_output="",
+    )
+    judge = JudgeResult(
+        verdict="merged",
+        merged_claims=[{"id": "S1"}],
+        merged_output={},
+        consistency_checks=[],
+        raw_output="",
+    )
+
+    assert validate_evidence_integrity([writer], judge) == [
+        "evidence_modified:S1",
+        "source_files_modified:S1",
+    ]
+
+
+def test_a5_001_merged_claim_validates_qualified_original_claims():
+    """새 merged id는 original_claims가 모두 실제 Writer claim이면 허용한다."""
+    from awf.core.analysis_writer import Claim, WriterResult, JudgeResult, validate_evidence_integrity
+
+    structure = WriterResult(
+        writer="structure",
+        claims=[Claim("S1", "endpoint", "POST /api", "ctrl.ts:15", ["src/ctrl.ts"], "high")],
+        output_sections={},
+        raw_output="",
+    )
+    behavior = WriterResult(
+        writer="behavior",
+        claims=[Claim("B1", "business_logic", "start quest", "svc.ts:20", ["src/svc.ts"], "high")],
+        output_sections={},
+        raw_output="",
+    )
+    judge = JudgeResult(
+        verdict="merged",
+        merged_claims=[
+            {
+                "id": "M1",
+                "original_claims": ["structure:S1", "behavior:B1"],
+                "resolution": "merged",
+            }
+        ],
+        merged_output={},
+        consistency_checks=[],
+        raw_output="",
+    )
+
+    assert validate_evidence_integrity([structure, behavior], judge) == []
+
+
+def test_a5_001_merged_claim_rejects_unknown_original_claim():
+    """merged id 자체가 아니라 존재하지 않는 original claim을 진단한다."""
+    from awf.core.analysis_writer import JudgeResult, validate_evidence_integrity
+
+    judge = JudgeResult(
+        verdict="merged",
+        merged_claims=[{"id": "M1", "original_claims": ["structure:FAKE1"]}],
+        merged_output={},
+        consistency_checks=[],
+        raw_output="",
+    )
+
+    assert validate_evidence_integrity([], judge) == ["unknown_claim_id:structure:FAKE1"]
 
 
 def test_a5_001_verdict_change_allowed():

@@ -133,12 +133,28 @@ def compose_stage2_output_from_writer_results(writer_results: dict[str, str]) ->
     return "\n".join(parts).rstrip() + "\n"
 
 
+def _normalize_exact_json_fence(content: str) -> str:
+    stripped = content.strip()
+    prefix = "```json\n"
+    suffix = "\n```"
+    if not stripped.startswith(prefix) or not stripped.endswith(suffix):
+        return content.rstrip()
+    document = stripped[len(prefix):-len(suffix)].strip()
+    try:
+        json.loads(document)
+    except json.JSONDecodeError:
+        return content.rstrip()
+    return document
+
+
 def compose_output_from_judge_result(judge_result: JudgeResult, output_files: list[str] | None = None) -> str:
     """Compose final ===FILE: markers output from JudgeResult."""
     files = output_files or ALL_OUTPUT_FILES
     parts: list[str] = []
     for file_name in files:
         content = judge_result.merged_output.get(file_name, "").rstrip()
+        if file_name == "api-spec.json":
+            content = _normalize_exact_json_fence(content)
         if not content:
             continue
         parts.append(f"===FILE: {file_name}===")
@@ -185,13 +201,16 @@ def analyze_stage2_consistency(raw: str, analysis_mode: str = "document") -> dic
             except json.JSONDecodeError:
                 issues.append("invalid_api_spec_json")
             else:
-                endpoints = api_spec.get("endpoints", [])
-                if not isinstance(endpoints, list):
-                    issues.append("invalid_api_endpoints")
-                elif endpoints and not parsed.get("domain-overview.md", "").strip():
-                    issues.append("missing_domain_overview")
-                elif endpoints and not parsed.get("external-integration.md", "").strip():
-                    issues.append("missing_external_integration")
+                if not isinstance(api_spec, dict):
+                    issues.append("invalid_api_spec_json")
+                else:
+                    endpoints = api_spec.get("endpoints", [])
+                    if not isinstance(endpoints, list):
+                        issues.append("invalid_api_endpoints")
+                    elif endpoints and not parsed.get("domain-overview.md", "").strip():
+                        issues.append("missing_domain_overview")
+                    elif endpoints and not parsed.get("external-integration.md", "").strip():
+                        issues.append("missing_external_integration")
 
     return {
         "passed": not issues,
@@ -472,6 +491,23 @@ def run_stage2_fanout(
         metadata["consistencyPassed"] = bool(consistency_summary["passed"])
         metadata["consistencyIssues"] = list(consistency_summary["issues"])
         if not consistency_summary["passed"]:
+            consistency_path = save_additional_result(
+                context,
+                provider_name,
+                combined_output,
+                "fanout-consistency",
+            )
+            metadata["consistencyArtifactSuffix"] = "fanout-consistency"
+            _emit(
+                EventType.ARTIFACT_CREATED,
+                data={
+                    "path": str(consistency_path),
+                    "kind": "analysis_fanout_consistency",
+                    "producer": provider_name,
+                    "status": "final",
+                    "replaces": None,
+                },
+            )
             return None, "consistency_check_failed:" + ",".join(consistency_summary["issues"]), metadata
 
         from awf.providers.base import ProviderResult

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -32,8 +33,14 @@ class FixtureProvider:
         add_dirs: list[str] | None = None,
         timeout_sec: int | None = None,
     ) -> ProviderResult:
-        # timeout_sec accepted for contract parity; fixture returns immediately
+        # timeout_sec is accepted for contract parity; tests may inject a deterministic delay.
         _ = timeout_sec
+        try:
+            delay_sec = max(0.0, float(os.environ.get("AWF_FIXTURE_DELAY_SEC", "0") or 0))
+        except ValueError:
+            delay_sec = 0.0
+        if delay_sec:
+            time.sleep(delay_sec)
         # Re-resolve result_file relative to cwd if the original was relative
         if cwd and not Path(self._result_file_raw).is_absolute():
             resolved = (Path(cwd) / self._result_file_raw).resolve()

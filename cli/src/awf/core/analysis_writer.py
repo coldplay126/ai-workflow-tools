@@ -255,29 +255,49 @@ def validate_evidence_integrity(
     match the original Writer claims. Returns list of violation descriptions.
     Empty list means integrity is maintained.
     """
-    # Build index: claim_id -> (evidence, source_files)
+    # Build index: bare/qualified claim_id -> (evidence, source_files)
     original: dict[str, tuple[str, tuple[str, ...]]] = {}
-    for wr in writer_results:
-        for claim in wr.claims:
-            if claim.id:
-                original[claim.id] = (claim.evidence, tuple(claim.source_files))
+    for writer_result in writer_results:
+        for claim in writer_result.claims:
+            if not claim.id:
+                continue
+            value = (claim.evidence, tuple(claim.source_files))
+            original[claim.id] = value
+            original[f"{writer_result.writer}:{claim.id}"] = value
 
     violations: list[str] = []
-    for mc in judge_result.merged_claims:
-        claim_id = str(mc.get("id", ""))
-        if not claim_id:
-            continue
-        if claim_id not in original:
-            violations.append(f"unknown_claim_id:{claim_id}")
-            continue
+    for merged_claim in judge_result.merged_claims:
+        claim_id = str(merged_claim.get("id", ""))
+        references_raw = merged_claim.get("original_claims")
+        references = (
+            [str(reference) for reference in references_raw if str(reference)]
+            if isinstance(references_raw, list)
+            else []
+        )
+        legacy_direct_claim = not references
+        if references:
+            for reference in references:
+                if reference not in original:
+                    violations.append(f"unknown_claim_id:{reference}")
+            if len(references) != 1 or references[0] not in original:
+                continue
+            original_id = references[0]
+        else:
+            if not claim_id:
+                continue
+            if claim_id not in original:
+                violations.append(f"unknown_claim_id:{claim_id}")
+                continue
+            original_id = claim_id
 
-        orig_evidence, orig_sources = original[claim_id]
-        judge_evidence = str(mc.get("evidence", ""))
-        judge_sources = tuple(mc.get("source_files", []))
-
-        if judge_evidence != orig_evidence:
+        original_evidence, original_sources = original[original_id]
+        if (
+            legacy_direct_claim or "evidence" in merged_claim
+        ) and str(merged_claim.get("evidence", "")) != original_evidence:
             violations.append(f"evidence_modified:{claim_id}")
-        if judge_sources != orig_sources:
+        if (
+            legacy_direct_claim or "source_files" in merged_claim
+        ) and tuple(merged_claim.get("source_files", [])) != original_sources:
             violations.append(f"source_files_modified:{claim_id}")
 
     return violations

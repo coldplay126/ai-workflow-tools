@@ -80,10 +80,20 @@ code `130`으로 끝나면 남은 domain이나 delay를 실행하지 않고 `130
 ## 0.3 Stage 2 fanout 완료 조건
 
 `parallel_v2` fanout은 structure/behavior writer를 병렬 실행하고 Judge가 필수
-산출물을 병합한 뒤 deterministic consistency check를 적용한다. 필수 산출물
-누락, 빈 내용, JSON이 아닌 `api-spec.json`은 성공으로 게시하지 않는다.
-`run_stage2_fanout()`은 `consistency_check_failed:<issues>`를 반환하고 CLI는
-진단을 보존한 채 single-agent Stage 2로 fallback한다.
+산출물을 병합한 뒤 deterministic consistency check를 적용한다. Judge가 새
+merged claim ID를 만들면 `original_claims`의 Writer-qualified reference(예:
+`structure:S1`)를 실제 Writer claim과 대조한다. legacy direct claim ID의
+evidence와 `source_files` 비교도 유지한다.
+
+필수 산출물 누락, 빈 내용, JSON object가 아닌 `api-spec.json`은 성공으로
+게시하지 않는다. `api-spec.json`이 문서 전체를 감싼 정확한 `json` Markdown
+fence 하나라면 내부 내용이 문법적으로 유효한 JSON일 때만 fence를 제거한다.
+fence 밖 설명이 있거나 내부 JSON이 malformed이면 원문을 유지하며, top-level
+object가 아닌 유효 JSON은 `invalid_api_spec_json` consistency 실패로 처리한다.
+`run_stage2_fanout()`은 `consistency_check_failed:<issues>`를 반환하고 결합
+결과를 `.ai-context/.tmp/result-stage2-<provider>-fanout-consistency.txt`에
+보존한다. CLI는 이 진단과 artifact를 유지한 채 single-agent Stage 2로
+fallback한다.
 
 성공한 fanout의 Stage 2 event와 JSON envelope `elapsed_sec`는 전체 fanout
 호출을 monotonic clock으로 측정한 실제 경과 시간을 사용한다. `--check`와
