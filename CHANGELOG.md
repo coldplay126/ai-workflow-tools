@@ -8,6 +8,19 @@
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-08-13
+
+### Fixed
+
+- 유효한 `api-spec.json`이 문서 전체를 감싼 정확한 `json` Markdown fence 하나로 반환되면 fence를 제거한 뒤 JSON artifact로 게시합니다.
+- malformed JSON이나 fence 밖 설명은 정규화하지 않고 top-level object가 아닌 JSON도 거부하며, consistency 실패 시 결합 결과를 `fanout-consistency` 진단 artifact로 보존합니다.
+- Judge가 새 merged claim ID를 만들 때 `original_claims`의 Writer-qualified reference를 검증해 정상 병합을 `unknown_claim_id`로 오진하지 않습니다.
+- 전체 fanout 경과 시간이 Stage 2 event와 최종 JSON envelope까지 전달되는 provider-backed 통합 회귀를 추가했습니다.
+
+### Documentation
+
+- JSON fence 정규화 경계, consistency failure artifact, merged claim provenance, elapsed telemetry 계약을 CLI와 analysis reference에 반영했습니다.
+
 ## [0.1.5] - 2026-08-13
 
 ### Fixed

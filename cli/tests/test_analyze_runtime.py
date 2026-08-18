@@ -10,7 +10,13 @@ from pathlib import Path
 
 import awf.commands.analyze as analyze
 
-from fixture_support import ANALYSIS_RESULT, ROOT, prepare_analysis_docs_fixture
+from fixture_support import (
+    ANALYSIS_RESULT,
+    ROOT,
+    prepare_analysis_docs_fixture,
+    run_awf,
+    write_fixture_project_config,
+)
 
 
 class _MutationContext:
@@ -227,6 +233,49 @@ def test_fanout_elapsed_uses_measured_wall_time(monkeypatch) -> None:
     assert error is None
     assert metadata is expected_metadata
     assert elapsed == 2.75
+
+
+def test_fanout_elapsed_reaches_stage_event_and_json_envelope(tmp_path: Path) -> None:
+    docs_root = tmp_path / "analysis-docs"
+    service_root = prepare_analysis_docs_fixture(docs_root, service_root=tmp_path / "sample-api")
+    write_fixture_project_config(
+        service_root,
+        result_file=ANALYSIS_RESULT,
+        analysis_lines=[
+            "fanout_enabled = true",
+            "fanout_large_file_threshold = 1",
+            "stage2_token_threshold = 1",
+            "stage2_line_threshold = 1",
+        ],
+    )
+
+    completed = run_awf(
+        service_root,
+        "analyze",
+        "sample-api",
+        "quest-challenge",
+        "--docs-root",
+        str(docs_root),
+        "--github-root",
+        str(tmp_path),
+        "--provider",
+        "fixture",
+        "--output-format",
+        "json",
+        "--no-ready-gate",
+        extra_env={
+            "AWF_FIXTURE_FANOUT_DIR": str(ROOT / "cli" / "tests" / "fixtures" / "fanout"),
+            "AWF_FIXTURE_DELAY_SEC": "0.05",
+        },
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    envelope = json.loads(completed.stdout)
+    state_path = docs_root / "sample-api" / "quest-challenge" / ".ai-context" / ".analysis-state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    stage2_duration = state["eventSync"]["stages"]["stage2"]["durationSec"]
+    assert stage2_duration >= 0.09
+    assert envelope["elapsed_sec"] >= round(stage2_duration, 1) >= 0.1
 
 
 def test_service_docs_root_resolution_does_not_probe_placeholder_domain(
