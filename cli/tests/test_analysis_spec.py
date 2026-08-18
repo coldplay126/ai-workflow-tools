@@ -661,6 +661,58 @@ def test_a6_002_provider_execution_failure_keeps_existing_result_contract():
     assert metadata.get("status") is None
 
 
+def test_a6_002_invalid_composed_output_fails_fanout(tmp_path):
+    """Judge output consistency failure must not publish a successful result."""
+    from awf.providers.fixture import _build_v2_judge_fixture, _build_v2_writer_fixture
+
+    (tmp_path / "api-spec.json").write_text("```json\n{}\n```\n", encoding="utf-8")
+    for file_name in ("data-model.md", "domain-overview.md", "external-integration.md"):
+        (tmp_path / file_name).write_text(f"# {file_name}\n", encoding="utf-8")
+
+    ctx = _make_analysis_context(tmp_path / ".ai-context", "document")
+    ctx.repo_root = tmp_path
+    ctx.service = "service"
+    ctx.domain = "orders"
+
+    def runner(_provider, _prompt, _cwd, _add_dirs, label):
+        if label.endswith("writer structure"):
+            result = _build_v2_writer_fixture(
+                tmp_path,
+                "structure",
+                ["api-spec.json", "data-model.md"],
+                0,
+                None,
+            )
+        elif label.endswith("writer behavior"):
+            result = _build_v2_writer_fixture(
+                tmp_path,
+                "behavior",
+                ["domain-overview.md", "external-integration.md"],
+                0,
+                None,
+            )
+        else:
+            result = _build_v2_judge_fixture(tmp_path, 0, None)
+        return result, 0.01
+
+    result, error, metadata = run_stage2_fanout(
+        context=ctx,
+        provider=None,
+        provider_factory=None,
+        provider_name="fixture",
+        add_dirs=[],
+        stage1_memo_text="memo",
+        domain_bundle_text="bundle",
+        runner=runner,
+        save_additional_result=lambda *_args: tmp_path / "artifact",
+    )
+
+    assert result is None
+    assert error == "consistency_check_failed:invalid_api_spec_json"
+    assert metadata["consistencyPassed"] is False
+    assert metadata["consistencyIssues"] == ["invalid_api_spec_json"]
+
+
 # ===========================================================================
 # AN-A2-001: Stage 1 observation-only artifact
 # ===========================================================================

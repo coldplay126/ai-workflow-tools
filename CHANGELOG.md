@@ -8,6 +8,18 @@
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-08-13
+
+### Fixed
+
+- Stage 2 `parallel_v2` fanout이 consistency 실패한 결과를 성공으로 게시하지 않고 single-agent Stage 2로 fallback합니다.
+- 성공한 fanout의 실제 monotonic 경과 시간을 Stage 2 event와 JSON envelope `elapsed_sec`에 기록합니다.
+- service-level `--check`와 `--catalog` 경로 해석에서 가짜 `__placeholder__` domain discovery와 경고를 제거했습니다.
+
+### Documentation
+
+- Writer/Judge fanout 완료 조건, consistency fallback, elapsed telemetry, service-level 경로 해석 계약을 CLI와 analysis reference에 반영했습니다.
+
 ## [0.1.4] - 2026-08-13
 
 ### Fixed

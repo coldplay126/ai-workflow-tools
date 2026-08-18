@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import sys
+import time as time_mod
 import uuid
 from pathlib import Path
 
@@ -284,6 +285,12 @@ def _make_fanout_provider_factory(registry, provider_name: str, *, yolo: bool):
         return provider
 
     return factory
+
+
+def _run_stage2_fanout_with_elapsed(**kwargs):
+    started_at = time_mod.monotonic()
+    result, error, metadata = run_stage2_fanout(**kwargs)
+    return result, error, metadata, time_mod.monotonic() - started_at
 
 
 def _is_under(path: Path, root: Path) -> bool:
@@ -920,8 +927,8 @@ def _run_analyze_domain_mutation(
     print(f"fanout_selected: {str(fanout_selected).lower()}")
     if fanout_selected:
         print(
-            "info: Stage 2 fan-out selected; synthesizer runs first, then 4 writers run in parallel, "
-            "then a consistency pass validates the combined output.",
+            "info: Stage 2 fan-out selected; structure and behavior writers run in parallel, "
+            "then the judge merges outputs and a local consistency check validates them.",
             file=sys.stderr,
         )
 
@@ -1020,7 +1027,7 @@ def _run_analyze_domain_mutation(
             )
             execution_mode_name = resolve_execution_mode(provider, native_task)
         if fanout_selected:
-            fanout_result, fanout_error, fanout_metadata = run_stage2_fanout(
+            fanout_result, fanout_error, fanout_metadata, stage2_elapsed = _run_stage2_fanout_with_elapsed(
                 context=context,
                 provider=provider,
                 provider_factory=_make_fanout_provider_factory(
@@ -1048,7 +1055,6 @@ def _run_analyze_domain_mutation(
             )
             if fanout_result is not None:
                 result = fanout_result
-                stage2_elapsed = 0.0
                 fanout_used = True
                 record_stage2_fanout_execution(
                     context,
@@ -1536,23 +1542,23 @@ def _run_analyze_all(args: argparse.Namespace) -> int:
 
 
 def _resolve_service_docs_root(args: argparse.Namespace) -> tuple[Path, Path, str]:
-    """Resolve docs_root, github_root, and service name for catalog/check commands.
+    """Resolve docs_root, github_root, and service name for catalog/check commands."""
+    from awf.core.config import resolve_analysis_roots
 
-    Uses a dummy domain to resolve paths via resolve_analysis_context, then
-    extracts docs_root and github_root from the context.
-    """
-    from awf.core.config import resolve_analysis_context
-    # Use a placeholder domain just to resolve paths
-    ctx = resolve_analysis_context(
-        service=args.service,
-        domain="__placeholder__",
-        deep=False,
+    _, docs_root, github_root = resolve_analysis_roots(
         repo_root=getattr(args, "repo_root", None),
         docs_root=getattr(args, "docs_root", None),
         github_root=getattr(args, "github_root", None),
-        use_ai_discovery=False,
     )
-    return ctx.docs_root, ctx.github_root, args.service
+    service_map = _load_analysis_config(docs_root).get("service_map", {})
+    service = args.service
+    if service not in service_map and not (github_root / service).is_dir():
+        supported = ", ".join(sorted(service_map))
+        raise KeyError(
+            f"Unknown service `{service}` and no repo found at {github_root / service}. "
+            f"Configured: {supported}"
+        )
+    return docs_root, github_root, service
 
 
 def _load_analysis_config(docs_root: Path) -> dict:

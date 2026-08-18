@@ -235,7 +235,7 @@ def test_root_parser_exposes_package_version(capsys: pytest.CaptureFixture[str])
         build_parser().parse_args(["--version"])
 
     assert raised.value.code == 0
-    assert capsys.readouterr().out == "awf 0.1.4\n"
+    assert capsys.readouterr().out == "awf 0.1.5\n"
 
 
 def test_analysis_generation_integrity_docs_share_contract() -> None:
@@ -322,16 +322,16 @@ def test_analysis_policy_consistency_docs_share_contract() -> None:
 
 def test_release_metadata_versions_match() -> None:
     assert (REPO_ROOT / "cli" / "pyproject.toml").read_text(encoding="utf-8").count(
-        'version = "0.1.4"'
+        'version = "0.1.5"'
     ) == 1
     assert (REPO_ROOT / "cli" / "src" / "awf" / "__init__.py").read_text(
         encoding="utf-8"
-    ).count('__version__ = "0.1.4"') == 1
+    ).count('__version__ = "0.1.5"') == 1
     assert (REPO_ROOT / "cli" / "uv.lock").read_text(encoding="utf-8").count(
-        'version = "0.1.4"'
+        'version = "0.1.5"'
     ) >= 1
     changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    assert "## [0.1.4] - 2026-08-13" in changelog
+    assert "## [0.1.5] - 2026-08-13" in changelog
 
 
 def test_multi_agent_snippet_requires_live_cmux_roster() -> None:
