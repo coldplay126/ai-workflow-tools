@@ -288,6 +288,11 @@ conflicted paths and the source and target provenance are unchanged. A changed
 source or target SHA returns `promotion_provenance_changed`; preserve the
 worktree instead of transplanting a resolution.
 
+If any changed or unmerged path falls outside the recorded conflict set, AWF
+returns `promotion_resolution_scope_mismatch`. AWF stages the allowed conflict
+files itself; if an unmerged index entry remains after that staging step, it
+returns `promotion_resolution_unmerged`.
+
 AWF stages, commits, verifies, pushes, and publishes the eligible result. The
 synthetic production PR requires approval and successful checks on that exact
 production PR before merge, including an automatic clean application. Staging

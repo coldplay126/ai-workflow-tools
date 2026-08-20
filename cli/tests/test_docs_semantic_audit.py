@@ -1078,6 +1078,8 @@ def test_out_of_order_promotion_docs_share_operator_contract() -> None:
         "`unsupported_out_of_order_rename`",
         "`out_of_order_conflict`",
         "`promotion_provenance_changed`",
+        "promotion_resolution_scope_mismatch",
+        "promotion_resolution_unmerged",
     )
 
     for path in paths:
