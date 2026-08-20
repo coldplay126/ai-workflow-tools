@@ -3435,6 +3435,8 @@ def test_promotion_initiative_separates_out_of_order_identity() -> None:
 def test_promote_out_of_order_preview_reports_promotion_mode(
     promotion_harness: PromotionHarness,
 ) -> None:
+    before_prs = dict(promotion_harness.github.prs)
+    before_open_prs = dict(promotion_harness.github.open_prs)
     result = promotion_harness.service.promote(
         source_pr=372,
         target_branch="main",
@@ -3443,6 +3445,12 @@ def test_promote_out_of_order_preview_reports_promotion_mode(
     )
 
     assert result.actions[0]["promotion_mode"] == "out_of_order"
+    assert len(promotion_harness.git.list_worktrees()) == 1
+    assert not promotion_harness.registry.db_path.exists()
+    assert not promotion_harness.cache_dir.exists()
+    assert promotion_harness.github.create_calls == []
+    assert promotion_harness.github.prs == before_prs
+    assert promotion_harness.github.open_prs == before_open_prs
 
 
 def test_promote_records_out_of_order_lease_provenance(
@@ -3466,6 +3474,51 @@ def test_promote_records_out_of_order_lease_provenance(
     assert persisted.source_head_sha == source.head_sha
     assert persisted.target_base_sha == target_sha
     assert persisted.reviewed_paths == source.changed_paths
+
+
+def test_promote_persists_out_of_order_provenance_before_patch_application(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = promotion_harness.github.prs[372]
+    target_sha = promotion_harness.git.resolve_ref("origin/main")
+    leases_seen_during_patch: list[Lease] = []
+
+    def fail_patch(_worktree: Path, _patch: bytes) -> None:
+        leases = promotion_harness.registry.list_leases()
+        assert len(leases) == 1
+        persisted = promotion_harness.registry.get_lease(leases[0].id)
+        assert persisted is not None
+        leases_seen_during_patch.append(persisted)
+        raise GitError("simulated patch failure")
+
+    monkeypatch.setattr(
+        promotion_harness.git,
+        "apply_indexed_patch",
+        fail_patch,
+    )
+
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "promotion_apply_failed"
+    assert result.lease is not None
+    assert result.lease.state is LeaseState.BLOCKED
+    persisted = promotion_harness.registry.get_lease(result.lease.id)
+    assert persisted is not None
+    assert persisted.state is LeaseState.BLOCKED
+    assert [lease.id for lease in leases_seen_during_patch] == [result.lease.id]
+    for lease in (*leases_seen_during_patch, persisted):
+        assert lease.promotion_mode is PromotionMode.OUT_OF_ORDER
+        assert lease.source_base_sha == source.base_sha
+        assert lease.source_head_sha == source.head_sha
+        assert lease.target_base_sha == target_sha
+        assert lease.reviewed_paths == source.changed_paths
 
 
 def test_promote_applies_only_source_pr_delta(
