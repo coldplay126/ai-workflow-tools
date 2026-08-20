@@ -4543,9 +4543,11 @@ def test_promote_out_of_order_preserves_three_way_conflict_for_manual_resolution
     assert persisted.state is LeaseState.BLOCKED
     assert persisted.resolution_state is ResolutionState.PENDING
     assert persisted.conflicted_paths == ("feature.txt",)
-    assert [
-        event.event_type for event in promotion_harness.registry.list_events(persisted.id)
-    ] == ["out_of_order_conflict"]
+    events = promotion_harness.registry.list_events(persisted.id)
+    assert [event.event_type for event in events] == ["promotion_blocked"]
+    assert events[0].summary.startswith(
+        "out_of_order_conflict: reviewed patch requires managed resolution"
+    )
     assert (persisted.worktree_path / "feature.txt").exists()
     assert promotion_harness.git.unmerged_paths(persisted.worktree_path) == (
         "feature.txt",
@@ -4585,6 +4587,7 @@ def test_promote_out_of_order_preview_reports_pending_manual_resolution_without_
             "lease_id": first.lease.id,
             "path": str(first.lease.worktree_path),
             "conflicted_paths": ["feature.txt"],
+            "current_changed_paths": ["feature.txt"],
         },
     )
     assert promotion_harness.registry.get_lease(first.lease.id) == before
@@ -4653,7 +4656,7 @@ def test_promote_out_of_order_applies_manual_resolution_and_opens_one_pr(
                     f"AWF-Target-Base: {first.lease.target_base_sha}",
                     f"AWF-Lease-ID: {first.lease.id}",
                     "AWF-Promotion-Mode: out-of-order",
-                    "AWF-Resolution: manual_reviewed",
+                    "AWF-Resolution: manual-reviewed",
                 )
             ),
         )
@@ -4666,7 +4669,8 @@ def test_promote_out_of_order_applies_manual_resolution_and_opens_one_pr(
         event.event_type
         for event in promotion_harness.registry.list_events(resumed.lease.id)
     ] == [
-        "out_of_order_conflict",
+        "promotion_blocked",
+        "promotion_manual_resolution_committed",
         "promotion_publish_pending",
         "promotion_pr_reconciled",
     ]
@@ -4710,7 +4714,7 @@ def test_promote_out_of_order_manual_resolution_blocks_outside_reviewed_path(
     )
 
     assert resumed.status == "blocked"
-    assert resumed.blockers[0]["code"] == "promotion_incomplete"
+    assert resumed.blockers[0]["code"] == "promotion_resolution_scope_mismatch"
     assert resumed.lease == lease
     assert promotion_harness.github.create_calls == []
     assert promotion_harness.git.remote_branch_sha(lease.branch) is None
@@ -4719,8 +4723,8 @@ def test_promote_out_of_order_manual_resolution_blocks_outside_reviewed_path(
 @pytest.mark.parametrize(
     ("drift", "blocker"),
     (
-        ("source", "source_sha_mismatch"),
-        ("target", "promotion_incomplete"),
+        ("source", "promotion_provenance_changed"),
+        ("target", "promotion_provenance_changed"),
     ),
 )
 def test_promote_out_of_order_manual_resolution_blocks_source_or_target_drift(
@@ -4829,6 +4833,198 @@ def test_promote_out_of_order_manual_resolution_blocks_published_target(
     assert resumed.blockers[0]["code"] == "promotion_incomplete"
     assert resumed.lease == lease
     assert promotion_harness.github.create_calls == []
+@pytest.mark.parametrize(
+    ("violation", "blocker"),
+    (
+        ("worktree", "promotion_incomplete"),
+        ("source_provenance", "promotion_incomplete"),
+        ("target_provenance", "promotion_incomplete"),
+        ("remote_branch", "promotion_incomplete"),
+        ("target_pr", "promotion_incomplete"),
+        ("outside_path", "promotion_resolution_scope_mismatch"),
+        ("unmerged_path", "promotion_resolution_scope_mismatch"),
+    ),
+)
+def test_promote_out_of_order_resolution_preview_blocks_invalid_pending_lease(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    violation: str,
+    blocker: str,
+) -> None:
+    lease = _pending_out_of_order_conflict(promotion_harness)
+    if violation == "worktree":
+        monkeypatch.setattr(promotion_harness.git, "list_worktrees", lambda: ())
+    elif violation == "source_provenance":
+        promotion_harness.github.prs[372] = replace(
+            promotion_harness.github.prs[372], head_sha="f" * 40
+        )
+    elif violation == "target_provenance":
+        monkeypatch.setattr(
+            promotion_harness.git,
+            "resolve_ref",
+            lambda _ref: "e" * 40,
+        )
+    elif violation == "remote_branch":
+        monkeypatch.setattr(
+            promotion_harness.git,
+            "remote_branch_sha",
+            lambda _branch: "a" * 40,
+        )
+    elif violation == "target_pr":
+        promotion_harness.github.open_prs[(lease.branch, "main")] = replace(
+            promotion_harness.github.prs[372],
+            number=901,
+            state="OPEN",
+            base_ref="main",
+            head_ref=lease.branch,
+            head_sha=lease.head_sha,
+            changed_paths=(),
+        )
+    elif violation == "unmerged_path":
+        monkeypatch.setattr(
+            promotion_harness.git,
+            "unmerged_paths",
+            lambda _worktree: ("feature.txt", "outside.txt"),
+        )
+    else:
+        (lease.worktree_path / "outside.txt").write_text(
+            "outside\n", encoding="utf-8"
+        )
+    before = promotion_harness.registry.get_lease(lease.id)
+    before_events = promotion_harness.registry.list_events(lease.id)
+
+    preview = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=False,
+    )
+
+    assert preview.status == "blocked"
+    assert preview.blockers[0]["code"] == blocker, preview.blockers
+    assert preview.lease == before
+    assert promotion_harness.registry.get_lease(lease.id) == before
+    assert promotion_harness.registry.list_events(lease.id) == before_events
+    assert promotion_harness.github.create_calls == []
+
+
+def test_promote_out_of_order_blocks_clean_applied_non_conflict_path(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.make_target_conflict()
+    source = promotion_harness.add_followup_source()
+    first = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert first.blockers[0]["code"] == "out_of_order_conflict"
+    assert first.lease is not None
+    assert first.lease.conflicted_paths == ("feature.txt",)
+    (first.lease.worktree_path / "feature.txt").write_text(
+        "manually resolved\n", encoding="utf-8"
+    )
+    resumed = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert resumed.status == "blocked"
+    assert resumed.blockers[0]["code"] == "promotion_resolution_scope_mismatch"
+    assert resumed.lease == first.lease
+    assert promotion_harness.github.create_calls == []
+
+
+def test_promote_out_of_order_blocks_remaining_unmerged_path_after_staging(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lease = _pending_out_of_order_conflict(promotion_harness)
+    (lease.worktree_path / "feature.txt").write_text(
+        "manually resolved\n", encoding="utf-8"
+    )
+    original_stage_paths = promotion_harness.git.stage_paths
+    staged: list[tuple[str, ...]] = []
+
+    def stage_paths(worktree: Path, paths: tuple[str, ...]) -> None:
+        staged.append(paths)
+        original_stage_paths(worktree, paths)
+
+    monkeypatch.setattr(promotion_harness.git, "stage_paths", stage_paths)
+    monkeypatch.setattr(
+        promotion_harness.git,
+        "unmerged_paths",
+        lambda _worktree: ("feature.txt",),
+    )
+    resumed = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert resumed.status == "blocked"
+    assert resumed.blockers[0]["code"] == "promotion_resolution_unmerged"
+    assert resumed.lease == lease
+    assert staged == [("feature.txt",)]
+    assert promotion_harness.github.create_calls == []
+
+
+@pytest.mark.parametrize("failure", ("prepare", "verify"))
+def test_promote_out_of_order_retries_manual_commit_after_verification_failure(
+    promotion_harness: PromotionHarness,
+    failure: str,
+) -> None:
+    if failure == "prepare":
+        promotion_harness.configure(
+            prepare_command=(sys.executable, "-c", "import sys; sys.exit(1)")
+        )
+    else:
+        promotion_harness.configure(
+            verify_production=((sys.executable, "-c", "import sys; sys.exit(1)"),)
+        )
+    lease = _pending_out_of_order_conflict(promotion_harness)
+    (lease.worktree_path / "feature.txt").write_text(
+        "manually resolved\n", encoding="utf-8"
+    )
+
+    failed = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert failed.status == "blocked"
+    assert failed.lease is not None
+    assert failed.lease.state is LeaseState.BLOCKED
+    assert failed.lease.resolution_state is ResolutionState.MANUAL_REVIEWED
+    assert failed.lease.head_sha == promotion_harness.git.head_sha(
+        failed.lease.worktree_path
+    )
+    committed_head = failed.lease.head_sha
+    promotion_harness.configure(
+        prepare_command=(),
+        verify_production=((sys.executable, "-c", "pass"),),
+    )
+    resumed = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert resumed.decision == "ready"
+    assert resumed.lease is not None
+    assert resumed.lease.head_sha == committed_head
+    assert resumed.lease.resolution_state is ResolutionState.MANUAL_REVIEWED
+    assert len(promotion_harness.github.create_calls) == 1
+
+
 
 
 
