@@ -101,6 +101,22 @@ def test_registry_round_trips_out_of_order_provenance(tmp_path: Path) -> None:
     }
 
 
+@pytest.mark.parametrize("mode", ("120000", "160000"))
+def test_registry_round_trips_supported_protected_index_entry_modes(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    registry = WorktreeRegistry(tmp_path / "worktrees.sqlite3")
+    created = replace(
+        lease(tmp_path),
+        promotion_mode=PromotionMode.OUT_OF_ORDER,
+        protected_index_entries=(("entry", (mode, "d" * 40)),),
+    )
+
+    registry.create_lease(created)
+
+    assert registry.get_lease(created.id) == created
+
 def test_registry_migrates_legacy_lease_with_promotion_defaults(
     tmp_path: Path,
 ) -> None:

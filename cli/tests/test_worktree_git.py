@@ -561,7 +561,7 @@ def test_git_client_snapshots_stage_zero_entries_with_literal_paths(
 
 
 @pytest.mark.parametrize("mode", ("120000", "160000"))
-def test_git_client_rejects_non_regular_stage_zero_entry_modes(
+def test_git_client_snapshots_supported_stage_zero_entry_modes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     mode: str,
@@ -569,7 +569,25 @@ def test_git_client_rejects_non_regular_stage_zero_entry_modes(
     client = GitClient(make_repository(tmp_path))
 
     def run(*_args: str, **_kwargs: object) -> GitCompleted:
-        return GitCompleted(0, f"{mode} {'a' * 40} 0\tentry\n\0".encode(), b"")
+        return GitCompleted(0, f"{mode} {'a' * 40} 0\tentry\0".encode(), b"")
+
+    monkeypatch.setattr(client, "_run", run)
+
+    assert client.index_entry_snapshot(client.cwd, ("entry",)) == (
+        ("entry", (mode, "a" * 40)),
+    )
+
+
+@pytest.mark.parametrize("mode", ("040000", "000000"))
+def test_git_client_rejects_invalid_stage_zero_entry_modes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    client = GitClient(make_repository(tmp_path))
+
+    def run(*_args: str, **_kwargs: object) -> GitCompleted:
+        return GitCompleted(0, f"{mode} {'a' * 40} 0\tentry\0".encode(), b"")
 
     monkeypatch.setattr(client, "_run", run)
 
@@ -1183,4 +1201,10 @@ def test_binary_patch_preserves_rename_mode_and_gitlink_delta(tmp_path: Path) ->
     ).read_bytes()
     assert client.path_blob(source_head, "submodule") == client.path_blob(
         target_head, "submodule"
+    )
+    assert client.index_entry_snapshot(target, ("submodule",)) == (
+        (
+            "submodule",
+            ("160000", client.path_blob(target_head, "submodule")),
+        ),
     )

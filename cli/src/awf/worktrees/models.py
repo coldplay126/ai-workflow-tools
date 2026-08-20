@@ -116,7 +116,7 @@ class Lease:
                 and (
                     not isinstance(item[1], tuple)
                     or len(item[1]) != 2
-                    or item[1][0] not in ("100644", "100755")
+                    or item[1][0] not in ("100644", "100755", "120000", "160000")
                     or not isinstance(item[1][1], str)
                     or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", item[1][1])
                     is None

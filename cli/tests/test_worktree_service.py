@@ -5022,6 +5022,61 @@ def test_promote_out_of_order_preserves_clean_applied_reviewed_path(
     assert (resumed.lease.worktree_path / "followup.txt").read_text(
         encoding="utf-8"
     ) == "followup\n"
+
+def test_promote_out_of_order_preserves_clean_applied_symlink_entry(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.make_target_conflict()
+    source = promotion_harness.add_followup_source()
+    git_command(promotion_harness.repo, "checkout", "-q", source.head_ref)
+    (promotion_harness.repo / "followup.txt").unlink()
+    (promotion_harness.repo / "followup.txt").symlink_to("target.txt")
+    git_command(promotion_harness.repo, "add", "-A", "followup.txt")
+    git_command(promotion_harness.repo, "commit", "-q", "-m", "make followup a link")
+    head_sha = git_command(promotion_harness.repo, "rev-parse", "HEAD")
+    git_command(promotion_harness.repo, "push", "-q", "origin", source.head_ref)
+    git_command(promotion_harness.repo, "checkout", "-q", "staging")
+    git_command(
+        promotion_harness.repo,
+        "merge",
+        "--no-ff",
+        "-q",
+        source.head_ref,
+        "-m",
+        "merge symlink followup",
+    )
+    merge_sha = git_command(promotion_harness.repo, "rev-parse", "HEAD")
+    git_command(promotion_harness.repo, "push", "-q", "origin", "staging")
+    promotion_harness.github.prs[source.number] = replace(
+        source,
+        head_sha=head_sha,
+        merge_commit_sha=merge_sha,
+    )
+    first = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert first.lease is not None
+    assert first.lease.protected_index_entries[0][1] is not None
+    assert first.lease.protected_index_entries[0][1][0] == "120000"
+    (first.lease.worktree_path / "feature.txt").write_text(
+        "manually resolved\n", encoding="utf-8"
+    )
+    resumed = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert resumed.decision == "ready"
+    assert (resumed.lease.worktree_path / "followup.txt").is_symlink()
+    assert (resumed.lease.worktree_path / "followup.txt").readlink() == Path(
+        "target.txt"
+    )
     assert len(promotion_harness.github.create_calls) == 1
 
 def test_promote_out_of_order_blocks_staged_protected_path_tampering(

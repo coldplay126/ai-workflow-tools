@@ -391,7 +391,7 @@ class GitClient:
             if not separator or len(fields) != 3:
                 raise GitError("git ls-files returned an invalid index record")
             raw_mode, raw_blob, stage = fields
-            if raw_mode not in (b"100644", b"100755"):
+            if raw_mode not in (b"100644", b"100755", b"120000", b"160000"):
                 raise GitError("git ls-files returned an unsupported index mode")
             if stage != b"0":
                 continue
