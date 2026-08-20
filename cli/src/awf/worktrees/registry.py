@@ -225,6 +225,22 @@ class WorktreeRegistry:
             ).fetchone()
         return self._lease_from_row(row) if row is not None else None
 
+    def find_active_read_only(
+        self, repository_id: str, initiative: str, purpose: Purpose
+    ) -> Lease | None:
+        if not self.db_path.is_file():
+            return None
+        with closing(self._connect_read_only()) as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM worktree_leases
+                WHERE repository_id = ? AND initiative = ? AND purpose = ?
+                AND state <> ?
+                """,
+                (repository_id, initiative, purpose.value, LeaseState.REMOVED.value),
+            ).fetchone()
+        return self._lease_from_row(row) if row is not None else None
+
     def list_leases(
         self, *, include_removed: bool = True, **filters: Any
     ) -> list[Lease]:

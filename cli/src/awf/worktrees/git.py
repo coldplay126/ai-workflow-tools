@@ -326,6 +326,70 @@ class GitClient:
             raise GitError("at least one path is required for staging")
         self._run("--literal-pathspecs", "add", "--", *paths, cwd=cwd)
 
+    def worktree_changed_paths(self, cwd: Path) -> tuple[str, ...]:
+        tracked = _nul_records(
+            self._run(
+                "diff",
+                "--name-only",
+                "-z",
+                "--no-renames",
+                "HEAD",
+                cwd=cwd,
+            ).stdout
+        )
+        untracked = _nul_records(
+            self._run(
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "-z",
+                cwd=cwd,
+            ).stdout
+        )
+        return tuple(sorted(set(tracked).union(untracked)))
+
+    def indexed_changed_paths(self, cwd: Path, base: str) -> tuple[str, ...]:
+        completed = self._run(
+            "diff",
+            "--cached",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            base,
+            cwd=cwd,
+        )
+        return _nul_records(completed.stdout)
+
+    def unstaged_paths(self, cwd: Path) -> tuple[str, ...]:
+        tracked = _nul_records(
+            self._run(
+                "diff",
+                "--name-only",
+                "-z",
+                "--no-renames",
+                cwd=cwd,
+            ).stdout
+        )
+        untracked = _nul_records(
+            self._run(
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "-z",
+                cwd=cwd,
+            ).stdout
+        )
+        return tuple(sorted(set(tracked).union(untracked)))
+
+    def staged_diff_is_clean(self, cwd: Path) -> bool:
+        try:
+            self._run("diff", "--cached", "--check", "--no-ext-diff", cwd=cwd)
+        except GitError as error:
+            if error.returncode is not None:
+                return False
+            raise
+        return True
+
     def reset_hard(self, cwd: Path, ref: str) -> None:
         """Set a managed checkout to ref and discard tracked staged/unstaged changes."""
         self._run("reset", "--hard", "-q", "--end-of-options", ref, cwd=cwd)
