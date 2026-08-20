@@ -4994,6 +4994,10 @@ def test_promote_out_of_order_preserves_clean_applied_reviewed_path(
     assert first.blockers[0]["code"] == "out_of_order_conflict"
     assert first.lease is not None
     assert first.lease.conflicted_paths == ("feature.txt",)
+    assert first.lease.protected_blobs == promotion_harness.git.index_blob_snapshot(
+        first.lease.worktree_path,
+        ("followup.txt",),
+    )
     (first.lease.worktree_path / "feature.txt").write_text(
         "manually resolved\n", encoding="utf-8"
     )
@@ -5016,6 +5020,155 @@ def test_promote_out_of_order_preserves_clean_applied_reviewed_path(
     assert (resumed.lease.worktree_path / "followup.txt").read_text(
         encoding="utf-8"
     ) == "followup\n"
+    assert len(promotion_harness.github.create_calls) == 1
+
+def test_promote_out_of_order_blocks_staged_protected_path_tampering(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.make_target_conflict()
+    source = promotion_harness.add_followup_source()
+    first = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert first.lease is not None
+    (first.lease.worktree_path / "feature.txt").write_text(
+        "manually resolved\n", encoding="utf-8"
+    )
+    (first.lease.worktree_path / "followup.txt").write_text(
+        "tampered\n", encoding="utf-8"
+    )
+    promotion_harness.git.stage_paths(first.lease.worktree_path, ("followup.txt",))
+    resumed = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert resumed.status == "blocked"
+    assert resumed.blockers[0]["code"] == "promotion_resolution_scope_mismatch"
+    assert resumed.lease == first.lease
+    assert promotion_harness.github.create_calls == []
+
+def test_promote_out_of_order_blocks_legacy_pending_without_protected_blobs(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.make_target_conflict()
+    source = promotion_harness.add_followup_source()
+    first = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert first.lease is not None
+    with sqlite3.connect(promotion_harness.registry.db_path) as connection:
+        connection.execute(
+            "UPDATE worktree_leases SET protected_blobs = '[]' WHERE id = ?",
+            (first.lease.id,),
+        )
+    (first.lease.worktree_path / "feature.txt").write_text(
+        "manually resolved\n", encoding="utf-8"
+    )
+    resumed = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert resumed.status == "blocked"
+    assert resumed.blockers[0]["code"] == "promotion_resolution_scope_mismatch"
+    assert promotion_harness.github.create_calls == []
+
+
+def test_promote_out_of_order_retries_initial_live_target_lookup_error(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_remote_branch_sha = promotion_harness.git.remote_branch_sha
+    unavailable = True
+
+    def remote_branch_sha(branch: str) -> str | None:
+        if branch == "main" and unavailable:
+            raise GitRemoteError("origin is temporarily unavailable")
+        return original_remote_branch_sha(branch)
+
+    monkeypatch.setattr(
+        promotion_harness.git,
+        "remote_branch_sha",
+        remote_branch_sha,
+    )
+    failed = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert failed.status == "error"
+    assert failed.lease is not None
+    assert failed.lease.state is LeaseState.ACTIVE
+    assert promotion_harness.github.create_calls == []
+    unavailable = False
+    resumed = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert resumed.decision == "ready"
+    assert len(promotion_harness.github.create_calls) == 1
+
+
+def test_promote_out_of_order_retries_publish_after_live_target_lookup_error(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lease = _pending_out_of_order_conflict(promotion_harness)
+    (lease.worktree_path / "feature.txt").write_text(
+        "manually resolved\n", encoding="utf-8"
+    )
+    original_remote_branch_sha = promotion_harness.git.remote_branch_sha
+    unavailable = True
+
+    def remote_branch_sha(branch: str) -> str | None:
+        if branch == "main" and unavailable:
+            raise GitRemoteError("origin is temporarily unavailable")
+        return original_remote_branch_sha(branch)
+
+    monkeypatch.setattr(
+        promotion_harness.git,
+        "remote_branch_sha",
+        remote_branch_sha,
+    )
+    failed = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert failed.status == "error"
+    assert failed.lease is not None
+    assert failed.lease.state is LeaseState.ACTIVE
+    assert failed.lease.resolution_state is ResolutionState.MANUAL_REVIEWED
+    assert promotion_harness.github.create_calls == []
+    unavailable = False
+    resumed = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert resumed.decision == "ready"
     assert len(promotion_harness.github.create_calls) == 1
 @pytest.mark.parametrize(
     ("target_state", "blocker"),

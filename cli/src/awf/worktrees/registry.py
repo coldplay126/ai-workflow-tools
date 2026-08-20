@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS worktree_leases (
     target_base_sha TEXT,
     reviewed_paths TEXT NOT NULL DEFAULT '[]',
     conflicted_paths TEXT NOT NULL DEFAULT '[]',
+    protected_blobs TEXT NOT NULL DEFAULT '[]',
     deployment_state TEXT NOT NULL CHECK (deployment_state IN (
         'unknown','pending','healthy','failed','not_required'
     )),
@@ -142,6 +143,10 @@ class WorktreeRegistry:
                 "ALTER TABLE worktree_leases ADD COLUMN conflicted_paths "
                 "TEXT NOT NULL DEFAULT '[]'"
             ),
+            "protected_blobs": (
+                "ALTER TABLE worktree_leases ADD COLUMN protected_blobs "
+                "TEXT NOT NULL DEFAULT '[]'"
+            ),
         }
         with closing(self._connect()) as connection:
             connection.executescript(_SCHEMA)
@@ -171,15 +176,16 @@ class WorktreeRegistry:
                         head_sha, promotion_mode, managed, owner_kind, owner_id,
                         state, source_pr, target_pr, resolution_state, source_base_sha,
                         source_head_sha, target_base_sha, reviewed_paths,
-                        conflicted_paths, deployment_state, retain, created_at,
-                        last_used_at, updated_at, removed_at, version
+                        conflicted_paths, protected_blobs, deployment_state, retain,
+                        created_at, last_used_at, updated_at, removed_at, version
                     ) VALUES (
                         :id, :repository_id, :repository_name, :repository_root,
                         :worktree_path, :initiative, :purpose, :branch, :base_ref,
                         :head_sha, :promotion_mode, :managed, :owner_kind, :owner_id,
                         :state, :source_pr, :target_pr, :resolution_state,
                         :source_base_sha, :source_head_sha, :target_base_sha,
-                        :reviewed_paths, :conflicted_paths, :deployment_state, :retain,
+                        :reviewed_paths,
+                        :conflicted_paths, :protected_blobs, :deployment_state, :retain,
                         :created_at, :last_used_at, :updated_at, :removed_at, :version
                     )
                     """,
@@ -310,6 +316,7 @@ class WorktreeRegistry:
         managed: bool | None = None,
         resolution_state: ResolutionState | None = None,
         conflicted_paths: tuple[str, ...] | None = None,
+        protected_blobs: tuple[tuple[str, str | None], ...] | None = None,
     ) -> Lease:
         self.ensure()
         connection = self._connect()
@@ -345,6 +352,10 @@ class WorktreeRegistry:
             if conflicted_paths is not None:
                 update_values["conflicted_paths"] = self._path_metadata_to_json(
                     conflicted_paths, name="conflicted_paths"
+                )
+            if protected_blobs is not None:
+                update_values["protected_blobs"] = self._protected_blobs_to_json(
+                    protected_blobs
                 )
 
             assignments = ", ".join(f"{column} = ?" for column in update_values)
@@ -763,6 +774,9 @@ class WorktreeRegistry:
             "conflicted_paths": WorktreeRegistry._path_metadata_to_json(
                 lease.conflicted_paths, name="conflicted_paths"
             ),
+            "protected_blobs": WorktreeRegistry._protected_blobs_to_json(
+                lease.protected_blobs
+            ),
             "deployment_state": lease.deployment_state.value,
             "retain": int(lease.retain),
             "created_at": lease.created_at,
@@ -801,6 +815,9 @@ class WorktreeRegistry:
             ),
             conflicted_paths=WorktreeRegistry._path_metadata_from_json(
                 row["conflicted_paths"], name="conflicted_paths"
+            ),
+            protected_blobs=WorktreeRegistry._protected_blobs_from_json(
+                row["protected_blobs"]
             ),
             deployment_state=DeploymentState(row["deployment_state"]),
             retain=bool(row["retain"]),
@@ -870,6 +887,31 @@ class WorktreeRegistry:
         if value != tuple(sorted(value)) or len(value) != len(set(value)):
             raise ValueError(f"invalid {name} metadata")
         return value
+
+    @staticmethod
+    def _protected_blobs_to_json(
+        protected_blobs: tuple[tuple[str, str | None], ...],
+    ) -> str:
+        Lease._validate_protected_blobs(protected_blobs)
+        return json.dumps(protected_blobs, separators=(",", ":"))
+
+    @staticmethod
+    def _protected_blobs_from_json(
+        value: str,
+    ) -> tuple[tuple[str, str | None], ...]:
+        if not isinstance(value, str):
+            raise ValueError("invalid protected_blobs metadata")
+        try:
+            raw_blobs = json.loads(value)
+        except json.JSONDecodeError as error:
+            raise ValueError("invalid protected_blobs metadata") from error
+        if not isinstance(raw_blobs, list):
+            raise ValueError("invalid protected_blobs metadata")
+        protected_blobs = tuple(
+            tuple(item) if isinstance(item, list) else item for item in raw_blobs
+        )
+        Lease._validate_protected_blobs(protected_blobs)
+        return protected_blobs
     @staticmethod
     def _is_active_identity_conflict(error: sqlite3.IntegrityError) -> bool:
         message = str(error)

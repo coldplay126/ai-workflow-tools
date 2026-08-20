@@ -360,6 +360,48 @@ class GitClient:
         )
         return _nul_records(completed.stdout)
 
+    def index_blob_snapshot(
+        self, cwd: Path, paths: tuple[str, ...]
+    ) -> tuple[tuple[str, str | None], ...]:
+        if not paths:
+            return ()
+        if (
+            any(not isinstance(path, str) for path in paths)
+            or paths != tuple(sorted(paths))
+            or len(paths) != len(set(paths))
+        ):
+            raise GitError("index blob paths must be sorted and unique")
+        completed = self._run(
+            "--literal-pathspecs",
+            "ls-files",
+            "--stage",
+            "-z",
+            "--",
+            *paths,
+            cwd=cwd,
+        )
+        blobs: dict[str, str | None] = {path: None for path in paths}
+        for record in completed.stdout.split(b"\0"):
+            if not record:
+                continue
+            metadata, separator, raw_path = record.partition(b"\t")
+            fields = metadata.split()
+            if not separator or len(fields) != 3:
+                raise GitError("git ls-files returned an invalid index record")
+            mode, blob, stage = fields
+            if mode not in (b"100644", b"100755", b"120000", b"160000"):
+                raise GitError("git ls-files returned an invalid index mode")
+            if stage != b"0":
+                continue
+            path = os.fsdecode(raw_path)
+            if path not in blobs:
+                raise GitError("git ls-files returned an unexpected index path")
+            try:
+                blobs[path] = blob.decode("ascii", errors="strict")
+            except UnicodeDecodeError as error:
+                raise GitError("git ls-files returned an invalid index blob") from error
+        return tuple((path, blobs[path]) for path in paths)
+
     def unstaged_paths(self, cwd: Path) -> tuple[str, ...]:
         tracked = _nul_records(
             self._run(

@@ -535,6 +535,27 @@ def test_git_client_allows_trailing_whitespace_without_conflict_markers(
     assert not client.committed_diff_has_conflict_markers(repo, base, head)
 
 
+def test_git_client_snapshots_stage_zero_blobs_with_literal_paths(
+    tmp_path: Path,
+) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    (repo / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+    client.stage_paths(repo, ("tracked.txt",))
+    client.commit(repo, "tracked")
+    (repo / "tracked.txt").write_text("updated\n", encoding="utf-8")
+    client.stage_paths(repo, ("tracked.txt",))
+
+    snapshot = client.index_blob_snapshot(
+        repo,
+        ("missing.txt", "tracked.txt"),
+    )
+
+    assert snapshot == (
+        ("missing.txt", None),
+        ("tracked.txt", git(repo, "rev-parse", ":tracked.txt")),
+    )
+
 def test_git_client_stage_paths_rejects_empty_paths(tmp_path: Path) -> None:
     client = GitClient(make_repository(tmp_path))
 
