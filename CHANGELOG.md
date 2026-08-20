@@ -12,6 +12,20 @@
 
 - code fallback 후 Judge evidence provenance를 최초 Writer 결과가 아니라 실제 재실행 Writer 결과와 대조해 잘못된 `unknown_claim_id`·`evidence_modified` 경고를 방지합니다.
 
+### Changed
+
+- 기본 exact promotion은 변경하지 않았고, 선행 staging 변경 A를 production에
+  포함할 수 없는 단일 merged PR B에는 opt-in `--out-of-order`를 추가했습니다.
+  이 경로는 하나의 `--source-pr`만 받고 `--exclude-path`를 허용하지 않으며,
+  위반 시 `invalid_out_of_order_promotion`, rename이면
+  `unsupported_out_of_order_rename`으로 중단합니다. B가 A의 API, schema,
+  behavior에 의존하면 중단해야 합니다. 충돌은 `out_of_order_conflict`로
+  보존하고 AWF가 보고한 파일만 수정한 뒤 같은 preview/apply를 재실행합니다.
+  source 또는 target SHA가 바뀌면 `promotion_provenance_changed`로 중단합니다.
+  synthetic production PR은 별도 approval과 successful checks를 거쳐야 합니다.
+  staging squash commit은 promotion input이
+  아니며 direct staging squash cherry-pick은 금지합니다.
+
 ## [0.1.6] - 2026-08-13
 
 ### Fixed

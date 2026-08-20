@@ -755,6 +755,10 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "link_pr_apply": ("wt", "link-pr"),
         "promote_preview": ("wt", "promote"),
         "promote_apply": ("wt", "promote"),
+        "out_of_order_promote_preview": ("wt", "promote"),
+        "out_of_order_promote_apply": ("wt", "promote"),
+        "out_of_order_resolution_preview": ("wt", "promote"),
+        "out_of_order_resolution_apply": ("wt", "promote"),
         "finish_preview": ("wt", "finish"),
         "finish_apply": ("wt", "finish"),
         "gc_preview": ("wt", "gc"),
@@ -785,6 +789,19 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
     assert "--apply" in commands["link_pr_apply"]
     assert "--apply" not in commands["promote_preview"]
     assert "--apply" in commands["promote_apply"]
+
+    assert "--out-of-order" in commands["out_of_order_promote_preview"]
+    assert "--apply" not in commands["out_of_order_promote_preview"]
+    assert "--out-of-order" in commands["out_of_order_promote_apply"]
+    assert "--apply" in commands["out_of_order_promote_apply"]
+    assert (
+        commands["out_of_order_resolution_preview"]
+        == commands["out_of_order_promote_preview"]
+    )
+    assert (
+        commands["out_of_order_resolution_apply"]
+        == commands["out_of_order_promote_apply"]
+    )
     assert "--apply" not in commands["finish_preview"]
     assert "--apply" in commands["finish_apply"]
     assert "--merged" in commands["gc_preview"]
@@ -798,6 +815,27 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
     assert safety["promotion_scope"] == "source_pr_delta_only"
     assert safety["deployment_health"] == "repository_rollout_evidence"
     assert safety["blocked_action"] == "preserve_worktree_report_code_message"
+    assert safety["out_of_order"] == {
+        "mode": "explicit_opt_in",
+        "exact_mode": "default",
+        "single_source": True,
+        "exclude_paths": "forbidden",
+        "production_pr_review": "required",
+        "production_pr_checks": "required",
+        "direct_cherry_pick": "forbidden",
+        "staging_squash_input": "forbidden",
+        "conflict_resolution": "managed_conflicted_files_only_replay_same_command",
+        "dependency_conflict": "blocked",
+        "rename": "unsupported",
+        "blocker_codes": [
+            "invalid_out_of_order_promotion",
+            "unsupported_out_of_order_rename",
+            "out_of_order_conflict",
+            "promotion_provenance_changed",
+            "promotion_resolution_scope_mismatch",
+            "promotion_resolution_unmerged",
+        ],
+    }
     assert safety["managed_feature_pr_link"] == {
         "lease_state": "active_unlinked_or_cleanable_exact_reuse",
         "pr_provenance": (
@@ -821,6 +859,8 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "acquire",
         "link-pr",
         "promote",
+        "out_of_order_promote",
+        "out_of_order_resolution",
         "import",
         "adopt",
         "finish",
@@ -835,6 +875,7 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "direct_worktree_mutation",
         "staging_wholesale_merge",
         "branch_merged_heuristic",
+        "direct_cherry_pick",
         "stash",
         "reset",
         "force_delete",
@@ -846,6 +887,8 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
             "acquire": "review_then_apply_explicitly",
             "link_pr": "review_then_apply_explicitly",
             "promote": "review_then_apply_explicitly",
+            "out_of_order_promote": "review_then_apply_explicitly",
+            "out_of_order_resolution": "review_same_blocked_lease_then_apply_explicitly",
             "finish": "review_blockers_then_apply",
             "gc": "review_blockers_then_apply",
         },
@@ -854,6 +897,8 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
             "acquire_apply": "use_or_report_returned_lease",
             "link_pr_apply": "restart_status_preflight_then_finish",
             "promote_apply": "use_or_report_returned_lease",
+            "out_of_order_promote_apply": "use_or_report_returned_lease",
+            "out_of_order_resolution_apply": "use_or_report_returned_lease",
         },
         "removed": "report_completion",
         "blocked": "preserve_worktree_report_code_message",
@@ -1003,3 +1048,74 @@ def test_release_worktree_lifecycle_shell_examples_match_contract() -> None:
     for command in displayed_commands:
         parsed = parser.parse_args(_argv_from_skill_command(command))
         assert parsed.command == "wt"
+
+
+def test_out_of_order_promotion_docs_share_operator_contract() -> None:
+    paths = (
+        REPO_ROOT / "claude" / "skills" / "release-worktree-lifecycle" / "SKILL.md",
+        CLI_README,
+    )
+    expected_commands = (
+        "awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --json",
+        "awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --apply --json",
+        "awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --json",
+        "awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --apply --json",
+    )
+    required_prose = (
+        "a code may ship but must remain inactive",
+        "a code must stay out of production; b applies cleanly",
+        "a code must stay out; b has a mechanical patch conflict",
+        "b requires a's api, schema, or behavior",
+        "exactly one `--source-pr`",
+        "must not use `--exclude-path`",
+        "only the conflicted files returned by awf",
+        "same preview command",
+        "same command with `--apply`",
+        "approval and successful checks on that exact production pr before merge",
+        "staging squash commits are not production promotion inputs",
+        "direct staging squash cherry-pick",
+        "`invalid_out_of_order_promotion`",
+        "`unsupported_out_of_order_rename`",
+        "`out_of_order_conflict`",
+        "`promotion_provenance_changed`",
+    )
+
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        displayed_commands = _shell_fenced_awf_commands(text)
+        assert (
+            _raw_contiguous_command_slice(displayed_commands, expected_commands)
+            == expected_commands
+        )
+        prose = " ".join(text.lower().split())
+        for requirement in required_prose:
+            assert requirement in prose
+
+
+def test_release_worktree_lifecycle_skill_copies_are_byte_identical() -> None:
+    canonical = (
+        REPO_ROOT / "claude" / "skills" / "release-worktree-lifecycle" / "SKILL.md"
+    )
+    packaged = (
+        REPO_ROOT
+        / "cli"
+        / "src"
+        / "awf"
+        / "resources"
+        / "release-worktree-lifecycle"
+        / "SKILL.md"
+    )
+
+    assert canonical.read_bytes() == packaged.read_bytes()
+
+
+def test_out_of_order_promotion_changelog_names_the_opt_in_safety_contract() -> None:
+    changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8").lower()
+
+    assert "기본 exact promotion은 변경하지 않았고" in changelog
+    assert "`--out-of-order`" in changelog
+    assert "`invalid_out_of_order_promotion`" in changelog
+    assert "`unsupported_out_of_order_rename`" in changelog
+    assert "`out_of_order_conflict`" in changelog
+    assert "`promotion_provenance_changed`" in changelog
+    assert "staging squash commit" in changelog

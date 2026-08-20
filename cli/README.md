@@ -244,6 +244,56 @@ rebuilt commit must pass the same exact path/blob and production checks before
 AWF publishes a pull request. A prepare command that leaves the worktree dirty
 is blocked. Other blocked promotion states remain fail-closed.
 
+#### Out-of-order production promotion
+
+Exact promotion remains the default. Use `--out-of-order` only when a single
+reviewed staging PR must reach production without an earlier staging change. It
+is never an automatic fallback from exact promotion.
+
+| Requirement | Workflow |
+| --- | --- |
+| A code may ship but must remain inactive | Preserve staging promotion order and gate A at runtime with a feature flag or equivalent. |
+| A code must stay out of production; B applies cleanly | Use the single-source `--out-of-order` promotion below. |
+| A code must stay out; B has a mechanical patch conflict | Resolve only in the managed promotion worktree, then replay preview/apply. |
+| B requires A's API, schema, or behavior | Stop. Out-of-order promotion is invalid until the dependency is removed or a compatible prerequisite is promoted. |
+
+The mode requires exactly one `--source-pr` and MUST NOT use `--exclude-path`.
+The source must be merged into the configured staging branch and still pass its
+review and checks policy. Multiple sources or exclusions return
+`invalid_out_of_order_promotion`; renamed source paths return
+`unsupported_out_of_order_rename`. A dependency on A is a stop condition. A
+clean patch does not establish independence.
+
+Inspect the initial preview before applying, then use the exact same replay
+commands if AWF reports a conflict:
+
+```bash
+# Initial preview and apply.
+awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --json
+awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --apply --json
+# After an AWF-reported conflict, replay the same preview and apply commands.
+awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --json
+awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --apply --json
+```
+
+`out_of_order_conflict` preserves an unpublished managed worktree with pending
+source, target, reviewed-path, and conflicted-path provenance. Edit only the
+conflicted files returned by AWF. Do not use direct `git add`, `git commit`,
+`git reset`, `git cherry-pick`, or `git push`.
+
+After editing, replay the same preview command and inspect the lease,
+conflicted paths, and current changed paths. Use the same command with
+`--apply` only when every changed or unmerged path is one of the reported
+conflicted paths and the source and target provenance are unchanged. A changed
+source or target SHA returns `promotion_provenance_changed`; preserve the
+worktree instead of transplanting a resolution.
+
+AWF stages, commits, verifies, pushes, and publishes the eligible result. The
+synthetic production PR requires approval and successful checks on that exact
+production PR before merge, including an automatic clean application. Staging
+squash commits are not production promotion inputs. A direct staging squash
+cherry-pick is forbidden.
+
 Feature flow:
 
 ```bash
