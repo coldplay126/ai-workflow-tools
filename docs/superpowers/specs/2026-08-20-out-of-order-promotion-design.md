@@ -128,13 +128,15 @@ Deployment health and cleanup keep the existing `status`, `finish`, and `gc` gat
 
 ## State and compatibility
 
-Registry schema migration adds three lease columns:
+Registry schema migration adds seven lease columns:
 
 - `promotion_mode TEXT NOT NULL DEFAULT 'exact'` with values `exact` and `out_of_order`;
 - `resolution_state TEXT NOT NULL DEFAULT 'none'` with values `none`, `pending`, `automatic`, and `manual_reviewed`;
+- nullable `source_base_sha`, `source_head_sha`, and `target_base_sha` text columns;
+- `reviewed_paths TEXT NOT NULL DEFAULT '[]'`, encoded as a sorted JSON string array;
 - `conflicted_paths TEXT NOT NULL DEFAULT '[]'`, encoded as a sorted JSON string array.
 
-Existing rows migrate to exact mode with no resolution and no conflicted paths. JSON output adds these fields without removing or renaming existing fields.
+New out-of-order leases persist all seven values before applying the patch, so a conflict has durable source, target, reviewed-path, and conflict provenance without relying on a promotion commit that does not yet exist. Existing rows migrate to exact mode with no resolution, no out-of-order SHAs, and empty path arrays. JSON output adds these fields without removing or renaming existing fields.
 
 Blocked exact promotions keep their existing rebuild behavior. Out-of-order conflict recovery is eligible only for an unpublished blocked out-of-order lease with the exact request identity.
 
