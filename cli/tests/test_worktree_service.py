@@ -16,7 +16,13 @@ import awf.worktrees.service as service_module
 from awf.worktrees.config import WorktreeConfig
 from awf.worktrees.git import GitClient, GitError, GitRemoteError, GitWorktree
 from awf.worktrees.github import ExternalServiceError, PullRequest
-from awf.worktrees.models import DeploymentState, Lease, LeaseState, Purpose
+from awf.worktrees.models import (
+    DeploymentState,
+    Lease,
+    LeaseState,
+    PromotionMode,
+    Purpose,
+)
 from awf.worktrees.registry import WorktreeRegistry
 from awf.worktrees.service import WorktreeService
 from worktree_fixtures import git as git_command
@@ -3379,6 +3385,81 @@ def test_import_apply_converts_insertion_identity_race_to_skipped_action(
 @pytest.fixture
 def promotion_harness(tmp_path: Path) -> PromotionHarness:
     return PromotionHarness.create(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("source_pr", "exclude_paths"),
+    [((372, 373), ()), (372, ("feature.txt",))],
+)
+def test_promote_rejects_invalid_out_of_order_combinations(
+    promotion_harness: PromotionHarness,
+    source_pr: int | tuple[int, ...],
+    exclude_paths: tuple[str, ...],
+) -> None:
+    result = promotion_harness.service.promote(
+        source_pr=source_pr,
+        exclude_paths=exclude_paths,
+        target_branch="main",
+        out_of_order=True,
+        apply=False,
+    )
+
+    assert result.blockers[0]["code"] == "invalid_out_of_order_promotion"
+    assert promotion_harness.github.view_calls == []
+    assert len(promotion_harness.git.list_worktrees()) == 1
+    assert not promotion_harness.registry.db_path.exists()
+
+
+def test_promotion_initiative_separates_out_of_order_identity() -> None:
+    exact = WorktreeService._promotion_initiative(
+        (372,),
+        "main",
+        promotion_mode=PromotionMode.EXACT,
+    )
+    out_of_order = WorktreeService._promotion_initiative(
+        (372,),
+        "main",
+        promotion_mode=PromotionMode.OUT_OF_ORDER,
+    )
+
+    assert exact == "pr-372-to-main"
+    assert out_of_order == "pr-372-to-main-out-of-order"
+
+
+def test_promote_out_of_order_preview_reports_promotion_mode(
+    promotion_harness: PromotionHarness,
+) -> None:
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=False,
+    )
+
+    assert result.actions[0]["promotion_mode"] == "out_of_order"
+
+
+def test_promote_records_out_of_order_lease_provenance(
+    promotion_harness: PromotionHarness,
+) -> None:
+    source = promotion_harness.github.prs[372]
+    target_sha = promotion_harness.git.resolve_ref("origin/main")
+
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert result.lease is not None
+    persisted = promotion_harness.registry.get_lease(result.lease.id)
+    assert persisted is not None
+    assert persisted.promotion_mode is PromotionMode.OUT_OF_ORDER
+    assert persisted.source_base_sha == source.base_sha
+    assert persisted.source_head_sha == source.head_sha
+    assert persisted.target_base_sha == target_sha
+    assert persisted.reviewed_paths == source.changed_paths
 
 
 def test_promote_applies_only_source_pr_delta(

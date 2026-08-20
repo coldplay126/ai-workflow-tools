@@ -25,6 +25,7 @@ from .models import (
     DeploymentState,
     Lease,
     LeaseState,
+    PromotionMode,
     Purpose,
     now_iso,
 )
@@ -214,6 +215,7 @@ class WorktreeService:
         exclude_paths: Sequence[str] = (),
         target_branch: str,
         apply: bool,
+        out_of_order: bool = False,
     ) -> CommandResult:
         try:
             source_numbers = self._promotion_source_numbers(source_pr)
@@ -223,6 +225,19 @@ class WorktreeService:
             excluded_paths = self._promotion_excluded_paths(exclude_paths)
         except ValueError as error:
             return self._promotion_blocked("invalid_excluded_path", str(error))
+        promotion_mode = (
+            PromotionMode.OUT_OF_ORDER
+            if out_of_order
+            else PromotionMode.EXACT
+        )
+        if promotion_mode is PromotionMode.OUT_OF_ORDER and (
+            len(source_numbers) != 1 or excluded_paths
+        ):
+            return self._promotion_blocked(
+                "invalid_out_of_order_promotion",
+                "out-of-order promotion requires exactly one source pull request "
+                "and no excluded paths",
+            )
         try:
             target_ref = self._promotion_target_ref(target_branch)
         except ConfigError as error:
@@ -277,7 +292,11 @@ class WorktreeService:
             except GitError as error:
                 return self._promotion_blocked("target_ref_unavailable", str(error))
             lease = self._new_promotion_lease(
-                sources, target_ref, target_sha, excluded_paths
+                sources,
+                target_ref,
+                target_sha,
+                excluded_paths,
+                promotion_mode=promotion_mode,
             )
             return CommandResult.ok(
                 "wt.promote",
@@ -303,6 +322,7 @@ class WorktreeService:
                         "excluded_paths": list(excluded_paths),
                         "target_branch": target_branch,
                         "target_base_sha": target_sha,
+                        "promotion_mode": promotion_mode.value,
                     },
                     *(
                         {
@@ -316,7 +336,10 @@ class WorktreeService:
 
         repository_id = self.git.repository_id()
         initiative = self._promotion_initiative(
-            source_numbers, target_branch, excluded_paths
+            source_numbers,
+            target_branch,
+            excluded_paths,
+            promotion_mode=promotion_mode,
         )
         expected_branch = self._promotion_branch(initiative)
         with repository_lock(self.lock_dir / f"{repository_id}.lock"):
@@ -480,7 +503,11 @@ class WorktreeService:
             )
             expected_paths = tuple(sorted(expected_blobs))
             lease = self._new_promotion_lease(
-                sources, target_ref, target_sha, excluded_paths
+                sources,
+                target_ref,
+                target_sha,
+                excluded_paths,
+                promotion_mode=promotion_mode,
             )
             branch_conflict = self._branch_conflict(lease.branch)
             if branch_conflict is not None:
@@ -3115,12 +3142,14 @@ class WorktreeService:
         target_ref: str,
         target_sha: str,
         excluded_paths: Sequence[str],
+        promotion_mode: PromotionMode = PromotionMode.EXACT,
     ) -> Lease:
         target_branch = target_ref[len("origin/") :]
         initiative = self._promotion_initiative(
             tuple(source.number for source in sources),
             target_branch,
             excluded_paths,
+            promotion_mode=promotion_mode,
         )
         lease = Lease.new(
             repository_id=self.git.repository_id(),
@@ -3135,6 +3164,35 @@ class WorktreeService:
             managed=True,
             owner_kind="awf",
             source_pr=sources[0].number,
+            promotion_mode=promotion_mode,
+            source_base_sha=(
+                sources[0].base_sha
+                if promotion_mode is PromotionMode.OUT_OF_ORDER
+                else None
+            ),
+            source_head_sha=(
+                sources[-1].head_sha
+                if promotion_mode is PromotionMode.OUT_OF_ORDER
+                else None
+            ),
+            target_base_sha=(
+                target_sha
+                if promotion_mode is PromotionMode.OUT_OF_ORDER
+                else None
+            ),
+            reviewed_paths=(
+                tuple(
+                    sorted(
+                        {
+                            path
+                            for source in sources
+                            for path in source.changed_paths
+                        }
+                    )
+                )
+                if promotion_mode is PromotionMode.OUT_OF_ORDER
+                else ()
+            ),
         )
         return replace(
             lease,
@@ -3146,16 +3204,19 @@ class WorktreeService:
         source_prs: Sequence[int],
         target_branch: str,
         excluded_paths: Sequence[str] = (),
+        promotion_mode: PromotionMode = PromotionMode.EXACT,
     ) -> str:
         prefix = "pr" if len(source_prs) == 1 else "prs"
         numbers = "-".join(str(source_pr) for source_pr in source_prs)
         initiative = f"{prefix}-{numbers}-to-{target_branch}"
-        if not excluded_paths:
-            return initiative
-        digest = hashlib.sha256(
-            "\0".join(excluded_paths).encode("utf-8")
-        ).hexdigest()[:16]
-        return f"{initiative}-except-{digest}"
+        if excluded_paths:
+            digest = hashlib.sha256(
+                "\0".join(excluded_paths).encode("utf-8")
+            ).hexdigest()[:16]
+            initiative = f"{initiative}-except-{digest}"
+        if promotion_mode is PromotionMode.OUT_OF_ORDER:
+            return f"{initiative}-out-of-order"
+        return initiative
 
     @staticmethod
     def _promotion_branch(initiative: str) -> str:

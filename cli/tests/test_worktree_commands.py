@@ -516,6 +516,7 @@ def test_wt_promote_parser_surface() -> None:
             "src/OpenApi.ts",
             "--exclude-path",
             "src/domains/fanLog/FanLogOpenApi.ts",
+            "--out-of-order",
             "--to",
             "main",
             "--repo-root",
@@ -536,7 +537,44 @@ def test_wt_promote_parser_surface() -> None:
     assert args.repo_root == "/repo"
     assert args.apply is True
     assert args.json is True
+    assert args.out_of_order is True
     assert args.handler.__name__ == "run_wt_promote"
+
+
+def test_wt_promote_forwards_out_of_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = make_repository(tmp_path)
+    received: dict[str, object] = {}
+
+    def record_promotion(*_args: object, **kwargs: object) -> CommandResult:
+        received.update(kwargs)
+        return CommandResult.ok("wt.promote", decision="preview")
+
+    monkeypatch.setattr(
+        "awf.commands.wt.WorktreeService.promote",
+        record_promotion,
+    )
+
+    rc, stdout, stderr = capture_main(
+        [
+            "wt",
+            "promote",
+            "--source-pr",
+            "372",
+            "--out-of-order",
+            "--to",
+            "main",
+            "--repo-root",
+            str(repo),
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    assert stderr == ""
+    assert json.loads(stdout)["decision"] == "preview"
+    assert received["out_of_order"] is True
 
 
 def test_wt_acquire_preview_emits_one_json_document(

@@ -702,6 +702,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Merged staging pull request number. Repeat in staging merge order.",
     )
     wt_promote_parser.add_argument(
+        "--out-of-order",
+        action="store_true",
+        help=(
+            "Reconstruct one reviewed staging PR on production without earlier "
+            "staging changes. Requires separate production review."
+        ),
+    )
+    wt_promote_parser.add_argument(
         "--exclude-path",
         action="append",
         default=[],

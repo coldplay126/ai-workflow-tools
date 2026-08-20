@@ -133,6 +133,7 @@ def run_wt_promote(args: argparse.Namespace) -> int:
             source_pr=args.source_pr,
             exclude_paths=args.exclude_path,
             target_branch=args.to,
+            out_of_order=args.out_of_order,
             apply=args.apply,
         ),
     )
