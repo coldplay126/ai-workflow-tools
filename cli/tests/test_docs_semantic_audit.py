@@ -1164,13 +1164,18 @@ def test_out_of_order_promotion_docs_share_operator_contract() -> None:
         "`promotion_resolution_unmerged`",
         "`source_base_sha`, `source_head_sha`, `target_base_sha`, and `reviewed_paths`",
         "action order is `resolve_out_of_order_conflict`, `stage_paths`, `commit`, `verify_production`, `push_branch`, then `open_pull_request`",
-        "operator's unstaged and unmerged edits must be a subset of `conflicted_paths`",
-        "final indexed delta must be a non-empty subset of `reviewed_paths`",
+        "operator's unstaged edits and unmerged paths must be a subset of `conflicted_paths`",
+        "awf clean-applied staged `protected_index_entries` may remain outside `conflicted_paths`",
+        "their mode+oid pin is exact across preview, apply, and retry",
+        "final indexed and committed paths must be a subset of `reviewed_paths`",
         "checks conflict markers only",
         "trailing whitespace is not prohibited",
         "rechecks the live target after verification before publish",
-        "clean-applied reviewed paths outside `conflicted_paths` are awf-pinned by exact stage-0 mode and blob oid index entries across preview, apply, and retry",
         "direct `git add` tampering or chmod/file-type mode tampering returns `promotion_resolution_scope_mismatch`",
+    )
+    forbidden_prose = (
+        "every changed or unmerged path remains within the reported conflicted paths",
+        "every changed or unmerged path is one of the reported conflicted paths",
     )
 
     parser = build_parser()
@@ -1192,6 +1197,8 @@ def test_out_of_order_promotion_docs_share_operator_contract() -> None:
         prose = " ".join(section.lower().split())
         for requirement in required_prose:
             assert requirement in prose
+        for stale_requirement in forbidden_prose:
+            assert stale_requirement not in prose
 
 
 def test_release_worktree_lifecycle_skill_copies_are_byte_identical() -> None:

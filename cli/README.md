@@ -288,13 +288,13 @@ source, target, reviewed-path, and conflicted-path provenance. Edit only the
 conflicted files returned by AWF. Do not use direct `git add`, `git commit`,
 `git reset`, `git cherry-pick`, or `git push`.
 
-The operator's unstaged and unmerged edits must be a subset of
-`conflicted_paths`. AWF may already have clean-applied and staged part of the
-patch; the final indexed delta must be a non-empty subset of `reviewed_paths`.
+Operator's unstaged edits and unmerged paths must be a subset of
+`conflicted_paths`. AWF clean-applied staged `protected_index_entries` may
+remain outside `conflicted_paths`. Their mode+OID pin is exact across preview,
+apply, and retry. Final indexed and committed paths must be a subset of
+`reviewed_paths`.
 
-Clean-applied reviewed paths outside `conflicted_paths` are AWF-pinned by exact
-stage-0 mode and blob OID index entries across preview, apply, and retry. Direct
-`git add` tampering or chmod/file-type mode tampering returns
+Direct `git add` tampering or chmod/file-type mode tampering returns
 `promotion_resolution_scope_mismatch`.
 
 Any direct cherry-pick is forbidden for production promotion. AWF reconstructs
@@ -302,15 +302,13 @@ reviewed PR deltas only through `awf wt promote`.
 
 After editing, replay the same preview command and inspect the lease,
 conflicted paths, and current changed paths. Use the same command with
-`--apply` only when every changed or unmerged path is one of the reported
-conflicted paths and the source and target provenance are unchanged. A changed
-source or target SHA returns `promotion_provenance_changed`; preserve the
-worktree instead of transplanting a resolution.
-
-If any changed or unmerged path falls outside the recorded conflict set, AWF
-returns `promotion_resolution_scope_mismatch`. AWF stages the allowed conflict
-files itself; if an unmerged index entry remains after that staging step, it
-returns `promotion_resolution_unmerged`.
+`--apply` only when source and target provenance are unchanged. If the source
+or target SHA changes, AWF returns `promotion_provenance_changed` and preserves
+the worktree rather than transplanting a resolution. An operator unstaged edit
+or unmerged path outside `conflicted_paths` returns
+`promotion_resolution_scope_mismatch`. AWF stages the allowed conflict files;
+an unmerged index entry that remains after staging returns
+`promotion_resolution_unmerged`.
 
 All conflict markers must be removed before apply. If a marker remains, AWF
 does not publish and preserves the worktree.
