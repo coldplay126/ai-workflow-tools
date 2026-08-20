@@ -89,7 +89,8 @@ For a new out-of-order promotion:
 7. Commit the synthetic production result with out-of-order provenance.
 8. Require the target-to-promotion changed paths to be a non-empty subset of the reviewed source paths. Paths that are already identical on production may be absent from the net delta. No new path is allowed.
 9. Run prepare and all production verification commands.
-10. Push the managed branch and create the production PR.
+10. Recheck the live origin target SHA after verification. If it changed, block and preserve the managed worktree.
+11. Push the managed branch and create the production PR.
 
 Out-of-order mode deliberately does not compare the final blobs with the source head. The production PR is a synthetic result and requires its own review. Exact mode keeps the current full-blob comparison.
 
@@ -103,17 +104,19 @@ A failed three-way application must preserve a managed, unpublished promotion wo
 - resolution state `pending`;
 - no remote branch and no target PR.
 
-The operator may edit only the conflicted files returned by AWF. Direct `git add`, `git commit`, `git reset`, `git cherry-pick`, and `git push` remain forbidden.
+The operator may edit only the conflicted files returned by AWF. Direct `git add`, `git commit`, `git reset`, `git cherry-pick`, and `git push` remain forbidden. The operator's unstaged and unmerged edits must be a subset of `conflicted_paths`; AWF may already have clean-applied and staged part of the patch. The final indexed delta must be non-empty and a subset of `reviewed_paths`.
 
-Repeating the same preview command inspects the blocked lease. A resolvable preview reports the lease, conflicted paths, current changed paths, and the actions that apply would take. Repeating the same command with `--apply` finalizes the resolution only when all guards pass:
+Initial preview exposes `source_base_sha`, `source_head_sha`, `target_base_sha`, and `reviewed_paths`. Repeating the same preview command for a pending lease reports the lease, conflicted paths, current changed paths, and the planned actions in this order: `resolve_out_of_order_conflict`, `stage_paths`, `commit`, `verify_production`, `push_branch`, and `open_pull_request`.
+
+Repeating the same command with `--apply` finalizes the resolution only when all guards pass:
 
 1. repository, source PR, promotion mode, target branch, source base/head, and target SHA are unchanged;
 2. the worktree is the exact registered managed worktree;
-3. no changed or unmerged path lies outside the recorded conflicted paths;
-4. every recorded conflict has a worktree resolution;
-5. no conflict marker or unmerged index entry remains after AWF stages the allowed paths;
-6. the target-to-result delta is non-empty and contains only reviewed source paths;
-7. prepare and production verification succeed;
+3. operator unstaged and unmerged paths are within `conflicted_paths`;
+4. AWF stages only the recorded conflicted paths, and no unmerged or unstaged resolution entry remains;
+5. the final indexed delta is non-empty and a subset of `reviewed_paths`;
+6. staged and committed deltas contain no conflict markers. This guard checks markers only; it does not prohibit valid trailing whitespace;
+7. prepare and production verification succeed, then AWF rechecks the live target SHA before publication;
 8. the promotion branch is still unpublished and no target PR exists.
 
 AWF stages allowed resolution files, commits them, and publishes only after validation. The commit records `AWF-Resolution: manual-reviewed`.

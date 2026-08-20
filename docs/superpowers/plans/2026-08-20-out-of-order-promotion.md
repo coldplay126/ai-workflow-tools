@@ -428,7 +428,7 @@ def validate_promotion_delta():
             )
 ```
 
-Transition a clean out-of-order lease to `ResolutionState.AUTOMATIC` before publication. Continue through the existing prepare, production verification, push, find-or-create PR, and `PR_OPEN` flow.
+Transition a clean out-of-order lease to `ResolutionState.AUTOMATIC` before publication. Continue through the existing prepare, production verification, live-target recheck, push, find-or-create PR, and `PR_OPEN` flow.
 
 - [ ] **Step 4: Add mode-aware provenance**
 
@@ -481,7 +481,20 @@ Assert exact mode still uses the existing generic blocked path and never becomes
 
 - [ ] **Step 2: Write failing preview/apply recovery tests**
 
-Edit only the returned conflict file, without running Git commands. Repeat the preview request and expect an action with `kind == "resolve_out_of_order_conflict"`. Repeat with `--apply` and assert:
+Edit only the returned conflict file, without running Git commands. Repeat the preview request and expect a read-only action sequence:
+
+```python
+assert tuple(action["kind"] for action in preview.actions) == (
+    "resolve_out_of_order_conflict",
+    "stage_paths",
+    "commit",
+    "verify_production",
+    "push_branch",
+    "open_pull_request",
+)
+```
+
+Repeat with `--apply` and assert:
 
 ```python
 assert resumed.decision == "ready"
@@ -491,16 +504,7 @@ assert resumed.lease.state is LeaseState.PR_OPEN
 assert "AWF-Resolution: manual-reviewed" in harness.github.created[0]["body"]
 ```
 
-Add blockers for:
-
-- changed file outside `conflicted_paths`;
-- current source base/head differing from persisted provenance;
-- current target SHA differing from `target_base_sha`;
-- a remaining unmerged path after AWF staging;
-- empty net production delta;
-- published remote branch or existing target PR.
-
-Expected codes: `promotion_resolution_scope_mismatch`, `promotion_provenance_changed`, or `promotion_incomplete` according to the condition.
+Add blockers for operator unstaged or unmerged paths outside `conflicted_paths`, a remaining unmerged or unstaged entry after AWF staging, current source base/head differing from persisted provenance, current target SHA differing from `target_base_sha`, an empty net production delta, a conflict marker, a published remote branch, or an existing target PR. The marker guard must allow valid trailing whitespace.
 
 - [ ] **Step 3: Run tests and verify RED**
 
@@ -525,22 +529,23 @@ Return the blocked lease and a concise message listing the paths. Do not reset, 
 
 - [ ] **Step 5: Add read-only resolution preview**
 
-Before normal preview returns, look up the exact active out-of-order initiative through a read-only registry path. If it is a pending blocked lease, call `_preview_out_of_order_resolution()`.
+Before normal preview returns, look up the exact active out-of-order initiative through a read-only registry path. If it is a pending blocked lease, call `_out_of_order_resolution_preview()`.
 
-The helper must verify request identity, persisted source/target SHAs, registered worktree path, absent remote branch/PR, and changed/unmerged path scope. It returns preview actions only; it does not stage or mutate files.
+The helper must verify request identity, persisted source/target SHAs, registered worktree path, absent remote branch/PR, and operator unstaged/unmerged scope. It returns, without mutation, the planned action order: resolve the reported conflict, stage exactly `conflicted_paths`, commit, run production verification, push the managed branch, and open the target PR.
 
 - [ ] **Step 6: Add apply recovery**
 
-In `_reuse_promotion()`, branch on pending out-of-order resolution before reading a promotion commit message. `_resolve_out_of_order_promotion()` must:
+In `_reuse_promotion()`, branch on pending out-of-order resolution before reading a promotion commit message. `_resume_out_of_order_conflict()` must:
 
 1. repeat every preview guard under the repository lock;
-2. stage exactly `lease.conflicted_paths` through `GitClient.stage_paths()`;
-3. require `unmerged_paths()` to become empty;
-4. commit using `AWF-Resolution: manual-reviewed`;
-5. verify non-empty target-to-head paths are a subset of `lease.reviewed_paths`;
-6. run prepare and production verification;
-7. transition to publish pending with `MANUAL_REVIEWED`;
-8. use the existing idempotent publication helper.
+2. require operator unstaged and unmerged paths to be subsets of `lease.conflicted_paths`;
+3. stage exactly `lease.conflicted_paths` through `GitClient.stage_paths()`;
+4. require no unmerged or unstaged resolution entry to remain;
+5. reject staged and committed conflict markers while allowing valid trailing whitespace;
+6. verify that the final indexed target-to-head paths are non-empty and a subset of `lease.reviewed_paths`;
+7. commit using `AWF-Resolution: manual-reviewed`;
+8. run prepare and production verification, then recheck the live target SHA before publication;
+9. transition to publish pending with `MANUAL_REVIEWED` and use the existing idempotent publication helper.
 
 Any failure stays BLOCKED and preserves the worktree. Target/source drift must not reset or transplant the resolution.
 
@@ -598,12 +603,15 @@ Document:
 
 - feature-flag path when A code may ship inactive;
 - code-isolated single-source `--out-of-order` preview/apply;
-- managed file-only conflict editing and exact command replay;
+- initial preview provenance including `reviewed_paths`;
+- managed file-only conflict editing, staged-delta boundaries, marker-only validation, and exact command replay;
+- ordered resolution preview actions: resolve, stage, commit, verify, publish;
 - mandatory review/checks on the synthetic production PR;
 - dependency conflicts as a stop condition;
+- live-target recheck after verification and before publish;
 - direct staging squash cherry-picks as forbidden.
 
-Update the JSON decision table with the exact displayed commands. Copy the canonical Skill byte-for-byte to the packaged resource; do not maintain divergent prose.
+Update the JSON decision table with the exact displayed commands and additive preview/action safety fields. Copy the canonical Skill byte-for-byte to the packaged resource; do not maintain divergent prose.
 
 - [ ] **Step 4: Update README and changelog**
 

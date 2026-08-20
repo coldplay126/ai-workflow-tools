@@ -871,6 +871,24 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "conflict_resolution": "managed_conflicted_files_only_replay_same_command",
         "dependency_conflict": "blocked",
         "rename": "unsupported",
+        "initial_preview_fields": [
+            "source_base_sha",
+            "source_head_sha",
+            "target_base_sha",
+            "reviewed_paths",
+        ],
+        "resolution_preview_actions": [
+            "resolve_out_of_order_conflict",
+            "stage_paths",
+            "commit",
+            "verify_production",
+            "push_branch",
+            "open_pull_request",
+        ],
+        "operator_edit_scope": "unstaged_unmerged_subset_of_conflicted_paths",
+        "final_indexed_delta": "non_empty_reviewed_paths_subset",
+        "conflict_marker_policy": "markers_only_trailing_whitespace_allowed",
+        "live_target_recheck": "after_verification_before_publish",
         "blocker_codes": [
             "invalid_out_of_order_promotion",
             "unsupported_out_of_order_rename",
@@ -1138,6 +1156,13 @@ def test_out_of_order_promotion_docs_share_operator_contract() -> None:
         "`promotion_provenance_changed`",
         "`promotion_resolution_scope_mismatch`",
         "`promotion_resolution_unmerged`",
+        "`source_base_sha`, `source_head_sha`, `target_base_sha`, and `reviewed_paths`",
+        "action order is `resolve_out_of_order_conflict`, `stage_paths`, `commit`, `verify_production`, `push_branch`, then `open_pull_request`",
+        "operator's unstaged and unmerged edits must be a subset of `conflicted_paths`",
+        "final indexed delta must be a non-empty subset of `reviewed_paths`",
+        "checks conflict markers only",
+        "trailing whitespace is not prohibited",
+        "rechecks the live target after verification before publish",
     )
 
     parser = build_parser()

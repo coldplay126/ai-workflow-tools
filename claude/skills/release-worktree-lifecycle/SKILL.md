@@ -145,9 +145,10 @@ Renamed source paths are unsupported and stop with
 `unsupported_out_of_order_rename`. A source dependency on A is a stop
 condition; a clean patch does not prove that B is independent.
 
-Preview the code-isolated synthetic production result, inspect its source
-base/head, target base, reviewed paths, mode, and verification actions, then
-explicitly apply it:
+Preview the code-isolated synthetic production result. Initial preview exposes
+`source_base_sha`, `source_head_sha`, `target_base_sha`, and `reviewed_paths`.
+Inspect those fields with the promotion mode and verification actions before
+explicitly applying it:
 
 ```sh
 # Initial preview and apply.
@@ -158,11 +159,20 @@ awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <re
 awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --apply --json
 ```
 
+When the replayed preview finds a pending conflict, it lists the work AWF
+would perform. The action order is `resolve_out_of_order_conflict`,
+`stage_paths`, `commit`, `verify_production`, `push_branch`, then
+`open_pull_request`.
+
 A failed three-way apply stops with `out_of_order_conflict`. AWF preserves an
 unpublished managed worktree with pending source, target, reviewed-path, and
 conflicted-path provenance. The operator may edit only the conflicted files
 returned by AWF. MUST NOT use `git add`, `git commit`, `git reset`,
 `git cherry-pick`, or `git push`.
+
+The operator's unstaged and unmerged edits must be a subset of
+`conflicted_paths`. AWF may already have clean-applied and staged part of the
+patch; the final indexed delta must be a non-empty subset of `reviewed_paths`.
 
 Any direct cherry-pick is forbidden for production promotion. AWF reconstructs
 reviewed PR deltas only through `awf wt promote`.
@@ -179,6 +189,11 @@ All conflict markers must be removed before apply. If a marker remains, AWF
 does not publish and preserves the worktree. If either reviewed source SHA or
 the target SHA changes, stop with `promotion_provenance_changed`; preserve the
 worktree rather than transplanting a resolution.
+
+The guard checks conflict markers only; trailing whitespace is not prohibited
+by this policy. For a clean automatic apply, AWF rechecks the live target after
+verification before publish. A changed target remains blocked and the managed
+worktree is preserved.
 
 AWF stages, commits, verifies, pushes, and publishes the eligible resolution.
 The synthetic production PR requires approval and successful checks on that
@@ -312,6 +327,24 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
       "conflict_resolution": "managed_conflicted_files_only_replay_same_command",
       "dependency_conflict": "blocked",
       "rename": "unsupported",
+      "initial_preview_fields": [
+        "source_base_sha",
+        "source_head_sha",
+        "target_base_sha",
+        "reviewed_paths"
+      ],
+      "resolution_preview_actions": [
+        "resolve_out_of_order_conflict",
+        "stage_paths",
+        "commit",
+        "verify_production",
+        "push_branch",
+        "open_pull_request"
+      ],
+      "operator_edit_scope": "unstaged_unmerged_subset_of_conflicted_paths",
+      "final_indexed_delta": "non_empty_reviewed_paths_subset",
+      "conflict_marker_policy": "markers_only_trailing_whitespace_allowed",
+      "live_target_recheck": "after_verification_before_publish",
       "blocker_codes": [
         "invalid_out_of_order_promotion",
         "unsupported_out_of_order_rename",

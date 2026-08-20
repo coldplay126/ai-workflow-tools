@@ -264,7 +264,9 @@ review and checks policy. Multiple sources or exclusions return
 `unsupported_out_of_order_rename`. A dependency on A is a stop condition. A
 clean patch does not establish independence.
 
-Inspect the initial preview before applying, then use the exact same replay
+Inspect the initial preview before applying. It exposes `source_base_sha`,
+`source_head_sha`, `target_base_sha`, and `reviewed_paths`; inspect those with
+the promotion mode and verification actions, then use the exact same replay
 commands if AWF reports a conflict:
 
 ```bash
@@ -276,10 +278,19 @@ awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <re
 awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --apply --json
 ```
 
+When the replayed preview finds a pending conflict, it lists the work AWF
+would perform. The action order is `resolve_out_of_order_conflict`,
+`stage_paths`, `commit`, `verify_production`, `push_branch`, then
+`open_pull_request`.
+
 `out_of_order_conflict` preserves an unpublished managed worktree with pending
 source, target, reviewed-path, and conflicted-path provenance. Edit only the
 conflicted files returned by AWF. Do not use direct `git add`, `git commit`,
 `git reset`, `git cherry-pick`, or `git push`.
+
+The operator's unstaged and unmerged edits must be a subset of
+`conflicted_paths`. AWF may already have clean-applied and staged part of the
+patch; the final indexed delta must be a non-empty subset of `reviewed_paths`.
 
 Any direct cherry-pick is forbidden for production promotion. AWF reconstructs
 reviewed PR deltas only through `awf wt promote`.
@@ -298,6 +309,11 @@ returns `promotion_resolution_unmerged`.
 
 All conflict markers must be removed before apply. If a marker remains, AWF
 does not publish and preserves the worktree.
+
+The guard checks conflict markers only; trailing whitespace is not prohibited
+by this policy. For a clean automatic apply, AWF rechecks the live target after
+verification before publish. A changed target remains blocked and the managed
+worktree is preserved.
 
 AWF stages, commits, verifies, pushes, and publishes the eligible result. The
 synthetic production PR requires approval and successful checks on that exact
