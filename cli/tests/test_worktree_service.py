@@ -14,7 +14,13 @@ import pytest
 
 import awf.worktrees.service as service_module
 from awf.worktrees.config import WorktreeConfig
-from awf.worktrees.git import GitClient, GitError, GitRemoteError, GitWorktree
+from awf.worktrees.git import (
+    GitClient,
+    GitError,
+    GitPatchConflict,
+    GitRemoteError,
+    GitWorktree,
+)
 from awf.worktrees.github import ExternalServiceError, PullRequest
 from awf.worktrees.models import (
     DeploymentState,
@@ -5052,6 +5058,220 @@ def test_promote_out_of_order_retries_manual_commit_after_verification_failure(
     assert resumed.lease.head_sha == committed_head
     assert resumed.lease.resolution_state is ResolutionState.MANUAL_REVIEWED
     assert len(promotion_harness.github.create_calls) == 1
+def test_promote_exact_preview_skips_legacy_read_only_active_lookup(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def legacy_lookup(*_args: object) -> Lease | None:
+        raise AssertionError("exact preview must not inspect the active-lease schema")
+
+    monkeypatch.setattr(
+        promotion_harness.registry,
+        "find_active_read_only",
+        legacy_lookup,
+    )
+
+    preview = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=False,
+    )
+
+    assert preview.decision == "preview"
+    assert not promotion_harness.registry.db_path.exists()
+
+
+def test_promote_out_of_order_preview_blocks_read_only_schema_error(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def legacy_lookup(*_args: object) -> Lease | None:
+        raise sqlite3.OperationalError("no such column: promotion_mode")
+
+    monkeypatch.setattr(
+        promotion_harness.registry,
+        "find_active_read_only",
+        legacy_lookup,
+    )
+
+    preview = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=False,
+    )
+
+    assert preview.status == "blocked"
+    assert preview.blockers[0]["code"] == "registry_conflict"
+    assert not promotion_harness.registry.db_path.exists()
+
+
+def test_promote_out_of_order_records_sorted_special_conflict_paths(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def conflict(_worktree: Path, _patch: bytes) -> None:
+        raise GitPatchConflict(("z space", "a [one]"), "synthetic conflict")
+
+    monkeypatch.setattr(promotion_harness.git, "apply_indexed_patch", conflict)
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.lease is not None
+    assert result.lease.conflicted_paths == ("a [one]", "z space")
+    event = promotion_harness.registry.list_events(result.lease.id)[0]
+    assert event.summary.endswith(
+        "conflicted paths: 'a [one]', 'z space'"
+    )
+
+
+def test_promote_out_of_order_reconciles_manual_commit_after_transition_failure(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lease = _pending_out_of_order_conflict(promotion_harness)
+    (lease.worktree_path / "feature.txt").write_text(
+        "manually resolved\n", encoding="utf-8"
+    )
+    original_transition = promotion_harness.registry.transition
+    original_commit = promotion_harness.git.commit
+    transition_failures = 0
+    commit_messages: list[str] = []
+
+    def transition(*args: object, **kwargs: object) -> Lease:
+        nonlocal transition_failures
+        if (
+            kwargs.get("event_type") == "promotion_manual_resolution_committed"
+            and transition_failures == 0
+        ):
+            transition_failures += 1
+            raise RuntimeError("registry temporarily unavailable")
+        return original_transition(*args, **kwargs)
+
+    def commit(
+        worktree: Path, message: str, *, allow_empty: bool = False
+    ) -> str:
+        commit_messages.append(message)
+        return original_commit(worktree, message, allow_empty=allow_empty)
+
+    monkeypatch.setattr(promotion_harness.registry, "transition", transition)
+    monkeypatch.setattr(promotion_harness.git, "commit", commit)
+    failed = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert failed.status == "blocked"
+    assert failed.lease is not None
+    assert failed.lease.resolution_state is ResolutionState.PENDING
+    committed_head = promotion_harness.git.head_sha(lease.worktree_path)
+    assert committed_head != lease.head_sha
+    resumed = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert resumed.decision == "ready"
+    assert resumed.lease is not None
+    assert resumed.lease.head_sha == committed_head
+    assert resumed.lease.resolution_state is ResolutionState.MANUAL_REVIEWED
+    assert len(commit_messages) == 1
+    assert len(promotion_harness.github.create_calls) == 1
+
+
+def test_promote_out_of_order_blocks_immutable_marker_commit(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lease = _pending_out_of_order_conflict(promotion_harness)
+    (lease.worktree_path / "feature.txt").write_text(
+        "manually resolved\n", encoding="utf-8"
+    )
+    original_commit = promotion_harness.git.commit
+
+    def commit(
+        worktree: Path, message: str, *, allow_empty: bool = False
+    ) -> str:
+        (worktree / "feature.txt").write_text(
+            "<<<<<<< ours\nmanual\n=======\ntheirs\n>>>>>>> theirs\n",
+            encoding="utf-8",
+        )
+        promotion_harness.git.stage_paths(worktree, ("feature.txt",))
+        return original_commit(worktree, message, allow_empty=allow_empty)
+
+    monkeypatch.setattr(promotion_harness.git, "commit", commit)
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "promotion_incomplete"
+    assert result.lease == lease
+    assert promotion_harness.github.create_calls == []
+
+
+def test_promote_out_of_order_blocks_target_drift_after_final_verification(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lease = _pending_out_of_order_conflict(promotion_harness)
+    (lease.worktree_path / "feature.txt").write_text(
+        "manually resolved\n", encoding="utf-8"
+    )
+    original_verify = promotion_harness.service._verify_promotion
+    original_remote_branch_sha = promotion_harness.git.remote_branch_sha
+    verification_count = 0
+    find_counts: list[int] = []
+    push_calls: list[str] = []
+
+    def verify(worktree: Path) -> tuple[dict[str, object], ...]:
+        nonlocal verification_count
+        verification_count += 1
+        find_counts.append(len(promotion_harness.github.find_calls))
+        return original_verify(worktree)
+
+    def remote_branch_sha(branch: str) -> str | None:
+        if branch == "main" and verification_count >= 2:
+            return "d" * 40
+        return original_remote_branch_sha(branch)
+
+    def push_branch(_worktree: Path, branch: str) -> None:
+        push_calls.append(branch)
+
+    monkeypatch.setattr(promotion_harness.service, "_verify_promotion", verify)
+    monkeypatch.setattr(
+        promotion_harness.git,
+        "remote_branch_sha",
+        remote_branch_sha,
+    )
+    monkeypatch.setattr(promotion_harness.git, "push_branch", push_branch)
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "promotion_provenance_changed"
+    assert verification_count == 2
+    assert find_counts == [2, 2]
+    assert push_calls == []
+    assert promotion_harness.github.create_calls == []
+
+
 
 
 

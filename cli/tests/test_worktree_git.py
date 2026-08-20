@@ -502,6 +502,19 @@ def test_git_client_stage_paths_resolves_conflict_and_preserves_staged_change(
     assert client.unmerged_paths(worktree) == ()
     assert client.status_porcelain(worktree) == ("M  shared.txt",)
 
+def test_git_client_detects_conflict_marker_in_committed_diff(tmp_path: Path) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    base = client.head_sha()
+    (repo / "marker.txt").write_text(
+        "<<<<<<< ours\nmanual\n=======\ntheirs\n>>>>>>> theirs\n",
+        encoding="utf-8",
+    )
+    client.stage_paths(repo, ("marker.txt",))
+    head = client.commit(repo, "marker")
+
+    assert not client.committed_diff_is_clean(repo, base, head)
+
 
 def test_git_client_stage_paths_rejects_empty_paths(tmp_path: Path) -> None:
     client = GitClient(make_repository(tmp_path))

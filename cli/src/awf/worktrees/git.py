@@ -390,6 +390,21 @@ class GitClient:
             raise
         return True
 
+    def committed_diff_is_clean(self, cwd: Path, base: str, head: str) -> bool:
+        try:
+            self._run(
+                "diff",
+                "--check",
+                "--no-ext-diff",
+                f"{base}..{head}",
+                cwd=cwd,
+            )
+        except GitError as error:
+            if error.returncode is not None:
+                return False
+            raise
+        return True
+
     def reset_hard(self, cwd: Path, ref: str) -> None:
         """Set a managed checkout to ref and discard tracked staged/unstaged changes."""
         self._run("reset", "--hard", "-q", "--end-of-options", ref, cwd=cwd)
