@@ -3397,7 +3397,7 @@ class WorktreeService:
                 )
             changed_paths = self.git.worktree_changed_paths(lease.worktree_path)
             unmerged_paths = self.git.unmerged_paths(lease.worktree_path)
-            protected_blobs_match = self._protected_blobs_match(lease)
+            protected_index_entries_match = self._protected_index_entries_match(lease)
         except GitRemoteError as error:
             return self._external_error(
                 "wt.promote",
@@ -3426,7 +3426,7 @@ class WorktreeService:
                 f"lease {lease.id} has pending changes outside conflicted paths",
                 lease=lease,
             )
-        if not protected_blobs_match:
+        if not protected_index_entries_match:
             return self._promotion_blocked(
                 "promotion_resolution_scope_mismatch",
                 f"lease {lease.id} protected reviewed paths changed",
@@ -3544,7 +3544,7 @@ class WorktreeService:
                     f"lease {lease.id} has pending changes outside conflicted paths",
                     lease=lease,
                 )
-            if not self._protected_blobs_match(lease):
+            if not self._protected_index_entries_match(lease):
                 return self._promotion_blocked(
                     "promotion_resolution_scope_mismatch",
                     f"lease {lease.id} protected reviewed paths changed",
@@ -3681,7 +3681,7 @@ class WorktreeService:
                     f"lease {lease.id} does not match a committed manual resolution",
                     lease=lease,
                 )
-            if not self._protected_blobs_match(lease):
+            if not self._protected_index_entries_match(lease):
                 return self._promotion_blocked(
                     "promotion_resolution_scope_mismatch",
                     f"lease {lease.id} protected reviewed paths changed",
@@ -3812,7 +3812,7 @@ class WorktreeService:
                     f"lease {lease.id} does not match its committed manual resolution",
                     lease=lease,
                 )
-            if not self._protected_blobs_match(lease):
+            if not self._protected_index_entries_match(lease):
                 return self._promotion_blocked(
                     "promotion_resolution_scope_mismatch",
                     f"lease {lease.id} protected reviewed paths changed",
@@ -4359,7 +4359,7 @@ class WorktreeService:
                 )
             if (
                 lease.resolution_state is ResolutionState.MANUAL_REVIEWED
-                and not self._protected_blobs_match(lease)
+                and not self._protected_index_entries_match(lease)
             ):
                 return self._promotion_blocked(
                     "promotion_resolution_scope_mismatch",
@@ -4540,7 +4540,7 @@ class WorktreeService:
                 )
             if (
                 lease.resolution_state is ResolutionState.MANUAL_REVIEWED
-                and not self._protected_blobs_match(lease)
+                and not self._protected_index_entries_match(lease)
             ):
                 return self._block_promotion_lease(
                     lease,
@@ -4925,17 +4925,20 @@ class WorktreeService:
         return None
 
 
-    def _protected_blobs_match(self, lease: Lease) -> bool:
+    def _protected_index_entries_match(self, lease: Lease) -> bool:
         protected_paths = tuple(
             path
             for path in lease.reviewed_paths
             if path not in lease.conflicted_paths
         )
-        if tuple(path for path, _blob_oid in lease.protected_blobs) != protected_paths:
+        if (
+            tuple(path for path, _entry in lease.protected_index_entries)
+            != protected_paths
+        ):
             return False
-        return self.git.index_blob_snapshot(
+        return self.git.index_entry_snapshot(
             lease.worktree_path, protected_paths
-        ) == lease.protected_blobs
+        ) == lease.protected_index_entries
 
 
     def _record_out_of_order_conflict(
@@ -4947,7 +4950,7 @@ class WorktreeService:
         )
         try:
             head_sha = self.git.head_sha(lease.worktree_path)
-            protected_blobs = self.git.index_blob_snapshot(
+            protected_index_entries = self.git.index_entry_snapshot(
                 lease.worktree_path, protected_paths
             )
             lease = self.registry.transition(
@@ -4964,7 +4967,7 @@ class WorktreeService:
                 head_sha=head_sha,
                 resolution_state=ResolutionState.PENDING,
                 conflicted_paths=conflicted_paths,
-                protected_blobs=protected_blobs,
+                protected_index_entries=protected_index_entries,
             )
         except (GitError, OSError, RuntimeError, sqlite3.Error) as transition_error:
             return self._promotion_blocked(

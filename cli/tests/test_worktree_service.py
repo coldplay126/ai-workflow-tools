@@ -4994,9 +4994,11 @@ def test_promote_out_of_order_preserves_clean_applied_reviewed_path(
     assert first.blockers[0]["code"] == "out_of_order_conflict"
     assert first.lease is not None
     assert first.lease.conflicted_paths == ("feature.txt",)
-    assert first.lease.protected_blobs == promotion_harness.git.index_blob_snapshot(
-        first.lease.worktree_path,
-        ("followup.txt",),
+    assert first.lease.protected_index_entries == (
+        promotion_harness.git.index_entry_snapshot(
+            first.lease.worktree_path,
+            ("followup.txt",),
+        )
     )
     (first.lease.worktree_path / "feature.txt").write_text(
         "manually resolved\n", encoding="utf-8"
@@ -5054,7 +5056,41 @@ def test_promote_out_of_order_blocks_staged_protected_path_tampering(
     assert resumed.lease == first.lease
     assert promotion_harness.github.create_calls == []
 
-def test_promote_out_of_order_blocks_legacy_pending_without_protected_blobs(
+def test_promote_out_of_order_blocks_protected_path_mode_tampering(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.make_target_conflict()
+    source = promotion_harness.add_followup_source()
+    first = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert first.lease is not None
+    (first.lease.worktree_path / "feature.txt").write_text(
+        "manually resolved\n", encoding="utf-8"
+    )
+    git_command(
+        first.lease.worktree_path,
+        "update-index",
+        "--chmod=+x",
+        "followup.txt",
+    )
+    resumed = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert resumed.status == "blocked"
+    assert resumed.blockers[0]["code"] == "promotion_resolution_scope_mismatch"
+    assert resumed.lease == first.lease
+    assert promotion_harness.github.create_calls == []
+
+def test_promote_out_of_order_blocks_legacy_pending_without_protected_entries(
     promotion_harness: PromotionHarness,
 ) -> None:
     promotion_harness.make_target_conflict()
@@ -5069,7 +5105,7 @@ def test_promote_out_of_order_blocks_legacy_pending_without_protected_blobs(
     assert first.lease is not None
     with sqlite3.connect(promotion_harness.registry.db_path) as connection:
         connection.execute(
-            "UPDATE worktree_leases SET protected_blobs = '[]' WHERE id = ?",
+            "UPDATE worktree_leases SET protected_index_entries = '[]' WHERE id = ?",
             (first.lease.id,),
         )
     (first.lease.worktree_path / "feature.txt").write_text(

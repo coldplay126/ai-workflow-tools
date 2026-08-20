@@ -535,7 +535,7 @@ def test_git_client_allows_trailing_whitespace_without_conflict_markers(
     assert not client.committed_diff_has_conflict_markers(repo, base, head)
 
 
-def test_git_client_snapshots_stage_zero_blobs_with_literal_paths(
+def test_git_client_snapshots_stage_zero_entries_with_literal_paths(
     tmp_path: Path,
 ) -> None:
     repo = make_repository(tmp_path)
@@ -546,16 +546,35 @@ def test_git_client_snapshots_stage_zero_blobs_with_literal_paths(
     (repo / "tracked.txt").write_text("updated\n", encoding="utf-8")
     client.stage_paths(repo, ("tracked.txt",))
 
-    snapshot = client.index_blob_snapshot(
+    snapshot = client.index_entry_snapshot(
         repo,
         ("missing.txt", "tracked.txt"),
     )
 
     assert snapshot == (
         ("missing.txt", None),
-        ("tracked.txt", git(repo, "rev-parse", ":tracked.txt")),
+        (
+            "tracked.txt",
+            ("100644", git(repo, "rev-parse", ":tracked.txt")),
+        ),
     )
 
+
+@pytest.mark.parametrize("mode", ("120000", "160000"))
+def test_git_client_rejects_non_regular_stage_zero_entry_modes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    client = GitClient(make_repository(tmp_path))
+
+    def run(*_args: str, **_kwargs: object) -> GitCompleted:
+        return GitCompleted(0, f"{mode} {'a' * 40} 0\tentry\n\0".encode(), b"")
+
+    monkeypatch.setattr(client, "_run", run)
+
+    with pytest.raises(GitError, match="unsupported index mode"):
+        client.index_entry_snapshot(client.cwd, ("entry",))
 def test_git_client_stage_paths_rejects_empty_paths(tmp_path: Path) -> None:
     client = GitClient(make_repository(tmp_path))
 

@@ -85,12 +85,12 @@ class Lease:
     target_base_sha: str | None = None
     reviewed_paths: tuple[str, ...] = ()
     conflicted_paths: tuple[str, ...] = ()
-    protected_blobs: tuple[tuple[str, str | None], ...] = ()
+    protected_index_entries: tuple[tuple[str, tuple[str, str] | None], ...] = ()
 
     def __post_init__(self) -> None:
         self._validate_path_metadata("reviewed_paths", self.reviewed_paths)
         self._validate_path_metadata("conflicted_paths", self.conflicted_paths)
-        self._validate_protected_blobs(self.protected_blobs)
+        self._validate_protected_index_entries(self.protected_index_entries)
 
     @staticmethod
     def _validate_path_metadata(name: str, paths: tuple[str, ...]) -> None:
@@ -103,26 +103,33 @@ class Lease:
 
 
     @classmethod
-    def _validate_protected_blobs(
-        cls, protected_blobs: tuple[tuple[str, str | None], ...]
+    def _validate_protected_index_entries(
+        cls,
+        protected_index_entries: tuple[tuple[str, tuple[str, str] | None], ...],
     ) -> None:
-        if not isinstance(protected_blobs, tuple) or any(
+        if not isinstance(protected_index_entries, tuple) or any(
             not isinstance(item, tuple)
             or len(item) != 2
             or not isinstance(item[0], str)
             or (
                 item[1] is not None
                 and (
-                    not isinstance(item[1], str)
-                    or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", item[1]) is None
+                    not isinstance(item[1], tuple)
+                    or len(item[1]) != 2
+                    or item[1][0] not in ("100644", "100755")
+                    or not isinstance(item[1][1], str)
+                    or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", item[1][1])
+                    is None
                 )
             )
-            for item in protected_blobs
+            for item in protected_index_entries
         ):
-            raise ValueError("protected_blobs must map paths to blob OIDs or null")
+            raise ValueError(
+                "protected_index_entries must map paths to stage-zero entries or null"
+            )
         cls._validate_path_metadata(
-            "protected_blobs",
-            tuple(path for path, _blob_oid in protected_blobs),
+            "protected_index_entries",
+            tuple(path for path, _entry in protected_index_entries),
         )
     @classmethod
     def new(
@@ -148,7 +155,9 @@ class Lease:
         target_base_sha: str | None = None,
         reviewed_paths: tuple[str, ...] = (),
         conflicted_paths: tuple[str, ...] = (),
-        protected_blobs: tuple[tuple[str, str | None], ...] = (),
+        protected_index_entries: tuple[
+            tuple[str, tuple[str, str] | None], ...
+        ] = (),
     ) -> Lease:
         timestamp = now_iso()
         deployment = (
@@ -187,7 +196,7 @@ class Lease:
             target_base_sha=target_base_sha,
             reviewed_paths=reviewed_paths,
             conflicted_paths=conflicted_paths,
-            protected_blobs=protected_blobs,
+            protected_index_entries=protected_index_entries,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -201,9 +210,13 @@ class Lease:
         payload["resolution_state"] = self.resolution_state.value
         payload["reviewed_paths"] = list(self.reviewed_paths)
         payload["conflicted_paths"] = list(self.conflicted_paths)
-        payload["protected_blobs"] = [
-            {"path": path, "blob_oid": blob_oid}
-            for path, blob_oid in self.protected_blobs
+        payload["protected_index_entries"] = [
+            {
+                "path": path,
+                "mode": entry[0] if entry is not None else None,
+                "blob_oid": entry[1] if entry is not None else None,
+            }
+            for path, entry in self.protected_index_entries
         ]
         return payload
 

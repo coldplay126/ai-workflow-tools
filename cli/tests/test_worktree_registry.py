@@ -71,7 +71,7 @@ def test_registry_round_trips_out_of_order_provenance(tmp_path: Path) -> None:
         target_base_sha="c" * 40,
         reviewed_paths=("src/a.py", "src/b.py"),
         conflicted_paths=("src/b.py",),
-        protected_blobs=(("src/a.py", "d" * 40),),
+        protected_index_entries=(("src/a.py", ("100644", "d" * 40)),),
     )
 
     registry.create_lease(created)
@@ -86,7 +86,7 @@ def test_registry_round_trips_out_of_order_provenance(tmp_path: Path) -> None:
         "target_base_sha": payload["target_base_sha"],
         "reviewed_paths": payload["reviewed_paths"],
         "conflicted_paths": payload["conflicted_paths"],
-        "protected_blobs": payload["protected_blobs"],
+        "protected_index_entries": payload["protected_index_entries"],
     } == {
         "promotion_mode": "out_of_order",
         "resolution_state": "pending",
@@ -95,7 +95,9 @@ def test_registry_round_trips_out_of_order_provenance(tmp_path: Path) -> None:
         "target_base_sha": "c" * 40,
         "reviewed_paths": ["src/a.py", "src/b.py"],
         "conflicted_paths": ["src/b.py"],
-        "protected_blobs": [{"path": "src/a.py", "blob_oid": "d" * 40}],
+        "protected_index_entries": [
+            {"path": "src/a.py", "mode": "100644", "blob_oid": "d" * 40}
+        ],
     }
 
 
@@ -200,7 +202,7 @@ def test_transition_updates_resolution_metadata_with_compare_and_swap(
             promotion_mode=PromotionMode.OUT_OF_ORDER,
             resolution_state=ResolutionState.PENDING,
             conflicted_paths=("src/a.py",),
-            protected_blobs=(("src/a.py", "d" * 40),),
+            protected_index_entries=(("src/a.py", ("100644", "d" * 40)),),
         )
     )
 
@@ -210,12 +212,12 @@ def test_transition_updates_resolution_metadata_with_compare_and_swap(
         expected_version=created.version,
         resolution_state=ResolutionState.MANUAL_REVIEWED,
         conflicted_paths=(),
-        protected_blobs=(("src/a.py", None),),
+        protected_index_entries=(("src/a.py", None),),
     )
 
     assert updated.resolution_state is ResolutionState.MANUAL_REVIEWED
     assert updated.conflicted_paths == ()
-    assert updated.protected_blobs == (("src/a.py", None),)
+    assert updated.protected_index_entries == (("src/a.py", None),)
     assert registry.get_lease(created.id) == updated
 
 
@@ -296,7 +298,7 @@ def test_ensure_resumes_and_repeats_a_partial_legacy_migration(tmp_path: Path) -
         "target_base_sha",
         "reviewed_paths",
         "conflicted_paths",
-        "protected_blobs",
+        "protected_index_entries",
     } <= columns
 
 

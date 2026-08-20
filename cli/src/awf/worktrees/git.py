@@ -360,9 +360,9 @@ class GitClient:
         )
         return _nul_records(completed.stdout)
 
-    def index_blob_snapshot(
+    def index_entry_snapshot(
         self, cwd: Path, paths: tuple[str, ...]
-    ) -> tuple[tuple[str, str | None], ...]:
+    ) -> tuple[tuple[str, tuple[str, str] | None], ...]:
         if not paths:
             return ()
         if (
@@ -370,7 +370,7 @@ class GitClient:
             or paths != tuple(sorted(paths))
             or len(paths) != len(set(paths))
         ):
-            raise GitError("index blob paths must be sorted and unique")
+            raise GitError("index entry paths must be sorted and unique")
         completed = self._run(
             "--literal-pathspecs",
             "ls-files",
@@ -380,7 +380,9 @@ class GitClient:
             *paths,
             cwd=cwd,
         )
-        blobs: dict[str, str | None] = {path: None for path in paths}
+        entries: dict[str, tuple[str, str] | None] = {
+            path: None for path in paths
+        }
         for record in completed.stdout.split(b"\0"):
             if not record:
                 continue
@@ -388,19 +390,23 @@ class GitClient:
             fields = metadata.split()
             if not separator or len(fields) != 3:
                 raise GitError("git ls-files returned an invalid index record")
-            mode, blob, stage = fields
-            if mode not in (b"100644", b"100755", b"120000", b"160000"):
-                raise GitError("git ls-files returned an invalid index mode")
+            raw_mode, raw_blob, stage = fields
+            if raw_mode not in (b"100644", b"100755"):
+                raise GitError("git ls-files returned an unsupported index mode")
             if stage != b"0":
                 continue
             path = os.fsdecode(raw_path)
-            if path not in blobs:
+            if path not in entries:
                 raise GitError("git ls-files returned an unexpected index path")
             try:
-                blobs[path] = blob.decode("ascii", errors="strict")
+                mode = raw_mode.decode("ascii", errors="strict")
+                blob_oid = raw_blob.decode("ascii", errors="strict")
             except UnicodeDecodeError as error:
-                raise GitError("git ls-files returned an invalid index blob") from error
-        return tuple((path, blobs[path]) for path in paths)
+                raise GitError("git ls-files returned an invalid index entry") from error
+            if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", blob_oid) is None:
+                raise GitError("git ls-files returned an invalid index blob")
+            entries[path] = (mode, blob_oid)
+        return tuple((path, entries[path]) for path in paths)
 
     def unstaged_paths(self, cwd: Path) -> tuple[str, ...]:
         tracked = _nul_records(
