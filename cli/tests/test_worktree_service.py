@@ -4886,6 +4886,7 @@ def test_promote_out_of_order_manual_resolution_blocks_published_target(
         ("target_pr", "promotion_incomplete"),
         ("outside_path", "promotion_resolution_scope_mismatch"),
         ("unmerged_path", "promotion_resolution_scope_mismatch"),
+        ("unstaged_error", "promotion_incomplete"),
     ),
 )
 def test_promote_out_of_order_resolution_preview_blocks_invalid_pending_lease(
@@ -4956,6 +4957,15 @@ def test_promote_out_of_order_resolution_preview_blocks_invalid_pending_lease(
             promotion_harness.git,
             "unmerged_paths",
             lambda _worktree: ("feature.txt", "outside.txt"),
+        )
+    elif violation == "unstaged_error":
+        def unstaged_paths(_worktree: Path) -> tuple[str, ...]:
+            raise GitError("simulated unstaged lookup failure")
+
+        monkeypatch.setattr(
+            promotion_harness.git,
+            "unstaged_paths",
+            unstaged_paths,
         )
     else:
         (lease.worktree_path / "outside.txt").write_text(

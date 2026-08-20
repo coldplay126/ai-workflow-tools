@@ -3397,6 +3397,7 @@ class WorktreeService:
                 )
             changed_paths = self.git.worktree_changed_paths(lease.worktree_path)
             unmerged_paths = self.git.unmerged_paths(lease.worktree_path)
+            unstaged_paths = self.git.unstaged_paths(lease.worktree_path)
             protected_index_entries_match = self._protected_index_entries_match(lease)
         except GitRemoteError as error:
             return self._external_error(
@@ -3416,7 +3417,6 @@ class WorktreeService:
             return self._promotion_blocked(
                 "promotion_incomplete", str(error), lease=lease
             )
-        unstaged_paths = self.git.unstaged_paths(lease.worktree_path)
         if not (
             set(unstaged_paths).issubset(lease.conflicted_paths)
             and set(unmerged_paths).issubset(lease.conflicted_paths)
