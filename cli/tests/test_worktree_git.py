@@ -1056,6 +1056,25 @@ def test_repository_lock_closes_descriptor_when_unlock_fails(
         pass
 
 
+@pytest.mark.parametrize("rename_config", ("true", "false"))
+def test_changed_path_endpoints_preserve_both_rename_sides(
+    tmp_path: Path, rename_config: str
+) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    base = client.head_sha()
+    git(repo, "config", "diff.renames", rename_config)
+
+    git(repo, "mv", "README.txt", "renamed.txt")
+    git(repo, "commit", "-q", "-m", "rename README")
+    head = client.head_sha()
+
+    assert client.changed_path_endpoints(repo, base, head) == (
+        "README.txt",
+        "renamed.txt",
+    )
+
+
 def test_binary_patch_preserves_rename_mode_and_gitlink_delta(tmp_path: Path) -> None:
     repo = make_repository(tmp_path)
     client = GitClient(repo)

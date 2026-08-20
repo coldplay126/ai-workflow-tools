@@ -521,6 +521,43 @@ class PromotionHarness:
         self.github.prs[number] = source
         return source
 
+    def add_renamed_source(self, number: int = 373) -> PullRequest:
+        branch = f"feature/pr-{number}"
+        git_command(self.repo, "checkout", "-q", "staging")
+        base_sha = git_command(self.repo, "rev-parse", "HEAD")
+        git_command(self.repo, "checkout", "-q", "-b", branch)
+        git_command(self.repo, "mv", "feature.txt", "renamed-feature.txt")
+        git_command(self.repo, "commit", "-q", "-m", "rename source feature")
+        head_sha = git_command(self.repo, "rev-parse", "HEAD")
+        git_command(self.repo, "push", "-q", "-u", "origin", branch)
+        git_command(self.repo, "checkout", "-q", "staging")
+        git_command(
+            self.repo,
+            "merge",
+            "--no-ff",
+            "-q",
+            branch,
+            "-m",
+            "merge renamed source",
+        )
+        merge_sha = git_command(self.repo, "rev-parse", "HEAD")
+        git_command(self.repo, "push", "-q", "origin", "staging")
+        source = PullRequest(
+            number=number,
+            state="MERGED",
+            base_ref="staging",
+            base_sha=base_sha,
+            head_ref=branch,
+            head_sha=head_sha,
+            merge_commit_sha=merge_sha,
+            review_decision="APPROVED",
+            checks_passed=True,
+            changed_paths=("renamed-feature.txt",),
+            url=f"https://github.example/acme/repo/pull/{number}",
+        )
+        self.github.prs[number] = source
+        return source
+
     def advance_target_prerequisite(self) -> str:
         git_command(self.repo, "checkout", "-q", "main")
         (self.repo / "feature.txt").write_text(
@@ -3696,6 +3733,149 @@ def test_promote_out_of_order_reuse_requires_automatic_trailer(
     assert reused.status == "blocked"
     assert reused.blockers[0]["code"] == "promotion_incomplete"
     assert len(promotion_harness.github.create_calls) == 1
+
+def test_promote_out_of_order_blocks_renames_before_worktree_creation(
+    promotion_harness: PromotionHarness,
+) -> None:
+    source = promotion_harness.add_renamed_source()
+
+    result = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "unsupported_out_of_order_rename"
+    assert promotion_harness.github.create_calls == []
+    assert len(promotion_harness.git.list_worktrees()) == 1
+
+
+def test_promote_out_of_order_publishes_reviewed_deletion(
+    promotion_harness: PromotionHarness,
+) -> None:
+    git_command(promotion_harness.repo, "checkout", "-q", "main")
+    (promotion_harness.repo / "feature.txt").write_text(
+        "feature\n", encoding="utf-8"
+    )
+    git_command(promotion_harness.repo, "add", "feature.txt")
+    git_command(promotion_harness.repo, "commit", "-q", "-m", "production feature")
+    git_command(promotion_harness.repo, "push", "-q", "origin", "main")
+    git_command(promotion_harness.repo, "checkout", "-q", "staging")
+    source = promotion_harness.add_followup_source(
+        feature_text=None,
+        include_followup=False,
+    )
+
+    result = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert result.decision == "ready"
+    assert result.lease is not None
+    assert result.lease.state is LeaseState.PR_OPEN
+    assert result.lease.resolution_state is ResolutionState.AUTOMATIC
+    assert not (result.lease.worktree_path / "feature.txt").exists()
+    assert len(promotion_harness.github.create_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "synthetic_paths",
+    ((), ("feature.txt", "unreviewed.txt")),
+    ids=("empty-net-delta", "unreviewed-path"),
+)
+def test_promote_out_of_order_blocks_invalid_synthetic_paths(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    synthetic_paths: tuple[str, ...],
+) -> None:
+    original_changed_paths = promotion_harness.git.changed_paths
+    push_calls: list[str] = []
+
+    def changed_paths(
+        cwd: Path,
+        base: str,
+        head: str = "HEAD",
+        *,
+        find_renames: bool = False,
+    ) -> tuple[str, ...]:
+        if cwd != promotion_harness.repo and find_renames:
+            return synthetic_paths
+        return original_changed_paths(cwd, base, head, find_renames=find_renames)
+
+    def push_branch(_worktree: Path, branch: str) -> None:
+        push_calls.append(branch)
+
+    monkeypatch.setattr(promotion_harness.git, "changed_paths", changed_paths)
+    monkeypatch.setattr(promotion_harness.git, "push_branch", push_branch)
+
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "promotion_delta_mismatch"
+    assert push_calls == []
+    assert promotion_harness.github.create_calls == []
+
+
+def test_promote_out_of_order_recovers_pending_transition_and_reverifies(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verify_count = promotion_harness.state_dir / "out-of-order-verify-count.txt"
+    verify_script = (
+        "from pathlib import Path; "
+        f"path = Path({str(verify_count)!r}); "
+        "count = int(path.read_text(encoding='utf-8')) if path.exists() else 0; "
+        "path.write_text(str(count + 1), encoding='utf-8')"
+    )
+    promotion_harness.configure(
+        verify_production=((sys.executable, "-c", verify_script),)
+    )
+    original_transition = promotion_harness.registry.transition
+
+    def fail_pending_transition(*args: object, **kwargs: object) -> Lease:
+        if kwargs.get("event_type") == "promotion_publish_pending":
+            raise RuntimeError("registry temporarily unavailable")
+        return original_transition(*args, **kwargs)
+
+    monkeypatch.setattr(
+        promotion_harness.registry, "transition", fail_pending_transition
+    )
+    first = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+    monkeypatch.setattr(promotion_harness.registry, "transition", original_transition)
+
+    second = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert first.status == "blocked"
+    assert second.decision == "ready"
+    assert second.lease is not None
+    assert second.lease.state is LeaseState.PR_OPEN
+    assert second.lease.resolution_state is ResolutionState.AUTOMATIC
+    assert second.lease.head_sha == promotion_harness.git.head_sha(
+        second.lease.worktree_path
+    )
+    assert promotion_harness.github.prs[900].head_sha == second.lease.head_sha
+    assert len(promotion_harness.github.create_calls) == 1
+    assert verify_count.read_text(encoding="utf-8") == "3"
 
 
 def test_promote_applies_only_source_pr_delta(

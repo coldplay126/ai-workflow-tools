@@ -345,6 +345,19 @@ class GitClient:
         completed = self._run(*arguments, cwd=cwd)
         return _nul_records(completed.stdout)
 
+    def changed_path_endpoints(
+        self, cwd: Path, base: str, head: str = "HEAD"
+    ) -> tuple[str, ...]:
+        completed = self._run(
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            f"{base}..{head}",
+            cwd=cwd,
+        )
+        return _nul_records(completed.stdout)
+
     def commit(self, cwd: Path, message: str, *, allow_empty: bool = False) -> str:
         arguments = ["commit"]
         if allow_empty:

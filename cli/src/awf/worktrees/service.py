@@ -454,6 +454,23 @@ class WorktreeService:
                             ),
                         )
                     if (
+                        promotion_mode is PromotionMode.OUT_OF_ORDER
+                        and tuple(
+                            sorted(
+                                self.git.changed_path_endpoints(
+                                    self.git.repository_root(),
+                                    merge_base,
+                                    source_head_sha,
+                                )
+                            )
+                        )
+                        != expected_source_paths
+                    ):
+                        return self._promotion_blocked(
+                            "unsupported_out_of_order_rename",
+                            "out-of-order promotion does not support renamed paths",
+                        )
+                    if (
                         excluded_paths
                         and source_merge_sha is not None
                         and any(
