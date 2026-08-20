@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
+from threading import Event, Lock
 
 import pytest
 
@@ -74,9 +76,24 @@ def test_registry_round_trips_out_of_order_provenance(tmp_path: Path) -> None:
     registry.create_lease(created)
 
     assert registry.get_lease(created.id) == created
-    assert created.to_dict()["promotion_mode"] == "out_of_order"
-    assert created.to_dict()["resolution_state"] == "pending"
-    assert created.to_dict()["reviewed_paths"] == ["src/a.py", "src/b.py"]
+    payload = created.to_dict()
+    assert {
+        "promotion_mode": payload["promotion_mode"],
+        "resolution_state": payload["resolution_state"],
+        "source_base_sha": payload["source_base_sha"],
+        "source_head_sha": payload["source_head_sha"],
+        "target_base_sha": payload["target_base_sha"],
+        "reviewed_paths": payload["reviewed_paths"],
+        "conflicted_paths": payload["conflicted_paths"],
+    } == {
+        "promotion_mode": "out_of_order",
+        "resolution_state": "pending",
+        "source_base_sha": "a" * 40,
+        "source_head_sha": "b" * 40,
+        "target_base_sha": "c" * 40,
+        "reviewed_paths": ["src/a.py", "src/b.py"],
+        "conflicted_paths": ["src/b.py"],
+    }
 
 
 def test_registry_migrates_legacy_lease_with_promotion_defaults(
@@ -218,6 +235,88 @@ def test_registry_rejects_invalid_path_metadata(
 
     with pytest.raises(ValueError, match=field):
         registry.get_lease(created.id)
+
+
+def test_registry_rejects_blob_path_metadata(tmp_path: Path) -> None:
+    registry = WorktreeRegistry(tmp_path / "worktrees.sqlite3")
+    created = registry.create_lease(lease(tmp_path))
+    with sqlite3.connect(registry.db_path) as connection:
+        connection.execute(
+            "UPDATE worktree_leases SET reviewed_paths = ? WHERE id = ?",
+            (sqlite3.Binary(b'["src/a.py"]'), created.id),
+        )
+
+    with pytest.raises(ValueError, match="reviewed_paths"):
+        registry.get_lease(created.id)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "promotion_mode",
+        "resolution_state",
+        "source_base_sha",
+        "source_head_sha",
+        "target_base_sha",
+        "reviewed_paths",
+        "conflicted_paths",
+    ],
+)
+def test_registry_rejects_promotion_metadata_filters(tmp_path: Path, name: str) -> None:
+    registry = WorktreeRegistry(tmp_path / "worktrees.sqlite3")
+
+    with pytest.raises(ValueError, match="unsupported lease filter"):
+        registry.list_leases(**{name: None})
+
+
+def test_ensure_resumes_and_repeats_a_partial_legacy_migration(tmp_path: Path) -> None:
+    db_path = tmp_path / "worktrees.sqlite3"
+    _create_partial_legacy_lease_table(db_path)
+    registry = WorktreeRegistry(db_path)
+
+    registry.ensure()
+    registry.ensure()
+
+    with sqlite3.connect(db_path) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(worktree_leases)")
+        }
+    assert {
+        "promotion_mode",
+        "resolution_state",
+        "source_base_sha",
+        "source_head_sha",
+        "target_base_sha",
+        "reviewed_paths",
+        "conflicted_paths",
+    } <= columns
+
+
+def test_ensure_migrates_legacy_schema_concurrently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "worktrees.sqlite3"
+    _create_partial_legacy_lease_table(db_path)
+    registry = WorktreeRegistry(db_path)
+    actual_connect = registry._connect
+    gate = EnsureMigrationGate()
+
+    def connect() -> PausingMigrationConnection:
+        return PausingMigrationConnection(actual_connect(), gate)
+
+    monkeypatch.setattr(registry, "_connect", connect)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(registry.ensure)
+        assert gate.first_pragma.wait(timeout=1)
+        second = executor.submit(registry.ensure)
+        try:
+            assert not gate.second_pragma.wait(timeout=1)
+        finally:
+            gate.release.set()
+        first.result()
+        second.result()
+
 
 def test_registry_rejects_two_active_leases_for_same_identity(tmp_path: Path) -> None:
     registry = WorktreeRegistry(tmp_path / "worktrees.sqlite3")
@@ -428,6 +527,71 @@ class TrackingConnection:
     def close(self) -> None:
         self.closed = True
         self.connection.close()
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.connection, name)
+
+
+def _create_partial_legacy_lease_table(db_path: Path) -> None:
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE worktree_leases (
+                id TEXT PRIMARY KEY,
+                repository_id TEXT NOT NULL,
+                initiative TEXT NOT NULL,
+                purpose TEXT NOT NULL,
+                state TEXT NOT NULL,
+                promotion_mode TEXT NOT NULL DEFAULT 'exact'
+            );
+            """
+        )
+
+
+class EnsureMigrationGate:
+    def __init__(self) -> None:
+        self.first_pragma = Event()
+        self.second_pragma = Event()
+        self.release = Event()
+        self._lock = Lock()
+        self._pragma_count = 0
+
+    def pause_after_pragma(self) -> None:
+        with self._lock:
+            self._pragma_count += 1
+            pragma_count = self._pragma_count
+        if pragma_count == 1:
+            self.first_pragma.set()
+        elif pragma_count == 2:
+            self.second_pragma.set()
+        else:
+            return
+        if not self.release.wait(timeout=5):
+            raise RuntimeError("migration gate timed out")
+
+
+class PausingMigrationConnection:
+    def __init__(
+        self, connection: sqlite3.Connection, gate: EnsureMigrationGate
+    ) -> None:
+        self.connection = connection
+        self.gate = gate
+
+    def __enter__(self) -> "PausingMigrationConnection":
+        self.connection.__enter__()
+        return self
+
+    def __exit__(self, *args: object) -> bool | None:
+        return self.connection.__exit__(*args)
+
+    def close(self) -> None:
+        self.connection.close()
+
+    def execute(self, statement: str, parameters: object = ()) -> object:
+        result = self.connection.execute(statement, parameters)
+        if statement == "PRAGMA table_info(worktree_leases)":
+            self.gate.pause_after_pragma()
+        return result
 
     def __getattr__(self, name: str) -> object:
         return getattr(self.connection, name)

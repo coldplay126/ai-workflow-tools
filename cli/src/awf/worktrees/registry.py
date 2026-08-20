@@ -107,13 +107,6 @@ _LEASE_FILTER_COLUMNS = {
     "target_pr": "target_pr",
     "deployment_state": "deployment_state",
     "retain": "retain",
-    "promotion_mode": "promotion_mode",
-    "resolution_state": "resolution_state",
-    "source_base_sha": "source_base_sha",
-    "source_head_sha": "source_head_sha",
-    "target_base_sha": "target_base_sha",
-    "reviewed_paths": "reviewed_paths",
-    "conflicted_paths": "conflicted_paths",
 }
 
 
@@ -150,15 +143,21 @@ class WorktreeRegistry:
                 "TEXT NOT NULL DEFAULT '[]'"
             ),
         }
-        with closing(self._connect()) as connection, connection:
+        with closing(self._connect()) as connection:
             connection.executescript(_SCHEMA)
-            columns = {
-                row["name"]
-                for row in connection.execute("PRAGMA table_info(worktree_leases)")
-            }
-            for name, statement in migrations.items():
-                if name not in columns:
-                    connection.execute(statement)
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                columns = {
+                    row["name"]
+                    for row in connection.execute("PRAGMA table_info(worktree_leases)")
+                }
+                for name, statement in migrations.items():
+                    if name not in columns:
+                        connection.execute(statement)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
 
     def create_lease(self, lease: Lease) -> Lease:
         self.ensure()
@@ -836,9 +835,11 @@ class WorktreeRegistry:
 
     @staticmethod
     def _path_metadata_from_json(value: str, *, name: str) -> tuple[str, ...]:
+        if not isinstance(value, str):
+            raise ValueError(f"invalid {name} metadata")
         try:
             paths = json.loads(value)
-        except (TypeError, json.JSONDecodeError) as error:
+        except json.JSONDecodeError as error:
             raise ValueError(f"invalid {name} metadata") from error
         if not isinstance(paths, list):
             raise ValueError(f"invalid {name} metadata")
