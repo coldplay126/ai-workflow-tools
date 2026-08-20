@@ -3310,16 +3310,23 @@ class WorktreeService:
             or lease.source_pr != expected.source_pr
             or lease.base_ref != expected.base_ref
             or lease.branch != expected.branch
-            or lease.source_base_sha != expected.source_base_sha
-            or lease.source_head_sha != expected.source_head_sha
-            or lease.target_base_sha != expected.target_base_sha
-            or lease.head_sha != expected.target_base_sha
+            or lease.target_base_sha is None
             or lease.reviewed_paths != expected.reviewed_paths
             or not set(lease.conflicted_paths).issubset(lease.reviewed_paths)
         ):
             return self._promotion_blocked(
                 "promotion_incomplete",
                 f"lease {lease.id} does not match pending conflict provenance",
+                lease=lease,
+            )
+        if (
+            lease.source_base_sha != expected.source_base_sha
+            or lease.source_head_sha != expected.source_head_sha
+            or lease.head_sha != lease.target_base_sha
+        ):
+            return self._promotion_blocked(
+                "promotion_provenance_changed",
+                f"lease {lease.id} pending conflict provenance changed",
                 lease=lease,
             )
         try:
@@ -3334,6 +3341,19 @@ class WorktreeService:
                 return self._promotion_blocked(
                     "promotion_incomplete",
                     f"lease {lease.id} does not match its managed conflict worktree",
+                    lease=lease,
+                )
+            live_target_sha = self.git.remote_branch_sha(target_branch)
+            if live_target_sha is None:
+                return self._promotion_blocked(
+                    "target_ref_unavailable",
+                    f"target branch {target_branch!r} is unavailable on origin",
+                    lease=lease,
+                )
+            if live_target_sha != lease.target_base_sha:
+                return self._promotion_blocked(
+                    "promotion_provenance_changed",
+                    f"lease {lease.id} target branch changed after the conflict",
                     lease=lease,
                 )
             if self.git.remote_branch_sha(lease.branch) is not None:

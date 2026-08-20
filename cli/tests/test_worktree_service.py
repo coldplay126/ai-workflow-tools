@@ -4837,8 +4837,9 @@ def test_promote_out_of_order_manual_resolution_blocks_published_target(
     ("violation", "blocker"),
     (
         ("worktree", "promotion_incomplete"),
-        ("source_provenance", "promotion_incomplete"),
-        ("target_provenance", "promotion_incomplete"),
+        ("source_provenance", "promotion_provenance_changed"),
+        ("target_remote_drift", "promotion_provenance_changed"),
+        ("target_unavailable", "target_ref_unavailable"),
         ("remote_branch", "promotion_incomplete"),
         ("target_pr", "promotion_incomplete"),
         ("outside_path", "promotion_resolution_scope_mismatch"),
@@ -4856,19 +4857,47 @@ def test_promote_out_of_order_resolution_preview_blocks_invalid_pending_lease(
         monkeypatch.setattr(promotion_harness.git, "list_worktrees", lambda: ())
     elif violation == "source_provenance":
         promotion_harness.github.prs[372] = replace(
-            promotion_harness.github.prs[372], head_sha="f" * 40
+            promotion_harness.github.prs[372],
+            base_sha="e" * 40,
+            head_sha="f" * 40,
         )
-    elif violation == "target_provenance":
+    elif violation == "target_remote_drift":
+        original_remote_branch_sha = promotion_harness.git.remote_branch_sha
+
+        def remote_branch_sha(branch: str) -> str | None:
+            if branch == "main":
+                return "d" * 40
+            return original_remote_branch_sha(branch)
+
         monkeypatch.setattr(
             promotion_harness.git,
             "resolve_ref",
-            lambda _ref: "e" * 40,
+            lambda _ref: lease.target_base_sha,
         )
-    elif violation == "remote_branch":
         monkeypatch.setattr(
             promotion_harness.git,
             "remote_branch_sha",
-            lambda _branch: "a" * 40,
+            remote_branch_sha,
+        )
+    elif violation == "target_unavailable":
+        original_remote_branch_sha = promotion_harness.git.remote_branch_sha
+        monkeypatch.setattr(
+            promotion_harness.git,
+            "remote_branch_sha",
+            lambda branch: (
+                None
+                if branch == "main"
+                else original_remote_branch_sha(branch)
+            ),
+        )
+    elif violation == "remote_branch":
+        def remote_branch_sha(branch: str) -> str | None:
+            return lease.target_base_sha if branch == "main" else "a" * 40
+
+        monkeypatch.setattr(
+            promotion_harness.git,
+            "remote_branch_sha",
+            remote_branch_sha,
         )
     elif violation == "target_pr":
         promotion_harness.github.open_prs[(lease.branch, "main")] = replace(
