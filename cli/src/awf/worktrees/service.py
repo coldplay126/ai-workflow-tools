@@ -4458,31 +4458,31 @@ class WorktreeService:
                 )
             if lease.promotion_mode is PromotionMode.OUT_OF_ORDER:
                 if lease.target_base_sha is None:
-                    return self._promotion_blocked(
+                    return self._block_promotion_lease(
+                        lease,
                         "promotion_incomplete",
                         f"lease {lease.id} has no out-of-order target provenance",
-                        lease=lease,
                     )
                 if not self.git.committed_diff_is_clean(
                     lease.worktree_path, lease.target_base_sha, head_sha
                 ):
-                    return self._promotion_blocked(
+                    return self._block_promotion_lease(
+                        lease,
                         "promotion_incomplete",
                         f"lease {lease.id} committed promotion failed Git's conflict-marker check",
-                        lease=lease,
                     )
                 live_target_sha = self.git.remote_branch_sha(target_branch)
                 if live_target_sha is None:
-                    return self._promotion_blocked(
+                    return self._block_promotion_lease(
+                        lease,
                         "target_ref_unavailable",
                         f"target branch {target_branch!r} is unavailable on origin",
-                        lease=lease,
                     )
                 if live_target_sha != lease.target_base_sha:
-                    return self._promotion_blocked(
+                    return self._block_promotion_lease(
+                        lease,
                         "promotion_provenance_changed",
                         f"lease {lease.id} target branch changed after verification",
-                        lease=lease,
                     )
             target_pull_request = github.find_open_pr(
                 head=lease.branch, base=target_branch
@@ -4849,7 +4849,8 @@ class WorktreeService:
             "out_of_order_conflict",
             (
                 f"out-of-order promotion lease {lease.id} has conflicts that require "
-                "manual resolution"
+                "manual resolution; conflicted paths: "
+                + ", ".join(repr(path) for path in conflicted_paths)
             ),
             lease=lease,
         )

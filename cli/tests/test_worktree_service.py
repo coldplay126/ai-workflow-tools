@@ -5124,6 +5124,9 @@ def test_promote_out_of_order_records_sorted_special_conflict_paths(
     assert result.status == "blocked"
     assert result.lease is not None
     assert result.lease.conflicted_paths == ("a [one]", "z space")
+    assert result.blockers[0]["message"].endswith(
+        "conflicted paths: 'a [one]', 'z space'"
+    )
     event = promotion_harness.registry.list_events(result.lease.id)[0]
     assert event.summary.endswith(
         "conflicted paths: 'a [one]', 'z space'"
@@ -5266,6 +5269,11 @@ def test_promote_out_of_order_blocks_target_drift_after_final_verification(
 
     assert result.status == "blocked"
     assert result.blockers[0]["code"] == "promotion_provenance_changed"
+    assert result.lease is not None
+    assert result.lease.state is LeaseState.BLOCKED
+    persisted = promotion_harness.registry.get_lease(result.lease.id)
+    assert persisted is not None
+    assert persisted.state is LeaseState.BLOCKED
     assert verification_count == 2
     assert find_counts == [2, 2]
     assert push_calls == []
