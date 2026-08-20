@@ -27,6 +27,7 @@ from .models import (
     LeaseState,
     PromotionMode,
     Purpose,
+    ResolutionState,
     now_iso,
 )
 from .registry import WorktreeRegistry
@@ -365,7 +366,9 @@ class WorktreeService:
                     else None
                 )
                 deltas: list[bytes] = []
-                expected_blob_heads: dict[str, str] = {}
+                expected_blob_heads: dict[str, str] | None = (
+                    {} if promotion_mode is PromotionMode.EXACT else None
+                )
                 for source in sources:
                     source_base_sha = self.git.fetch_ref(source.base_sha)
                     source_head_sha = self.git.fetch_ref(source.head_sha)
@@ -490,8 +493,9 @@ class WorktreeService:
                                 ),
                             )
                         deltas.append(included_patch)
-                    for path in included_source_paths:
-                        expected_blob_heads[path] = source_head_sha
+                    if expected_blob_heads is not None:
+                        for path in included_source_paths:
+                            expected_blob_heads[path] = source_head_sha
             except GitRemoteError as error:
                 return self._external_error(
                     "wt.promote", "source_delta_unavailable", str(error)
@@ -499,10 +503,13 @@ class WorktreeService:
             except GitError as error:
                 return self._promotion_blocked("source_delta_unavailable", str(error))
 
-            expected_blobs = self._promotion_net_blobs(
-                expected_blob_heads, target_sha
-            )
-            expected_paths = tuple(sorted(expected_blobs))
+            expected_blobs: dict[str, str | None] | None = None
+            expected_paths: tuple[str, ...] = ()
+            if expected_blob_heads is not None:
+                expected_blobs = self._promotion_net_blobs(
+                    expected_blob_heads, target_sha
+                )
+                expected_paths = tuple(sorted(expected_blobs))
             lease = self._new_promotion_lease(
                 sources,
                 target_ref,
@@ -552,23 +559,39 @@ class WorktreeService:
                     promotion_head,
                     find_renames=True,
                 )
-                if promoted_paths != expected_paths:
-                    return self._block_promotion_lease(
-                        lease,
-                        "promotion_delta_mismatch",
-                        "promotion paths do not exactly match the reviewed pull requests",
-                    )
-                if any(
-                    expected_blobs[path]
-                    != self.git.path_blob(promotion_head, path)
-                    for path in expected_paths
+                if promotion_mode is PromotionMode.EXACT:
+                    assert expected_blobs is not None
+                    if promoted_paths != expected_paths:
+                        return self._block_promotion_lease(
+                            lease,
+                            "promotion_delta_mismatch",
+                            (
+                                "promotion paths do not exactly match the reviewed"
+                                " pull requests"
+                            ),
+                        )
+                    if any(
+                        expected_blobs[path]
+                        != self.git.path_blob(promotion_head, path)
+                        for path in expected_paths
+                    ):
+                        return self._block_promotion_lease(
+                            lease,
+                            "promotion_content_mismatch",
+                            (
+                                "promotion contents do not exactly match the ordered"
+                                " reviewed pull requests"
+                            ),
+                        )
+                elif not promoted_paths or not all(
+                    path in lease.reviewed_paths for path in promoted_paths
                 ):
                     return self._block_promotion_lease(
                         lease,
-                        "promotion_content_mismatch",
+                        "promotion_delta_mismatch",
                         (
-                            "promotion contents do not exactly match the ordered"
-                            " reviewed pull requests"
+                            "out-of-order promotion paths must be a non-empty subset"
+                            " of the reviewed pull request paths"
                         ),
                     )
                 prepare_blocker = self._prepare_promotion(lease, force=True)
@@ -588,6 +611,11 @@ class WorktreeService:
                     summary="promotion verified; publication pending",
                     observed_head_sha=promotion_head,
                     head_sha=promotion_head,
+                    resolution_state=(
+                        ResolutionState.AUTOMATIC
+                        if promotion_mode is PromotionMode.OUT_OF_ORDER
+                        else None
+                    ),
                 )
             except (RuntimeError, sqlite3.Error) as error:
                 return self._promotion_blocked(
@@ -3266,7 +3294,12 @@ class WorktreeService:
                 lease=lease,
             )
         target_base_prefix = "AWF-Target-Base: "
-        target_base_line = message_lines[-2] if len(message_lines) >= 2 else ""
+        target_base_line = (
+            message_lines[-4]
+            if lease.promotion_mode is PromotionMode.OUT_OF_ORDER
+            and len(message_lines) >= 4
+            else (message_lines[-2] if len(message_lines) >= 2 else "")
+        )
         target_base_sha = (
             target_base_line[len(target_base_prefix) :]
             if target_base_line.startswith(target_base_prefix)
@@ -3283,6 +3316,18 @@ class WorktreeService:
         if (
             _GIT_OBJECT_ID.fullmatch(target_base_sha) is None
             or recorded_source_base_shas is None
+        ):
+            return self._promotion_blocked(
+                "promotion_incomplete",
+                f"lease {lease.id} does not have exact promotion provenance",
+                lease=lease,
+            )
+        if lease.promotion_mode is PromotionMode.OUT_OF_ORDER and (
+            lease.source_base_sha != sources[0].base_sha
+            or lease.source_head_sha != sources[0].head_sha
+            or lease.target_base_sha != target_base_sha
+            or recorded_source_base_shas != (lease.source_base_sha,)
+            or lease.reviewed_paths != tuple(sorted(sources[0].changed_paths))
         ):
             return self._promotion_blocked(
                 "promotion_incomplete",
@@ -3580,7 +3625,8 @@ class WorktreeService:
                     f"lease {lease.id} does not have exact promotion provenance",
                     lease=lease,
                 )
-            expected_blob_heads: dict[str, str] = {}
+            if lease.promotion_mode is PromotionMode.EXACT:
+                expected_blob_heads: dict[str, str] = {}
             for source, source_base_sha in zip(sources, source_base_shas):
                 if (
                     (
@@ -3595,27 +3641,40 @@ class WorktreeService:
                         f"lease {lease.id} does not have exact source provenance",
                         lease=lease,
                     )
-                for path in source.changed_paths:
-                    if path not in excluded_paths:
-                        expected_blob_heads[path] = source.head_sha
-            expected_blobs = self._promotion_net_blobs(
-                expected_blob_heads, target_sha
-            )
-            expected_paths = tuple(sorted(expected_blobs))
-            if (
-                self.git.changed_paths(
+                if lease.promotion_mode is PromotionMode.EXACT:
+                    for path in source.changed_paths:
+                        if path not in excluded_paths:
+                            expected_blob_heads[path] = source.head_sha
+            if lease.promotion_mode is PromotionMode.EXACT:
+                expected_blobs = self._promotion_net_blobs(
+                    expected_blob_heads, target_sha
+                )
+                expected_paths = tuple(sorted(expected_blobs))
+                contents_valid = (
+                    self.git.changed_paths(
+                        lease.worktree_path,
+                        target_sha,
+                        promotion_head,
+                        find_renames=True,
+                    )
+                    == expected_paths
+                    and not any(
+                        expected_blobs[path]
+                        != self.git.path_blob(promotion_head, path)
+                        for path in expected_paths
+                    )
+                )
+            else:
+                promoted_paths = self.git.changed_paths(
                     lease.worktree_path,
                     target_sha,
                     promotion_head,
                     find_renames=True,
                 )
-                != expected_paths
-                or any(
-                    expected_blobs[path]
-                    != self.git.path_blob(promotion_head, path)
-                    for path in expected_paths
+                contents_valid = bool(promoted_paths) and all(
+                    path in lease.reviewed_paths for path in promoted_paths
                 )
-            ):
+            if not contents_valid:
                 return self._promotion_blocked(
                     "promotion_incomplete",
                     f"lease {lease.id} does not have the exact reviewed delta",
@@ -3633,6 +3692,11 @@ class WorktreeService:
                 summary="recovered verified promotion; publication pending",
                 observed_head_sha=promotion_head,
                 head_sha=promotion_head,
+                resolution_state=(
+                    ResolutionState.AUTOMATIC
+                    if lease.promotion_mode is PromotionMode.OUT_OF_ORDER
+                    else None
+                ),
             )
         except GitRemoteError as error:
             return self._external_error(
@@ -3783,11 +3847,20 @@ class WorktreeService:
         excluded_trailers = tuple(
             f"AWF-Excluded-Path: {path}" for path in excluded_paths
         )
+        mode_trailers = (
+            (
+                "AWF-Promotion-Mode: out-of-order",
+                "AWF-Resolution: automatic",
+            )
+            if lease.promotion_mode is PromotionMode.OUT_OF_ORDER
+            else ()
+        )
         return (
             *source_trailers,
             *excluded_trailers,
             f"AWF-Target-Base: {target_sha}",
             f"AWF-Lease-ID: {lease.id}",
+            *mode_trailers,
         )
 
     def _promotion_message(
@@ -3826,8 +3899,12 @@ class WorktreeService:
         target_branch: str,
     ) -> tuple[str, ...] | None:
         lines = message.splitlines()
+        mode_trailer_count = (
+            2 if lease.promotion_mode is PromotionMode.OUT_OF_ORDER else 0
+        )
         if (
-            len(lines) != 3 * len(sources) + len(excluded_paths) + 4
+            len(lines)
+            != 3 * len(sources) + len(excluded_paths) + 4 + mode_trailer_count
             or lines[0]
             != WorktreeService._promotion_title(
                 tuple(source.number for source in sources),
@@ -3862,6 +3939,11 @@ class WorktreeService:
         if (
             lines[offset] != f"AWF-Target-Base: {target_sha}"
             or lines[offset + 1] != f"AWF-Lease-ID: {lease.id}"
+        ):
+            return None
+        if lease.promotion_mode is PromotionMode.OUT_OF_ORDER and (
+            lines[offset + 2] != "AWF-Promotion-Mode: out-of-order"
+            or lines[offset + 3] != "AWF-Resolution: automatic"
         ):
             return None
         return tuple(source_base_shas)

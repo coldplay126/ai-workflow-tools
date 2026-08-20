@@ -22,6 +22,7 @@ from awf.worktrees.models import (
     LeaseState,
     PromotionMode,
     Purpose,
+    ResolutionState,
 )
 from awf.worktrees.registry import WorktreeRegistry
 from awf.worktrees.service import WorktreeService
@@ -462,6 +463,63 @@ class PromotionHarness:
             change_feature=True,
             include_followup=False,
         )
+
+    def add_divergent_same_file_non_overlapping_source(
+        self, number: int = 373
+    ) -> PullRequest:
+        source_base_text = (
+            "copy=source\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nrank=old\n"
+        )
+        source_head_text = source_base_text.replace("rank=old", "rank=new")
+        target_text = source_base_text.replace("copy=source", "copy=target")
+        branch = f"feature/pr-{number}"
+
+        git_command(self.repo, "checkout", "-q", "staging")
+        (self.repo / "feature.txt").write_text(source_base_text, encoding="utf-8")
+        git_command(self.repo, "add", "feature.txt")
+        git_command(self.repo, "commit", "-q", "-m", "source prerequisite")
+        git_command(self.repo, "push", "-q", "origin", "staging")
+        git_command(self.repo, "checkout", "-q", "-b", branch)
+        base_sha = git_command(self.repo, "rev-parse", "HEAD")
+        (self.repo / "feature.txt").write_text(source_head_text, encoding="utf-8")
+        git_command(self.repo, "add", "feature.txt")
+        git_command(self.repo, "commit", "-q", "-m", "source followup")
+        head_sha = git_command(self.repo, "rev-parse", "HEAD")
+        git_command(self.repo, "push", "-q", "-u", "origin", branch)
+        git_command(self.repo, "checkout", "-q", "staging")
+        git_command(
+            self.repo,
+            "merge",
+            "--no-ff",
+            "-q",
+            branch,
+            "-m",
+            "merge source followup",
+        )
+        merge_sha = git_command(self.repo, "rev-parse", "HEAD")
+        git_command(self.repo, "push", "-q", "origin", "staging")
+        git_command(self.repo, "checkout", "-q", "main")
+        (self.repo / "feature.txt").write_text(target_text, encoding="utf-8")
+        git_command(self.repo, "add", "feature.txt")
+        git_command(self.repo, "commit", "-q", "-m", "production divergent change")
+        git_command(self.repo, "push", "-q", "origin", "main")
+        git_command(self.repo, "checkout", "-q", "staging")
+
+        source = PullRequest(
+            number=number,
+            state="MERGED",
+            base_ref="staging",
+            base_sha=base_sha,
+            head_ref=branch,
+            head_sha=head_sha,
+            merge_commit_sha=merge_sha,
+            review_decision="APPROVED",
+            checks_passed=True,
+            changed_paths=("feature.txt",),
+            url=f"https://github.example/acme/repo/pull/{number}",
+        )
+        self.github.prs[number] = source
+        return source
 
     def advance_target_prerequisite(self) -> str:
         git_command(self.repo, "checkout", "-q", "main")
@@ -3521,9 +3579,130 @@ def test_promote_persists_out_of_order_provenance_before_patch_application(
         assert lease.reviewed_paths == source.changed_paths
 
 
+def test_promote_exact_blocks_divergent_same_file_followup(
+    promotion_harness: PromotionHarness,
+) -> None:
+    source = promotion_harness.add_divergent_same_file_non_overlapping_source()
+
+    result = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "promotion_content_mismatch"
+    assert promotion_harness.github.create_calls == []
+
+
+def test_promote_out_of_order_synthesizes_divergent_same_file_followup(
+    promotion_harness: PromotionHarness,
+) -> None:
+    source = promotion_harness.add_divergent_same_file_non_overlapping_source()
+    promotion_harness.configure(
+        verify_production=(
+            (
+                sys.executable,
+                "-c",
+                (
+                    "from pathlib import Path; assert Path('feature.txt').read_text()"
+                    " == 'copy=target\\nstable-1\\nstable-2\\nstable-3\\nstable-4\\n"
+                    "stable-5\\nrank=new\\n'"
+                ),
+            ),
+        )
+    )
+
+    result = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert result.decision == "ready"
+    assert result.lease is not None
+    assert result.lease.state is LeaseState.PR_OPEN
+    assert result.lease.resolution_state is ResolutionState.AUTOMATIC
+    assert result.lease.target_pr == 900
+    assert (result.lease.worktree_path / "feature.txt").read_text(
+        encoding="utf-8"
+    ) == (
+        "copy=target\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nrank=new\n"
+    )
+    assert len(promotion_harness.github.create_calls) == 1
+    expected_body = "\n".join(
+        (
+            "AWF-Source-PR: 373",
+            f"AWF-Source-Base: {source.base_sha}",
+            f"AWF-Source-Head: {source.head_sha}",
+            f"AWF-Target-Base: {result.lease.target_base_sha}",
+            f"AWF-Lease-ID: {result.lease.id}",
+            "AWF-Promotion-Mode: out-of-order",
+            "AWF-Resolution: automatic",
+        )
+    )
+    assert promotion_harness.github.create_calls[0]["body"] == expected_body
+    assert promotion_harness.git.commit_message(result.lease.worktree_path) == "\n\n".join(
+        ("Promote PR #373 to main", expected_body)
+    )
+    assert result.actions == (
+        {
+            "kind": "verify_production",
+            "argv": list(promotion_harness.config.verify_production[0]),
+            "exit_code": 0,
+            "stderr": "",
+        },
+    )
+
+    reused = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert reused.decision == "reuse"
+    assert len(promotion_harness.github.create_calls) == 1
+
+def test_promote_out_of_order_reuse_requires_automatic_trailer(
+    promotion_harness: PromotionHarness,
+) -> None:
+    first = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert first.lease is not None
+    message = promotion_harness.git.commit_message(first.lease.worktree_path)
+    git_command(
+        first.lease.worktree_path,
+        "commit",
+        "--amend",
+        "-q",
+        "-m",
+        message.replace("AWF-Resolution: automatic", "AWF-Resolution: manual_reviewed"),
+    )
+
+    reused = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert reused.status == "blocked"
+    assert reused.blockers[0]["code"] == "promotion_incomplete"
+    assert len(promotion_harness.github.create_calls) == 1
+
+
 def test_promote_applies_only_source_pr_delta(
     promotion_harness: PromotionHarness,
 ) -> None:
+    source = promotion_harness.github.prs[372]
+    target_sha = promotion_harness.git.resolve_ref("origin/main")
     result = promotion_harness.service.promote(
         source_pr=372,
         target_branch="main",
@@ -3538,8 +3717,20 @@ def test_promote_applies_only_source_pr_delta(
     assert promotion_harness.git.changed_paths(worktree, result.lease.base_ref) == (
         "feature.txt",
     )
+    expected_body = "\n".join(
+        (
+            "AWF-Source-PR: 372",
+            f"AWF-Source-Base: {source.base_sha}",
+            f"AWF-Source-Head: {source.head_sha}",
+            f"AWF-Target-Base: {target_sha}",
+            f"AWF-Lease-ID: {result.lease.id}",
+        )
+    )
     assert promotion_harness.github.create_calls[0]["base"] == "main"
-    assert "AWF-Source-PR: 372" in promotion_harness.github.create_calls[0]["body"]
+    assert promotion_harness.github.create_calls[0]["body"] == expected_body
+    assert promotion_harness.git.commit_message(worktree) == "\n\n".join(
+        ("Promote PR #372 to main", expected_body)
+    )
     assert result.lease.state is LeaseState.PR_OPEN
     assert result.lease.target_pr == 900
 
