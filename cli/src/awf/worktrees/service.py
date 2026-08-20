@@ -3291,6 +3291,12 @@ class WorktreeService:
                 f"lease {lease.id} does not match the requested promotion",
                 lease=lease,
             )
+        if promotion_mode is PromotionMode.OUT_OF_ORDER:
+            source_blocker = self._out_of_order_reuse_source_blocker(
+                lease, sources[0]
+            )
+            if source_blocker is not None:
+                return source_blocker
         try:
             promotion_message = self.git.commit_message(lease.worktree_path)
         except GitError as error:
@@ -3417,6 +3423,75 @@ class WorktreeService:
             excluded_paths=excluded_paths,
             target_branch=target_branch,
         )
+
+    def _out_of_order_reuse_source_blocker(
+        self, lease: Lease, source: PullRequest
+    ) -> CommandResult | None:
+        try:
+            source_base_sha = self.git.fetch_ref(source.base_sha)
+            source_head_sha = self.git.fetch_ref(source.head_sha)
+            if (
+                source_base_sha != source.base_sha
+                or source_head_sha != source.head_sha
+            ):
+                return self._promotion_blocked(
+                    "source_sha_mismatch",
+                    (
+                        f"fetched source pull request #{source.number} refs do not"
+                        " match the reviewed SHAs"
+                    ),
+                    lease=lease,
+                )
+            merge_base = self.git.merge_base(source_base_sha, source_head_sha)
+            collapsed_paths = tuple(
+                sorted(
+                    self.git.changed_paths(
+                        self.git.repository_root(),
+                        merge_base,
+                        source_head_sha,
+                        find_renames=True,
+                    )
+                )
+            )
+            expanded_paths = tuple(
+                sorted(
+                    self.git.changed_path_endpoints(
+                        self.git.repository_root(),
+                        merge_base,
+                        source_head_sha,
+                    )
+                )
+            )
+        except GitRemoteError as error:
+            return self._external_error(
+                "wt.promote",
+                "source_delta_unavailable",
+                str(error),
+                lease=lease,
+            )
+        except GitError as error:
+            return self._promotion_blocked(
+                "source_delta_unavailable", str(error), lease=lease
+            )
+        reviewed_paths = tuple(sorted(source.changed_paths))
+        if expanded_paths != collapsed_paths:
+            return self._promotion_blocked(
+                "unsupported_out_of_order_rename",
+                "out-of-order promotion does not support renamed paths",
+                lease=lease,
+            )
+        if (
+            collapsed_paths != reviewed_paths
+            or lease.source_base_sha != source.base_sha
+            or lease.source_head_sha != source.head_sha
+            or lease.reviewed_paths != reviewed_paths
+        ):
+            return self._promotion_blocked(
+                "promotion_incomplete",
+                f"lease {lease.id} does not have exact promotion provenance",
+                lease=lease,
+            )
+        return None
 
     def _rebuild_content_mismatch_promotion(
         self,

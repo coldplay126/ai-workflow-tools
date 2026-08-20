@@ -3751,6 +3751,81 @@ def test_promote_out_of_order_blocks_renames_before_worktree_creation(
     assert promotion_harness.github.create_calls == []
     assert len(promotion_harness.git.list_worktrees()) == 1
 
+@pytest.mark.parametrize(
+    "state",
+    (LeaseState.ACTIVE, LeaseState.BLOCKED, LeaseState.PR_OPEN),
+    ids=("active", "blocked", "pr-open"),
+)
+def test_promote_out_of_order_reuse_blocks_legacy_rename_leases(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    state: LeaseState,
+) -> None:
+    source = promotion_harness.add_renamed_source()
+    verify_count = promotion_harness.state_dir / "rename-verify-count.txt"
+    promotion_harness.configure(
+        verify_production=(
+            (
+                sys.executable,
+                "-c",
+                (
+                    "from pathlib import Path; "
+                    f"Path({str(verify_count)!r}).touch()"
+                ),
+            ),
+        )
+    )
+    target_ref = "origin/main"
+    target_sha = promotion_harness.git.fetch_ref("main")
+    lease = promotion_harness.service._new_promotion_lease(
+        (source,),
+        target_ref,
+        target_sha,
+        (),
+        promotion_mode=PromotionMode.OUT_OF_ORDER,
+    )
+    promotion_harness.git.add_worktree(
+        lease.worktree_path,
+        lease.branch,
+        target_sha,
+    )
+    lease = promotion_harness.registry.create_lease(
+        replace(
+            lease,
+            head_sha=promotion_harness.git.head_sha(lease.worktree_path),
+        )
+    )
+    if state is not LeaseState.ACTIVE:
+        lease = promotion_harness.registry.transition(
+            lease.id,
+            state,
+            expected_version=lease.version,
+            event_type=(
+                "promotion_blocked"
+                if state is LeaseState.BLOCKED
+                else "promotion_pr_open"
+            ),
+            pr_number=900 if state is LeaseState.PR_OPEN else None,
+        )
+    push_calls: list[str] = []
+
+    def push_branch(_worktree: Path, branch: str) -> None:
+        push_calls.append(branch)
+
+    monkeypatch.setattr(promotion_harness.git, "push_branch", push_branch)
+    result = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "unsupported_out_of_order_rename"
+    assert not verify_count.exists()
+    assert push_calls == []
+    assert promotion_harness.github.create_calls == []
+
 
 def test_promote_out_of_order_publishes_reviewed_deletion(
     promotion_harness: PromotionHarness,
