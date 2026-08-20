@@ -175,7 +175,8 @@ The operator's unstaged and unmerged edits must be a subset of
 patch; the final indexed delta must be a non-empty subset of `reviewed_paths`.
 
 Clean-applied reviewed paths outside `conflicted_paths` are AWF-pinned by exact
-index blobs across preview, apply, and retry. Direct `git add` tampering returns
+stage-0 mode and blob OID index entries across preview, apply, and retry. Direct
+`git add` tampering or chmod/file-type mode tampering returns
 `promotion_resolution_scope_mismatch`.
 
 Any direct cherry-pick is forbidden for production promotion. AWF reconstructs
@@ -349,8 +350,9 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
       "final_indexed_delta": "non_empty_reviewed_paths_subset",
       "conflict_marker_policy": "markers_only_trailing_whitespace_allowed",
       "live_target_recheck": "after_verification_before_publish",
-      "protected_blobs": {
+      "protected_index_entries": {
         "paths": "clean_applied_reviewed_paths_outside_conflicted_paths",
+        "entry": "stage_zero_mode_blob_oid_or_null",
         "pin": "exact_preview_apply_retry",
         "tamper": "promotion_resolution_scope_mismatch"
       },

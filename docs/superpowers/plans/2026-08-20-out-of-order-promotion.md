@@ -12,16 +12,16 @@
 
 ## File map
 
-- `cli/src/awf/worktrees/models.py`: promotion and resolution enums plus durable lease fields, JSON shape, and protected clean-apply blob pins.
-- `cli/src/awf/worktrees/registry.py`: backward-compatible SQLite migration, protected-blob serialization, inserts, CAS transitions, and row mapping.
+- `cli/src/awf/worktrees/models.py`: promotion and resolution enums plus durable lease fields, JSON shape, and protected clean-apply index-entry pins.
+- `cli/src/awf/worktrees/registry.py`: backward-compatible SQLite migration, protected-index-entry serialization, inserts, CAS transitions, and row mapping.
 - `cli/src/awf/worktrees/git.py`: structured three-way patch conflicts, index blob snapshots, unmerged-path inspection, and AWF-owned staging.
 - `cli/src/awf/cli.py`: `--out-of-order` parser surface.
 - `cli/src/awf/commands/wt.py`: CLI-to-service forwarding.
-- `cli/src/awf/worktrees/service.py`: validation, lease identity, automatic synthetic promotion, conflict preservation, protected-blob pinning, resolution preview/apply, provenance, and publication.
-- `cli/tests/test_worktree_registry.py`: new and legacy registry contracts, protected-blob migration, and round trips.
+- `cli/src/awf/worktrees/service.py`: validation, lease identity, automatic synthetic promotion, conflict preservation, protected-index-entry pinning, resolution preview/apply, provenance, and publication.
+- `cli/tests/test_worktree_registry.py`: new and legacy registry contracts, protected-index-entry migration, and round trips.
 - `cli/tests/test_worktree_git.py`: real Git conflict and staging contracts.
 - `cli/tests/test_worktree_commands.py`: parser and forwarding contracts.
-- `cli/tests/test_worktree_service.py`: automatic and manual out-of-order behavior, protected-blob pin validation, and exact-mode regressions.
+- `cli/tests/test_worktree_service.py`: automatic and manual out-of-order behavior, protected-index-entry pin validation, and exact-mode regressions.
 - `cli/tests/test_release_worktree_smoke.py`: end-to-end divergent staging/production scenario.
 - `cli/tests/test_docs_semantic_audit.py`: lifecycle command and decision-table semantics.
 - `claude/skills/release-worktree-lifecycle/SKILL.md`: canonical operator procedure.
@@ -52,7 +52,7 @@ def test_registry_round_trips_out_of_order_provenance(tmp_path: Path) -> None:
         target_base_sha="c" * 40,
         reviewed_paths=("src/a.py", "src/b.py"),
         conflicted_paths=("src/b.py",),
-        protected_blobs=(("src/a.py", "d" * 40),),
+        protected_index_entries=(("src/a.py", ("100644", "d" * 40)),),
     )
 
     registry.create_lease(created)
@@ -61,8 +61,8 @@ def test_registry_round_trips_out_of_order_provenance(tmp_path: Path) -> None:
     assert created.to_dict()["promotion_mode"] == "out_of_order"
     assert created.to_dict()["resolution_state"] == "pending"
     assert created.to_dict()["reviewed_paths"] == ["src/a.py", "src/b.py"]
-    assert created.to_dict()["protected_blobs"] == [
-        {"path": "src/a.py", "blob_oid": "d" * 40}
+    assert created.to_dict()["protected_index_entries"] == [
+        {"path": "src/a.py", "mode": "100644", "blob_oid": "d" * 40}
     ]
 
 Create a legacy `worktree_leases` table with the pre-feature columns, insert one exact lease row, call `registry.ensure()`, and assert the row loads with:
@@ -75,9 +75,9 @@ assert loaded.source_head_sha is None
 assert loaded.target_base_sha is None
 assert loaded.reviewed_paths == ()
 assert loaded.conflicted_paths == ()
-assert loaded.protected_blobs == ()
+assert loaded.protected_index_entries == ()
 
-Add a CAS transition test that changes `resolution_state`, `conflicted_paths`, and `protected_blobs` and survives a reload.
+Add a CAS transition test that changes `resolution_state`, `conflicted_paths`, and `protected_index_entries` and survives a reload.
 
 - [ ] **Step 2: Run the tests and verify RED**
 
@@ -117,14 +117,14 @@ source_head_sha: str | None
 target_base_sha: str | None
 reviewed_paths: tuple[str, ...]
 conflicted_paths: tuple[str, ...]
-protected_blobs: tuple[tuple[str, str | None], ...]
+protected_index_entries: tuple[tuple[str, tuple[str, str] | None], ...]
 ```
 
-Use exact/none/`None`/empty-tuple defaults in `Lease.new()`. Convert enum values, path tuples, and sorted protected path→blob-or-null pairs to additive JSON output.
+Use exact/none/`None`/empty-tuple defaults in `Lease.new()`. Convert enum values, path tuples, and sorted protected path→stage-0 mode+blob-OID-or-null entries to additive JSON output.
 
 - [ ] **Step 4: Add idempotent SQLite migration and mappings**
 
-Extend `_SCHEMA` with checked mode/state columns, nullable SHA columns, JSON text path columns, and protected blob metadata. In `ensure()`, after `executescript`, inspect `PRAGMA table_info(worktree_leases)` and conditionally execute these additions for existing databases:
+Extend `_SCHEMA` with checked mode/state columns, nullable SHA columns, JSON text path columns, and protected index-entry metadata. In `ensure()`, after `executescript`, inspect `PRAGMA table_info(worktree_leases)` and conditionally execute these additions for existing databases:
 
 ```python
 migrations = {
@@ -147,16 +147,16 @@ migrations = {
         "ALTER TABLE worktree_leases ADD COLUMN conflicted_paths "
         "TEXT NOT NULL DEFAULT '[]'"
     ),
-    "protected_blobs": (
-        "ALTER TABLE worktree_leases ADD COLUMN protected_blobs "
+    "protected_index_entries": (
+        "ALTER TABLE worktree_leases ADD COLUMN protected_index_entries "
         "TEXT NOT NULL DEFAULT '[]'"
     ),
 }
 ```
 
-Use JSON path arrays and sorted protected path→blob-or-null pairs on write, and validate decoded values on read. Reject malformed registry data with `ValueError`; do not silently discard it.
+Use JSON path arrays and sorted protected path→stage-0 mode+blob-OID-or-null entries on write, and validate decoded values on read. Reject malformed registry data with `ValueError`; do not silently discard it.
 
-Extend `transition()` with optional `resolution_state`, `conflicted_paths`, and `protected_blobs` arguments. Update only fields explicitly supplied, preserving CAS semantics.
+Extend `transition()` with optional `resolution_state`, `conflicted_paths`, and `protected_index_entries` arguments. Update only fields explicitly supplied, preserving CAS semantics.
 
 - [ ] **Step 5: Run focused tests and verify GREEN**
 
@@ -512,7 +512,7 @@ assert resumed.lease.state is LeaseState.PR_OPEN
 assert "AWF-Resolution: manual-reviewed" in harness.github.created[0]["body"]
 ```
 
-Add blockers for operator unstaged or unmerged paths outside `conflicted_paths`, a remaining unmerged or unstaged entry after AWF staging, an exact protected-blob pin mismatch after direct index tampering, current source base/head differing from persisted provenance, current target SHA differing from `target_base_sha`, an empty net production delta, a conflict marker, a published remote branch, or an existing target PR. Protected-blob tampering returns `promotion_resolution_scope_mismatch`; the marker guard must allow valid trailing whitespace.
+Add blockers for operator unstaged or unmerged paths outside `conflicted_paths`, a remaining unmerged or unstaged entry after AWF staging, an exact protected-index-entry pin mismatch after direct index, chmod, or file-type mode tampering, current source base/head differing from persisted provenance, current target SHA differing from `target_base_sha`, an empty net production delta, a conflict marker, a published remote branch, or an existing target PR. Protected-index-entry tampering returns `promotion_resolution_scope_mismatch`; the marker guard must allow valid trailing whitespace.
 
 - [ ] **Step 3: Run tests and verify RED**
 
@@ -529,7 +529,7 @@ Catch `GitPatchConflict` separately during new out-of-order application. Transit
 ```python
 resolution_state=ResolutionState.PENDING
 conflicted_paths=error.paths
-protected_blobs=git.index_blob_snapshot(
+protected_index_entries=git.index_entry_snapshot(
     worktree,
     reviewed_paths_outside(error.paths),
 )
@@ -537,13 +537,13 @@ event_type="promotion_blocked"
 summary="out_of_order_conflict: reviewed patch requires managed resolution"
 ```
 
-Return the blocked lease and a concise message listing the paths. Persist the clean-applied reviewed index blobs outside `conflicted_paths`; do not reset, commit, push, or create a PR.
+Return the blocked lease and a concise message listing the paths. Persist the clean-applied reviewed stage-0 mode and blob OID entries outside `conflicted_paths`; do not reset, commit, push, or create a PR.
 
 - [ ] **Step 5: Add read-only resolution preview**
 
 Before normal preview returns, look up the exact active out-of-order initiative through a read-only registry path. If it is a pending blocked lease, call `_out_of_order_resolution_preview()`.
 
-The helper must verify request identity, persisted source/target SHAs, registered worktree path, absent remote branch/PR, operator unstaged/unmerged scope, and exact protected blobs. It returns, without mutation, the planned action order: resolve the reported conflict, stage exactly `conflicted_paths`, commit, run production verification, push the managed branch, and open the target PR.
+The helper must verify request identity, persisted source/target SHAs, registered worktree path, absent remote branch/PR, operator unstaged/unmerged scope, and exact protected index entries. It returns, without mutation, the planned action order: resolve the reported conflict, stage exactly `conflicted_paths`, commit, run production verification, push the managed branch, and open the target PR.
 
 - [ ] **Step 6: Add apply recovery**
 
@@ -551,7 +551,7 @@ In `_reuse_promotion()`, branch on pending out-of-order resolution before readin
 
 1. repeat every preview guard under the repository lock;
 2. require operator unstaged and unmerged paths to be subsets of `lease.conflicted_paths`;
-3. require AWF-pinned clean-applied reviewed blobs to match on preview, apply, and retry;
+3. require AWF-pinned clean-applied reviewed stage-0 mode and blob OID entries to match on preview, apply, and retry;
 4. stage exactly `lease.conflicted_paths` through `GitClient.stage_paths()`;
 5. require no unmerged or unstaged resolution entry to remain;
 6. reject staged and committed conflict markers while allowing valid trailing whitespace;
