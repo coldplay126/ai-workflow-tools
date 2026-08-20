@@ -3546,6 +3546,7 @@ def test_promote_out_of_order_preview_reports_promotion_mode(
     )
 
     assert result.actions[0]["promotion_mode"] == "out_of_order"
+    assert result.actions[0]["reviewed_paths"] == ["feature.txt"]
     assert len(promotion_harness.git.list_worktrees()) == 1
     assert not promotion_harness.registry.db_path.exists()
     assert not promotion_harness.cache_dir.exists()
@@ -3930,6 +3931,19 @@ def test_promote_out_of_order_recovers_pending_transition_and_reverifies(
 
     monkeypatch.setattr(
         promotion_harness.registry, "transition", fail_pending_transition
+    )
+    def unexpected_marker_check(*_args: object) -> bool:
+        raise AssertionError("automatic promotion must not inspect manual markers")
+
+    monkeypatch.setattr(
+        promotion_harness.git,
+        "staged_diff_has_conflict_markers",
+        unexpected_marker_check,
+    )
+    monkeypatch.setattr(
+        promotion_harness.git,
+        "committed_diff_has_conflict_markers",
+        unexpected_marker_check,
     )
     first = promotion_harness.service.promote(
         source_pr=372,
@@ -4593,7 +4607,26 @@ def test_promote_out_of_order_preview_reports_pending_manual_resolution_without_
             "lease_id": first.lease.id,
             "path": str(first.lease.worktree_path),
             "conflicted_paths": ["feature.txt"],
+            "reviewed_paths": ["feature.txt"],
             "current_changed_paths": ["feature.txt"],
+        },
+        {"kind": "stage_paths", "paths": ["feature.txt"]},
+        {
+            "kind": "commit",
+            "resolution_state": "manual-reviewed",
+        },
+        {
+            "kind": "verify_production",
+            "argv": list(promotion_harness.config.verify_production[0]),
+        },
+        {
+            "kind": "push_branch",
+            "branch": first.lease.branch,
+        },
+        {
+            "kind": "open_pull_request",
+            "head": first.lease.branch,
+            "base": "main",
         },
     )
     assert promotion_harness.registry.get_lease(first.lease.id) == before
@@ -4634,7 +4667,7 @@ def test_promote_out_of_order_applies_manual_resolution_and_opens_one_pr(
     )
     assert first.lease is not None
     (first.lease.worktree_path / "feature.txt").write_text(
-        "manually resolved\n", encoding="utf-8"
+        "manually resolved  \n", encoding="utf-8"
     )
 
     resumed = promotion_harness.service.promote(
@@ -4651,6 +4684,9 @@ def test_promote_out_of_order_applies_manual_resolution_and_opens_one_pr(
     assert resumed.lease.resolution_state is ResolutionState.MANUAL_REVIEWED
     assert resumed.lease.target_pr == 900
     assert resumed.lease.conflicted_paths == ("feature.txt",)
+    assert (resumed.lease.worktree_path / "feature.txt").read_text(
+        encoding="utf-8"
+    ) == "manually resolved  \n"
     assert promotion_harness.git.commit_message(resumed.lease.worktree_path) == "\n\n".join(
         (
             "Promote PR #372 to main",
@@ -4943,7 +4979,7 @@ def test_promote_out_of_order_resolution_preview_blocks_invalid_pending_lease(
     assert promotion_harness.github.create_calls == []
 
 
-def test_promote_out_of_order_blocks_clean_applied_non_conflict_path(
+def test_promote_out_of_order_preserves_clean_applied_reviewed_path(
     promotion_harness: PromotionHarness,
 ) -> None:
     promotion_harness.make_target_conflict()
@@ -4961,6 +4997,7 @@ def test_promote_out_of_order_blocks_clean_applied_non_conflict_path(
     (first.lease.worktree_path / "feature.txt").write_text(
         "manually resolved\n", encoding="utf-8"
     )
+
     resumed = promotion_harness.service.promote(
         source_pr=source.number,
         target_branch="main",
@@ -4968,9 +5005,72 @@ def test_promote_out_of_order_blocks_clean_applied_non_conflict_path(
         apply=True,
     )
 
-    assert resumed.status == "blocked"
-    assert resumed.blockers[0]["code"] == "promotion_resolution_scope_mismatch"
-    assert resumed.lease == first.lease
+    assert resumed.decision == "ready"
+    assert resumed.lease is not None
+    assert promotion_harness.git.changed_paths(
+        resumed.lease.worktree_path,
+        resumed.lease.target_base_sha,
+        resumed.lease.head_sha,
+        find_renames=True,
+    ) == ("feature.txt", "followup.txt")
+    assert (resumed.lease.worktree_path / "followup.txt").read_text(
+        encoding="utf-8"
+    ) == "followup\n"
+    assert len(promotion_harness.github.create_calls) == 1
+@pytest.mark.parametrize(
+    ("target_state", "blocker"),
+    (
+        ("advanced", "promotion_provenance_changed"),
+        ("missing", "target_ref_unavailable"),
+    ),
+)
+def test_promote_out_of_order_blocks_live_target_after_initial_verification(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    target_state: str,
+    blocker: str,
+) -> None:
+    original_verify = promotion_harness.service._verify_promotion
+    original_remote_branch_sha = promotion_harness.git.remote_branch_sha
+    verification_count = 0
+    push_calls: list[str] = []
+
+    def verify(worktree: Path) -> tuple[dict[str, object], ...]:
+        nonlocal verification_count
+        verification_count += 1
+        return original_verify(worktree)
+
+    def remote_branch_sha(branch: str) -> str | None:
+        if branch == "main" and verification_count:
+            return None if target_state == "missing" else "d" * 40
+        return original_remote_branch_sha(branch)
+
+    def push_branch(_worktree: Path, branch: str) -> None:
+        push_calls.append(branch)
+
+    monkeypatch.setattr(promotion_harness.service, "_verify_promotion", verify)
+    monkeypatch.setattr(
+        promotion_harness.git,
+        "remote_branch_sha",
+        remote_branch_sha,
+    )
+    monkeypatch.setattr(promotion_harness.git, "push_branch", push_branch)
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == blocker
+    assert result.lease is not None
+    assert result.lease.state is LeaseState.BLOCKED
+    persisted = promotion_harness.registry.get_lease(result.lease.id)
+    assert persisted is not None
+    assert persisted.state is LeaseState.BLOCKED
+    assert verification_count == 1
+    assert push_calls == []
     assert promotion_harness.github.create_calls == []
 
 

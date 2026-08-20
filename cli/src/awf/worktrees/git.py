@@ -381,29 +381,22 @@ class GitClient:
         )
         return tuple(sorted(set(tracked).union(untracked)))
 
-    def staged_diff_is_clean(self, cwd: Path) -> bool:
-        try:
-            self._run("diff", "--cached", "--check", "--no-ext-diff", cwd=cwd)
-        except GitError as error:
-            if error.returncode is not None:
-                return False
-            raise
-        return True
+    def staged_diff_has_conflict_markers(self, cwd: Path) -> bool:
+        return _has_added_conflict_marker(
+            self._run("diff", "--cached", "--no-ext-diff", cwd=cwd).stdout
+        )
 
-    def committed_diff_is_clean(self, cwd: Path, base: str, head: str) -> bool:
-        try:
+    def committed_diff_has_conflict_markers(
+        self, cwd: Path, base: str, head: str
+    ) -> bool:
+        return _has_added_conflict_marker(
             self._run(
                 "diff",
-                "--check",
                 "--no-ext-diff",
                 f"{base}..{head}",
                 cwd=cwd,
-            )
-        except GitError as error:
-            if error.returncode is not None:
-                return False
-            raise
-        return True
+            ).stdout
+        )
 
     def reset_hard(self, cwd: Path, ref: str) -> None:
         """Set a managed checkout to ref and discard tracked staged/unstaged changes."""
@@ -576,6 +569,16 @@ def _parse_worktrees(value: bytes) -> tuple[GitWorktree, ...]:
     if fields:
         worktrees.append(_worktree_from_fields(fields))
     return tuple(worktrees)
+
+_CONFLICT_MARKER_PREFIXES = (b"<<<<<<<", b"=======", b">>>>>>>", b"|||||||")
+
+
+def _has_added_conflict_marker(patch: bytes) -> bool:
+    for line in patch.splitlines():
+        if line.startswith(b"+") and not line.startswith(b"+++"):
+            if line[1:].startswith(_CONFLICT_MARKER_PREFIXES):
+                return True
+    return False
 
 def _worktree_from_fields(fields: dict[str, str | bool]) -> GitWorktree:
     raw_path = fields.get("worktree")

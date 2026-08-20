@@ -339,6 +339,7 @@ class WorktreeService:
                         "target_branch": target_branch,
                         "target_base_sha": target_sha,
                         "promotion_mode": promotion_mode.value,
+                        "reviewed_paths": list(lease.reviewed_paths),
                     },
                     *(
                         {
@@ -630,6 +631,20 @@ class WorktreeService:
                 if prepare_blocker is not None:
                     return prepare_blocker
                 verification_actions = self._verify_promotion(lease.worktree_path)
+                if promotion_mode is PromotionMode.OUT_OF_ORDER:
+                    live_target_sha = self.git.remote_branch_sha(target_branch)
+                    if live_target_sha is None:
+                        return self._block_promotion_lease(
+                            lease,
+                            "target_ref_unavailable",
+                            f"target branch {target_branch!r} is unavailable on origin",
+                        )
+                    if live_target_sha != target_sha:
+                        return self._block_promotion_lease(
+                            lease,
+                            "promotion_provenance_changed",
+                            f"target branch {target_branch!r} changed after verification",
+                        )
             except GitPatchConflict as error:
                 if promotion_mode is PromotionMode.OUT_OF_ORDER:
                     return self._record_out_of_order_conflict(lease, error)
@@ -3392,8 +3407,9 @@ class WorktreeService:
             return self._promotion_blocked(
                 "promotion_incomplete", str(error), lease=lease
             )
+        unstaged_paths = self.git.unstaged_paths(lease.worktree_path)
         if not (
-            set(changed_paths).issubset(lease.conflicted_paths)
+            set(unstaged_paths).issubset(lease.conflicted_paths)
             and set(unmerged_paths).issubset(lease.conflicted_paths)
         ):
             return self._promotion_blocked(
@@ -3411,7 +3427,32 @@ class WorktreeService:
                     "lease_id": lease.id,
                     "path": str(lease.worktree_path),
                     "conflicted_paths": list(lease.conflicted_paths),
+                    "reviewed_paths": list(lease.reviewed_paths),
                     "current_changed_paths": list(changed_paths),
+                },
+                {
+                    "kind": "stage_paths",
+                    "paths": list(lease.conflicted_paths),
+                },
+                {
+                    "kind": "commit",
+                    "resolution_state": "manual-reviewed",
+                },
+                *(
+                    {
+                        "kind": "verify_production",
+                        "argv": list(command),
+                    }
+                    for command in self.config.verify_production
+                ),
+                {
+                    "kind": "push_branch",
+                    "branch": lease.branch,
+                },
+                {
+                    "kind": "open_pull_request",
+                    "head": lease.branch,
+                    "base": target_branch,
                 },
             ),
         )
@@ -3477,10 +3518,10 @@ class WorktreeService:
                     f"lease {lease.id} already has a target pull request",
                     lease=lease,
                 )
-            changed_paths = self.git.worktree_changed_paths(lease.worktree_path)
             unmerged_paths = self.git.unmerged_paths(lease.worktree_path)
+            unstaged_paths = self.git.unstaged_paths(lease.worktree_path)
             if not (
-                set(changed_paths).issubset(lease.conflicted_paths)
+                set(unstaged_paths).issubset(lease.conflicted_paths)
                 and set(unmerged_paths).issubset(lease.conflicted_paths)
             ):
                 return self._promotion_blocked(
@@ -3495,23 +3536,30 @@ class WorktreeService:
                     f"lease {lease.id} still has unmerged paths after staging",
                     lease=lease,
                 )
-            if self.git.unstaged_paths(lease.worktree_path):
+            remaining_unstaged_paths = self.git.unstaged_paths(lease.worktree_path)
+            if not set(remaining_unstaged_paths).issubset(lease.conflicted_paths):
                 return self._promotion_blocked(
                     "promotion_resolution_scope_mismatch",
                     f"lease {lease.id} has unstaged resolution changes",
                     lease=lease,
                 )
-            if not self.git.staged_diff_is_clean(lease.worktree_path):
+            if remaining_unstaged_paths:
                 return self._promotion_blocked(
                     "promotion_incomplete",
-                    f"lease {lease.id} staged resolution failed Git's conflict-marker check",
+                    f"lease {lease.id} has unstaged conflicted resolution changes",
+                    lease=lease,
+                )
+            if self.git.staged_diff_has_conflict_markers(lease.worktree_path):
+                return self._promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} staged resolution has conflict markers",
                     lease=lease,
                 )
             promoted_paths = self.git.indexed_changed_paths(
                 lease.worktree_path, lease.target_base_sha
             )
             if not promoted_paths or not set(promoted_paths).issubset(
-                lease.conflicted_paths
+                lease.reviewed_paths
             ):
                 return self._promotion_blocked(
                     "promotion_incomplete",
@@ -3529,12 +3577,12 @@ class WorktreeService:
                     resolution_state=ResolutionState.MANUAL_REVIEWED,
                 ),
             )
-            if not self.git.committed_diff_is_clean(
+            if self.git.committed_diff_has_conflict_markers(
                 lease.worktree_path, lease.target_base_sha, promotion_head
             ):
                 return self._promotion_blocked(
                     "promotion_incomplete",
-                    f"lease {lease.id} committed resolution failed Git's conflict-marker check",
+                    f"lease {lease.id} committed resolution has conflict markers",
                     lease=lease,
                 )
             lease = self.registry.transition(
@@ -3652,8 +3700,8 @@ class WorktreeService:
             if (
                 source_base_shas != (lease.source_base_sha,)
                 or not promoted_paths
-                or not set(promoted_paths).issubset(lease.conflicted_paths)
-                or not self.git.committed_diff_is_clean(
+                or not set(promoted_paths).issubset(lease.reviewed_paths)
+                or self.git.committed_diff_has_conflict_markers(
                     lease.worktree_path, lease.target_base_sha, promotion_head
                 )
             ):
@@ -3773,8 +3821,8 @@ class WorktreeService:
             if (
                 source_base_shas != (lease.source_base_sha,)
                 or not promoted_paths
-                or not set(promoted_paths).issubset(lease.conflicted_paths)
-                or not self.git.committed_diff_is_clean(
+                or not set(promoted_paths).issubset(lease.reviewed_paths)
+                or self.git.committed_diff_has_conflict_markers(
                     lease.worktree_path, lease.target_base_sha, promotion_head
                 )
             ):
@@ -4363,8 +4411,11 @@ class WorktreeService:
                 contents_valid = bool(promoted_paths) and all(
                     path in lease.reviewed_paths for path in promoted_paths
                 )
-            if not contents_valid or not self.git.committed_diff_is_clean(
-                lease.worktree_path, target_sha, promotion_head
+            if not contents_valid or (
+                lease.resolution_state is ResolutionState.MANUAL_REVIEWED
+                and self.git.committed_diff_has_conflict_markers(
+                    lease.worktree_path, target_sha, promotion_head
+                )
             ):
                 return self._promotion_blocked(
                     "promotion_incomplete",
@@ -4463,13 +4514,16 @@ class WorktreeService:
                         "promotion_incomplete",
                         f"lease {lease.id} has no out-of-order target provenance",
                     )
-                if not self.git.committed_diff_is_clean(
-                    lease.worktree_path, lease.target_base_sha, head_sha
+                if (
+                    lease.resolution_state is ResolutionState.MANUAL_REVIEWED
+                    and self.git.committed_diff_has_conflict_markers(
+                        lease.worktree_path, lease.target_base_sha, head_sha
+                    )
                 ):
                     return self._block_promotion_lease(
                         lease,
                         "promotion_incomplete",
-                        f"lease {lease.id} committed promotion failed Git's conflict-marker check",
+                        f"lease {lease.id} committed promotion has conflict markers",
                     )
                 live_target_sha = self.git.remote_branch_sha(target_branch)
                 if live_target_sha is None:

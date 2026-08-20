@@ -502,7 +502,9 @@ def test_git_client_stage_paths_resolves_conflict_and_preserves_staged_change(
     assert client.unmerged_paths(worktree) == ()
     assert client.status_porcelain(worktree) == ("M  shared.txt",)
 
-def test_git_client_detects_conflict_marker_in_committed_diff(tmp_path: Path) -> None:
+def test_git_client_detects_added_conflict_markers_in_staged_and_committed_diffs(
+    tmp_path: Path,
+) -> None:
     repo = make_repository(tmp_path)
     client = GitClient(repo)
     base = client.head_sha()
@@ -511,9 +513,26 @@ def test_git_client_detects_conflict_marker_in_committed_diff(tmp_path: Path) ->
         encoding="utf-8",
     )
     client.stage_paths(repo, ("marker.txt",))
-    head = client.commit(repo, "marker")
 
-    assert not client.committed_diff_is_clean(repo, base, head)
+    assert client.staged_diff_has_conflict_markers(repo)
+
+    head = client.commit(repo, "marker")
+    assert client.committed_diff_has_conflict_markers(repo, base, head)
+
+
+def test_git_client_allows_trailing_whitespace_without_conflict_markers(
+    tmp_path: Path,
+) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    base = client.head_sha()
+    (repo / "whitespace.txt").write_text("manual  \n", encoding="utf-8")
+    client.stage_paths(repo, ("whitespace.txt",))
+
+    assert not client.staged_diff_has_conflict_markers(repo)
+
+    head = client.commit(repo, "trailing whitespace")
+    assert not client.committed_diff_has_conflict_markers(repo, base, head)
 
 
 def test_git_client_stage_paths_rejects_empty_paths(tmp_path: Path) -> None:
