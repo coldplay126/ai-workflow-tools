@@ -558,28 +558,24 @@ def test_git_client_stage_paths_treats_pathspecs_as_literal_paths(
     assert " M unstaged-sentinel.txt" in status
 
 
-def test_git_client_reports_modify_delete_unmerged_paths_without_mutating_head(
+def test_git_client_preserves_modify_delete_apply_failure_without_mutating_head(
     tmp_path: Path,
 ) -> None:
-    client, worktree, _patch = _divergent_patch_worktree(
+    client, worktree, patch = _divergent_patch_worktree(
         tmp_path,
         path="removed.txt",
         base_contents=b"base\n",
         source_contents=None,
         target_contents=b"target\n",
     )
-    head_before = client.head_sha(worktree)
-    merge = subprocess.run(
-        ["git", "merge", "awf/conflict-source"],
-        cwd=worktree,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
     _add_unrelated_staged_and_unstaged_changes(worktree)
-    assert merge.returncode != 0
-    assert client.unmerged_paths(worktree) == ("removed.txt",)
+    head_before = client.head_sha(worktree)
+
+    with pytest.raises(GitError) as caught:
+        client.apply_indexed_patch(worktree, patch)
+
+    assert type(caught.value) is GitError
+    assert client.unmerged_paths(worktree) == ()
     assert client.head_sha(worktree) == head_before
     _assert_unrelated_changes_are_preserved(client, worktree)
 
@@ -1090,6 +1086,10 @@ def test_binary_patch_preserves_rename_mode_and_gitlink_delta(tmp_path: Path) ->
         "submodule",
     )
     assert (target / "script.sh").stat().st_mode & 0o111
+    assert not (target / "README.txt").exists()
+    assert (target / "renamed.txt").read_bytes() == (
+        source / "renamed.txt"
+    ).read_bytes()
     assert client.path_blob(source_head, "submodule") == client.path_blob(
         target_head, "submodule"
     )
