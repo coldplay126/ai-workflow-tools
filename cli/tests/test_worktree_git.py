@@ -15,6 +15,7 @@ from awf.worktrees.git import (
     GitCompleted,
     GitClient,
     GitError,
+    GitPatchConflict,
     GitRemoteError,
     _bounded_stderr,
     _nul_records,
@@ -406,6 +407,77 @@ def test_git_client_classifies_push_transport_failure_as_external(
 
     with pytest.raises(GitRemoteError):
         client.push_branch(repo, "awf/push")
+
+def _conflicting_patch_worktree(
+    tmp_path: Path,
+) -> tuple[GitClient, Path, bytes]:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    (repo / "shared.txt").write_text("base\n", encoding="utf-8")
+    git(repo, "add", "shared.txt")
+    git(repo, "commit", "-q", "-m", "add shared file")
+    base = client.head_sha()
+    source = tmp_path / "conflict-source"
+    target = tmp_path / "conflict-target"
+    client.add_worktree(source, "awf/conflict-source", base)
+    client.add_worktree(target, "awf/conflict-target", base)
+    (source / "shared.txt").write_text("source\n", encoding="utf-8")
+    git(source, "add", "shared.txt")
+    git(source, "commit", "-q", "-m", "source change")
+    source_head = client.head_sha(source)
+    (target / "shared.txt").write_text("target\n", encoding="utf-8")
+    git(target, "add", "shared.txt")
+    git(target, "commit", "-q", "-m", "target change")
+
+    return client, target, client.binary_diff(base, source_head)
+
+
+def test_git_client_reports_real_patch_conflict_and_preserves_unmerged_worktree(
+    tmp_path: Path,
+) -> None:
+    client, worktree, patch = _conflicting_patch_worktree(tmp_path)
+
+    with pytest.raises(GitPatchConflict) as caught:
+        client.apply_indexed_patch(worktree, patch)
+
+    assert caught.value.paths == ("shared.txt",)
+    assert client.unmerged_paths(worktree) == ("shared.txt",)
+    assert any(
+        entry.endswith("shared.txt") for entry in client.status_porcelain(worktree)
+    )
+
+
+def test_git_client_stage_paths_resolves_conflict_and_preserves_staged_change(
+    tmp_path: Path,
+) -> None:
+    client, worktree, patch = _conflicting_patch_worktree(tmp_path)
+
+    with pytest.raises(GitError):
+        client.apply_indexed_patch(worktree, patch)
+    (worktree / "shared.txt").write_text("resolved\n", encoding="utf-8")
+
+    client.stage_paths(worktree, ("shared.txt",))
+
+    assert client.unmerged_paths(worktree) == ()
+    assert client.status_porcelain(worktree) == ("M  shared.txt",)
+
+
+def test_git_client_stage_paths_rejects_empty_paths(tmp_path: Path) -> None:
+    client = GitClient(make_repository(tmp_path))
+
+    with pytest.raises(GitError, match="at least one path is required for staging"):
+        client.stage_paths(client.cwd, ())
+
+
+def test_git_client_keeps_generic_error_for_non_conflicting_patch_failure(
+    tmp_path: Path,
+) -> None:
+    client = GitClient(make_repository(tmp_path))
+
+    with pytest.raises(GitError) as caught:
+        client.apply_indexed_patch(client.cwd, b"not a patch")
+
+    assert type(caught.value) is GitError
 
 
 def test_git_client_applies_binary_patch_and_commits_from_a_worktree(tmp_path: Path) -> None:

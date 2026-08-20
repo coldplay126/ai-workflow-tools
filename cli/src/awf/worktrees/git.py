@@ -16,6 +16,14 @@ class GitError(RuntimeError):
     """Raised when a checked Git command cannot complete successfully."""
 
 
+class GitPatchConflict(GitError):
+    """Raised when an indexed three-way patch application leaves conflicts."""
+
+    def __init__(self, paths: tuple[str, ...], detail: str) -> None:
+        super().__init__(detail)
+        self.paths = paths
+
+
 
 class GitRemoteError(GitError):
     """Raised when a Git transport operation against origin cannot complete."""
@@ -79,6 +87,12 @@ class GitClient:
     def status_porcelain(self, cwd: Path | None = None) -> tuple[str, ...]:
         completed = self._run("status", "--porcelain=v1", "-z", cwd=cwd)
         return _nul_records(completed.stdout)
+
+    def unmerged_paths(self, cwd: Path) -> tuple[str, ...]:
+        completed = self._run(
+            "diff", "--name-only", "--diff-filter=U", "-z", cwd=cwd
+        )
+        return tuple(sorted(_nul_records(completed.stdout)))
 
     def list_worktrees(self) -> tuple[GitWorktree, ...]:
         completed = self._run("worktree", "list", "--porcelain", "-z")
@@ -288,7 +302,18 @@ class GitClient:
         return self._run(*args).stdout
 
     def apply_indexed_patch(self, cwd: Path, patch: bytes) -> None:
-        self._run("apply", "--3way", "--index", "-", cwd=cwd, input_bytes=patch)
+        try:
+            self._run("apply", "--3way", "--index", "-", cwd=cwd, input_bytes=patch)
+        except GitError as error:
+            paths = self.unmerged_paths(cwd)
+            if paths:
+                raise GitPatchConflict(paths, str(error)) from error
+            raise
+
+    def stage_paths(self, cwd: Path, paths: tuple[str, ...]) -> None:
+        if not paths:
+            raise GitError("at least one path is required for staging")
+        self._run("add", "--", *paths, cwd=cwd)
 
     def reset_hard(self, cwd: Path, ref: str) -> None:
         """Set a managed checkout to ref and discard tracked staged/unstaged changes."""
