@@ -401,30 +401,31 @@ Expected: exact mode blocks as before; out-of-order mode still returns `promotio
 Keep patch-path equality before application. After commit:
 
 ```python
-if promotion_mode is PromotionMode.EXACT:
-    if promoted_paths != expected_paths:
-        return self._block_promotion_lease(
-            lease,
-            "promotion_delta_mismatch",
-            "promotion paths do not exactly match the reviewed pull requests",
-        )
-    if any(
-        expected_blobs[path] != self.git.path_blob(promotion_head, path)
-        for path in expected_paths
-    ):
-        return self._block_promotion_lease(
-            lease,
-            "promotion_content_mismatch",
-            "promotion contents do not exactly match the reviewed pull requests",
-        )
-else:
-    reviewed = set(lease.reviewed_paths)
-    if not promoted_paths or not set(promoted_paths).issubset(reviewed):
-        return self._block_promotion_lease(
-            lease,
-            "promotion_delta_mismatch",
-            "out-of-order promotion changed paths outside the reviewed source",
-        )
+def validate_promotion_delta():
+    if promotion_mode is PromotionMode.EXACT:
+        if promoted_paths != expected_paths:
+            return self._block_promotion_lease(
+                lease,
+                "promotion_delta_mismatch",
+                "promotion paths do not exactly match the reviewed pull requests",
+            )
+        if any(
+            expected_blobs[path] != self.git.path_blob(promotion_head, path)
+            for path in expected_paths
+        ):
+            return self._block_promotion_lease(
+                lease,
+                "promotion_content_mismatch",
+                "promotion contents do not exactly match the reviewed pull requests",
+            )
+    else:
+        reviewed = set(lease.reviewed_paths)
+        if not promoted_paths or not set(promoted_paths).issubset(reviewed):
+            return self._block_promotion_lease(
+                lease,
+                "promotion_delta_mismatch",
+                "out-of-order promotion changed paths outside the reviewed source",
+            )
 ```
 
 Transition a clean out-of-order lease to `ResolutionState.AUTOMATIC` before publication. Continue through the existing prepare, production verification, push, find-or-create PR, and `PR_OPEN` flow.
