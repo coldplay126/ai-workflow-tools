@@ -64,6 +64,8 @@ def test_registry_round_trips_out_of_order_provenance(tmp_path: Path) -> None:
     assert created.to_dict()["protected_index_entries"] == [
         {"path": "src/a.py", "mode": "100644", "blob_oid": "d" * 40}
     ]
+```
+
 
 Create a legacy `worktree_leases` table with the pre-feature columns, insert one exact lease row, call `registry.ensure()`, and assert the row loads with:
 
@@ -76,6 +78,8 @@ assert loaded.target_base_sha is None
 assert loaded.reviewed_paths == ()
 assert loaded.conflicted_paths == ()
 assert loaded.protected_index_entries == ()
+```
+
 
 Add a CAS transition test that changes `resolution_state`, `conflicted_paths`, and `protected_index_entries` and survives a reload.
 
