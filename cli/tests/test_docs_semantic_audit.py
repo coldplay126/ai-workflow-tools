@@ -106,6 +106,58 @@ def _shell_fenced_awf_commands(text: str) -> tuple[str, ...]:
     return tuple(commands)
 
 
+def _reject_duplicate_json_keys(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate key: {key}")
+        result[key] = value
+    return result
+
+
+def _release_worktree_lifecycle_contract(text: str) -> dict[str, object]:
+    contracts = tuple(
+        json.loads(
+            match.group(1),
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
+        for match in re.finditer(r"```json\n(.*?)\n```", text, re.DOTALL)
+    )
+    matching = tuple(
+        contract
+        for contract in contracts
+        if contract.get("schema") == "awf.release-worktree-lifecycle/v1"
+    )
+    assert len(matching) == 1
+    return matching[0]
+
+
+def _out_of_order_promotion_section(text: str) -> str:
+    matches = tuple(
+        re.finditer(
+            r"^#{2,4} Out-of-order production promotion\s*$",
+            text,
+            re.MULTILINE,
+        )
+    )
+    assert len(matches) == 1
+    heading_level = len(matches[0].group()) - len(matches[0].group().lstrip("#"))
+    start = matches[0].end()
+    in_fence = False
+    end = len(text)
+    offset = start
+    for line in text[start:].splitlines(keepends=True):
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+        elif not in_fence and re.match(rf"^#{{1,{heading_level}}} ", line):
+            end = offset
+            break
+        offset += len(line)
+    return text[start:end]
+
+
 def test_shell_fenced_command_extractor_includes_non_worktree_awf_commands() -> None:
     text = """```bash
 awf ready --repo-root . --json
@@ -731,15 +783,7 @@ def test_only_umbrella_skill_uses_wf_slash_aliases() -> None:
 def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
     path = REPO_ROOT / "claude" / "skills" / "release-worktree-lifecycle" / "SKILL.md"
     text = path.read_text(encoding="utf-8")
-    contracts = [
-        json.loads(match.group(1))
-        for match in re.finditer(r"```json\n(.*?)\n```", text, re.DOTALL)
-    ]
-    contract = next(
-        item
-        for item in contracts
-        if item.get("schema") == "awf.release-worktree-lifecycle/v1"
-    )
+    contract = _release_worktree_lifecycle_contract(text)
 
     commands = contract["commands"]
     expected_commands = {
@@ -905,6 +949,15 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
     }
 
 
+def test_release_worktree_lifecycle_contract_rejects_duplicate_json_keys() -> None:
+    text = """```json
+{"schema": "awf.release-worktree-lifecycle/v1", "schema": "duplicate"}
+```"""
+
+    with pytest.raises(ValueError, match="duplicate key: schema"):
+        _release_worktree_lifecycle_contract(text)
+
+
 def test_managed_feature_pr_link_docs_share_ordered_safety_contract() -> None:
     paths = (
         REPO_ROOT / "claude" / "skills" / "release-worktree-lifecycle" / "SKILL.md",
@@ -1061,6 +1114,7 @@ def test_out_of_order_promotion_docs_share_operator_contract() -> None:
         "awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --json",
         "awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --apply --json",
     )
+    expected_apply = (False, True, False, True)
     required_prose = (
         "a code may ship but must remain inactive",
         "a code must stay out of production; b applies cleanly",
@@ -1074,22 +1128,35 @@ def test_out_of_order_promotion_docs_share_operator_contract() -> None:
         "approval and successful checks on that exact production pr before merge",
         "staging squash commits are not production promotion inputs",
         "direct staging squash cherry-pick",
+        "any direct cherry-pick is forbidden",
+        "reviewed pr deltas only through `awf wt promote`",
+        "all conflict markers must be removed before apply",
+        "does not publish and preserves the worktree",
         "`invalid_out_of_order_promotion`",
         "`unsupported_out_of_order_rename`",
         "`out_of_order_conflict`",
         "`promotion_provenance_changed`",
-        "promotion_resolution_scope_mismatch",
-        "promotion_resolution_unmerged",
+        "`promotion_resolution_scope_mismatch`",
+        "`promotion_resolution_unmerged`",
     )
 
+    parser = build_parser()
     for path in paths:
-        text = path.read_text(encoding="utf-8")
-        displayed_commands = _shell_fenced_awf_commands(text)
-        assert (
-            _raw_contiguous_command_slice(displayed_commands, expected_commands)
-            == expected_commands
+        section = _out_of_order_promotion_section(
+            path.read_text(encoding="utf-8")
         )
-        prose = " ".join(text.lower().split())
+        displayed_commands = _shell_fenced_awf_commands(section)
+        assert displayed_commands == expected_commands
+        for command, apply in zip(displayed_commands, expected_apply):
+            parsed = parser.parse_args(_argv_from_displayed_command(command))
+            assert (parsed.command, parsed.wt_command) == ("wt", "promote")
+            assert parsed.source_pr == [1]
+            assert parsed.out_of_order is True
+            assert parsed.apply is apply
+            assert parsed.exclude_path == []
+            assert parsed.json is True
+
+        prose = " ".join(section.lower().split())
         for requirement in required_prose:
             assert requirement in prose
 

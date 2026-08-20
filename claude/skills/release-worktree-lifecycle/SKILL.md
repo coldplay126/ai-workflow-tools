@@ -164,13 +164,21 @@ conflicted-path provenance. The operator may edit only the conflicted files
 returned by AWF. MUST NOT use `git add`, `git commit`, `git reset`,
 `git cherry-pick`, or `git push`.
 
+Any direct cherry-pick is forbidden for production promotion. AWF reconstructs
+reviewed PR deltas only through `awf wt promote`.
+
 After editing, replay the same preview command. It reports the blocked lease,
 conflicted paths, and current changed paths. Replay the same command with
-`--apply` only when source and target provenance are unchanged, every changed
-or unmerged path remains within the reported conflicted paths, and no conflict
-markers remain. If either reviewed source SHA or the target SHA changes, stop
-with `promotion_provenance_changed`; preserve the worktree rather than
-transplanting a resolution.
+`--apply` only when source and target provenance are unchanged and every
+changed or unmerged path remains within the reported conflicted paths. A path
+outside that set returns `promotion_resolution_scope_mismatch`. AWF stages the
+allowed conflict files; an unmerged index entry that remains after staging
+returns `promotion_resolution_unmerged`.
+
+All conflict markers must be removed before apply. If a marker remains, AWF
+does not publish and preserves the worktree. If either reviewed source SHA or
+the target SHA changes, stop with `promotion_provenance_changed`; preserve the
+worktree rather than transplanting a resolution.
 
 AWF stages, commits, verifies, pushes, and publishes the eligible resolution.
 The synthetic production PR requires approval and successful checks on that

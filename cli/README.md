@@ -281,6 +281,9 @@ source, target, reviewed-path, and conflicted-path provenance. Edit only the
 conflicted files returned by AWF. Do not use direct `git add`, `git commit`,
 `git reset`, `git cherry-pick`, or `git push`.
 
+Any direct cherry-pick is forbidden for production promotion. AWF reconstructs
+reviewed PR deltas only through `awf wt promote`.
+
 After editing, replay the same preview command and inspect the lease,
 conflicted paths, and current changed paths. Use the same command with
 `--apply` only when every changed or unmerged path is one of the reported
@@ -293,13 +296,16 @@ returns `promotion_resolution_scope_mismatch`. AWF stages the allowed conflict
 files itself; if an unmerged index entry remains after that staging step, it
 returns `promotion_resolution_unmerged`.
 
+All conflict markers must be removed before apply. If a marker remains, AWF
+does not publish and preserves the worktree.
+
 AWF stages, commits, verifies, pushes, and publishes the eligible result. The
 synthetic production PR requires approval and successful checks on that exact
 production PR before merge, including an automatic clean application. Staging
 squash commits are not production promotion inputs. A direct staging squash
 cherry-pick is forbidden.
 
-Feature flow:
+#### Feature flow
 
 ```bash
 # Inspect the generated branch and worktree path first.

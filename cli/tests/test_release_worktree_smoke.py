@@ -352,6 +352,20 @@ def test_out_of_order_promotion_smoke_generates_b_without_staging_a(
     assert "flag=staging-a" not in (
         promoted.lease.worktree_path / "out-of-order.txt"
     ).read_text(encoding="utf-8")
+    assert (
+        smoke.git.remote_branch_sha(promoted.lease.branch)
+        == promoted.lease.head_sha
+    )
+    remote_content = git_command(
+        smoke.repo.parent / "origin.git",
+        "show",
+        f"refs/heads/{promoted.lease.branch}:out-of-order.txt",
+    )
+    assert remote_content == (
+        "flag=production\nstable-1\nstable-2\nstable-3\nstable-4\n"
+        "stable-5\nfollowup=from-b"
+    )
+    assert "flag=staging-a" not in remote_content
     assert len(smoke.github.created_pr_bodies) == 1
     assert len(smoke.github.open_prs) == 1
 
