@@ -15,6 +15,10 @@ from pathlib import Path
 class GitError(RuntimeError):
     """Raised when a checked Git command cannot complete successfully."""
 
+    def __init__(self, detail: str, *, returncode: int | None = None) -> None:
+        super().__init__(detail)
+        self.returncode = returncode
+
 
 class GitPatchConflict(GitError):
     """Raised when an indexed three-way patch application leaves conflicts."""
@@ -302,10 +306,17 @@ class GitClient:
         return self._run(*args).stdout
 
     def apply_indexed_patch(self, cwd: Path, patch: bytes) -> None:
+        if self.unmerged_paths(cwd):
+            raise GitError("git apply requires a clean index")
         try:
             self._run("apply", "--3way", "--index", "-", cwd=cwd, input_bytes=patch)
         except GitError as error:
-            paths = self.unmerged_paths(cwd)
+            if error.returncode is None:
+                raise
+            try:
+                paths = self.unmerged_paths(cwd)
+            except GitError:
+                raise error
             if paths:
                 raise GitPatchConflict(paths, str(error)) from error
             raise
@@ -313,7 +324,7 @@ class GitClient:
     def stage_paths(self, cwd: Path, paths: tuple[str, ...]) -> None:
         if not paths:
             raise GitError("at least one path is required for staging")
-        self._run("add", "--", *paths, cwd=cwd)
+        self._run("--literal-pathspecs", "add", "--", *paths, cwd=cwd)
 
     def reset_hard(self, cwd: Path, ref: str) -> None:
         """Set a managed checkout to ref and discard tracked staged/unstaged changes."""
@@ -380,7 +391,10 @@ class GitClient:
             detail = _bounded_stderr(stderr)
             if "not a git repository" in detail.lower():
                 detail = f"not a Git repository: {detail}"
-            raise GitError(f"git {command} failed ({process.returncode}): {detail}")
+            raise GitError(
+                f"git {command} failed ({process.returncode}): {detail}",
+                returncode=process.returncode,
+            )
         return GitCompleted(process.returncode, stdout, stderr)
 
     @staticmethod
