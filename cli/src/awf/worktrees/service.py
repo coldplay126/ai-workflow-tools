@@ -221,23 +221,23 @@ class WorktreeService:
             source_numbers = self._promotion_source_numbers(source_pr)
         except ValueError as error:
             return self._promotion_blocked("invalid_source_pr", str(error))
-        try:
-            excluded_paths = self._promotion_excluded_paths(exclude_paths)
-        except ValueError as error:
-            return self._promotion_blocked("invalid_excluded_path", str(error))
         promotion_mode = (
             PromotionMode.OUT_OF_ORDER
             if out_of_order
             else PromotionMode.EXACT
         )
         if promotion_mode is PromotionMode.OUT_OF_ORDER and (
-            len(source_numbers) != 1 or excluded_paths
+            len(source_numbers) != 1 or exclude_paths
         ):
             return self._promotion_blocked(
                 "invalid_out_of_order_promotion",
                 "out-of-order promotion requires exactly one source pull request "
                 "and no excluded paths",
             )
+        try:
+            excluded_paths = self._promotion_excluded_paths(exclude_paths)
+        except ValueError as error:
+            return self._promotion_blocked("invalid_excluded_path", str(error))
         try:
             target_ref = self._promotion_target_ref(target_branch)
         except ConfigError as error:
@@ -351,6 +351,7 @@ class WorktreeService:
                     active,
                     sources=sources,
                     excluded_paths=excluded_paths,
+                    promotion_mode=promotion_mode,
                     target_ref=target_ref,
                     expected_branch=expected_branch,
                     github=github,
@@ -3228,6 +3229,7 @@ class WorktreeService:
         *,
         sources: Sequence[PullRequest],
         excluded_paths: Sequence[str],
+        promotion_mode: PromotionMode,
         target_ref: str,
         expected_branch: str,
         github: GhClient,
@@ -3236,6 +3238,7 @@ class WorktreeService:
         if (
             lease.source_pr != sources[0].number
             or lease.base_ref != target_ref
+            or lease.promotion_mode is not promotion_mode
             or lease.branch != expected_branch
         ):
             return self._promotion_blocked(

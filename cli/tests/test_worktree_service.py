@@ -3389,16 +3389,22 @@ def promotion_harness(tmp_path: Path) -> PromotionHarness:
 
 @pytest.mark.parametrize(
     ("source_pr", "exclude_paths"),
-    [((372, 373), ()), (372, ("feature.txt",))],
+    [
+        ((372, 373), ()),
+        (372, ("feature.txt",)),
+        (372, ("feature.txt", "feature.txt")),
+        (372, ("/absolute.txt",)),
+        (372, "feature.txt"),
+    ],
 )
 def test_promote_rejects_invalid_out_of_order_combinations(
     promotion_harness: PromotionHarness,
     source_pr: int | tuple[int, ...],
-    exclude_paths: tuple[str, ...],
+    exclude_paths: object,
 ) -> None:
     result = promotion_harness.service.promote(
         source_pr=source_pr,
-        exclude_paths=exclude_paths,
+        exclude_paths=exclude_paths,  # type: ignore[arg-type]
         target_branch="main",
         out_of_order=True,
         apply=False,
@@ -3637,9 +3643,7 @@ def test_promote_rejects_reuse_with_different_path_exclusions(
     monkeypatch.setattr(
         WorktreeService,
         "_promotion_initiative",
-        staticmethod(
-            lambda source_prs, target_branch, excluded_paths=(): first_initiative
-        ),
+        staticmethod(lambda *_args, **_kwargs: first_initiative),
     )
 
     second = promotion_harness.service.promote(
@@ -3652,6 +3656,43 @@ def test_promote_rejects_reuse_with_different_path_exclusions(
     assert second.status == "blocked"
     assert second.blockers[0]["code"] == "promotion_lease_conflict"
     assert len(promotion_harness.github.create_calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("first_out_of_order", "second_out_of_order"),
+    [(False, True), (True, False)],
+    ids=("exact-to-out-of-order", "out-of-order-to-exact"),
+)
+def test_promote_rejects_reuse_when_promotion_mode_conflicts(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    first_out_of_order: bool,
+    second_out_of_order: bool,
+) -> None:
+    initiative = "promotion-mode-identity-collision"
+    monkeypatch.setattr(
+        WorktreeService,
+        "_promotion_initiative",
+        staticmethod(lambda *_args, **_kwargs: initiative),
+    )
+
+    first = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=first_out_of_order,
+        apply=True,
+    )
+    assert first.decision == "ready"
+
+    second = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=second_out_of_order,
+        apply=True,
+    )
+
+    assert second.status == "blocked"
+    assert second.blockers[0]["code"] == "promotion_lease_conflict"
 
 
 @pytest.mark.parametrize(
