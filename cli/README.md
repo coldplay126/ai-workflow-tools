@@ -292,6 +292,10 @@ The operator's unstaged and unmerged edits must be a subset of
 `conflicted_paths`. AWF may already have clean-applied and staged part of the
 patch; the final indexed delta must be a non-empty subset of `reviewed_paths`.
 
+Clean-applied reviewed paths outside `conflicted_paths` are AWF-pinned by exact
+index blobs across preview, apply, and retry. Direct `git add` tampering returns
+`promotion_resolution_scope_mismatch`.
+
 Any direct cherry-pick is forbidden for production promotion. AWF reconstructs
 reviewed PR deltas only through `awf wt promote`.
 

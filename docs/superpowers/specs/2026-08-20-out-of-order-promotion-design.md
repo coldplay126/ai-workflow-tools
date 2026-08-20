@@ -106,6 +106,11 @@ A failed three-way application must preserve a managed, unpublished promotion wo
 
 The operator may edit only the conflicted files returned by AWF. Direct `git add`, `git commit`, `git reset`, `git cherry-pick`, and `git push` remain forbidden. The operator's unstaged and unmerged edits must be a subset of `conflicted_paths`; AWF may already have clean-applied and staged part of the patch. The final indexed delta must be non-empty and a subset of `reviewed_paths`.
 
+When the first patch clean-stages reviewed paths outside `conflicted_paths`, AWF
+persists their index blobs in `protected_blobs`. Resolution preview, apply, and
+retry pin those blobs exactly; direct `git add` tampering is
+`promotion_resolution_scope_mismatch`.
+
 Initial preview exposes `source_base_sha`, `source_head_sha`, `target_base_sha`, and `reviewed_paths`. Repeating the same preview command for a pending lease reports the lease, conflicted paths, current changed paths, and the planned actions in this order: `resolve_out_of_order_conflict`, `stage_paths`, `commit`, `verify_production`, `push_branch`, and `open_pull_request`.
 
 Repeating the same command with `--apply` finalizes the resolution only when all guards pass:
@@ -131,15 +136,16 @@ Deployment health and cleanup keep the existing `status`, `finish`, and `gc` gat
 
 ## State and compatibility
 
-Registry schema migration adds seven lease columns:
+Registry schema migration adds eight lease metadata fields:
 
 - `promotion_mode TEXT NOT NULL DEFAULT 'exact'` with values `exact` and `out_of_order`;
 - `resolution_state TEXT NOT NULL DEFAULT 'none'` with values `none`, `pending`, `automatic`, and `manual_reviewed`;
 - nullable `source_base_sha`, `source_head_sha`, and `target_base_sha` text columns;
 - `reviewed_paths TEXT NOT NULL DEFAULT '[]'`, encoded as a sorted JSON string array;
-- `conflicted_paths TEXT NOT NULL DEFAULT '[]'`, encoded as a sorted JSON string array.
+- `conflicted_paths TEXT NOT NULL DEFAULT '[]'`, encoded as a sorted JSON string array;
+- `protected_blobs TEXT NOT NULL DEFAULT '[]'`, a sorted path→blob-or-null JSON object logical mapping, stored as ordered `[path, blob|null]` JSON pairs.
 
-New out-of-order leases persist all seven values before applying the patch, so a conflict has durable source, target, reviewed-path, and conflict provenance without relying on a promotion commit that does not yet exist. Existing rows migrate to exact mode with no resolution, no out-of-order SHAs, and empty path arrays. JSON output adds these fields without removing or renaming existing fields.
+New out-of-order leases persist all eight values before applying the patch, so a conflict has durable source, target, reviewed-path, conflict, and protected-index provenance without relying on a promotion commit that does not yet exist. When the first patch clean-stages reviewed paths outside `conflicted_paths`, AWF snapshots their indexed blobs into `protected_blobs` and pins them exactly on every resolution preview, apply, and retry. Direct `git add` tampering with a protected path returns `promotion_resolution_scope_mismatch`. Existing rows migrate to exact mode with no resolution, no out-of-order SHAs, and empty path/blob metadata. JSON output adds these fields without removing or renaming existing fields.
 
 Blocked exact promotions keep their existing rebuild behavior. Out-of-order conflict recovery is eligible only for an unpublished blocked out-of-order lease with the exact request identity.
 

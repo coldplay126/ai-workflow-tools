@@ -889,6 +889,11 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "final_indexed_delta": "non_empty_reviewed_paths_subset",
         "conflict_marker_policy": "markers_only_trailing_whitespace_allowed",
         "live_target_recheck": "after_verification_before_publish",
+        "protected_blobs": {
+            "paths": "clean_applied_reviewed_paths_outside_conflicted_paths",
+            "pin": "exact_preview_apply_retry",
+            "tamper": "promotion_resolution_scope_mismatch",
+        },
         "blocker_codes": [
             "invalid_out_of_order_promotion",
             "unsupported_out_of_order_rename",
@@ -1163,6 +1168,8 @@ def test_out_of_order_promotion_docs_share_operator_contract() -> None:
         "checks conflict markers only",
         "trailing whitespace is not prohibited",
         "rechecks the live target after verification before publish",
+        "clean-applied reviewed paths outside `conflicted_paths` are awf-pinned by exact index blobs across preview, apply, and retry",
+        "direct `git add` tampering returns `promotion_resolution_scope_mismatch`",
     )
 
     parser = build_parser()
