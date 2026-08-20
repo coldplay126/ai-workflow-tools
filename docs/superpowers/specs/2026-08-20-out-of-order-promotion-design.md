@@ -146,6 +146,11 @@ Registry schema migration adds eight lease metadata fields:
 - `conflicted_paths TEXT NOT NULL DEFAULT '[]'`, encoded as a sorted JSON string array;
 - `protected_index_entries TEXT NOT NULL DEFAULT '[]'`, a sorted path→stage-0 mode+blob-OID-or-null mapping, stored as ordered `[path, [mode, blob_oid]|null]` JSON pairs.
 
+Valid stage-0 modes are `100644` regular, `100755` executable, `120000`
+symlink, and `160000` gitlink. Invalid index modes fail closed. Symlink and
+gitlink entries are pinned with their mode and blob OID just like regular and
+executable entries.
+
 New out-of-order leases persist all eight values before applying the patch, so a conflict has durable source, target, reviewed-path, conflict, and protected-index provenance without relying on a promotion commit that does not yet exist. When the first patch clean-stages reviewed paths outside `conflicted_paths`, AWF snapshots their stage-0 mode and blob OID index entries into `protected_index_entries` and pins them exactly on every resolution preview, apply, and retry. Direct `git add` or chmod/file-type mode tampering with a protected path returns `promotion_resolution_scope_mismatch`. Existing rows migrate to exact mode with no resolution, no out-of-order SHAs, and empty path/index-entry metadata. JSON output adds these fields without removing or renaming existing fields.
 
 Blocked exact promotions keep their existing rebuild behavior. Out-of-order conflict recovery is eligible only for an unpublished blocked out-of-order lease with the exact request identity.

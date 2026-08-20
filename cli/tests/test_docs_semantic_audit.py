@@ -1221,3 +1221,31 @@ def test_out_of_order_promotion_changelog_names_the_opt_in_safety_contract() -> 
     assert "`out_of_order_conflict`" in changelog
     assert "`promotion_provenance_changed`" in changelog
     assert "staging squash commit" in changelog
+
+
+def test_protected_index_entry_docs_define_supported_stage_zero_modes() -> None:
+    paths = (
+        REPO_ROOT
+        / "docs"
+        / "superpowers"
+        / "specs"
+        / "2026-08-20-out-of-order-promotion-design.md",
+        REPO_ROOT
+        / "docs"
+        / "superpowers"
+        / "plans"
+        / "2026-08-20-out-of-order-promotion.md",
+    )
+    required_prose = (
+        "`100644` regular",
+        "`100755` executable",
+        "`120000` symlink",
+        "`160000` gitlink",
+        "invalid index modes fail closed",
+        "symlink and gitlink entries are pinned",
+    )
+
+    for path in paths:
+        prose = " ".join(path.read_text(encoding="utf-8").lower().split())
+        for requirement in required_prose:
+            assert requirement in prose

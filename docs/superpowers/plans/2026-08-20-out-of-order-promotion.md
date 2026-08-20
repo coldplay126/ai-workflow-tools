@@ -79,6 +79,29 @@ assert loaded.protected_index_entries == ()
 
 Add a CAS transition test that changes `resolution_state`, `conflicted_paths`, and `protected_index_entries` and survives a reload.
 
+Add stage-0 entry tests that round-trip and pin each supported type:
+
+```python
+@pytest.mark.parametrize(
+    ("mode", "kind"),
+    (
+        ("100644", "regular"),
+        ("100755", "executable"),
+        ("120000", "symlink"),
+        ("160000", "gitlink"),
+    ),
+)
+def test_registry_round_trips_protected_index_entry_modes(
+    tmp_path: Path, mode: str, kind: str
+) -> None:
+    ...
+```
+
+Valid stage-0 modes are `100644` regular, `100755` executable, `120000`
+symlink, and `160000` gitlink. Invalid index modes fail closed. Symlink and
+gitlink entries are pinned with their mode and blob OID across preview, apply,
+and retry.
+
 - [ ] **Step 2: Run the tests and verify RED**
 
 Run:
