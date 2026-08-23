@@ -244,7 +244,87 @@ rebuilt commit must pass the same exact path/blob and production checks before
 AWF publishes a pull request. A prepare command that leaves the worktree dirty
 is blocked. Other blocked promotion states remain fail-closed.
 
-Feature flow:
+#### Out-of-order production promotion
+
+Exact promotion remains the default. Use `--out-of-order` only when a single
+reviewed staging PR must reach production without an earlier staging change. It
+is never an automatic fallback from exact promotion.
+
+| Requirement | Workflow |
+| --- | --- |
+| A code may ship but must remain inactive | Preserve staging promotion order and gate A at runtime with a feature flag or equivalent. |
+| A code must stay out of production; B applies cleanly | Use the single-source `--out-of-order` promotion below. |
+| A code must stay out; B has a mechanical patch conflict | Resolve only in the managed promotion worktree, then replay preview/apply. |
+| B requires A's API, schema, or behavior | Stop. Out-of-order promotion is invalid until the dependency is removed or a compatible prerequisite is promoted. |
+
+The mode requires exactly one `--source-pr` and MUST NOT use `--exclude-path`.
+The source must be merged into the configured staging branch and still pass its
+review and checks policy. Multiple sources or exclusions return
+`invalid_out_of_order_promotion`; renamed source paths return
+`unsupported_out_of_order_rename`. A dependency on A is a stop condition. A
+clean patch does not establish independence.
+
+Inspect the initial preview before applying. It exposes `source_base_sha`,
+`source_head_sha`, `target_base_sha`, and `reviewed_paths`; inspect those with
+the promotion mode and verification actions, then use the exact same replay
+commands if AWF reports a conflict:
+
+```bash
+# Initial preview and apply.
+awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --json
+awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --apply --json
+# After an AWF-reported conflict, replay the same preview and apply commands.
+awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --json
+awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --apply --json
+```
+
+When the replayed preview finds a pending conflict, it lists the work AWF
+would perform. The action order is `resolve_out_of_order_conflict`,
+`stage_paths`, `commit`, `verify_production`, `push_branch`, then
+`open_pull_request`.
+
+`out_of_order_conflict` preserves an unpublished managed worktree with pending
+source, target, reviewed-path, and conflicted-path provenance. Edit only the
+conflicted files returned by AWF. Do not use direct `git add`, `git commit`,
+`git reset`, `git cherry-pick`, or `git push`.
+
+Operator's unstaged edits and unmerged paths must be a subset of
+`conflicted_paths`. AWF clean-applied staged `protected_index_entries` may
+remain outside `conflicted_paths`. Their mode+OID pin is exact across preview,
+apply, and retry. Final indexed and committed paths must be a subset of
+`reviewed_paths`.
+
+Direct `git add` tampering or chmod/file-type mode tampering returns
+`promotion_resolution_scope_mismatch`.
+
+Any direct cherry-pick is forbidden for production promotion. AWF reconstructs
+reviewed PR deltas only through `awf wt promote`.
+
+After editing, replay the same preview command and inspect the lease,
+conflicted paths, and current changed paths. Use the same command with
+`--apply` only when source and target provenance are unchanged. If the source
+or target SHA changes, AWF returns `promotion_provenance_changed` and preserves
+the worktree rather than transplanting a resolution. An operator unstaged edit
+or unmerged path outside `conflicted_paths` returns
+`promotion_resolution_scope_mismatch`. AWF stages the allowed conflict files;
+an unmerged index entry that remains after staging returns
+`promotion_resolution_unmerged`.
+
+All conflict markers must be removed before apply. If a marker remains, AWF
+does not publish and preserves the worktree.
+
+The guard checks conflict markers only; trailing whitespace is not prohibited
+by this policy. For a clean automatic apply, AWF rechecks the live target after
+verification before publish. A changed target remains blocked and the managed
+worktree is preserved.
+
+AWF stages, commits, verifies, pushes, and publishes the eligible result. The
+synthetic production PR requires approval and successful checks on that exact
+production PR before merge, including an automatic clean application. Staging
+squash commits are not production promotion inputs. A direct staging squash
+cherry-pick is forbidden.
+
+#### Feature flow
 
 ```bash
 # Inspect the generated branch and worktree path first.

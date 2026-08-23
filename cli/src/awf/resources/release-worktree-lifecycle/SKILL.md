@@ -125,6 +125,87 @@ MUST NOT repeat `--apply`. A blocked promotion is resumable only through the
 CLI's verified prepare, verification, or publication recovery paths; MUST NOT
 manually repair or recreate its lease.
 
+## Out-of-order production promotion
+
+Use this opt-in path only when one reviewed staging PR must reach production
+without an earlier staging change. It is not a fallback from exact promotion.
+
+| Situation | Required workflow |
+| --- | --- |
+| A code may ship but must remain inactive | Preserve staging promotion order and gate A at runtime with a feature flag or equivalent. |
+| A code must stay out of production; B applies cleanly | Use the single-source `--out-of-order` promotion below. |
+| A code must stay out; B has a mechanical patch conflict | Resolve only in the managed promotion worktree, then replay preview/apply. |
+| B requires A's API, schema, or behavior | Stop. Out-of-order promotion is invalid until the dependency is removed or a compatible prerequisite is promoted. |
+
+`--out-of-order` requires exactly one `--source-pr` and MUST NOT use
+`--exclude-path`. The source PR must be merged into the configured staging
+branch and still satisfy the configured source review and checks policy.
+Multiple sources or exclusions stop with `invalid_out_of_order_promotion`.
+Renamed source paths are unsupported and stop with
+`unsupported_out_of_order_rename`. A source dependency on A is a stop
+condition; a clean patch does not prove that B is independent.
+
+Preview the code-isolated synthetic production result. Initial preview exposes
+`source_base_sha`, `source_head_sha`, `target_base_sha`, and `reviewed_paths`.
+Inspect those fields with the promotion mode and verification actions before
+explicitly applying it:
+
+```sh
+# Initial preview and apply.
+awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --json
+awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --apply --json
+# After an AWF-reported conflict, replay the same preview and apply commands.
+awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --json
+awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --apply --json
+```
+
+When the replayed preview finds a pending conflict, it lists the work AWF
+would perform. The action order is `resolve_out_of_order_conflict`,
+`stage_paths`, `commit`, `verify_production`, `push_branch`, then
+`open_pull_request`.
+
+A failed three-way apply stops with `out_of_order_conflict`. AWF preserves an
+unpublished managed worktree with pending source, target, reviewed-path, and
+conflicted-path provenance. The operator may edit only the conflicted files
+returned by AWF. MUST NOT use `git add`, `git commit`, `git reset`,
+`git cherry-pick`, or `git push`.
+
+Operator's unstaged edits and unmerged paths must be a subset of
+`conflicted_paths`. AWF clean-applied staged `protected_index_entries` may
+remain outside `conflicted_paths`. Their mode+OID pin is exact across preview,
+apply, and retry. Final indexed and committed paths must be a subset of
+`reviewed_paths`.
+
+Direct `git add` tampering or chmod/file-type mode tampering returns
+`promotion_resolution_scope_mismatch`.
+
+Any direct cherry-pick is forbidden for production promotion. AWF reconstructs
+reviewed PR deltas only through `awf wt promote`.
+
+After editing, replay the same preview command. It reports the blocked lease,
+conflicted paths, and current changed paths. Replay the same command with
+`--apply` only when source and target provenance are unchanged. An operator
+unstaged edit or unmerged path outside `conflicted_paths` returns
+`promotion_resolution_scope_mismatch`. AWF stages the allowed conflict files;
+an unmerged index entry that remains after staging returns
+`promotion_resolution_unmerged`.
+
+All conflict markers must be removed before apply. If a marker remains, AWF
+does not publish and preserves the worktree. If either reviewed source SHA or
+the target SHA changes, stop with `promotion_provenance_changed`; preserve the
+worktree rather than transplanting a resolution.
+
+The guard checks conflict markers only; trailing whitespace is not prohibited
+by this policy. For a clean automatic apply, AWF rechecks the live target after
+verification before publish. A changed target remains blocked and the managed
+worktree is preserved.
+
+AWF stages, commits, verifies, pushes, and publishes the eligible resolution.
+The synthetic production PR requires approval and successful checks on that
+exact production PR before merge, even after an automatic clean application.
+Staging squash commits are not production promotion inputs. A direct staging
+squash cherry-pick is forbidden.
+
 ## Deployment verification
 
 After the production PR merges, MUST use the repository's existing CI and rollout path to prove the deployed revision is healthy. MUST NOT infer health from a merged PR, a passing local command, elapsed time, or an unavailable provider. Unknown or failed deployment health is `blocked`; preserve the release worktree and report the evidence gap.
@@ -224,6 +305,10 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
     "link_pr_apply": "awf wt link-pr --lease <id> --pr <merged-pr> --apply --json",
     "promote_preview": "awf wt promote --source-pr <number> --to <branch> --repo-root <repo-root> --json",
     "promote_apply": "awf wt promote --source-pr <number> --to <branch> --repo-root <repo-root> --apply --json",
+    "out_of_order_promote_preview": "awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --json",
+    "out_of_order_promote_apply": "awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --apply --json",
+    "out_of_order_resolution_preview": "awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --json",
+    "out_of_order_resolution_apply": "awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --apply --json",
     "finish_preview": "awf wt finish --repo-root <repo-root> --pr <merged-pr> --json",
     "finish_apply": "awf wt finish --repo-root <repo-root> --pr <merged-pr> --apply --json",
     "gc_preview": "awf wt gc --repo-root <repo-root> --merged --older-than 7d --dry-run --json",
@@ -235,6 +320,51 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
     "promotion_scope": "source_pr_delta_only",
     "deployment_health": "repository_rollout_evidence",
     "blocked_action": "preserve_worktree_report_code_message",
+    "out_of_order": {
+      "mode": "explicit_opt_in",
+      "exact_mode": "default",
+      "single_source": true,
+      "exclude_paths": "forbidden",
+      "production_pr_review": "required",
+      "production_pr_checks": "required",
+      "direct_cherry_pick": "forbidden",
+      "staging_squash_input": "forbidden",
+      "conflict_resolution": "managed_conflicted_files_only_replay_same_command",
+      "dependency_conflict": "blocked",
+      "rename": "unsupported",
+      "initial_preview_fields": [
+        "source_base_sha",
+        "source_head_sha",
+        "target_base_sha",
+        "reviewed_paths"
+      ],
+      "resolution_preview_actions": [
+        "resolve_out_of_order_conflict",
+        "stage_paths",
+        "commit",
+        "verify_production",
+        "push_branch",
+        "open_pull_request"
+      ],
+      "operator_edit_scope": "unstaged_unmerged_subset_of_conflicted_paths",
+      "final_indexed_delta": "non_empty_reviewed_paths_subset",
+      "conflict_marker_policy": "markers_only_trailing_whitespace_allowed",
+      "live_target_recheck": "after_verification_before_publish",
+      "protected_index_entries": {
+        "paths": "clean_applied_reviewed_paths_outside_conflicted_paths",
+        "entry": "stage_zero_mode_blob_oid_or_null",
+        "pin": "exact_preview_apply_retry",
+        "tamper": "promotion_resolution_scope_mismatch"
+      },
+      "blocker_codes": [
+        "invalid_out_of_order_promotion",
+        "unsupported_out_of_order_rename",
+        "out_of_order_conflict",
+        "promotion_provenance_changed",
+        "promotion_resolution_scope_mismatch",
+        "promotion_resolution_unmerged"
+      ]
+    },
     "managed_feature_pr_link": {
       "lease_state": "active_unlinked_or_cleanable_exact_reuse",
       "pr_provenance": "already_merged_exact_repository_branch_and_current_worktree_head",
@@ -250,7 +380,17 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
       "github_external_failure": "exit_4",
       "runtime_source_before_removal": "install_cli_and_skill_from_stable_merged_main_and_verify_links"
     },
-    "preview_before_apply": ["acquire", "link-pr", "promote", "import", "adopt", "finish", "gc"],
+    "preview_before_apply": [
+      "acquire",
+      "link-pr",
+      "promote",
+      "out_of_order_promote",
+      "out_of_order_resolution",
+      "import",
+      "adopt",
+      "finish",
+      "gc"
+    ],
     "stop_conditions": [
       "deployment_health_unknown",
       "closed_unmerged",
@@ -260,6 +400,7 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
       "direct_worktree_mutation",
       "staging_wholesale_merge",
       "branch_merged_heuristic",
+      "direct_cherry_pick",
       "stash",
       "reset",
       "force_delete",
@@ -272,6 +413,8 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
       "acquire": "review_then_apply_explicitly",
       "link_pr": "review_then_apply_explicitly",
       "promote": "review_then_apply_explicitly",
+      "out_of_order_promote": "review_then_apply_explicitly",
+      "out_of_order_resolution": "review_same_blocked_lease_then_apply_explicitly",
       "finish": "review_blockers_then_apply",
       "gc": "review_blockers_then_apply"
     },
@@ -279,7 +422,9 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
       "status": "inspect_select_lifecycle_action",
       "acquire_apply": "use_or_report_returned_lease",
       "link_pr_apply": "restart_status_preflight_then_finish",
-      "promote_apply": "use_or_report_returned_lease"
+      "promote_apply": "use_or_report_returned_lease",
+      "out_of_order_promote_apply": "use_or_report_returned_lease",
+      "out_of_order_resolution_apply": "use_or_report_returned_lease"
     },
     "removed": "report_completion",
     "blocked": "preserve_worktree_report_code_message"

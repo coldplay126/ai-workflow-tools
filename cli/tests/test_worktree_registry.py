@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import sqlite3
-
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
+from threading import Event, Lock
 
 import pytest
 
@@ -11,7 +13,9 @@ from awf.worktrees.models import (
     DeploymentState,
     Lease,
     LeaseState,
+    PromotionMode,
     Purpose,
+    ResolutionState,
 )
 from awf.worktrees.registry import WorktreeRegistry
 
@@ -34,6 +38,13 @@ def lease(
         head_sha="a" * 40,
         managed=True,
         owner_kind="awf",
+        promotion_mode=PromotionMode.EXACT,
+        resolution_state=ResolutionState.NONE,
+        source_base_sha=None,
+        source_head_sha=None,
+        target_base_sha=None,
+        reviewed_paths=(),
+        conflicted_paths=(),
     )
 
 
@@ -46,6 +57,290 @@ def test_registry_creates_and_round_trips_a_lease(tmp_path: Path) -> None:
     assert loaded == created
     assert loaded.state is LeaseState.ACTIVE
     assert loaded.deployment_state is DeploymentState.NOT_REQUIRED
+
+
+
+def test_registry_round_trips_out_of_order_provenance(tmp_path: Path) -> None:
+    registry = WorktreeRegistry(tmp_path / "worktrees.sqlite3")
+    created = replace(
+        lease(tmp_path),
+        promotion_mode=PromotionMode.OUT_OF_ORDER,
+        resolution_state=ResolutionState.PENDING,
+        source_base_sha="a" * 40,
+        source_head_sha="b" * 40,
+        target_base_sha="c" * 40,
+        reviewed_paths=("src/a.py", "src/b.py"),
+        conflicted_paths=("src/b.py",),
+        protected_index_entries=(("src/a.py", ("100644", "d" * 40)),),
+    )
+
+    registry.create_lease(created)
+
+    assert registry.get_lease(created.id) == created
+    payload = created.to_dict()
+    assert {
+        "promotion_mode": payload["promotion_mode"],
+        "resolution_state": payload["resolution_state"],
+        "source_base_sha": payload["source_base_sha"],
+        "source_head_sha": payload["source_head_sha"],
+        "target_base_sha": payload["target_base_sha"],
+        "reviewed_paths": payload["reviewed_paths"],
+        "conflicted_paths": payload["conflicted_paths"],
+        "protected_index_entries": payload["protected_index_entries"],
+    } == {
+        "promotion_mode": "out_of_order",
+        "resolution_state": "pending",
+        "source_base_sha": "a" * 40,
+        "source_head_sha": "b" * 40,
+        "target_base_sha": "c" * 40,
+        "reviewed_paths": ["src/a.py", "src/b.py"],
+        "conflicted_paths": ["src/b.py"],
+        "protected_index_entries": [
+            {"path": "src/a.py", "mode": "100644", "blob_oid": "d" * 40}
+        ],
+    }
+
+
+@pytest.mark.parametrize("mode", ("120000", "160000"))
+def test_registry_round_trips_supported_protected_index_entry_modes(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    registry = WorktreeRegistry(tmp_path / "worktrees.sqlite3")
+    created = replace(
+        lease(tmp_path),
+        promotion_mode=PromotionMode.OUT_OF_ORDER,
+        protected_index_entries=(("entry", (mode, "d" * 40)),),
+    )
+
+    registry.create_lease(created)
+
+    assert registry.get_lease(created.id) == created
+
+def test_registry_migrates_legacy_lease_with_promotion_defaults(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "worktrees.sqlite3"
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE worktree_leases (
+                id TEXT PRIMARY KEY,
+                repository_id TEXT NOT NULL,
+                repository_name TEXT NOT NULL,
+                repository_root TEXT NOT NULL,
+                worktree_path TEXT NOT NULL UNIQUE,
+                initiative TEXT NOT NULL,
+                purpose TEXT NOT NULL,
+                branch TEXT NOT NULL,
+                base_ref TEXT NOT NULL,
+                head_sha TEXT NOT NULL,
+                managed INTEGER NOT NULL,
+                owner_kind TEXT NOT NULL,
+                owner_id TEXT,
+                state TEXT NOT NULL,
+                source_pr INTEGER,
+                target_pr INTEGER,
+                deployment_state TEXT NOT NULL,
+                retain INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                last_used_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                removed_at TEXT,
+                version INTEGER NOT NULL DEFAULT 0
+            );
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO worktree_leases (
+                id, repository_id, repository_name, repository_root, worktree_path,
+                initiative, purpose, branch, base_ref, head_sha, managed, owner_kind,
+                owner_id, state, source_pr, target_pr, deployment_state, retain,
+                created_at, last_used_at, updated_at, removed_at, version
+            ) VALUES (
+                :id, :repository_id, :repository_name, :repository_root, :worktree_path,
+                :initiative, :purpose, :branch, :base_ref, :head_sha, :managed,
+                :owner_kind, :owner_id, :state, :source_pr, :target_pr,
+                :deployment_state, :retain, :created_at, :last_used_at, :updated_at,
+                :removed_at, :version
+            )
+            """,
+            {
+                "id": "legacy-lease",
+                "repository_id": "repo-1",
+                "repository_name": "demo",
+                "repository_root": str(tmp_path / "repo"),
+                "worktree_path": str(tmp_path / "cache" / "legacy"),
+                "initiative": "legacy",
+                "purpose": "feature",
+                "branch": "awf/legacy/feature",
+                "base_ref": "origin/staging",
+                "head_sha": "a" * 40,
+                "managed": 1,
+                "owner_kind": "awf",
+                "owner_id": None,
+                "state": "ACTIVE",
+                "source_pr": None,
+                "target_pr": None,
+                "deployment_state": "not_required",
+                "retain": 0,
+                "created_at": "2030-01-02T03:04:05+00:00",
+                "last_used_at": "2030-01-02T03:04:05+00:00",
+                "updated_at": "2030-01-02T03:04:05+00:00",
+                "removed_at": None,
+                "version": 0,
+            },
+        )
+
+    registry = WorktreeRegistry(db_path)
+    registry.ensure()
+
+    loaded = registry.get_lease("legacy-lease")
+
+    assert loaded is not None
+    assert loaded.promotion_mode is PromotionMode.EXACT
+    assert loaded.resolution_state is ResolutionState.NONE
+    assert loaded.source_base_sha is None
+    assert loaded.source_head_sha is None
+    assert loaded.target_base_sha is None
+    assert loaded.reviewed_paths == ()
+    assert loaded.conflicted_paths == ()
+
+
+def test_transition_updates_resolution_metadata_with_compare_and_swap(
+    tmp_path: Path,
+) -> None:
+    registry = WorktreeRegistry(tmp_path / "worktrees.sqlite3")
+    created = registry.create_lease(
+        replace(
+            lease(tmp_path),
+            promotion_mode=PromotionMode.OUT_OF_ORDER,
+            resolution_state=ResolutionState.PENDING,
+            conflicted_paths=("src/a.py",),
+            protected_index_entries=(("src/a.py", ("100644", "d" * 40)),),
+        )
+    )
+
+    updated = registry.transition(
+        created.id,
+        LeaseState.ACTIVE,
+        expected_version=created.version,
+        resolution_state=ResolutionState.MANUAL_REVIEWED,
+        conflicted_paths=(),
+        protected_index_entries=(("src/a.py", None),),
+    )
+
+    assert updated.resolution_state is ResolutionState.MANUAL_REVIEWED
+    assert updated.conflicted_paths == ()
+    assert updated.protected_index_entries == (("src/a.py", None),)
+    assert registry.get_lease(created.id) == updated
+
+
+@pytest.mark.parametrize(
+    ("field", "metadata"),
+    [
+        ("reviewed_paths", "not-json"),
+        ("reviewed_paths", '["src/b.py","src/a.py"]'),
+        ("reviewed_paths", '["src/a.py","src/a.py"]'),
+        ("conflicted_paths", '["src/a.py",1]'),
+    ],
+)
+def test_registry_rejects_invalid_path_metadata(
+    tmp_path: Path, field: str, metadata: str
+) -> None:
+    registry = WorktreeRegistry(tmp_path / "worktrees.sqlite3")
+    created = registry.create_lease(lease(tmp_path))
+    with sqlite3.connect(registry.db_path) as connection:
+        connection.execute(
+            f"UPDATE worktree_leases SET {field} = ? WHERE id = ?",
+            (metadata, created.id),
+        )
+
+    with pytest.raises(ValueError, match=field):
+        registry.get_lease(created.id)
+
+
+def test_registry_rejects_blob_path_metadata(tmp_path: Path) -> None:
+    registry = WorktreeRegistry(tmp_path / "worktrees.sqlite3")
+    created = registry.create_lease(lease(tmp_path))
+    with sqlite3.connect(registry.db_path) as connection:
+        connection.execute(
+            "UPDATE worktree_leases SET reviewed_paths = ? WHERE id = ?",
+            (sqlite3.Binary(b'["src/a.py"]'), created.id),
+        )
+
+    with pytest.raises(ValueError, match="reviewed_paths"):
+        registry.get_lease(created.id)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "promotion_mode",
+        "resolution_state",
+        "source_base_sha",
+        "source_head_sha",
+        "target_base_sha",
+        "reviewed_paths",
+        "conflicted_paths",
+    ],
+)
+def test_registry_rejects_promotion_metadata_filters(tmp_path: Path, name: str) -> None:
+    registry = WorktreeRegistry(tmp_path / "worktrees.sqlite3")
+
+    with pytest.raises(ValueError, match="unsupported lease filter"):
+        registry.list_leases(**{name: None})
+
+
+def test_ensure_resumes_and_repeats_a_partial_legacy_migration(tmp_path: Path) -> None:
+    db_path = tmp_path / "worktrees.sqlite3"
+    _create_partial_legacy_lease_table(db_path)
+    registry = WorktreeRegistry(db_path)
+
+    registry.ensure()
+    registry.ensure()
+
+    with sqlite3.connect(db_path) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(worktree_leases)")
+        }
+    assert {
+        "promotion_mode",
+        "resolution_state",
+        "source_base_sha",
+        "source_head_sha",
+        "target_base_sha",
+        "reviewed_paths",
+        "conflicted_paths",
+        "protected_index_entries",
+    } <= columns
+
+
+def test_ensure_migrates_legacy_schema_concurrently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "worktrees.sqlite3"
+    _create_partial_legacy_lease_table(db_path)
+    registry = WorktreeRegistry(db_path)
+    actual_connect = registry._connect
+    gate = EnsureMigrationGate()
+
+    def connect() -> PausingMigrationConnection:
+        return PausingMigrationConnection(actual_connect(), gate)
+
+    monkeypatch.setattr(registry, "_connect", connect)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(registry.ensure)
+        assert gate.first_pragma.wait(timeout=1)
+        second = executor.submit(registry.ensure)
+        try:
+            assert not gate.second_pragma.wait(timeout=1)
+        finally:
+            gate.release.set()
+        first.result()
+        second.result()
 
 
 def test_registry_rejects_two_active_leases_for_same_identity(tmp_path: Path) -> None:
@@ -257,6 +552,71 @@ class TrackingConnection:
     def close(self) -> None:
         self.closed = True
         self.connection.close()
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.connection, name)
+
+
+def _create_partial_legacy_lease_table(db_path: Path) -> None:
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE worktree_leases (
+                id TEXT PRIMARY KEY,
+                repository_id TEXT NOT NULL,
+                initiative TEXT NOT NULL,
+                purpose TEXT NOT NULL,
+                state TEXT NOT NULL,
+                promotion_mode TEXT NOT NULL DEFAULT 'exact'
+            );
+            """
+        )
+
+
+class EnsureMigrationGate:
+    def __init__(self) -> None:
+        self.first_pragma = Event()
+        self.second_pragma = Event()
+        self.release = Event()
+        self._lock = Lock()
+        self._pragma_count = 0
+
+    def pause_after_pragma(self) -> None:
+        with self._lock:
+            self._pragma_count += 1
+            pragma_count = self._pragma_count
+        if pragma_count == 1:
+            self.first_pragma.set()
+        elif pragma_count == 2:
+            self.second_pragma.set()
+        else:
+            return
+        if not self.release.wait(timeout=5):
+            raise RuntimeError("migration gate timed out")
+
+
+class PausingMigrationConnection:
+    def __init__(
+        self, connection: sqlite3.Connection, gate: EnsureMigrationGate
+    ) -> None:
+        self.connection = connection
+        self.gate = gate
+
+    def __enter__(self) -> "PausingMigrationConnection":
+        self.connection.__enter__()
+        return self
+
+    def __exit__(self, *args: object) -> bool | None:
+        return self.connection.__exit__(*args)
+
+    def close(self) -> None:
+        self.connection.close()
+
+    def execute(self, statement: str, parameters: object = ()) -> object:
+        result = self.connection.execute(statement, parameters)
+        if statement == "PRAGMA table_info(worktree_leases)":
+            self.gate.pause_after_pragma()
+        return result
 
     def __getattr__(self, name: str) -> object:
         return getattr(self.connection, name)

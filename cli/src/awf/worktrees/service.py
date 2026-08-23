@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 from datetime import datetime, timedelta, timezone
 
 from .config import ConfigError, WorktreeConfig, load_worktree_config
-from .git import GitClient, GitError, GitRemoteError, GitWorktree
+from .git import GitClient, GitError, GitPatchConflict, GitRemoteError, GitWorktree
 from .github import ExternalServiceError, GhClient, PullRequest
 from .locking import repository_lock
 from .models import (
@@ -25,7 +25,9 @@ from .models import (
     DeploymentState,
     Lease,
     LeaseState,
+    PromotionMode,
     Purpose,
+    ResolutionState,
     now_iso,
 )
 from .registry import WorktreeRegistry
@@ -214,11 +216,25 @@ class WorktreeService:
         exclude_paths: Sequence[str] = (),
         target_branch: str,
         apply: bool,
+        out_of_order: bool = False,
     ) -> CommandResult:
         try:
             source_numbers = self._promotion_source_numbers(source_pr)
         except ValueError as error:
             return self._promotion_blocked("invalid_source_pr", str(error))
+        promotion_mode = (
+            PromotionMode.OUT_OF_ORDER
+            if out_of_order
+            else PromotionMode.EXACT
+        )
+        if promotion_mode is PromotionMode.OUT_OF_ORDER and (
+            len(source_numbers) != 1 or exclude_paths
+        ):
+            return self._promotion_blocked(
+                "invalid_out_of_order_promotion",
+                "out-of-order promotion requires exactly one source pull request "
+                "and no excluded paths",
+            )
         try:
             excluded_paths = self._promotion_excluded_paths(exclude_paths)
         except ValueError as error:
@@ -277,8 +293,27 @@ class WorktreeService:
             except GitError as error:
                 return self._promotion_blocked("target_ref_unavailable", str(error))
             lease = self._new_promotion_lease(
-                sources, target_ref, target_sha, excluded_paths
+                sources,
+                target_ref,
+                target_sha,
+                excluded_paths,
+                promotion_mode=promotion_mode,
             )
+            if promotion_mode is PromotionMode.OUT_OF_ORDER:
+                try:
+                    active = self.registry.find_active_read_only(
+                        lease.repository_id, lease.initiative, Purpose.PROMOTE
+                    )
+                except sqlite3.Error as error:
+                    return self._promotion_blocked("registry_conflict", str(error))
+                resolution_preview = self._out_of_order_resolution_preview(
+                    active,
+                    expected=lease,
+                    github=github,
+                    target_branch=target_branch,
+                )
+                if resolution_preview is not None:
+                    return resolution_preview
             return CommandResult.ok(
                 "wt.promote",
                 decision="preview",
@@ -303,6 +338,8 @@ class WorktreeService:
                         "excluded_paths": list(excluded_paths),
                         "target_branch": target_branch,
                         "target_base_sha": target_sha,
+                        "promotion_mode": promotion_mode.value,
+                        "reviewed_paths": list(lease.reviewed_paths),
                     },
                     *(
                         {
@@ -316,7 +353,10 @@ class WorktreeService:
 
         repository_id = self.git.repository_id()
         initiative = self._promotion_initiative(
-            source_numbers, target_branch, excluded_paths
+            source_numbers,
+            target_branch,
+            excluded_paths,
+            promotion_mode=promotion_mode,
         )
         expected_branch = self._promotion_branch(initiative)
         with repository_lock(self.lock_dir / f"{repository_id}.lock"):
@@ -328,6 +368,7 @@ class WorktreeService:
                     active,
                     sources=sources,
                     excluded_paths=excluded_paths,
+                    promotion_mode=promotion_mode,
                     target_ref=target_ref,
                     expected_branch=expected_branch,
                     github=github,
@@ -341,7 +382,9 @@ class WorktreeService:
                     else None
                 )
                 deltas: list[bytes] = []
-                expected_blob_heads: dict[str, str] = {}
+                expected_blob_heads: dict[str, str] | None = (
+                    {} if promotion_mode is PromotionMode.EXACT else None
+                )
                 for source in sources:
                     source_base_sha = self.git.fetch_ref(source.base_sha)
                     source_head_sha = self.git.fetch_ref(source.head_sha)
@@ -427,6 +470,23 @@ class WorktreeService:
                             ),
                         )
                     if (
+                        promotion_mode is PromotionMode.OUT_OF_ORDER
+                        and tuple(
+                            sorted(
+                                self.git.changed_path_endpoints(
+                                    self.git.repository_root(),
+                                    merge_base,
+                                    source_head_sha,
+                                )
+                            )
+                        )
+                        != expected_source_paths
+                    ):
+                        return self._promotion_blocked(
+                            "unsupported_out_of_order_rename",
+                            "out-of-order promotion does not support renamed paths",
+                        )
+                    if (
                         excluded_paths
                         and source_merge_sha is not None
                         and any(
@@ -466,8 +526,9 @@ class WorktreeService:
                                 ),
                             )
                         deltas.append(included_patch)
-                    for path in included_source_paths:
-                        expected_blob_heads[path] = source_head_sha
+                    if expected_blob_heads is not None:
+                        for path in included_source_paths:
+                            expected_blob_heads[path] = source_head_sha
             except GitRemoteError as error:
                 return self._external_error(
                     "wt.promote", "source_delta_unavailable", str(error)
@@ -475,12 +536,19 @@ class WorktreeService:
             except GitError as error:
                 return self._promotion_blocked("source_delta_unavailable", str(error))
 
-            expected_blobs = self._promotion_net_blobs(
-                expected_blob_heads, target_sha
-            )
-            expected_paths = tuple(sorted(expected_blobs))
+            expected_blobs: dict[str, str | None] | None = None
+            expected_paths: tuple[str, ...] = ()
+            if expected_blob_heads is not None:
+                expected_blobs = self._promotion_net_blobs(
+                    expected_blob_heads, target_sha
+                )
+                expected_paths = tuple(sorted(expected_blobs))
             lease = self._new_promotion_lease(
-                sources, target_ref, target_sha, excluded_paths
+                sources,
+                target_ref,
+                target_sha,
+                excluded_paths,
+                promotion_mode=promotion_mode,
             )
             branch_conflict = self._branch_conflict(lease.branch)
             if branch_conflict is not None:
@@ -524,29 +592,51 @@ class WorktreeService:
                     promotion_head,
                     find_renames=True,
                 )
-                if promoted_paths != expected_paths:
-                    return self._block_promotion_lease(
-                        lease,
-                        "promotion_delta_mismatch",
-                        "promotion paths do not exactly match the reviewed pull requests",
-                    )
-                if any(
-                    expected_blobs[path]
-                    != self.git.path_blob(promotion_head, path)
-                    for path in expected_paths
+                if promotion_mode is PromotionMode.EXACT:
+                    assert expected_blobs is not None
+                    if promoted_paths != expected_paths:
+                        return self._block_promotion_lease(
+                            lease,
+                            "promotion_delta_mismatch",
+                            (
+                                "promotion paths do not exactly match the reviewed"
+                                " pull requests"
+                            ),
+                        )
+                    if any(
+                        expected_blobs[path]
+                        != self.git.path_blob(promotion_head, path)
+                        for path in expected_paths
+                    ):
+                        return self._block_promotion_lease(
+                            lease,
+                            "promotion_content_mismatch",
+                            (
+                                "promotion contents do not exactly match the ordered"
+                                " reviewed pull requests"
+                            ),
+                        )
+                elif not promoted_paths or not all(
+                    path in lease.reviewed_paths for path in promoted_paths
                 ):
                     return self._block_promotion_lease(
                         lease,
-                        "promotion_content_mismatch",
+                        "promotion_delta_mismatch",
                         (
-                            "promotion contents do not exactly match the ordered"
-                            " reviewed pull requests"
+                            "out-of-order promotion paths must be a non-empty subset"
+                            " of the reviewed pull request paths"
                         ),
                     )
                 prepare_blocker = self._prepare_promotion(lease, force=True)
                 if prepare_blocker is not None:
                     return prepare_blocker
                 verification_actions = self._verify_promotion(lease.worktree_path)
+            except GitPatchConflict as error:
+                if promotion_mode is PromotionMode.OUT_OF_ORDER:
+                    return self._record_out_of_order_conflict(lease, error)
+                return self._block_promotion_lease(
+                    lease, "promotion_apply_failed", str(error)
+                )
             except (GitError, OSError, RuntimeError, subprocess.SubprocessError) as error:
                 return self._block_promotion_lease(
                     lease, "promotion_apply_failed", str(error)
@@ -560,11 +650,38 @@ class WorktreeService:
                     summary="promotion verified; publication pending",
                     observed_head_sha=promotion_head,
                     head_sha=promotion_head,
+                    resolution_state=(
+                        ResolutionState.AUTOMATIC
+                        if promotion_mode is PromotionMode.OUT_OF_ORDER
+                        else None
+                    ),
                 )
             except (RuntimeError, sqlite3.Error) as error:
                 return self._promotion_blocked(
                     "registry_conflict", str(error), lease=lease
                 )
+            if promotion_mode is PromotionMode.OUT_OF_ORDER:
+                try:
+                    live_target_sha = self.git.remote_branch_sha(target_branch)
+                except GitRemoteError as error:
+                    return self._external_error(
+                        "wt.promote",
+                        "promotion_publish_failed",
+                        str(error),
+                        lease=lease,
+                    )
+                if live_target_sha is None:
+                    return self._block_promotion_lease(
+                        lease,
+                        "target_ref_unavailable",
+                        f"target branch {target_branch!r} is unavailable on origin",
+                    )
+                if live_target_sha != target_sha:
+                    return self._block_promotion_lease(
+                        lease,
+                        "promotion_provenance_changed",
+                        f"target branch {target_branch!r} changed after verification",
+                    )
 
             try:
                 self.git.push_branch(lease.worktree_path, lease.branch)
@@ -3115,12 +3232,14 @@ class WorktreeService:
         target_ref: str,
         target_sha: str,
         excluded_paths: Sequence[str],
+        promotion_mode: PromotionMode = PromotionMode.EXACT,
     ) -> Lease:
         target_branch = target_ref[len("origin/") :]
         initiative = self._promotion_initiative(
             tuple(source.number for source in sources),
             target_branch,
             excluded_paths,
+            promotion_mode=promotion_mode,
         )
         lease = Lease.new(
             repository_id=self.git.repository_id(),
@@ -3135,6 +3254,35 @@ class WorktreeService:
             managed=True,
             owner_kind="awf",
             source_pr=sources[0].number,
+            promotion_mode=promotion_mode,
+            source_base_sha=(
+                sources[0].base_sha
+                if promotion_mode is PromotionMode.OUT_OF_ORDER
+                else None
+            ),
+            source_head_sha=(
+                sources[-1].head_sha
+                if promotion_mode is PromotionMode.OUT_OF_ORDER
+                else None
+            ),
+            target_base_sha=(
+                target_sha
+                if promotion_mode is PromotionMode.OUT_OF_ORDER
+                else None
+            ),
+            reviewed_paths=(
+                tuple(
+                    sorted(
+                        {
+                            path
+                            for source in sources
+                            for path in source.changed_paths
+                        }
+                    )
+                )
+                if promotion_mode is PromotionMode.OUT_OF_ORDER
+                else ()
+            ),
         )
         return replace(
             lease,
@@ -3146,20 +3294,623 @@ class WorktreeService:
         source_prs: Sequence[int],
         target_branch: str,
         excluded_paths: Sequence[str] = (),
+        promotion_mode: PromotionMode = PromotionMode.EXACT,
     ) -> str:
         prefix = "pr" if len(source_prs) == 1 else "prs"
         numbers = "-".join(str(source_pr) for source_pr in source_prs)
         initiative = f"{prefix}-{numbers}-to-{target_branch}"
-        if not excluded_paths:
-            return initiative
-        digest = hashlib.sha256(
-            "\0".join(excluded_paths).encode("utf-8")
-        ).hexdigest()[:16]
-        return f"{initiative}-except-{digest}"
+        if excluded_paths:
+            digest = hashlib.sha256(
+                "\0".join(excluded_paths).encode("utf-8")
+            ).hexdigest()[:16]
+            initiative = f"{initiative}-except-{digest}"
+        if promotion_mode is PromotionMode.OUT_OF_ORDER:
+            return f"{initiative}-out-of-order"
+        return initiative
 
     @staticmethod
     def _promotion_branch(initiative: str) -> str:
         return f"awf/{initiative}/promote"
+
+    def _out_of_order_resolution_preview(
+        self,
+        lease: Lease | None,
+        *,
+        expected: Lease,
+        github: GhClient,
+        target_branch: str,
+    ) -> CommandResult | None:
+        if (
+            lease is None
+            or lease.promotion_mode is not PromotionMode.OUT_OF_ORDER
+            or lease.state is not LeaseState.BLOCKED
+            or lease.resolution_state is not ResolutionState.PENDING
+        ):
+            return None
+        if (
+            not lease.managed
+            or not lease.conflicted_paths
+            or lease.target_pr is not None
+            or lease.repository_id != expected.repository_id
+            or lease.initiative != expected.initiative
+            or lease.purpose is not Purpose.PROMOTE
+            or lease.source_pr != expected.source_pr
+            or lease.base_ref != expected.base_ref
+            or lease.branch != expected.branch
+            or lease.target_base_sha is None
+            or lease.reviewed_paths != expected.reviewed_paths
+            or not set(lease.conflicted_paths).issubset(lease.reviewed_paths)
+        ):
+            return self._promotion_blocked(
+                "promotion_incomplete",
+                f"lease {lease.id} does not match pending conflict provenance",
+                lease=lease,
+            )
+        if (
+            lease.source_base_sha != expected.source_base_sha
+            or lease.source_head_sha != expected.source_head_sha
+            or lease.head_sha != lease.target_base_sha
+        ):
+            return self._promotion_blocked(
+                "promotion_provenance_changed",
+                f"lease {lease.id} pending conflict provenance changed",
+                lease=lease,
+            )
+        try:
+            worktree = self._registered_worktree(lease)
+            if (
+                worktree is None
+                or worktree.branch != lease.branch
+                or worktree.detached
+                or worktree.bare
+                or self.git.head_sha(lease.worktree_path) != lease.head_sha
+            ):
+                return self._promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} does not match its managed conflict worktree",
+                    lease=lease,
+                )
+            live_target_sha = self.git.remote_branch_sha(target_branch)
+            if live_target_sha is None:
+                return self._promotion_blocked(
+                    "target_ref_unavailable",
+                    f"target branch {target_branch!r} is unavailable on origin",
+                    lease=lease,
+                )
+            if live_target_sha != lease.target_base_sha:
+                return self._promotion_blocked(
+                    "promotion_provenance_changed",
+                    f"lease {lease.id} target branch changed after the conflict",
+                    lease=lease,
+                )
+            if self.git.remote_branch_sha(lease.branch) is not None:
+                return self._promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} promotion branch is already published",
+                    lease=lease,
+                )
+            if github.find_open_pr(head=lease.branch, base=target_branch) is not None:
+                return self._promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} already has a target pull request",
+                    lease=lease,
+                )
+            changed_paths = self.git.worktree_changed_paths(lease.worktree_path)
+            unmerged_paths = self.git.unmerged_paths(lease.worktree_path)
+            unstaged_paths = self.git.unstaged_paths(lease.worktree_path)
+            protected_index_entries_match = self._protected_index_entries_match(lease)
+        except GitRemoteError as error:
+            return self._external_error(
+                "wt.promote",
+                "promotion_recovery_failed",
+                str(error),
+                lease=lease,
+            )
+        except ExternalServiceError as error:
+            return self._external_error(
+                "wt.promote",
+                "promotion_recovery_failed",
+                str(error),
+                lease=lease,
+            )
+        except GitError as error:
+            return self._promotion_blocked(
+                "promotion_incomplete", str(error), lease=lease
+            )
+        if not (
+            set(unstaged_paths).issubset(lease.conflicted_paths)
+            and set(unmerged_paths).issubset(lease.conflicted_paths)
+        ):
+            return self._promotion_blocked(
+                "promotion_resolution_scope_mismatch",
+                f"lease {lease.id} has pending changes outside conflicted paths",
+                lease=lease,
+            )
+        if not protected_index_entries_match:
+            return self._promotion_blocked(
+                "promotion_resolution_scope_mismatch",
+                f"lease {lease.id} protected reviewed paths changed",
+                lease=lease,
+            )
+        return CommandResult.ok(
+            "wt.promote",
+            decision="preview",
+            lease=lease,
+            actions=(
+                {
+                    "kind": "resolve_out_of_order_conflict",
+                    "lease_id": lease.id,
+                    "path": str(lease.worktree_path),
+                    "conflicted_paths": list(lease.conflicted_paths),
+                    "reviewed_paths": list(lease.reviewed_paths),
+                    "current_changed_paths": list(changed_paths),
+                },
+                {
+                    "kind": "stage_paths",
+                    "paths": list(lease.conflicted_paths),
+                },
+                {
+                    "kind": "commit",
+                    "resolution_state": "manual-reviewed",
+                },
+                *(
+                    {
+                        "kind": "verify_production",
+                        "argv": list(command),
+                    }
+                    for command in self.config.verify_production
+                ),
+                {
+                    "kind": "push_branch",
+                    "branch": lease.branch,
+                },
+                {
+                    "kind": "open_pull_request",
+                    "head": lease.branch,
+                    "base": target_branch,
+                },
+            ),
+        )
+
+    def _resume_out_of_order_conflict(
+        self,
+        lease: Lease,
+        *,
+        github: GhClient,
+        sources: Sequence[PullRequest],
+        target_branch: str,
+    ) -> CommandResult:
+        if (
+            lease.state is not LeaseState.BLOCKED
+            or lease.resolution_state is not ResolutionState.PENDING
+            or not lease.managed
+            or not lease.conflicted_paths
+            or lease.target_pr is not None
+            or lease.target_base_sha is None
+            or not set(lease.conflicted_paths).issubset(lease.reviewed_paths)
+        ):
+            return self._promotion_blocked(
+                "promotion_incomplete",
+                f"lease {lease.id} is not a pending out-of-order conflict",
+                lease=lease,
+            )
+        try:
+            worktree = self._registered_worktree(lease)
+            if (
+                worktree is None
+                or worktree.branch != lease.branch
+                or worktree.detached
+                or worktree.bare
+                or lease.head_sha != lease.target_base_sha
+            ):
+                return self._promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} does not match its managed conflict worktree",
+                    lease=lease,
+                )
+            if self.git.head_sha(lease.worktree_path) != lease.head_sha:
+                return self._reconcile_pending_manual_resolution(
+                    lease,
+                    github=github,
+                    sources=sources,
+                    target_branch=target_branch,
+                )
+            if self.git.fetch_ref(target_branch) != lease.target_base_sha:
+                return self._promotion_blocked(
+                    "promotion_provenance_changed",
+                    f"lease {lease.id} target branch changed after the conflict",
+                    lease=lease,
+                )
+            if self.git.remote_branch_sha(lease.branch) is not None:
+                return self._promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} promotion branch is already published",
+                    lease=lease,
+                )
+            if github.find_open_pr(head=lease.branch, base=target_branch) is not None:
+                return self._promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} already has a target pull request",
+                    lease=lease,
+                )
+            unmerged_paths = self.git.unmerged_paths(lease.worktree_path)
+            unstaged_paths = self.git.unstaged_paths(lease.worktree_path)
+            if not (
+                set(unstaged_paths).issubset(lease.conflicted_paths)
+                and set(unmerged_paths).issubset(lease.conflicted_paths)
+            ):
+                return self._promotion_blocked(
+                    "promotion_resolution_scope_mismatch",
+                    f"lease {lease.id} has pending changes outside conflicted paths",
+                    lease=lease,
+                )
+            if not self._protected_index_entries_match(lease):
+                return self._promotion_blocked(
+                    "promotion_resolution_scope_mismatch",
+                    f"lease {lease.id} protected reviewed paths changed",
+                    lease=lease,
+                )
+            self.git.stage_paths(lease.worktree_path, lease.conflicted_paths)
+            if self.git.unmerged_paths(lease.worktree_path):
+                return self._promotion_blocked(
+                    "promotion_resolution_unmerged",
+                    f"lease {lease.id} still has unmerged paths after staging",
+                    lease=lease,
+                )
+            remaining_unstaged_paths = self.git.unstaged_paths(lease.worktree_path)
+            if not set(remaining_unstaged_paths).issubset(lease.conflicted_paths):
+                return self._promotion_blocked(
+                    "promotion_resolution_scope_mismatch",
+                    f"lease {lease.id} has unstaged resolution changes",
+                    lease=lease,
+                )
+            if remaining_unstaged_paths:
+                return self._promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} has unstaged conflicted resolution changes",
+                    lease=lease,
+                )
+            if self.git.staged_diff_has_conflict_markers(lease.worktree_path):
+                return self._promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} staged resolution has conflict markers",
+                    lease=lease,
+                )
+            promoted_paths = self.git.indexed_changed_paths(
+                lease.worktree_path, lease.target_base_sha
+            )
+            if not promoted_paths or not set(promoted_paths).issubset(
+                lease.reviewed_paths
+            ):
+                return self._promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} resolved delta is not a non-empty reviewed subset",
+                    lease=lease,
+                )
+            promotion_head = self.git.commit(
+                lease.worktree_path,
+                self._promotion_message(
+                    sources=sources,
+                    excluded_paths=(),
+                    target_sha=lease.target_base_sha,
+                    lease=lease,
+                    target_branch=target_branch,
+                    resolution_state=ResolutionState.MANUAL_REVIEWED,
+                ),
+            )
+            if self.git.committed_diff_has_conflict_markers(
+                lease.worktree_path, lease.target_base_sha, promotion_head
+            ):
+                return self._promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} committed resolution has conflict markers",
+                    lease=lease,
+                )
+            lease = self.registry.transition(
+                lease.id,
+                LeaseState.BLOCKED,
+                expected_version=lease.version,
+                event_type="promotion_manual_resolution_committed",
+                summary="manually reviewed conflict resolution committed",
+                observed_head_sha=promotion_head,
+                head_sha=promotion_head,
+                resolution_state=ResolutionState.MANUAL_REVIEWED,
+            )
+        except GitRemoteError as error:
+            return self._external_error(
+                "wt.promote",
+                "promotion_recovery_failed",
+                str(error),
+                lease=lease,
+            )
+        except ExternalServiceError as error:
+            return self._external_error(
+                "wt.promote",
+                "promotion_recovery_failed",
+                str(error),
+                lease=lease,
+            )
+        except (
+            GitError,
+            OSError,
+            RuntimeError,
+            sqlite3.Error,
+            subprocess.SubprocessError,
+        ) as error:
+            return self._promotion_blocked(
+                "promotion_incomplete", str(error), lease=lease
+            )
+        return self._resume_manually_reviewed_promotion(
+            lease,
+            github=github,
+            sources=sources,
+            target_branch=target_branch,
+        )
+    def _reconcile_pending_manual_resolution(
+        self,
+        lease: Lease,
+        *,
+        github: GhClient,
+        sources: Sequence[PullRequest],
+        target_branch: str,
+    ) -> CommandResult:
+        if (
+            lease.state is not LeaseState.BLOCKED
+            or lease.resolution_state is not ResolutionState.PENDING
+            or lease.target_base_sha is None
+        ):
+            return self._promotion_blocked(
+                "promotion_incomplete",
+                f"lease {lease.id} is not a pending manual reconciliation",
+                lease=lease,
+            )
+        try:
+            worktree = self._registered_worktree(lease)
+            promotion_head = self.git.head_sha(lease.worktree_path)
+            if (
+                worktree is None
+                or worktree.branch != lease.branch
+                or worktree.detached
+                or worktree.bare
+                or self.git.status_porcelain(lease.worktree_path)
+                or self.git.commit_parents(promotion_head)
+                != (lease.target_base_sha,)
+            ):
+                return self._promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} does not match a committed manual resolution",
+                    lease=lease,
+                )
+            if not self._protected_index_entries_match(lease):
+                return self._promotion_blocked(
+                    "promotion_resolution_scope_mismatch",
+                    f"lease {lease.id} protected reviewed paths changed",
+                    lease=lease,
+                )
+            if self.git.fetch_ref(target_branch) != lease.target_base_sha:
+                return self._promotion_blocked(
+                    "promotion_provenance_changed",
+                    f"lease {lease.id} target branch changed after the conflict",
+                    lease=lease,
+                )
+            if self.git.remote_branch_sha(lease.branch) is not None:
+                return self._promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} promotion branch is already published",
+                    lease=lease,
+                )
+            if github.find_open_pr(head=lease.branch, base=target_branch) is not None:
+                return self._promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} already has a target pull request",
+                    lease=lease,
+                )
+            provisional = replace(
+                lease,
+                head_sha=promotion_head,
+                resolution_state=ResolutionState.MANUAL_REVIEWED,
+            )
+            source_base_shas = self._promotion_source_bases_from_message(
+                self.git.commit_message(lease.worktree_path),
+                sources=sources,
+                excluded_paths=(),
+                target_sha=lease.target_base_sha,
+                lease=provisional,
+                target_branch=target_branch,
+            )
+            promoted_paths = self.git.changed_paths(
+                lease.worktree_path,
+                lease.target_base_sha,
+                promotion_head,
+                find_renames=True,
+            )
+            if (
+                source_base_shas != (lease.source_base_sha,)
+                or not promoted_paths
+                or not set(promoted_paths).issubset(lease.reviewed_paths)
+                or self.git.committed_diff_has_conflict_markers(
+                    lease.worktree_path, lease.target_base_sha, promotion_head
+                )
+            ):
+                return self._promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} does not have a valid manual resolution commit",
+                    lease=lease,
+                )
+            lease = self.registry.transition(
+                lease.id,
+                LeaseState.BLOCKED,
+                expected_version=lease.version,
+                event_type="promotion_manual_resolution_reconciled",
+                summary="manually reviewed conflict resolution reconciled",
+                observed_head_sha=promotion_head,
+                head_sha=promotion_head,
+                resolution_state=ResolutionState.MANUAL_REVIEWED,
+            )
+        except GitRemoteError as error:
+            return self._external_error(
+                "wt.promote",
+                "promotion_recovery_failed",
+                str(error),
+                lease=lease,
+            )
+        except ExternalServiceError as error:
+            return self._external_error(
+                "wt.promote",
+                "promotion_recovery_failed",
+                str(error),
+                lease=lease,
+            )
+        except (GitError, OSError, RuntimeError, sqlite3.Error) as error:
+            return self._promotion_blocked(
+                "promotion_incomplete", str(error), lease=lease
+            )
+        return self._resume_manually_reviewed_promotion(
+            lease,
+            github=github,
+            sources=sources,
+            target_branch=target_branch,
+        )
+
+
+
+    def _resume_manually_reviewed_promotion(
+        self,
+        lease: Lease,
+        *,
+        github: GhClient,
+        sources: Sequence[PullRequest],
+        target_branch: str,
+    ) -> CommandResult:
+        if (
+            lease.state is not LeaseState.BLOCKED
+            or lease.resolution_state is not ResolutionState.MANUAL_REVIEWED
+            or not lease.managed
+            or lease.target_pr is not None
+            or lease.target_base_sha is None
+        ):
+            return self._promotion_blocked(
+                "promotion_incomplete",
+                f"lease {lease.id} is not a manually reviewed promotion",
+                lease=lease,
+            )
+        try:
+            worktree = self._registered_worktree(lease)
+            promotion_head = self.git.head_sha(lease.worktree_path)
+            if (
+                worktree is None
+                or worktree.branch != lease.branch
+                or worktree.detached
+                or worktree.bare
+                or promotion_head != lease.head_sha
+                or self.git.status_porcelain(lease.worktree_path)
+                or self.git.commit_parents(promotion_head)
+                != (lease.target_base_sha,)
+            ):
+                return self._promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} does not match its committed manual resolution",
+                    lease=lease,
+                )
+            if not self._protected_index_entries_match(lease):
+                return self._promotion_blocked(
+                    "promotion_resolution_scope_mismatch",
+                    f"lease {lease.id} protected reviewed paths changed",
+                    lease=lease,
+                )
+            if self.git.fetch_ref(target_branch) != lease.target_base_sha:
+                return self._promotion_blocked(
+                    "promotion_provenance_changed",
+                    f"lease {lease.id} target branch changed after the conflict",
+                    lease=lease,
+                )
+            if self.git.remote_branch_sha(lease.branch) is not None:
+                return self._promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} promotion branch is already published",
+                    lease=lease,
+                )
+            if github.find_open_pr(head=lease.branch, base=target_branch) is not None:
+                return self._promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} already has a target pull request",
+                    lease=lease,
+                )
+            promotion_message = self.git.commit_message(lease.worktree_path)
+            source_base_shas = self._promotion_source_bases_from_message(
+                promotion_message,
+                sources=sources,
+                excluded_paths=(),
+                target_sha=lease.target_base_sha,
+                lease=lease,
+                target_branch=target_branch,
+            )
+            promoted_paths = self.git.changed_paths(
+                lease.worktree_path,
+                lease.target_base_sha,
+                promotion_head,
+                find_renames=True,
+            )
+            if (
+                source_base_shas != (lease.source_base_sha,)
+                or not promoted_paths
+                or not set(promoted_paths).issubset(lease.reviewed_paths)
+                or self.git.committed_diff_has_conflict_markers(
+                    lease.worktree_path, lease.target_base_sha, promotion_head
+                )
+            ):
+                return self._promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} does not have its reviewed manual resolution",
+                    lease=lease,
+                )
+            prepare_blocker = self._prepare_promotion(lease, force=True)
+            if prepare_blocker is not None:
+                return prepare_blocker
+            verification_actions = self._verify_promotion(lease.worktree_path)
+            lease = self.registry.transition(
+                lease.id,
+                LeaseState.ACTIVE,
+                expected_version=lease.version,
+                event_type="promotion_publish_pending",
+                summary="manually reviewed promotion verified; publication pending",
+                observed_head_sha=promotion_head,
+                head_sha=promotion_head,
+                resolution_state=ResolutionState.MANUAL_REVIEWED,
+            )
+        except GitRemoteError as error:
+            return self._external_error(
+                "wt.promote",
+                "promotion_recovery_failed",
+                str(error),
+                lease=lease,
+            )
+        except ExternalServiceError as error:
+            return self._external_error(
+                "wt.promote",
+                "promotion_recovery_failed",
+                str(error),
+                lease=lease,
+            )
+        except (
+            GitError,
+            OSError,
+            RuntimeError,
+            sqlite3.Error,
+            subprocess.SubprocessError,
+        ) as error:
+            return self._promotion_blocked(
+                "promotion_incomplete", str(error), lease=lease
+            )
+        resumed = self._resume_promotion_publish(
+            lease,
+            github=github,
+            source_prs=tuple(source.number for source in sources),
+            target_branch=target_branch,
+        )
+        return replace(resumed, actions=verification_actions)
+
+
 
     def _reuse_promotion(
         self,
@@ -3167,6 +3918,7 @@ class WorktreeService:
         *,
         sources: Sequence[PullRequest],
         excluded_paths: Sequence[str],
+        promotion_mode: PromotionMode,
         target_ref: str,
         expected_branch: str,
         github: GhClient,
@@ -3175,6 +3927,7 @@ class WorktreeService:
         if (
             lease.source_pr != sources[0].number
             or lease.base_ref != target_ref
+            or lease.promotion_mode is not promotion_mode
             or lease.branch != expected_branch
         ):
             return self._promotion_blocked(
@@ -3182,6 +3935,36 @@ class WorktreeService:
                 f"lease {lease.id} does not match the requested promotion",
                 lease=lease,
             )
+        if promotion_mode is PromotionMode.OUT_OF_ORDER:
+            source_blocker = self._out_of_order_reuse_source_blocker(
+                lease, sources[0]
+            )
+            if source_blocker is not None:
+                if (
+                    source_blocker.status == "blocked"
+                    and lease.state is LeaseState.BLOCKED
+                    and lease.resolution_state
+                    in (
+                        ResolutionState.PENDING,
+                        ResolutionState.MANUAL_REVIEWED,
+                    )
+                ):
+                    return self._promotion_blocked(
+                        "promotion_provenance_changed",
+                        source_blocker.blockers[0]["message"],
+                        lease=lease,
+                    )
+                return source_blocker
+            if (
+                lease.state is LeaseState.BLOCKED
+                and lease.resolution_state is ResolutionState.PENDING
+            ):
+                return self._resume_out_of_order_conflict(
+                    lease,
+                    github=github,
+                    sources=sources,
+                    target_branch=target_branch,
+                )
         try:
             promotion_message = self.git.commit_message(lease.worktree_path)
         except GitError as error:
@@ -3202,7 +3985,12 @@ class WorktreeService:
                 lease=lease,
             )
         target_base_prefix = "AWF-Target-Base: "
-        target_base_line = message_lines[-2] if len(message_lines) >= 2 else ""
+        target_base_line = (
+            message_lines[-4]
+            if lease.promotion_mode is PromotionMode.OUT_OF_ORDER
+            and len(message_lines) >= 4
+            else (message_lines[-2] if len(message_lines) >= 2 else "")
+        )
         target_base_sha = (
             target_base_line[len(target_base_prefix) :]
             if target_base_line.startswith(target_base_prefix)
@@ -3224,6 +4012,28 @@ class WorktreeService:
                 "promotion_incomplete",
                 f"lease {lease.id} does not have exact promotion provenance",
                 lease=lease,
+            )
+        if lease.promotion_mode is PromotionMode.OUT_OF_ORDER and (
+            lease.source_base_sha != sources[0].base_sha
+            or lease.source_head_sha != sources[0].head_sha
+            or lease.target_base_sha != target_base_sha
+            or recorded_source_base_shas != (lease.source_base_sha,)
+            or lease.reviewed_paths != tuple(sorted(sources[0].changed_paths))
+        ):
+            return self._promotion_blocked(
+                "promotion_incomplete",
+                f"lease {lease.id} does not have exact promotion provenance",
+                lease=lease,
+            )
+        if (
+            lease.state is LeaseState.BLOCKED
+            and lease.resolution_state is ResolutionState.MANUAL_REVIEWED
+        ):
+            return self._resume_manually_reviewed_promotion(
+                lease,
+                github=github,
+                sources=sources,
+                target_branch=target_branch,
             )
         if lease.state is LeaseState.PR_OPEN and lease.target_pr is not None:
             return CommandResult.ok("wt.promote", decision="reuse", lease=lease)
@@ -3291,6 +4101,75 @@ class WorktreeService:
             excluded_paths=excluded_paths,
             target_branch=target_branch,
         )
+
+    def _out_of_order_reuse_source_blocker(
+        self, lease: Lease, source: PullRequest
+    ) -> CommandResult | None:
+        try:
+            source_base_sha = self.git.fetch_ref(source.base_sha)
+            source_head_sha = self.git.fetch_ref(source.head_sha)
+            if (
+                source_base_sha != source.base_sha
+                or source_head_sha != source.head_sha
+            ):
+                return self._promotion_blocked(
+                    "source_sha_mismatch",
+                    (
+                        f"fetched source pull request #{source.number} refs do not"
+                        " match the reviewed SHAs"
+                    ),
+                    lease=lease,
+                )
+            merge_base = self.git.merge_base(source_base_sha, source_head_sha)
+            collapsed_paths = tuple(
+                sorted(
+                    self.git.changed_paths(
+                        self.git.repository_root(),
+                        merge_base,
+                        source_head_sha,
+                        find_renames=True,
+                    )
+                )
+            )
+            expanded_paths = tuple(
+                sorted(
+                    self.git.changed_path_endpoints(
+                        self.git.repository_root(),
+                        merge_base,
+                        source_head_sha,
+                    )
+                )
+            )
+        except GitRemoteError as error:
+            return self._external_error(
+                "wt.promote",
+                "source_delta_unavailable",
+                str(error),
+                lease=lease,
+            )
+        except GitError as error:
+            return self._promotion_blocked(
+                "source_delta_unavailable", str(error), lease=lease
+            )
+        reviewed_paths = tuple(sorted(source.changed_paths))
+        if expanded_paths != collapsed_paths:
+            return self._promotion_blocked(
+                "unsupported_out_of_order_rename",
+                "out-of-order promotion does not support renamed paths",
+                lease=lease,
+            )
+        if (
+            collapsed_paths != reviewed_paths
+            or lease.source_base_sha != source.base_sha
+            or lease.source_head_sha != source.head_sha
+            or lease.reviewed_paths != reviewed_paths
+        ):
+            return self._promotion_blocked(
+                "promotion_incomplete",
+                f"lease {lease.id} does not have exact promotion provenance",
+                lease=lease,
+            )
+        return None
 
     def _rebuild_content_mismatch_promotion(
         self,
@@ -3478,6 +4357,15 @@ class WorktreeService:
                     f"lease {lease.id} was not verified for publication",
                     lease=lease,
                 )
+            if (
+                lease.resolution_state is ResolutionState.MANUAL_REVIEWED
+                and not self._protected_index_entries_match(lease)
+            ):
+                return self._promotion_blocked(
+                    "promotion_resolution_scope_mismatch",
+                    f"lease {lease.id} protected reviewed paths changed",
+                    lease=lease,
+                )
             promotion_head = self.git.head_sha(lease.worktree_path)
             target_sha = (
                 self.git.fetch_ref(target_branch)
@@ -3516,7 +4404,8 @@ class WorktreeService:
                     f"lease {lease.id} does not have exact promotion provenance",
                     lease=lease,
                 )
-            expected_blob_heads: dict[str, str] = {}
+            if lease.promotion_mode is PromotionMode.EXACT:
+                expected_blob_heads: dict[str, str] = {}
             for source, source_base_sha in zip(sources, source_base_shas):
                 if (
                     (
@@ -3531,25 +4420,43 @@ class WorktreeService:
                         f"lease {lease.id} does not have exact source provenance",
                         lease=lease,
                     )
-                for path in source.changed_paths:
-                    if path not in excluded_paths:
-                        expected_blob_heads[path] = source.head_sha
-            expected_blobs = self._promotion_net_blobs(
-                expected_blob_heads, target_sha
-            )
-            expected_paths = tuple(sorted(expected_blobs))
-            if (
-                self.git.changed_paths(
+                if lease.promotion_mode is PromotionMode.EXACT:
+                    for path in source.changed_paths:
+                        if path not in excluded_paths:
+                            expected_blob_heads[path] = source.head_sha
+            if lease.promotion_mode is PromotionMode.EXACT:
+                expected_blobs = self._promotion_net_blobs(
+                    expected_blob_heads, target_sha
+                )
+                expected_paths = tuple(sorted(expected_blobs))
+                contents_valid = (
+                    self.git.changed_paths(
+                        lease.worktree_path,
+                        target_sha,
+                        promotion_head,
+                        find_renames=True,
+                    )
+                    == expected_paths
+                    and not any(
+                        expected_blobs[path]
+                        != self.git.path_blob(promotion_head, path)
+                        for path in expected_paths
+                    )
+                )
+            else:
+                promoted_paths = self.git.changed_paths(
                     lease.worktree_path,
                     target_sha,
                     promotion_head,
                     find_renames=True,
                 )
-                != expected_paths
-                or any(
-                    expected_blobs[path]
-                    != self.git.path_blob(promotion_head, path)
-                    for path in expected_paths
+                contents_valid = bool(promoted_paths) and all(
+                    path in lease.reviewed_paths for path in promoted_paths
+                )
+            if not contents_valid or (
+                lease.resolution_state is ResolutionState.MANUAL_REVIEWED
+                and self.git.committed_diff_has_conflict_markers(
+                    lease.worktree_path, target_sha, promotion_head
                 )
             ):
                 return self._promotion_blocked(
@@ -3569,6 +4476,15 @@ class WorktreeService:
                 summary="recovered verified promotion; publication pending",
                 observed_head_sha=promotion_head,
                 head_sha=promotion_head,
+                resolution_state=(
+                    ResolutionState.MANUAL_REVIEWED
+                    if lease.resolution_state is ResolutionState.MANUAL_REVIEWED
+                    else (
+                        ResolutionState.AUTOMATIC
+                        if lease.promotion_mode is PromotionMode.OUT_OF_ORDER
+                        else None
+                    )
+                ),
             )
         except GitRemoteError as error:
             return self._external_error(
@@ -3622,6 +4538,15 @@ class WorktreeService:
                     "promotion_head_mismatch",
                     "promotion worktree changed after verification",
                 )
+            if (
+                lease.resolution_state is ResolutionState.MANUAL_REVIEWED
+                and not self._protected_index_entries_match(lease)
+            ):
+                return self._block_promotion_lease(
+                    lease,
+                    "promotion_resolution_scope_mismatch",
+                    f"lease {lease.id} protected reviewed paths changed",
+                )
             prepare_blocker = self._prepare_promotion(lease, force=False)
             if prepare_blocker is not None:
                 return prepare_blocker
@@ -3633,6 +4558,37 @@ class WorktreeService:
                     "promotion_verification_failed",
                     str(error),
                 )
+            if lease.promotion_mode is PromotionMode.OUT_OF_ORDER:
+                if lease.target_base_sha is None:
+                    return self._block_promotion_lease(
+                        lease,
+                        "promotion_incomplete",
+                        f"lease {lease.id} has no out-of-order target provenance",
+                    )
+                if (
+                    lease.resolution_state is ResolutionState.MANUAL_REVIEWED
+                    and self.git.committed_diff_has_conflict_markers(
+                        lease.worktree_path, lease.target_base_sha, head_sha
+                    )
+                ):
+                    return self._block_promotion_lease(
+                        lease,
+                        "promotion_incomplete",
+                        f"lease {lease.id} committed promotion has conflict markers",
+                    )
+                live_target_sha = self.git.remote_branch_sha(target_branch)
+                if live_target_sha is None:
+                    return self._block_promotion_lease(
+                        lease,
+                        "target_ref_unavailable",
+                        f"target branch {target_branch!r} is unavailable on origin",
+                    )
+                if live_target_sha != lease.target_base_sha:
+                    return self._block_promotion_lease(
+                        lease,
+                        "promotion_provenance_changed",
+                        f"lease {lease.id} target branch changed after verification",
+                    )
             target_pull_request = github.find_open_pr(
                 head=lease.branch, base=target_branch
             )
@@ -3706,6 +4662,7 @@ class WorktreeService:
         excluded_paths: Sequence[str],
         target_sha: str,
         lease: Lease,
+        resolution_state: ResolutionState | None = None,
     ) -> tuple[str, ...]:
         source_trailers = tuple(
             trailer
@@ -3719,11 +4676,33 @@ class WorktreeService:
         excluded_trailers = tuple(
             f"AWF-Excluded-Path: {path}" for path in excluded_paths
         )
+        resolution = (
+            ResolutionState.MANUAL_REVIEWED
+            if resolution_state is ResolutionState.MANUAL_REVIEWED
+            or (
+                resolution_state is None
+                and lease.resolution_state is ResolutionState.MANUAL_REVIEWED
+            )
+            else ResolutionState.AUTOMATIC
+        )
+        mode_trailers = (
+            (
+                "AWF-Promotion-Mode: out-of-order",
+                (
+                    "AWF-Resolution: manual-reviewed"
+                    if resolution is ResolutionState.MANUAL_REVIEWED
+                    else "AWF-Resolution: automatic"
+                ),
+            )
+            if lease.promotion_mode is PromotionMode.OUT_OF_ORDER
+            else ()
+        )
         return (
             *source_trailers,
             *excluded_trailers,
             f"AWF-Target-Base: {target_sha}",
             f"AWF-Lease-ID: {lease.id}",
+            *mode_trailers,
         )
 
     def _promotion_message(
@@ -3734,6 +4713,7 @@ class WorktreeService:
         target_sha: str,
         lease: Lease,
         target_branch: str,
+        resolution_state: ResolutionState | None = None,
     ) -> str:
         return "\n".join(
             (
@@ -3747,6 +4727,7 @@ class WorktreeService:
                     excluded_paths=excluded_paths,
                     target_sha=target_sha,
                     lease=lease,
+                    resolution_state=resolution_state,
                 ),
             )
         )
@@ -3762,8 +4743,12 @@ class WorktreeService:
         target_branch: str,
     ) -> tuple[str, ...] | None:
         lines = message.splitlines()
+        mode_trailer_count = (
+            2 if lease.promotion_mode is PromotionMode.OUT_OF_ORDER else 0
+        )
         if (
-            len(lines) != 3 * len(sources) + len(excluded_paths) + 4
+            len(lines)
+            != 3 * len(sources) + len(excluded_paths) + 4 + mode_trailer_count
             or lines[0]
             != WorktreeService._promotion_title(
                 tuple(source.number for source in sources),
@@ -3798,6 +4783,16 @@ class WorktreeService:
         if (
             lines[offset] != f"AWF-Target-Base: {target_sha}"
             or lines[offset + 1] != f"AWF-Lease-ID: {lease.id}"
+        ):
+            return None
+        if lease.promotion_mode is PromotionMode.OUT_OF_ORDER and (
+            lines[offset + 2] != "AWF-Promotion-Mode: out-of-order"
+            or lines[offset + 3]
+            != (
+                "AWF-Resolution: manual-reviewed"
+                if lease.resolution_state is ResolutionState.MANUAL_REVIEWED
+                else "AWF-Resolution: automatic"
+            )
         ):
             return None
         return tuple(source_base_shas)
@@ -3928,6 +4923,65 @@ class WorktreeService:
                 "promotion prepare command left uncommitted changes",
             )
         return None
+
+
+    def _protected_index_entries_match(self, lease: Lease) -> bool:
+        protected_paths = tuple(
+            path
+            for path in lease.reviewed_paths
+            if path not in lease.conflicted_paths
+        )
+        if (
+            tuple(path for path, _entry in lease.protected_index_entries)
+            != protected_paths
+        ):
+            return False
+        return self.git.index_entry_snapshot(
+            lease.worktree_path, protected_paths
+        ) == lease.protected_index_entries
+
+
+    def _record_out_of_order_conflict(
+        self, lease: Lease, error: GitPatchConflict
+    ) -> CommandResult:
+        conflicted_paths = tuple(sorted(error.paths))
+        protected_paths = tuple(
+            path for path in lease.reviewed_paths if path not in conflicted_paths
+        )
+        try:
+            head_sha = self.git.head_sha(lease.worktree_path)
+            protected_index_entries = self.git.index_entry_snapshot(
+                lease.worktree_path, protected_paths
+            )
+            lease = self.registry.transition(
+                lease.id,
+                LeaseState.BLOCKED,
+                expected_version=lease.version,
+                event_type="promotion_blocked",
+                summary=(
+                    "out_of_order_conflict: reviewed patch requires managed "
+                    "resolution; conflicted paths: "
+                    + ", ".join(repr(path) for path in conflicted_paths)
+                ),
+                observed_head_sha=head_sha,
+                head_sha=head_sha,
+                resolution_state=ResolutionState.PENDING,
+                conflicted_paths=conflicted_paths,
+                protected_index_entries=protected_index_entries,
+            )
+        except (GitError, OSError, RuntimeError, sqlite3.Error) as transition_error:
+            return self._promotion_blocked(
+                "registry_conflict", str(transition_error), lease=lease
+            )
+        return self._promotion_blocked(
+            "out_of_order_conflict",
+            (
+                f"out-of-order promotion lease {lease.id} has conflicts that require "
+                "manual resolution; conflicted paths: "
+                + ", ".join(repr(path) for path in conflicted_paths)
+            ),
+            lease=lease,
+        )
 
 
     def _block_promotion_lease(

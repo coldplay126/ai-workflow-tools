@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -36,6 +37,18 @@ class DeploymentState(str, Enum):
     NOT_REQUIRED = "not_required"
 
 
+class PromotionMode(str, Enum):
+    EXACT = "exact"
+    OUT_OF_ORDER = "out_of_order"
+
+
+class ResolutionState(str, Enum):
+    NONE = "none"
+    PENDING = "pending"
+    AUTOMATIC = "automatic"
+    MANUAL_REVIEWED = "manual_reviewed"
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -65,7 +78,59 @@ class Lease:
     updated_at: str
     removed_at: str | None
     version: int
+    promotion_mode: PromotionMode = PromotionMode.EXACT
+    resolution_state: ResolutionState = ResolutionState.NONE
+    source_base_sha: str | None = None
+    source_head_sha: str | None = None
+    target_base_sha: str | None = None
+    reviewed_paths: tuple[str, ...] = ()
+    conflicted_paths: tuple[str, ...] = ()
+    protected_index_entries: tuple[tuple[str, tuple[str, str] | None], ...] = ()
 
+    def __post_init__(self) -> None:
+        self._validate_path_metadata("reviewed_paths", self.reviewed_paths)
+        self._validate_path_metadata("conflicted_paths", self.conflicted_paths)
+        self._validate_protected_index_entries(self.protected_index_entries)
+
+    @staticmethod
+    def _validate_path_metadata(name: str, paths: tuple[str, ...]) -> None:
+        if not isinstance(paths, tuple) or any(
+            not isinstance(path, str) for path in paths
+        ):
+            raise ValueError(f"{name} must be a tuple of strings")
+        if paths != tuple(sorted(paths)) or len(paths) != len(set(paths)):
+            raise ValueError(f"{name} must be sorted and unique")
+
+
+    @classmethod
+    def _validate_protected_index_entries(
+        cls,
+        protected_index_entries: tuple[tuple[str, tuple[str, str] | None], ...],
+    ) -> None:
+        if not isinstance(protected_index_entries, tuple) or any(
+            not isinstance(item, tuple)
+            or len(item) != 2
+            or not isinstance(item[0], str)
+            or (
+                item[1] is not None
+                and (
+                    not isinstance(item[1], tuple)
+                    or len(item[1]) != 2
+                    or item[1][0] not in ("100644", "100755", "120000", "160000")
+                    or not isinstance(item[1][1], str)
+                    or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", item[1][1])
+                    is None
+                )
+            )
+            for item in protected_index_entries
+        ):
+            raise ValueError(
+                "protected_index_entries must map paths to stage-zero entries or null"
+            )
+        cls._validate_path_metadata(
+            "protected_index_entries",
+            tuple(path for path, _entry in protected_index_entries),
+        )
     @classmethod
     def new(
         cls,
@@ -83,6 +148,16 @@ class Lease:
         owner_kind: str,
         owner_id: str | None = None,
         source_pr: int | None = None,
+        promotion_mode: PromotionMode = PromotionMode.EXACT,
+        resolution_state: ResolutionState = ResolutionState.NONE,
+        source_base_sha: str | None = None,
+        source_head_sha: str | None = None,
+        target_base_sha: str | None = None,
+        reviewed_paths: tuple[str, ...] = (),
+        conflicted_paths: tuple[str, ...] = (),
+        protected_index_entries: tuple[
+            tuple[str, tuple[str, str] | None], ...
+        ] = (),
     ) -> Lease:
         timestamp = now_iso()
         deployment = (
@@ -114,6 +189,14 @@ class Lease:
             updated_at=timestamp,
             removed_at=None,
             version=0,
+            promotion_mode=promotion_mode,
+            resolution_state=resolution_state,
+            source_base_sha=source_base_sha,
+            source_head_sha=source_head_sha,
+            target_base_sha=target_base_sha,
+            reviewed_paths=reviewed_paths,
+            conflicted_paths=conflicted_paths,
+            protected_index_entries=protected_index_entries,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -123,6 +206,18 @@ class Lease:
         payload["purpose"] = self.purpose.value
         payload["state"] = self.state.value
         payload["deployment_state"] = self.deployment_state.value
+        payload["promotion_mode"] = self.promotion_mode.value
+        payload["resolution_state"] = self.resolution_state.value
+        payload["reviewed_paths"] = list(self.reviewed_paths)
+        payload["conflicted_paths"] = list(self.conflicted_paths)
+        payload["protected_index_entries"] = [
+            {
+                "path": path,
+                "mode": entry[0] if entry is not None else None,
+                "blob_oid": entry[1] if entry is not None else None,
+            }
+            for path, entry in self.protected_index_entries
+        ]
         return payload
 
 

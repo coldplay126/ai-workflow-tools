@@ -15,6 +15,18 @@ from pathlib import Path
 class GitError(RuntimeError):
     """Raised when a checked Git command cannot complete successfully."""
 
+    def __init__(self, detail: str, *, returncode: int | None = None) -> None:
+        super().__init__(detail)
+        self.returncode = returncode
+
+
+class GitPatchConflict(GitError):
+    """Raised when an indexed three-way patch application leaves conflicts."""
+
+    def __init__(self, paths: tuple[str, ...], detail: str) -> None:
+        super().__init__(detail)
+        self.paths = paths
+
 
 
 class GitRemoteError(GitError):
@@ -79,6 +91,12 @@ class GitClient:
     def status_porcelain(self, cwd: Path | None = None) -> tuple[str, ...]:
         completed = self._run("status", "--porcelain=v1", "-z", cwd=cwd)
         return _nul_records(completed.stdout)
+
+    def unmerged_paths(self, cwd: Path) -> tuple[str, ...]:
+        completed = self._run(
+            "diff", "--name-only", "--diff-filter=U", "-z", cwd=cwd
+        )
+        return tuple(sorted(_nul_records(completed.stdout)))
 
     def list_worktrees(self) -> tuple[GitWorktree, ...]:
         completed = self._run("worktree", "list", "--porcelain", "-z")
@@ -288,7 +306,145 @@ class GitClient:
         return self._run(*args).stdout
 
     def apply_indexed_patch(self, cwd: Path, patch: bytes) -> None:
-        self._run("apply", "--3way", "--index", "-", cwd=cwd, input_bytes=patch)
+        if self.unmerged_paths(cwd):
+            raise GitError("git apply requires a clean index")
+        try:
+            self._run("apply", "--3way", "--index", "-", cwd=cwd, input_bytes=patch)
+        except GitError as error:
+            if error.returncode is None:
+                raise
+            try:
+                paths = self.unmerged_paths(cwd)
+            except GitError:
+                raise error
+            if paths:
+                raise GitPatchConflict(paths, str(error)) from error
+            raise
+
+    def stage_paths(self, cwd: Path, paths: tuple[str, ...]) -> None:
+        if not paths:
+            raise GitError("at least one path is required for staging")
+        self._run("--literal-pathspecs", "add", "--", *paths, cwd=cwd)
+
+    def worktree_changed_paths(self, cwd: Path) -> tuple[str, ...]:
+        tracked = _nul_records(
+            self._run(
+                "diff",
+                "--name-only",
+                "-z",
+                "--no-renames",
+                "HEAD",
+                cwd=cwd,
+            ).stdout
+        )
+        untracked = _nul_records(
+            self._run(
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "-z",
+                cwd=cwd,
+            ).stdout
+        )
+        return tuple(sorted(set(tracked).union(untracked)))
+
+    def indexed_changed_paths(self, cwd: Path, base: str) -> tuple[str, ...]:
+        completed = self._run(
+            "diff",
+            "--cached",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            base,
+            cwd=cwd,
+        )
+        return _nul_records(completed.stdout)
+
+    def index_entry_snapshot(
+        self, cwd: Path, paths: tuple[str, ...]
+    ) -> tuple[tuple[str, tuple[str, str] | None], ...]:
+        if not paths:
+            return ()
+        if (
+            any(not isinstance(path, str) for path in paths)
+            or paths != tuple(sorted(paths))
+            or len(paths) != len(set(paths))
+        ):
+            raise GitError("index entry paths must be sorted and unique")
+        completed = self._run(
+            "--literal-pathspecs",
+            "ls-files",
+            "--stage",
+            "-z",
+            "--",
+            *paths,
+            cwd=cwd,
+        )
+        entries: dict[str, tuple[str, str] | None] = {
+            path: None for path in paths
+        }
+        for record in completed.stdout.split(b"\0"):
+            if not record:
+                continue
+            metadata, separator, raw_path = record.partition(b"\t")
+            fields = metadata.split()
+            if not separator or len(fields) != 3:
+                raise GitError("git ls-files returned an invalid index record")
+            raw_mode, raw_blob, stage = fields
+            if raw_mode not in (b"100644", b"100755", b"120000", b"160000"):
+                raise GitError("git ls-files returned an unsupported index mode")
+            if stage != b"0":
+                continue
+            path = os.fsdecode(raw_path)
+            if path not in entries:
+                raise GitError("git ls-files returned an unexpected index path")
+            try:
+                mode = raw_mode.decode("ascii", errors="strict")
+                blob_oid = raw_blob.decode("ascii", errors="strict")
+            except UnicodeDecodeError as error:
+                raise GitError("git ls-files returned an invalid index entry") from error
+            if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", blob_oid) is None:
+                raise GitError("git ls-files returned an invalid index blob")
+            entries[path] = (mode, blob_oid)
+        return tuple((path, entries[path]) for path in paths)
+
+    def unstaged_paths(self, cwd: Path) -> tuple[str, ...]:
+        tracked = _nul_records(
+            self._run(
+                "diff",
+                "--name-only",
+                "-z",
+                "--no-renames",
+                cwd=cwd,
+            ).stdout
+        )
+        untracked = _nul_records(
+            self._run(
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "-z",
+                cwd=cwd,
+            ).stdout
+        )
+        return tuple(sorted(set(tracked).union(untracked)))
+
+    def staged_diff_has_conflict_markers(self, cwd: Path) -> bool:
+        return _has_added_conflict_marker(
+            self._run("diff", "--cached", "--no-ext-diff", cwd=cwd).stdout
+        )
+
+    def committed_diff_has_conflict_markers(
+        self, cwd: Path, base: str, head: str
+    ) -> bool:
+        return _has_added_conflict_marker(
+            self._run(
+                "diff",
+                "--no-ext-diff",
+                f"{base}..{head}",
+                cwd=cwd,
+            ).stdout
+        )
 
     def reset_hard(self, cwd: Path, ref: str) -> None:
         """Set a managed checkout to ref and discard tracked staged/unstaged changes."""
@@ -307,6 +463,19 @@ class GitClient:
             arguments.append("--find-renames")
         arguments.append(f"{base}..{head}")
         completed = self._run(*arguments, cwd=cwd)
+        return _nul_records(completed.stdout)
+
+    def changed_path_endpoints(
+        self, cwd: Path, base: str, head: str = "HEAD"
+    ) -> tuple[str, ...]:
+        completed = self._run(
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            f"{base}..{head}",
+            cwd=cwd,
+        )
         return _nul_records(completed.stdout)
 
     def commit(self, cwd: Path, message: str, *, allow_empty: bool = False) -> str:
@@ -355,7 +524,10 @@ class GitClient:
             detail = _bounded_stderr(stderr)
             if "not a git repository" in detail.lower():
                 detail = f"not a Git repository: {detail}"
-            raise GitError(f"git {command} failed ({process.returncode}): {detail}")
+            raise GitError(
+                f"git {command} failed ({process.returncode}): {detail}",
+                returncode=process.returncode,
+            )
         return GitCompleted(process.returncode, stdout, stderr)
 
     @staticmethod
@@ -445,6 +617,16 @@ def _parse_worktrees(value: bytes) -> tuple[GitWorktree, ...]:
     if fields:
         worktrees.append(_worktree_from_fields(fields))
     return tuple(worktrees)
+
+_CONFLICT_MARKER_PREFIXES = (b"<<<<<<<", b"=======", b">>>>>>>", b"|||||||")
+
+
+def _has_added_conflict_marker(patch: bytes) -> bool:
+    for line in patch.splitlines():
+        if line.startswith(b"+") and not line.startswith(b"+++"):
+            if line[1:].startswith(_CONFLICT_MARKER_PREFIXES):
+                return True
+    return False
 
 def _worktree_from_fields(fields: dict[str, str | bool]) -> GitWorktree:
     raw_path = fields.get("worktree")

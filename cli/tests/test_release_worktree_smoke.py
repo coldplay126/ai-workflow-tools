@@ -10,7 +10,13 @@ import pytest
 from awf.worktrees.config import WorktreeConfig
 from awf.worktrees.git import GitClient
 from awf.worktrees.github import PullRequest
-from awf.worktrees.models import DeploymentState, LeaseState, Purpose
+from awf.worktrees.models import (
+    DeploymentState,
+    LeaseState,
+    PromotionMode,
+    Purpose,
+    ResolutionState,
+)
 from awf.worktrees.registry import WorktreeRegistry
 from awf.worktrees.service import WorktreeService
 from worktree_fixtures import git as git_command
@@ -22,6 +28,7 @@ class FakeGitHub:
     repository_root: Path
     prs: dict[int, PullRequest] = field(default_factory=dict)
     open_prs: dict[tuple[str, str], PullRequest] = field(default_factory=dict)
+    created_pr_bodies: list[str] = field(default_factory=list)
 
     def view_pr(self, number: int) -> PullRequest:
         return self.prs[number]
@@ -32,6 +39,7 @@ class FakeGitHub:
     def create_pr(
         self, *, base: str, head: str, title: str, body: str
     ) -> PullRequest:
+        self.created_pr_bodies.append(body)
         pull_request = PullRequest(
             number=900,
             state="OPEN",
@@ -180,6 +188,76 @@ class SmokeHarness:
         )
         self._rebuild_service()
 
+    def add_divergent_same_file_followup(
+        self, *, number: int = 373
+    ) -> PullRequest:
+        target_text = (
+            "flag=production\nstable-1\nstable-2\nstable-3\nstable-4\n"
+            "stable-5\nfollowup=old\n"
+        )
+        source_base_text = (
+            "flag=staging-a\nstable-1\nstable-2\nstable-3\nstable-4\n"
+            "stable-5\nfollowup=old\n"
+        )
+        source_head_text = (
+            "flag=staging-a\nstable-1\nstable-2\nstable-3\nstable-4\n"
+            "stable-5\nfollowup=from-b\n"
+        )
+        branch = f"feature/pr-{number}"
+
+        git_command(self.repo, "checkout", "-q", "main")
+        (self.repo / "out-of-order.txt").write_text(
+            target_text, encoding="utf-8"
+        )
+        git_command(self.repo, "add", "out-of-order.txt")
+        git_command(self.repo, "commit", "-q", "-m", "production baseline")
+        git_command(self.repo, "push", "-q", "origin", "main")
+
+        git_command(self.repo, "checkout", "-q", "staging")
+        (self.repo / "out-of-order.txt").write_text(
+            source_base_text, encoding="utf-8"
+        )
+        git_command(self.repo, "add", "out-of-order.txt")
+        git_command(self.repo, "commit", "-q", "-m", "staging change A")
+        git_command(self.repo, "push", "-q", "origin", "staging")
+        git_command(self.repo, "checkout", "-q", "-b", branch)
+        base_sha = git_command(self.repo, "rev-parse", "HEAD")
+        (self.repo / "out-of-order.txt").write_text(
+            source_head_text, encoding="utf-8"
+        )
+        git_command(self.repo, "add", "out-of-order.txt")
+        git_command(self.repo, "commit", "-q", "-m", "staging follow-up B")
+        head_sha = git_command(self.repo, "rev-parse", "HEAD")
+        git_command(self.repo, "push", "-q", "-u", "origin", branch)
+        git_command(self.repo, "checkout", "-q", "staging")
+        git_command(
+            self.repo,
+            "merge",
+            "--no-ff",
+            "-q",
+            branch,
+            "-m",
+            "merge staging follow-up B",
+        )
+        merge_sha = git_command(self.repo, "rev-parse", "HEAD")
+        git_command(self.repo, "push", "-q", "origin", "staging")
+
+        source = PullRequest(
+            number=number,
+            state="MERGED",
+            base_ref="staging",
+            base_sha=base_sha,
+            head_ref=branch,
+            head_sha=head_sha,
+            merge_commit_sha=merge_sha,
+            review_decision="APPROVED",
+            checks_passed=True,
+            changed_paths=("out-of-order.txt",),
+            url=f"https://github.example/acme/repo/pull/{number}",
+        )
+        self.github.prs[number] = source
+        return source
+
 
 @pytest.fixture
 def smoke(tmp_path: Path) -> SmokeHarness:
@@ -233,6 +311,74 @@ def test_release_worktree_lifecycle_smoke(smoke: SmokeHarness) -> None:
         ("deployment-status",),
         ("deployment-status",),
     ]
+
+
+def test_out_of_order_promotion_smoke_generates_b_without_staging_a(
+    smoke: SmokeHarness,
+) -> None:
+    source = smoke.add_divergent_same_file_followup()
+
+    preview = smoke.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        out_of_order=True,
+        apply=False,
+    )
+
+    assert preview.decision == "preview"
+    assert preview.actions[0]["promotion_mode"] == "out_of_order"
+    assert preview.actions[0]["source_base_sha"] == source.base_sha
+    assert preview.actions[0]["source_head_sha"] == source.head_sha
+
+    promoted = smoke.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert promoted.decision == "ready", promoted.blockers
+    assert promoted.lease is not None
+    assert promoted.lease.state is LeaseState.PR_OPEN
+    assert promoted.lease.promotion_mode is PromotionMode.OUT_OF_ORDER
+    assert promoted.lease.resolution_state is ResolutionState.AUTOMATIC
+    assert promoted.lease.target_pr == 900
+    assert (promoted.lease.worktree_path / "out-of-order.txt").read_text(
+        encoding="utf-8"
+    ) == (
+        "flag=production\nstable-1\nstable-2\nstable-3\nstable-4\n"
+        "stable-5\nfollowup=from-b\n"
+    )
+    assert "flag=staging-a" not in (
+        promoted.lease.worktree_path / "out-of-order.txt"
+    ).read_text(encoding="utf-8")
+    assert (
+        smoke.git.remote_branch_sha(promoted.lease.branch)
+        == promoted.lease.head_sha
+    )
+    remote_content = git_command(
+        smoke.repo.parent / "origin.git",
+        "show",
+        f"refs/heads/{promoted.lease.branch}:out-of-order.txt",
+    )
+    assert remote_content == (
+        "flag=production\nstable-1\nstable-2\nstable-3\nstable-4\n"
+        "stable-5\nfollowup=from-b"
+    )
+    assert "flag=staging-a" not in remote_content
+    assert len(smoke.github.created_pr_bodies) == 1
+    assert len(smoke.github.open_prs) == 1
+
+    for trailer in (
+        "AWF-Source-PR: 373",
+        f"AWF-Source-Base: {source.base_sha}",
+        f"AWF-Source-Head: {source.head_sha}",
+        f"AWF-Target-Base: {promoted.lease.target_base_sha}",
+        f"AWF-Lease-ID: {promoted.lease.id}",
+        "AWF-Promotion-Mode: out-of-order",
+        "AWF-Resolution: automatic",
+    ):
+        assert trailer in smoke.github.created_pr_bodies[0]
 
 
 def test_imported_worktree_pr_cleanup_lifecycle_smoke(smoke: SmokeHarness) -> None:

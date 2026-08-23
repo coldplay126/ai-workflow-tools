@@ -15,6 +15,7 @@ from awf.worktrees.git import (
     GitCompleted,
     GitClient,
     GitError,
+    GitPatchConflict,
     GitRemoteError,
     _bounded_stderr,
     _nul_records,
@@ -407,6 +408,353 @@ def test_git_client_classifies_push_transport_failure_as_external(
     with pytest.raises(GitRemoteError):
         client.push_branch(repo, "awf/push")
 
+def _divergent_patch_worktree(
+    tmp_path: Path,
+    *,
+    path: str,
+    base_contents: bytes,
+    source_contents: bytes | None,
+    target_contents: bytes | None,
+) -> tuple[GitClient, Path, bytes]:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    (repo / path).write_bytes(base_contents)
+    (repo / "staged-sentinel.txt").write_text("base\n", encoding="utf-8")
+    (repo / "unstaged-sentinel.txt").write_text("base\n", encoding="utf-8")
+    git(repo, "add", "--", path, "staged-sentinel.txt", "unstaged-sentinel.txt")
+    git(repo, "commit", "-q", "-m", "add conflict inputs")
+    base = client.head_sha()
+    source = tmp_path / "conflict-source"
+    target = tmp_path / "conflict-target"
+    client.add_worktree(source, "awf/conflict-source", base)
+    client.add_worktree(target, "awf/conflict-target", base)
+    if source_contents is None:
+        git(source, "rm", "--", path)
+    else:
+        (source / path).write_bytes(source_contents)
+        git(source, "add", "--", path)
+    git(source, "commit", "-q", "-m", "source change")
+    source_head = client.head_sha(source)
+    if target_contents is None:
+        git(target, "rm", "--", path)
+    else:
+        (target / path).write_bytes(target_contents)
+        git(target, "add", "--", path)
+    git(target, "commit", "-q", "-m", "target change")
+
+    return client, target, client.binary_diff(base, source_head)
+
+
+def _conflicting_patch_worktree(
+    tmp_path: Path,
+) -> tuple[GitClient, Path, bytes]:
+    return _divergent_patch_worktree(
+        tmp_path,
+        path="shared.txt",
+        base_contents=b"base\n",
+        source_contents=b"source\n",
+        target_contents=b"target\n",
+    )
+
+
+def _add_unrelated_staged_and_unstaged_changes(worktree: Path) -> None:
+    (worktree / "staged-sentinel.txt").write_text("staged\n", encoding="utf-8")
+    git(worktree, "add", "staged-sentinel.txt")
+    (worktree / "unstaged-sentinel.txt").write_text(
+        "unstaged\n", encoding="utf-8"
+    )
+
+
+def _assert_unrelated_changes_are_preserved(
+    client: GitClient, worktree: Path
+) -> None:
+    status = client.status_porcelain(worktree)
+    assert "M  staged-sentinel.txt" in status
+    assert " M unstaged-sentinel.txt" in status
+
+
+def test_git_client_reports_real_patch_conflict_and_preserves_unmerged_worktree(
+    tmp_path: Path,
+) -> None:
+    client, worktree, patch = _conflicting_patch_worktree(tmp_path)
+
+    with pytest.raises(GitPatchConflict) as caught:
+        client.apply_indexed_patch(worktree, patch)
+
+    assert caught.value.paths == ("shared.txt",)
+    assert client.unmerged_paths(worktree) == ("shared.txt",)
+    assert any(
+        entry.endswith("shared.txt") for entry in client.status_porcelain(worktree)
+    )
+
+
+def test_git_client_stage_paths_resolves_conflict_and_preserves_staged_change(
+    tmp_path: Path,
+) -> None:
+    client, worktree, patch = _conflicting_patch_worktree(tmp_path)
+
+    with pytest.raises(GitError):
+        client.apply_indexed_patch(worktree, patch)
+    (worktree / "shared.txt").write_text("resolved\n", encoding="utf-8")
+
+    client.stage_paths(worktree, ("shared.txt",))
+
+    assert client.unmerged_paths(worktree) == ()
+    assert client.status_porcelain(worktree) == ("M  shared.txt",)
+
+def test_git_client_detects_added_conflict_markers_in_staged_and_committed_diffs(
+    tmp_path: Path,
+) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    base = client.head_sha()
+    (repo / "marker.txt").write_text(
+        "<<<<<<< ours\nmanual\n=======\ntheirs\n>>>>>>> theirs\n",
+        encoding="utf-8",
+    )
+    client.stage_paths(repo, ("marker.txt",))
+
+    assert client.staged_diff_has_conflict_markers(repo)
+
+    head = client.commit(repo, "marker")
+    assert client.committed_diff_has_conflict_markers(repo, base, head)
+
+
+def test_git_client_allows_trailing_whitespace_without_conflict_markers(
+    tmp_path: Path,
+) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    base = client.head_sha()
+    (repo / "whitespace.txt").write_text("manual  \n", encoding="utf-8")
+    client.stage_paths(repo, ("whitespace.txt",))
+
+    assert not client.staged_diff_has_conflict_markers(repo)
+
+    head = client.commit(repo, "trailing whitespace")
+    assert not client.committed_diff_has_conflict_markers(repo, base, head)
+
+
+def test_git_client_snapshots_stage_zero_entries_with_literal_paths(
+    tmp_path: Path,
+) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    (repo / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+    client.stage_paths(repo, ("tracked.txt",))
+    client.commit(repo, "tracked")
+    (repo / "tracked.txt").write_text("updated\n", encoding="utf-8")
+    client.stage_paths(repo, ("tracked.txt",))
+
+    snapshot = client.index_entry_snapshot(
+        repo,
+        ("missing.txt", "tracked.txt"),
+    )
+
+    assert snapshot == (
+        ("missing.txt", None),
+        (
+            "tracked.txt",
+            ("100644", git(repo, "rev-parse", ":tracked.txt")),
+        ),
+    )
+
+
+@pytest.mark.parametrize("mode", ("120000", "160000"))
+def test_git_client_snapshots_supported_stage_zero_entry_modes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    client = GitClient(make_repository(tmp_path))
+
+    def run(*_args: str, **_kwargs: object) -> GitCompleted:
+        return GitCompleted(0, f"{mode} {'a' * 40} 0\tentry\0".encode(), b"")
+
+    monkeypatch.setattr(client, "_run", run)
+
+    assert client.index_entry_snapshot(client.cwd, ("entry",)) == (
+        ("entry", (mode, "a" * 40)),
+    )
+
+
+@pytest.mark.parametrize("mode", ("040000", "000000"))
+def test_git_client_rejects_invalid_stage_zero_entry_modes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    client = GitClient(make_repository(tmp_path))
+
+    def run(*_args: str, **_kwargs: object) -> GitCompleted:
+        return GitCompleted(0, f"{mode} {'a' * 40} 0\tentry\0".encode(), b"")
+
+    monkeypatch.setattr(client, "_run", run)
+
+    with pytest.raises(GitError, match="unsupported index mode"):
+        client.index_entry_snapshot(client.cwd, ("entry",))
+def test_git_client_stage_paths_rejects_empty_paths(tmp_path: Path) -> None:
+    client = GitClient(make_repository(tmp_path))
+
+    with pytest.raises(GitError, match="at least one path is required for staging"):
+        client.stage_paths(client.cwd, ())
+
+
+def test_git_client_keeps_generic_error_for_non_conflicting_patch_failure(
+    tmp_path: Path,
+) -> None:
+    client = GitClient(make_repository(tmp_path))
+
+    with pytest.raises(GitError) as caught:
+        client.apply_indexed_patch(client.cwd, b"not a patch")
+
+    assert type(caught.value) is GitError
+    assert caught.value.returncode is not None
+
+
+def test_git_client_stage_paths_treats_pathspecs_as_literal_paths(
+    tmp_path: Path,
+) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    paths = (":(glob)**", "-leading.txt", "file with spaces.txt")
+    for path in paths:
+        (repo / path).write_text("base\n", encoding="utf-8")
+    (repo / "staged-sentinel.txt").write_text("base\n", encoding="utf-8")
+    (repo / "unstaged-sentinel.txt").write_text("base\n", encoding="utf-8")
+    git(
+        repo,
+        "--literal-pathspecs",
+        "add",
+        "--",
+        *paths,
+        "staged-sentinel.txt",
+        "unstaged-sentinel.txt",
+    )
+    git(repo, "commit", "-q", "-m", "add literal pathspec inputs")
+    for path in paths:
+        (repo / path).write_text("changed\n", encoding="utf-8")
+    (repo / "staged-sentinel.txt").write_text("staged\n", encoding="utf-8")
+    git(repo, "add", "staged-sentinel.txt")
+    (repo / "unstaged-sentinel.txt").write_text("unstaged\n", encoding="utf-8")
+
+    client.stage_paths(repo, paths)
+
+    status = client.status_porcelain(repo)
+    assert "M  :(glob)**" in status
+    assert "M  -leading.txt" in status
+    assert "M  file with spaces.txt" in status
+    assert "M  staged-sentinel.txt" in status
+    assert " M unstaged-sentinel.txt" in status
+
+
+def test_git_client_preserves_modify_delete_apply_failure_without_mutating_head(
+    tmp_path: Path,
+) -> None:
+    client, worktree, patch = _divergent_patch_worktree(
+        tmp_path,
+        path="removed.txt",
+        base_contents=b"base\n",
+        source_contents=None,
+        target_contents=b"target\n",
+    )
+    _add_unrelated_staged_and_unstaged_changes(worktree)
+    head_before = client.head_sha(worktree)
+
+    with pytest.raises(GitError) as caught:
+        client.apply_indexed_patch(worktree, patch)
+
+    assert type(caught.value) is GitError
+    assert client.unmerged_paths(worktree) == ()
+    assert client.head_sha(worktree) == head_before
+    _assert_unrelated_changes_are_preserved(client, worktree)
+
+
+def test_git_client_reports_nul_binary_patch_conflict_without_mutating_head(
+    tmp_path: Path,
+) -> None:
+    client, worktree, patch = _divergent_patch_worktree(
+        tmp_path,
+        path="binary.dat",
+        base_contents=b"\0base\n",
+        source_contents=b"\0source\n",
+        target_contents=b"\0target\n",
+    )
+    _add_unrelated_staged_and_unstaged_changes(worktree)
+    head_before = client.head_sha(worktree)
+
+    with pytest.raises(GitPatchConflict) as caught:
+        client.apply_indexed_patch(worktree, patch)
+
+    assert caught.value.paths == ("binary.dat",)
+    assert client.unmerged_paths(worktree) == ("binary.dat",)
+    assert client.head_sha(worktree) == head_before
+    _assert_unrelated_changes_are_preserved(client, worktree)
+
+
+def test_git_client_rejects_apply_when_index_already_has_unmerged_paths(
+    tmp_path: Path,
+) -> None:
+    client, worktree, patch = _conflicting_patch_worktree(tmp_path)
+
+    with pytest.raises(GitPatchConflict):
+        client.apply_indexed_patch(worktree, patch)
+
+    with pytest.raises(GitError, match="requires a clean index") as caught:
+        client.apply_indexed_patch(worktree, b"not a patch")
+
+    assert type(caught.value) is GitError
+    assert client.unmerged_paths(worktree) == ("shared.txt",)
+
+
+def test_git_client_preserves_apply_error_when_unmerged_lookup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = GitClient(make_repository(tmp_path))
+    apply_error = GitError("git apply failed (1)", returncode=1)
+    lookup_error = GitError("git diff failed (1)")
+    unmerged_lookups = 0
+
+    def run(*args: str, **_kwargs: object) -> GitCompleted:
+        nonlocal unmerged_lookups
+        if args[0] == "diff":
+            unmerged_lookups += 1
+            if unmerged_lookups == 1:
+                return GitCompleted(0, b"", b"")
+            raise lookup_error
+        assert args[0] == "apply"
+        raise apply_error
+
+    monkeypatch.setattr(client, "_run", run)
+
+    with pytest.raises(GitError) as caught:
+        client.apply_indexed_patch(client.cwd, b"patch")
+
+    assert caught.value is apply_error
+
+
+def test_git_client_does_not_inspect_conflicts_after_non_command_apply_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = GitClient(make_repository(tmp_path))
+    launch_error = GitError("git apply failed to launch")
+    commands: list[str] = []
+
+    def run(*args: str, **_kwargs: object) -> GitCompleted:
+        commands.append(args[0])
+        if args[0] == "diff":
+            return GitCompleted(0, b"", b"")
+        assert args[0] == "apply"
+        raise launch_error
+
+    monkeypatch.setattr(client, "_run", run)
+
+    with pytest.raises(GitError) as caught:
+        client.apply_indexed_patch(client.cwd, b"patch")
+
+    assert caught.value is launch_error
+    assert commands == ["diff", "apply"]
+
 
 def test_git_client_applies_binary_patch_and_commits_from_a_worktree(tmp_path: Path) -> None:
     repo = make_repository(tmp_path)
@@ -636,8 +984,10 @@ def test_git_client_maps_embedded_nul_subprocess_argument_to_git_error(
 ) -> None:
     client = GitClient(make_repository(tmp_path))
 
-    with pytest.raises(GitError, match="failed to launch"):
+    with pytest.raises(GitError, match="failed to launch") as caught:
         client.resolve_ref("HEAD\x00invalid")
+
+    assert caught.value.returncode is None
 
 
 @pytest.mark.parametrize("message", ["한" * 200, "😀" * 200])
@@ -736,8 +1086,10 @@ def test_git_client_terminates_timeout_descendants(
         "    time.sleep(1)\n",
     )
 
-    with pytest.raises(GitError, match="timed out"):
+    with pytest.raises(GitError, match="timed out") as caught:
         GitClient(tmp_path, timeout=0.5).resolve_ref("HEAD")
+
+    assert caught.value.returncode is None
 
     child_pid = int(child_pid_file.read_text(encoding="utf-8"))
     try:
@@ -794,6 +1146,25 @@ def test_repository_lock_closes_descriptor_when_unlock_fails(
         pass
 
 
+@pytest.mark.parametrize("rename_config", ("true", "false"))
+def test_changed_path_endpoints_preserve_both_rename_sides(
+    tmp_path: Path, rename_config: str
+) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    base = client.head_sha()
+    git(repo, "config", "diff.renames", rename_config)
+
+    git(repo, "mv", "README.txt", "renamed.txt")
+    git(repo, "commit", "-q", "-m", "rename README")
+    head = client.head_sha()
+
+    assert client.changed_path_endpoints(repo, base, head) == (
+        "README.txt",
+        "renamed.txt",
+    )
+
+
 def test_binary_patch_preserves_rename_mode_and_gitlink_delta(tmp_path: Path) -> None:
     repo = make_repository(tmp_path)
     client = GitClient(repo)
@@ -824,6 +1195,16 @@ def test_binary_patch_preserves_rename_mode_and_gitlink_delta(tmp_path: Path) ->
         "submodule",
     )
     assert (target / "script.sh").stat().st_mode & 0o111
+    assert not (target / "README.txt").exists()
+    assert (target / "renamed.txt").read_bytes() == (
+        source / "renamed.txt"
+    ).read_bytes()
     assert client.path_blob(source_head, "submodule") == client.path_blob(
         target_head, "submodule"
+    )
+    assert client.index_entry_snapshot(target, ("submodule",)) == (
+        (
+            "submodule",
+            ("160000", client.path_blob(target_head, "submodule")),
+        ),
     )

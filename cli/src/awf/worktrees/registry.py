@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from contextlib import closing
 
+import json
+
 import sqlite3
 from enum import Enum
 from pathlib import Path
@@ -12,7 +14,9 @@ from .models import (
     DeploymentState,
     Lease,
     LeaseState,
+    PromotionMode,
     Purpose,
+    ResolutionState,
     WorktreeEvent,
     now_iso,
 )
@@ -30,6 +34,9 @@ CREATE TABLE IF NOT EXISTS worktree_leases (
     branch TEXT NOT NULL,
     base_ref TEXT NOT NULL,
     head_sha TEXT NOT NULL,
+    promotion_mode TEXT NOT NULL DEFAULT 'exact' CHECK (promotion_mode IN (
+        'exact','out_of_order'
+    )),
     managed INTEGER NOT NULL CHECK (managed IN (0,1)),
     owner_kind TEXT NOT NULL CHECK (owner_kind IN ('awf','imported','user')),
     owner_id TEXT,
@@ -39,6 +46,15 @@ CREATE TABLE IF NOT EXISTS worktree_leases (
     )),
     source_pr INTEGER,
     target_pr INTEGER,
+    resolution_state TEXT NOT NULL DEFAULT 'none' CHECK (resolution_state IN (
+        'none','pending','automatic','manual_reviewed'
+    )),
+    source_base_sha TEXT,
+    source_head_sha TEXT,
+    target_base_sha TEXT,
+    reviewed_paths TEXT NOT NULL DEFAULT '[]',
+    conflicted_paths TEXT NOT NULL DEFAULT '[]',
+    protected_index_entries TEXT NOT NULL DEFAULT '[]',
     deployment_state TEXT NOT NULL CHECK (deployment_state IN (
         'unknown','pending','healthy','failed','not_required'
     )),
@@ -101,8 +117,52 @@ class WorktreeRegistry:
 
     def ensure(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(self._connect()) as connection, connection:
+        migrations = {
+            "promotion_mode": (
+                "ALTER TABLE worktree_leases ADD COLUMN promotion_mode "
+                "TEXT NOT NULL DEFAULT 'exact'"
+            ),
+            "resolution_state": (
+                "ALTER TABLE worktree_leases ADD COLUMN resolution_state "
+                "TEXT NOT NULL DEFAULT 'none'"
+            ),
+            "source_base_sha": (
+                "ALTER TABLE worktree_leases ADD COLUMN source_base_sha TEXT"
+            ),
+            "source_head_sha": (
+                "ALTER TABLE worktree_leases ADD COLUMN source_head_sha TEXT"
+            ),
+            "target_base_sha": (
+                "ALTER TABLE worktree_leases ADD COLUMN target_base_sha TEXT"
+            ),
+            "reviewed_paths": (
+                "ALTER TABLE worktree_leases ADD COLUMN reviewed_paths "
+                "TEXT NOT NULL DEFAULT '[]'"
+            ),
+            "conflicted_paths": (
+                "ALTER TABLE worktree_leases ADD COLUMN conflicted_paths "
+                "TEXT NOT NULL DEFAULT '[]'"
+            ),
+            "protected_index_entries": (
+                "ALTER TABLE worktree_leases ADD COLUMN protected_index_entries "
+                "TEXT NOT NULL DEFAULT '[]'"
+            ),
+        }
+        with closing(self._connect()) as connection:
             connection.executescript(_SCHEMA)
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                columns = {
+                    row["name"]
+                    for row in connection.execute("PRAGMA table_info(worktree_leases)")
+                }
+                for name, statement in migrations.items():
+                    if name not in columns:
+                        connection.execute(statement)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
 
     def create_lease(self, lease: Lease) -> Lease:
         self.ensure()
@@ -113,15 +173,20 @@ class WorktreeRegistry:
                     INSERT INTO worktree_leases (
                         id, repository_id, repository_name, repository_root,
                         worktree_path, initiative, purpose, branch, base_ref,
-                        head_sha, managed, owner_kind, owner_id, state, source_pr,
-                        target_pr, deployment_state, retain, created_at, last_used_at,
-                        updated_at, removed_at, version
+                        head_sha, promotion_mode, managed, owner_kind, owner_id,
+                        state, source_pr, target_pr, resolution_state, source_base_sha,
+                        source_head_sha, target_base_sha, reviewed_paths,
+                        conflicted_paths, protected_index_entries, deployment_state, retain,
+                        created_at, last_used_at, updated_at, removed_at, version
                     ) VALUES (
                         :id, :repository_id, :repository_name, :repository_root,
                         :worktree_path, :initiative, :purpose, :branch, :base_ref,
-                        :head_sha, :managed, :owner_kind, :owner_id, :state, :source_pr,
-                        :target_pr, :deployment_state, :retain, :created_at, :last_used_at,
-                        :updated_at, :removed_at, :version
+                        :head_sha, :promotion_mode, :managed, :owner_kind, :owner_id,
+                        :state, :source_pr, :target_pr, :resolution_state,
+                        :source_base_sha, :source_head_sha, :target_base_sha,
+                        :reviewed_paths,
+                        :conflicted_paths, :protected_index_entries, :deployment_state, :retain,
+                        :created_at, :last_used_at, :updated_at, :removed_at, :version
                     )
                     """,
                     self._lease_parameters(lease),
@@ -156,6 +221,22 @@ class WorktreeRegistry:
     ) -> Lease | None:
         self.ensure()
         with closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM worktree_leases
+                WHERE repository_id = ? AND initiative = ? AND purpose = ?
+                AND state <> ?
+                """,
+                (repository_id, initiative, purpose.value, LeaseState.REMOVED.value),
+            ).fetchone()
+        return self._lease_from_row(row) if row is not None else None
+
+    def find_active_read_only(
+        self, repository_id: str, initiative: str, purpose: Purpose
+    ) -> Lease | None:
+        if not self.db_path.is_file():
+            return None
+        with closing(self._connect_read_only()) as connection:
             row = connection.execute(
                 """
                 SELECT * FROM worktree_leases
@@ -233,6 +314,12 @@ class WorktreeRegistry:
         deployment_state: DeploymentState | None = None,
         retain: bool | None = None,
         managed: bool | None = None,
+        resolution_state: ResolutionState | None = None,
+        conflicted_paths: tuple[str, ...] | None = None,
+        protected_index_entries: tuple[
+            tuple[str, tuple[str, str] | None], ...
+        ]
+        | None = None,
     ) -> Lease:
         self.ensure()
         connection = self._connect()
@@ -263,6 +350,16 @@ class WorktreeRegistry:
                 update_values["retain"] = int(retain)
             if managed is not None:
                 update_values["managed"] = int(managed)
+            if resolution_state is not None:
+                update_values["resolution_state"] = resolution_state.value
+            if conflicted_paths is not None:
+                update_values["conflicted_paths"] = self._path_metadata_to_json(
+                    conflicted_paths, name="conflicted_paths"
+                )
+            if protected_index_entries is not None:
+                update_values[
+                    "protected_index_entries"
+                ] = self._protected_index_entries_to_json(protected_index_entries)
 
             assignments = ", ".join(f"{column} = ?" for column in update_values)
             cursor = connection.execute(
@@ -663,12 +760,26 @@ class WorktreeRegistry:
             "branch": lease.branch,
             "base_ref": lease.base_ref,
             "head_sha": lease.head_sha,
+            "promotion_mode": lease.promotion_mode.value,
             "managed": int(lease.managed),
             "owner_kind": lease.owner_kind,
             "owner_id": lease.owner_id,
             "state": lease.state.value,
             "source_pr": lease.source_pr,
             "target_pr": lease.target_pr,
+            "resolution_state": lease.resolution_state.value,
+            "source_base_sha": lease.source_base_sha,
+            "source_head_sha": lease.source_head_sha,
+            "target_base_sha": lease.target_base_sha,
+            "reviewed_paths": WorktreeRegistry._path_metadata_to_json(
+                lease.reviewed_paths, name="reviewed_paths"
+            ),
+            "conflicted_paths": WorktreeRegistry._path_metadata_to_json(
+                lease.conflicted_paths, name="conflicted_paths"
+            ),
+            "protected_index_entries": WorktreeRegistry._protected_index_entries_to_json(
+                lease.protected_index_entries
+            ),
             "deployment_state": lease.deployment_state.value,
             "retain": int(lease.retain),
             "created_at": lease.created_at,
@@ -691,12 +802,28 @@ class WorktreeRegistry:
             branch=row["branch"],
             base_ref=row["base_ref"],
             head_sha=row["head_sha"],
+            promotion_mode=PromotionMode(row["promotion_mode"]),
             managed=bool(row["managed"]),
             owner_kind=row["owner_kind"],
             owner_id=row["owner_id"],
             state=LeaseState(row["state"]),
             source_pr=row["source_pr"],
             target_pr=row["target_pr"],
+            resolution_state=ResolutionState(row["resolution_state"]),
+            source_base_sha=row["source_base_sha"],
+            source_head_sha=row["source_head_sha"],
+            target_base_sha=row["target_base_sha"],
+            reviewed_paths=WorktreeRegistry._path_metadata_from_json(
+                row["reviewed_paths"], name="reviewed_paths"
+            ),
+            conflicted_paths=WorktreeRegistry._path_metadata_from_json(
+                row["conflicted_paths"], name="conflicted_paths"
+            ),
+            protected_index_entries=(
+                WorktreeRegistry._protected_index_entries_from_json(
+                    row["protected_index_entries"]
+                )
+            ),
             deployment_state=DeploymentState(row["deployment_state"]),
             retain=bool(row["retain"]),
             created_at=row["created_at"],
@@ -737,6 +864,67 @@ class WorktreeRegistry:
             return int(value)
         return value
 
+    @staticmethod
+    def _path_metadata_to_json(paths: tuple[str, ...], *, name: str) -> str:
+        return json.dumps(
+            list(WorktreeRegistry._validated_path_metadata(paths, name=name)),
+            separators=(",", ":"),
+        )
+
+    @staticmethod
+    def _path_metadata_from_json(value: str, *, name: str) -> tuple[str, ...]:
+        if not isinstance(value, str):
+            raise ValueError(f"invalid {name} metadata")
+        try:
+            paths = json.loads(value)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"invalid {name} metadata") from error
+        if not isinstance(paths, list):
+            raise ValueError(f"invalid {name} metadata")
+        return WorktreeRegistry._validated_path_metadata(tuple(paths), name=name)
+
+    @staticmethod
+    def _validated_path_metadata(value: Any, *, name: str) -> tuple[str, ...]:
+        if not isinstance(value, tuple) or any(
+            not isinstance(path, str) for path in value
+        ):
+            raise ValueError(f"invalid {name} metadata")
+        if value != tuple(sorted(value)) or len(value) != len(set(value)):
+            raise ValueError(f"invalid {name} metadata")
+        return value
+
+    @staticmethod
+    def _protected_index_entries_to_json(
+        protected_index_entries: tuple[
+            tuple[str, tuple[str, str] | None], ...
+        ],
+    ) -> str:
+        Lease._validate_protected_index_entries(protected_index_entries)
+        return json.dumps(protected_index_entries, separators=(",", ":"))
+
+    @staticmethod
+    def _protected_index_entries_from_json(
+        value: str,
+    ) -> tuple[tuple[str, tuple[str, str] | None], ...]:
+        if not isinstance(value, str):
+            raise ValueError("invalid protected_index_entries metadata")
+        try:
+            raw_entries = json.loads(value)
+        except json.JSONDecodeError as error:
+            raise ValueError("invalid protected_index_entries metadata") from error
+        if not isinstance(raw_entries, list):
+            raise ValueError("invalid protected_index_entries metadata")
+        protected_index_entries = tuple(
+            (
+                item[0],
+                tuple(item[1]) if item[1] is not None else None,
+            )
+            if isinstance(item, list) and len(item) == 2
+            else item
+            for item in raw_entries
+        )
+        Lease._validate_protected_index_entries(protected_index_entries)
+        return protected_index_entries
     @staticmethod
     def _is_active_identity_conflict(error: sqlite3.IntegrityError) -> bool:
         message = str(error)

@@ -106,6 +106,58 @@ def _shell_fenced_awf_commands(text: str) -> tuple[str, ...]:
     return tuple(commands)
 
 
+def _reject_duplicate_json_keys(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate key: {key}")
+        result[key] = value
+    return result
+
+
+def _release_worktree_lifecycle_contract(text: str) -> dict[str, object]:
+    contracts = tuple(
+        json.loads(
+            match.group(1),
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
+        for match in re.finditer(r"```json\n(.*?)\n```", text, re.DOTALL)
+    )
+    matching = tuple(
+        contract
+        for contract in contracts
+        if contract.get("schema") == "awf.release-worktree-lifecycle/v1"
+    )
+    assert len(matching) == 1
+    return matching[0]
+
+
+def _out_of_order_promotion_section(text: str) -> str:
+    matches = tuple(
+        re.finditer(
+            r"^#{2,4} Out-of-order production promotion\s*$",
+            text,
+            re.MULTILINE,
+        )
+    )
+    assert len(matches) == 1
+    heading_level = len(matches[0].group()) - len(matches[0].group().lstrip("#"))
+    start = matches[0].end()
+    in_fence = False
+    end = len(text)
+    offset = start
+    for line in text[start:].splitlines(keepends=True):
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+        elif not in_fence and re.match(rf"^#{{1,{heading_level}}} ", line):
+            end = offset
+            break
+        offset += len(line)
+    return text[start:end]
+
+
 def test_shell_fenced_command_extractor_includes_non_worktree_awf_commands() -> None:
     text = """```bash
 awf ready --repo-root . --json
@@ -731,15 +783,7 @@ def test_only_umbrella_skill_uses_wf_slash_aliases() -> None:
 def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
     path = REPO_ROOT / "claude" / "skills" / "release-worktree-lifecycle" / "SKILL.md"
     text = path.read_text(encoding="utf-8")
-    contracts = [
-        json.loads(match.group(1))
-        for match in re.finditer(r"```json\n(.*?)\n```", text, re.DOTALL)
-    ]
-    contract = next(
-        item
-        for item in contracts
-        if item.get("schema") == "awf.release-worktree-lifecycle/v1"
-    )
+    contract = _release_worktree_lifecycle_contract(text)
 
     commands = contract["commands"]
     expected_commands = {
@@ -755,6 +799,10 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "link_pr_apply": ("wt", "link-pr"),
         "promote_preview": ("wt", "promote"),
         "promote_apply": ("wt", "promote"),
+        "out_of_order_promote_preview": ("wt", "promote"),
+        "out_of_order_promote_apply": ("wt", "promote"),
+        "out_of_order_resolution_preview": ("wt", "promote"),
+        "out_of_order_resolution_apply": ("wt", "promote"),
         "finish_preview": ("wt", "finish"),
         "finish_apply": ("wt", "finish"),
         "gc_preview": ("wt", "gc"),
@@ -785,6 +833,19 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
     assert "--apply" in commands["link_pr_apply"]
     assert "--apply" not in commands["promote_preview"]
     assert "--apply" in commands["promote_apply"]
+
+    assert "--out-of-order" in commands["out_of_order_promote_preview"]
+    assert "--apply" not in commands["out_of_order_promote_preview"]
+    assert "--out-of-order" in commands["out_of_order_promote_apply"]
+    assert "--apply" in commands["out_of_order_promote_apply"]
+    assert (
+        commands["out_of_order_resolution_preview"]
+        == commands["out_of_order_promote_preview"]
+    )
+    assert (
+        commands["out_of_order_resolution_apply"]
+        == commands["out_of_order_promote_apply"]
+    )
     assert "--apply" not in commands["finish_preview"]
     assert "--apply" in commands["finish_apply"]
     assert "--merged" in commands["gc_preview"]
@@ -798,6 +859,51 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
     assert safety["promotion_scope"] == "source_pr_delta_only"
     assert safety["deployment_health"] == "repository_rollout_evidence"
     assert safety["blocked_action"] == "preserve_worktree_report_code_message"
+    assert safety["out_of_order"] == {
+        "mode": "explicit_opt_in",
+        "exact_mode": "default",
+        "single_source": True,
+        "exclude_paths": "forbidden",
+        "production_pr_review": "required",
+        "production_pr_checks": "required",
+        "direct_cherry_pick": "forbidden",
+        "staging_squash_input": "forbidden",
+        "conflict_resolution": "managed_conflicted_files_only_replay_same_command",
+        "dependency_conflict": "blocked",
+        "rename": "unsupported",
+        "initial_preview_fields": [
+            "source_base_sha",
+            "source_head_sha",
+            "target_base_sha",
+            "reviewed_paths",
+        ],
+        "resolution_preview_actions": [
+            "resolve_out_of_order_conflict",
+            "stage_paths",
+            "commit",
+            "verify_production",
+            "push_branch",
+            "open_pull_request",
+        ],
+        "operator_edit_scope": "unstaged_unmerged_subset_of_conflicted_paths",
+        "final_indexed_delta": "non_empty_reviewed_paths_subset",
+        "conflict_marker_policy": "markers_only_trailing_whitespace_allowed",
+        "live_target_recheck": "after_verification_before_publish",
+        "protected_index_entries": {
+            "paths": "clean_applied_reviewed_paths_outside_conflicted_paths",
+            "entry": "stage_zero_mode_blob_oid_or_null",
+            "pin": "exact_preview_apply_retry",
+            "tamper": "promotion_resolution_scope_mismatch",
+        },
+        "blocker_codes": [
+            "invalid_out_of_order_promotion",
+            "unsupported_out_of_order_rename",
+            "out_of_order_conflict",
+            "promotion_provenance_changed",
+            "promotion_resolution_scope_mismatch",
+            "promotion_resolution_unmerged",
+        ],
+    }
     assert safety["managed_feature_pr_link"] == {
         "lease_state": "active_unlinked_or_cleanable_exact_reuse",
         "pr_provenance": (
@@ -821,6 +927,8 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "acquire",
         "link-pr",
         "promote",
+        "out_of_order_promote",
+        "out_of_order_resolution",
         "import",
         "adopt",
         "finish",
@@ -835,6 +943,7 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "direct_worktree_mutation",
         "staging_wholesale_merge",
         "branch_merged_heuristic",
+        "direct_cherry_pick",
         "stash",
         "reset",
         "force_delete",
@@ -846,6 +955,8 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
             "acquire": "review_then_apply_explicitly",
             "link_pr": "review_then_apply_explicitly",
             "promote": "review_then_apply_explicitly",
+            "out_of_order_promote": "review_then_apply_explicitly",
+            "out_of_order_resolution": "review_same_blocked_lease_then_apply_explicitly",
             "finish": "review_blockers_then_apply",
             "gc": "review_blockers_then_apply",
         },
@@ -854,10 +965,21 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
             "acquire_apply": "use_or_report_returned_lease",
             "link_pr_apply": "restart_status_preflight_then_finish",
             "promote_apply": "use_or_report_returned_lease",
+            "out_of_order_promote_apply": "use_or_report_returned_lease",
+            "out_of_order_resolution_apply": "use_or_report_returned_lease",
         },
         "removed": "report_completion",
         "blocked": "preserve_worktree_report_code_message",
     }
+
+
+def test_release_worktree_lifecycle_contract_rejects_duplicate_json_keys() -> None:
+    text = """```json
+{"schema": "awf.release-worktree-lifecycle/v1", "schema": "duplicate"}
+```"""
+
+    with pytest.raises(ValueError, match="duplicate key: schema"):
+        _release_worktree_lifecycle_contract(text)
 
 
 def test_managed_feature_pr_link_docs_share_ordered_safety_contract() -> None:
@@ -1003,3 +1125,134 @@ def test_release_worktree_lifecycle_shell_examples_match_contract() -> None:
     for command in displayed_commands:
         parsed = parser.parse_args(_argv_from_skill_command(command))
         assert parsed.command == "wt"
+
+
+def test_out_of_order_promotion_docs_share_operator_contract() -> None:
+    paths = (
+        REPO_ROOT / "claude" / "skills" / "release-worktree-lifecycle" / "SKILL.md",
+        CLI_README,
+    )
+    expected_commands = (
+        "awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --json",
+        "awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --apply --json",
+        "awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --json",
+        "awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --apply --json",
+    )
+    expected_apply = (False, True, False, True)
+    required_prose = (
+        "a code may ship but must remain inactive",
+        "a code must stay out of production; b applies cleanly",
+        "a code must stay out; b has a mechanical patch conflict",
+        "b requires a's api, schema, or behavior",
+        "exactly one `--source-pr`",
+        "must not use `--exclude-path`",
+        "only the conflicted files returned by awf",
+        "same preview command",
+        "same command with `--apply`",
+        "approval and successful checks on that exact production pr before merge",
+        "staging squash commits are not production promotion inputs",
+        "direct staging squash cherry-pick",
+        "any direct cherry-pick is forbidden",
+        "reviewed pr deltas only through `awf wt promote`",
+        "all conflict markers must be removed before apply",
+        "does not publish and preserves the worktree",
+        "`invalid_out_of_order_promotion`",
+        "`unsupported_out_of_order_rename`",
+        "`out_of_order_conflict`",
+        "`promotion_provenance_changed`",
+        "`promotion_resolution_scope_mismatch`",
+        "`promotion_resolution_unmerged`",
+        "`source_base_sha`, `source_head_sha`, `target_base_sha`, and `reviewed_paths`",
+        "action order is `resolve_out_of_order_conflict`, `stage_paths`, `commit`, `verify_production`, `push_branch`, then `open_pull_request`",
+        "operator's unstaged edits and unmerged paths must be a subset of `conflicted_paths`",
+        "awf clean-applied staged `protected_index_entries` may remain outside `conflicted_paths`",
+        "their mode+oid pin is exact across preview, apply, and retry",
+        "final indexed and committed paths must be a subset of `reviewed_paths`",
+        "checks conflict markers only",
+        "trailing whitespace is not prohibited",
+        "rechecks the live target after verification before publish",
+        "direct `git add` tampering or chmod/file-type mode tampering returns `promotion_resolution_scope_mismatch`",
+    )
+    forbidden_prose = (
+        "every changed or unmerged path remains within the reported conflicted paths",
+        "every changed or unmerged path is one of the reported conflicted paths",
+    )
+
+    parser = build_parser()
+    for path in paths:
+        section = _out_of_order_promotion_section(
+            path.read_text(encoding="utf-8")
+        )
+        displayed_commands = _shell_fenced_awf_commands(section)
+        assert displayed_commands == expected_commands
+        for command, apply in zip(displayed_commands, expected_apply):
+            parsed = parser.parse_args(_argv_from_displayed_command(command))
+            assert (parsed.command, parsed.wt_command) == ("wt", "promote")
+            assert parsed.source_pr == [1]
+            assert parsed.out_of_order is True
+            assert parsed.apply is apply
+            assert parsed.exclude_path == []
+            assert parsed.json is True
+
+        prose = " ".join(section.lower().split())
+        for requirement in required_prose:
+            assert requirement in prose
+        for stale_requirement in forbidden_prose:
+            assert stale_requirement not in prose
+
+
+def test_release_worktree_lifecycle_skill_copies_are_byte_identical() -> None:
+    canonical = (
+        REPO_ROOT / "claude" / "skills" / "release-worktree-lifecycle" / "SKILL.md"
+    )
+    packaged = (
+        REPO_ROOT
+        / "cli"
+        / "src"
+        / "awf"
+        / "resources"
+        / "release-worktree-lifecycle"
+        / "SKILL.md"
+    )
+
+    assert canonical.read_bytes() == packaged.read_bytes()
+
+
+def test_out_of_order_promotion_changelog_names_the_opt_in_safety_contract() -> None:
+    changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8").lower()
+
+    assert "기본 exact promotion은 변경하지 않았고" in changelog
+    assert "`--out-of-order`" in changelog
+    assert "`invalid_out_of_order_promotion`" in changelog
+    assert "`unsupported_out_of_order_rename`" in changelog
+    assert "`out_of_order_conflict`" in changelog
+    assert "`promotion_provenance_changed`" in changelog
+    assert "staging squash commit" in changelog
+
+
+def test_protected_index_entry_docs_define_supported_stage_zero_modes() -> None:
+    paths = (
+        REPO_ROOT
+        / "docs"
+        / "superpowers"
+        / "specs"
+        / "2026-08-20-out-of-order-promotion-design.md",
+        REPO_ROOT
+        / "docs"
+        / "superpowers"
+        / "plans"
+        / "2026-08-20-out-of-order-promotion.md",
+    )
+    required_prose = (
+        "`100644` regular",
+        "`100755` executable",
+        "`120000` symlink",
+        "`160000` gitlink",
+        "invalid index modes fail closed",
+        "symlink and gitlink entries are pinned",
+    )
+
+    for path in paths:
+        prose = " ".join(path.read_text(encoding="utf-8").lower().split())
+        for requirement in required_prose:
+            assert requirement in prose
