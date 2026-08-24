@@ -12,8 +12,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from awf.core.db_validation import run_database_check
+from awf.core.db_validation import detect_database_signal, run_database_check
 from awf.core.gates import evaluate_gate
+from awf.core.state import promote_database_change_to_high_risk
 
 
 def _scaffold(tmp_path: Path, phase: str, *, conditions: list[str], gate_id: str) -> Path:
@@ -191,6 +192,20 @@ def _database_schema() -> dict[str, object]:
     }
 
 
+def _database_verify() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "kind": "database_verify",
+        "production_schema_hash": "a" * 64,
+        "selected_option_id": "rewrite-query",
+        "equivalence": "pass",
+        "integrity": "pass",
+        "query_plan": "pass",
+        "migration": "not_applicable",
+        "rollback": "pass",
+    }
+
+
 def _database_decision(*, waiver: bool = False) -> dict[str, object]:
     baseline = {
         "id": "maintain-current",
@@ -243,7 +258,12 @@ def _database_decision(*, waiver: bool = False) -> dict[str, object]:
     return decision
 
 
-def _prepare_database_plan_evidence(repo: Path, *, waiver: bool = False) -> None:
+def _prepare_database_plan_evidence(
+    repo: Path,
+    *,
+    waiver: bool = False,
+    verify: bool = False,
+) -> None:
     artifacts = repo / ".workflow" / "artifacts"
     artifacts.mkdir(parents=True, exist_ok=True)
     (artifacts / "spec.md").write_text("Database query change", encoding="utf-8")
@@ -257,7 +277,7 @@ def _prepare_database_plan_evidence(repo: Path, *, waiver: bool = False) -> None
                 "database_validation": {
                     "enabled": True,
                     "schema_command": _database_command(_database_schema()),
-                    "verify_command": [],
+                    "verify_command": _database_command(_database_verify()) if verify else [],
                     "test_command": [],
                     "command_timeout_seconds": 5,
                     "max_schema_age_hours": 24,
@@ -266,6 +286,10 @@ def _prepare_database_plan_evidence(repo: Path, *, waiver: bool = False) -> None
             }
         ),
         encoding="utf-8",
+    )
+    promote_database_change_to_high_risk(
+        str(repo),
+        detect_database_signal(repo).reasons,
     )
     result = run_database_check(repo, "plan")
     assert result.status == "pass"
@@ -357,6 +381,61 @@ def test_database_local_test_valid_waiver_passes_g6(tmp_path: Path) -> None:
     summary = _checks_by_condition(checks)["database.local_test"]["database_summary"]
     assert summary["waiver_present"] == "true"
     assert "waiver_reason" not in summary
+
+
+def _set_change_class(repo: Path, change_class: str) -> None:
+    state_path = repo / ".workflow" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["changeClass"] = change_class
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+
+def test_database_risk_class_is_mandatory_for_small_verify_state(
+    tmp_path: Path,
+) -> None:
+    repo = _scaffold(
+        tmp_path,
+        "verify",
+        conditions=["scope.violations == 0"],
+        gate_id="G5",
+    )
+    _prepare_database_plan_evidence(repo, verify=True)
+    assert run_database_check(repo, "verify").status == "pass"
+    _set_change_class(repo, "small")
+
+    passed, checks = evaluate_gate(
+        str(repo),
+        "verify",
+        _passing_verify_data(),
+        change_class="small",
+    )
+
+    assert not passed
+    assert _checks_by_condition(checks)["database.risk_class"]["passed"] is False
+
+
+def test_database_risk_class_is_mandatory_for_small_test_state(
+    tmp_path: Path,
+) -> None:
+    repo = _scaffold(
+        tmp_path,
+        "test",
+        conditions=["suites.failed == 0"],
+        gate_id="G6",
+    )
+    _prepare_database_plan_evidence(repo, waiver=True)
+    assert run_database_check(repo, "test").status == "pass"
+    _set_change_class(repo, "small")
+
+    passed, checks = evaluate_gate(
+        str(repo),
+        "test",
+        _passing_test_data(),
+        change_class="small",
+    )
+
+    assert not passed
+    assert _checks_by_condition(checks)["database.risk_class"]["passed"] is False
 
 
 def test_missing_agent_card_is_a_stable_gate_configuration_failure(tmp_path: Path) -> None:

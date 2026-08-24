@@ -20,6 +20,7 @@ from pathlib import Path
 
 from awf.core.db_validation import detect_database_signal, run_database_check
 from awf.core.gates import _extract_fr_ids, _extract_fr_tags, evaluate_plan_gate
+from awf.core.state import promote_database_change_to_high_risk
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +389,24 @@ def _database_plan_project(tmp: Path) -> tuple[Path, Path]:
         json.dumps(_database_decision()),
         encoding="utf-8",
     )
+    (workflow / "state.json").write_text(
+        json.dumps(
+            {
+                "id": "database-g1",
+                "currentPhase": "plan",
+                "changeClass": "standard",
+                "phases": {"plan": {"status": "in_progress", "retries": 0}},
+                "gates": {},
+                "history": [],
+                "totalExecutions": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    promote_database_change_to_high_risk(
+        str(root),
+        detect_database_signal(root).reasons,
+    )
     result = run_database_check(root, "plan")
     assert result.status == "pass"
     return root, artifacts / "database-validation-evidence.json"
@@ -413,6 +432,70 @@ def test_database_g1_valid_plan_evidence_passes() -> None:
         assert checks["database.production_schema"]["passed"] is True
 
 
+
+
+def test_database_g1_missing_workflow_state_fails_risk_class() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root, _ = _database_plan_project(Path(tmp))
+        (root / ".workflow" / "state.json").unlink()
+
+        passed, evaluations = evaluate_plan_gate(root)
+
+        assert not passed
+        assert _evaluation_by_condition(evaluations)["database.risk_class"]["passed"] is False
+
+
+def test_database_g1_small_state_fails_risk_class_even_with_high_risk_evidence() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root, _ = _database_plan_project(Path(tmp))
+        state_path = root / ".workflow" / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["changeClass"] = "small"
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        passed, evaluations = evaluate_plan_gate(root)
+
+        assert not passed
+        assert _evaluation_by_condition(evaluations)["database.risk_class"]["passed"] is False
+
+
+def test_database_g1_standard_state_fails_risk_class_even_with_high_risk_evidence() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root, _ = _database_plan_project(Path(tmp))
+        state_path = root / ".workflow" / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["changeClass"] = "standard"
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        passed, evaluations = evaluate_plan_gate(root)
+
+        assert not passed
+        assert _evaluation_by_condition(evaluations)["database.risk_class"]["passed"] is False
+
+
+def test_database_g1_malformed_workflow_state_fails_risk_class() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root, _ = _database_plan_project(Path(tmp))
+        (root / ".workflow" / "state.json").write_text("{", encoding="utf-8")
+
+        passed, evaluations = evaluate_plan_gate(root)
+
+        assert not passed
+        assert _evaluation_by_condition(evaluations)["database.risk_class"]["passed"] is False
+
+
+def test_database_g1_forged_audit_reasons_fail_risk_class() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root, _ = _database_plan_project(Path(tmp))
+        state_path = root / ".workflow" / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["history"][0]["reasons"] = ["text:database"]
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        passed, evaluations = evaluate_plan_gate(root)
+
+        assert not passed
+        assert _evaluation_by_condition(evaluations)["database.risk_class"]["passed"] is False
 def test_database_g1_missing_decision_fails() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root, _ = _database_plan_project(Path(tmp))
@@ -471,7 +554,7 @@ def test_database_g1_non_high_risk_evidence_fails() -> None:
         passed, evaluations = evaluate_plan_gate(root)
 
         assert not passed
-        assert _evaluation_by_condition(evaluations)["database.risk_class"]["passed"] is False
+        assert _evaluation_by_condition(evaluations)["database.production_schema"]["passed"] is False
 
 
 def test_database_g1_no_signal_remains_not_applicable() -> None:

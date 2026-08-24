@@ -2081,6 +2081,7 @@ _DATABASE_GATE_CONDITIONS = {
     ),
     "verify": (
         "database.production_schema",
+        "database.risk_class",
         "database.equivalence",
         "database.integrity",
         "database.query_plan",
@@ -2089,6 +2090,7 @@ _DATABASE_GATE_CONDITIONS = {
     ),
     "test": (
         "database.production_schema",
+        "database.risk_class",
         "database.local_test",
     ),
 }
@@ -2132,6 +2134,32 @@ def _database_gate_evaluation(
     return evaluation
 
 
+def _workflow_database_risk_is_current(
+    root: Path,
+    signal: DatabaseSignal,
+) -> bool:
+    """Require the state promotion and its exact audit event for this signal."""
+
+    try:
+        from awf.core.state import load_workflow_state
+
+        state = load_workflow_state(str(root))
+    except (FileNotFoundError, OSError, ValueError):
+        return False
+    if not isinstance(state, dict) or state.get("changeClass") != "high_risk":
+        return False
+    history = state.get("history")
+    if not isinstance(history, list):
+        return False
+    expected_reasons = list(signal.reasons)
+    return any(
+        isinstance(event, dict)
+        and event.get("action") == "database_risk_escalated"
+        and event.get("reasons") == expected_reasons
+        for event in history
+    )
+
+
 def evaluate_database_gate(repo_root: Path, stage: str) -> list[dict[str, Any]]:
     """Return mandatory, sanitized database-evidence conditions for one gate."""
 
@@ -2163,6 +2191,8 @@ def evaluate_database_gate(repo_root: Path, stage: str) -> list[dict[str, Any]]:
                 "status": "not_applicable",
             }
         return [evaluation]
+    workflow_risk_is_current = _workflow_database_risk_is_current(root, signal)
+
 
     decision: Optional[DatabaseDecision] = None
     profile: Optional[DatabaseProfile] = None
@@ -2228,9 +2258,9 @@ def evaluate_database_gate(repo_root: Path, stage: str) -> list[dict[str, Any]]:
             ),
             _database_gate_evaluation(
                 "database.risk_class",
-                evidence_is_high_risk,
+                workflow_risk_is_current,
                 stage="plan",
-                status="pass" if evidence_is_high_risk else "fail",
+                status="pass" if workflow_risk_is_current else "fail",
             ),
             _database_gate_evaluation(
                 "database.decision",
@@ -2263,6 +2293,12 @@ def evaluate_database_gate(repo_root: Path, stage: str) -> list[dict[str, Any]]:
                 status="pass" if stage_is_current else "fail",
                 schema=schema,
                 decision=decision if stage_is_current else None,
+            ),
+            _database_gate_evaluation(
+                "database.risk_class",
+                workflow_risk_is_current,
+                stage="verify",
+                status="pass" if workflow_risk_is_current else "fail",
             ),
             *[
                 _database_gate_evaluation(
@@ -2298,6 +2334,12 @@ def evaluate_database_gate(repo_root: Path, stage: str) -> list[dict[str, Any]]:
                 decision=decision,
             ),
             _database_gate_evaluation(
+                "database.risk_class",
+                workflow_risk_is_current,
+                stage="test",
+                status="pass" if workflow_risk_is_current else "fail",
+            ),
+            _database_gate_evaluation(
                 "database.local_test",
                 True,
                 stage="test",
@@ -2316,6 +2358,12 @@ def evaluate_database_gate(repo_root: Path, stage: str) -> list[dict[str, Any]]:
             status="pass" if stage_is_current else "fail",
             schema=schema,
             decision=decision if stage_is_current else None,
+        ),
+        _database_gate_evaluation(
+            "database.risk_class",
+            workflow_risk_is_current,
+            stage="test",
+            status="pass" if workflow_risk_is_current else "fail",
         ),
         _database_gate_evaluation(
             "database.local_test",
