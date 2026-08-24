@@ -95,7 +95,7 @@ Add `promote_database_change_to_high_risk()` in `state.py`. Under the workflow s
 Add the manifest default:
 
 ```python
-"database_validation": {
+database_validation_default = {
     "enabled": False,
     "schema_command": [],
     "verify_command": [],
@@ -103,7 +103,7 @@ Add the manifest default:
     "command_timeout_seconds": 30,
     "max_schema_age_hours": 24,
     "allow_production_replica_sample": False,
-},
+}
 ```
 
 - [ ] **Step 6: Run GREEN and commit**
