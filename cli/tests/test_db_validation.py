@@ -394,6 +394,9 @@ def database_decision(
         "operational_risks": [],
         "transition_risks": [],
         "rollback_or_exit": "No change",
+        "unavailable_reason": None,
+        "denormalization_assessment": None,
+        "physical_design_assessment": None,
     }
     rewrite = {
         "id": "rewrite-query",
@@ -407,6 +410,9 @@ def database_decision(
         "operational_risks": [],
         "transition_risks": [],
         "rollback_or_exit": "Restore the current query",
+        "unavailable_reason": None,
+        "denormalization_assessment": None,
+        "physical_design_assessment": None,
     }
     payload: dict[str, object] = {
         "schema_version": 1,
@@ -522,6 +528,74 @@ def test_profile_rejects_disabled_incomplete_unknown_and_shell_string_commands(
             load_database_profile(tmp_path)
 
 
+@pytest.mark.parametrize(
+    "secret_option",
+    [
+        "--password",
+        "--token",
+        "--dsn",
+        "--secret",
+        "--credential",
+        "--password=from-env",
+        "--token=from-env",
+        "--dsn=from-env",
+        "--secret=from-env",
+        "--credential=from-env",
+    ],
+)
+def test_profile_rejects_split_and_equals_secret_options(
+    tmp_path: Path,
+    secret_option: str,
+) -> None:
+    write_workflow_artifacts(tmp_path, concept="Update the database query")
+    write_database_manifest(
+        tmp_path,
+        schema_command=["database-inspector", secret_option, "$DATABASE_SECRET"],
+    )
+
+    with pytest.raises(DatabaseValidationError):
+        load_database_profile(tmp_path)
+
+
+@pytest.mark.parametrize("shell", ["sh", "bash", "zsh"])
+def test_profile_rejects_shell_interpreter_commands(tmp_path: Path, shell: str) -> None:
+    write_workflow_artifacts(tmp_path, concept="Update the database query")
+    write_database_manifest(
+        tmp_path,
+        schema_command=[shell, "-c", "echo $DATABASE_SECRET"],
+    )
+
+    with pytest.raises(DatabaseValidationError):
+        load_database_profile(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    [
+        "enabled",
+        "schema_command",
+        "verify_command",
+        "test_command",
+        "command_timeout_seconds",
+        "max_schema_age_hours",
+        "allow_production_replica_sample",
+    ],
+)
+def test_profile_rejects_each_missing_required_field(
+    tmp_path: Path,
+    missing_field: str,
+) -> None:
+    write_workflow_artifacts(tmp_path, concept="Update the database query")
+    write_database_manifest(tmp_path, schema_command=database_command(schema_evidence()))
+    manifest_path = tmp_path / ".workflow" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["database_validation"][missing_field]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(DatabaseValidationError):
+        load_database_profile(tmp_path)
+
+
 def test_profile_returns_canonical_hash_for_a_safe_complete_profile(tmp_path: Path) -> None:
     write_workflow_artifacts(tmp_path, concept="Update the database query")
     write_database_manifest(
@@ -561,7 +635,74 @@ def test_decision_requires_candidates_baseline_references_and_selected_plans(
             load_database_decision(tmp_path)
 
 
-def test_decision_requires_materially_distinct_candidate_kinds(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "decision_updates",
+    [
+        {
+            "candidates": database_decision()["candidates"]
+            + [
+                {
+                    **database_decision()["candidates"][1],
+                    "id": "alternate-query-one",
+                },
+                {
+                    **database_decision()["candidates"][1],
+                    "id": "alternate-query-two",
+                },
+            ]
+        },
+        {"recommended_option_id": "broken-id"},
+        {
+            "candidates": [
+                database_decision()["candidates"][0],
+                {
+                    **database_decision()["candidates"][1],
+                    "integrity_plan": "",
+                },
+            ]
+        },
+        {
+            "candidates": [
+                database_decision()["candidates"][0],
+                {
+                    **database_decision()["candidates"][1],
+                    "applicable": False,
+                    "unavailable_reason": None,
+                },
+            ],
+            "recommended_option_id": "maintain-current",
+            "selected_option_id": "maintain-current",
+        },
+        {
+            "candidates": [
+                database_decision()["candidates"][0],
+                {
+                    **database_decision()["candidates"][1],
+                    "unavailable_reason": "This option is available.",
+                },
+            ]
+        },
+    ],
+    ids=[
+        "four-candidates",
+        "broken-recommendation-id",
+        "missing-integrity-plan",
+        "missing-unavailable-reason",
+        "available-candidate-has-unavailable-reason",
+    ],
+)
+def test_decision_rejects_required_candidate_mutations(
+    tmp_path: Path,
+    decision_updates: dict[str, object],
+) -> None:
+    write_workflow_artifacts(tmp_path, concept="Update the database query")
+    write_database_decision(tmp_path, database_decision(**decision_updates))
+
+    with pytest.raises(DatabaseValidationError):
+        load_database_decision(tmp_path)
+
+
+def test_decision_allows_materially_distinct_same_kind_candidates(tmp_path: Path) -> None:
     write_workflow_artifacts(tmp_path, concept="Update the database query")
     baseline = database_decision()["candidates"][0]
     duplicate_maintain = {
@@ -578,8 +719,63 @@ def test_decision_requires_materially_distinct_candidate_kinds(tmp_path: Path) -
         ),
     )
 
-    with pytest.raises(DatabaseValidationError):
-        load_database_decision(tmp_path)
+    assert load_database_decision(tmp_path).selected_option_id == "maintain-copy"
+
+
+@pytest.mark.parametrize(
+    ("kind", "assessment_field", "assessment", "change_surfaces"),
+    [
+        (
+            "denormalize",
+            "denormalization_assessment",
+            {
+                "source_of_truth": "The ledger is authoritative.",
+                "consistency_window": "Updates converge within one minute.",
+                "reconciliation": "A scheduled job compares source and summary.",
+                "rollback": "Stop summary writes and rebuild from the ledger.",
+            },
+            ["column"],
+        ),
+        (
+            "physical_design",
+            "physical_design_assessment",
+            {
+                "read_benefit": "The index narrows lookup work.",
+                "write_amplification": "Each write updates one index.",
+                "storage": "Storage is bounded by projected keys.",
+                "build_or_lock": "Build online with a bounded metadata lock.",
+                "rollback": "Drop the index online.",
+            },
+            ["index"],
+        ),
+    ],
+)
+def test_decision_accepts_exact_structured_kind_assessments(
+    tmp_path: Path,
+    kind: str,
+    assessment_field: str,
+    assessment: dict[str, str],
+    change_surfaces: list[str],
+) -> None:
+    write_workflow_artifacts(tmp_path, concept="Update the database query")
+    baseline, alternative = database_decision()["candidates"]
+    candidate = {
+        **alternative,
+        "id": f"{kind}-option",
+        "kind": kind,
+        assessment_field: assessment,
+    }
+    write_database_decision(
+        tmp_path,
+        database_decision(
+            change_surfaces=change_surfaces,
+            candidates=[baseline, candidate],
+            recommended_option_id=candidate["id"],
+            selected_option_id=candidate["id"],
+        ),
+    )
+
+    assert load_database_decision(tmp_path).selected_option_id == candidate["id"]
 
 
 def test_decision_enforces_surface_denormalization_and_physical_design_assessments(
@@ -591,14 +787,22 @@ def test_decision_enforces_surface_denormalization_and_physical_design_assessmen
         **database_decision()["candidates"][1],
         "id": "denormalize-summary",
         "kind": "denormalize",
-        "normalization_assessment": "Source of truth and a consistency window.",
+        "denormalization_assessment": {
+            "source_of_truth": "The base ledger remains authoritative.",
+            "consistency_window": "Updates converge within one minute.",
+            "reconciliation": "A nightly reconciliation compares aggregates.",
+        },
     }
     physical = {
         **database_decision()["candidates"][1],
         "id": "add-index",
         "kind": "physical_design",
-        "read_write_cost": "Read benefit and write amplification.",
-        "rollback_or_exit": "Rollback the index.",
+        "physical_design_assessment": {
+            "read_benefit": "The index narrows the read path.",
+            "write_amplification": "Each write updates one index.",
+            "storage": "The index is bounded by the projected key count.",
+            "build_or_lock": "Build online with a bounded metadata lock.",
+        },
     }
     for payload in (
         database_decision(
@@ -761,6 +965,33 @@ def test_verify_evidence_requires_migration_and_rollback_for_column_surfaces(
     assert result.blockers == ("verify_evidence_invalid",)
 
 
+@pytest.mark.parametrize(
+    "verification",
+    [
+        verify_evidence(equivalence="fail"),
+        verify_evidence(integrity="fail"),
+        verify_evidence(rollback="fail"),
+    ],
+    ids=["equivalence", "integrity", "rollback"],
+)
+def test_verify_evidence_rejects_failed_required_outcomes(
+    tmp_path: Path,
+    verification: dict[str, object],
+) -> None:
+    prepare_database_workflow(
+        tmp_path,
+        verify_command=database_command(verification),
+    )
+    assert run_database_check(tmp_path, "plan").status == "pass"
+    before = evidence_path(tmp_path).read_bytes()
+
+    result = run_database_check(tmp_path, "verify")
+
+    assert result.status == "fail"
+    assert result.blockers == ("verify_evidence_invalid",)
+    assert evidence_path(tmp_path).read_bytes() == before
+
+
 def test_verify_merges_sanitized_evidence_without_replacing_plan(tmp_path: Path) -> None:
     prepare_database_workflow(
         tmp_path,
@@ -797,6 +1028,55 @@ def test_test_evidence_requires_masked_safe_local_target_and_all_passes(tmp_path
     assert result.status == "fail"
     assert result.blockers == ("test_evidence_invalid",)
     assert set(json.loads(evidence_path(tmp_path).read_text())["stages"]) == {"plan", "verify"}
+
+
+@pytest.mark.parametrize(
+    ("allow_replica", "expected_status"),
+    [(False, "fail"), (True, "pass")],
+)
+def test_read_replica_test_target_requires_profile_opt_in(
+    tmp_path: Path,
+    allow_replica: bool,
+    expected_status: str,
+) -> None:
+    write_workflow_artifacts(tmp_path, concept="Update the database query")
+    write_database_manifest(
+        tmp_path,
+        schema_command=database_command(schema_evidence()),
+        verify_command=database_command(verify_evidence()),
+        test_command=database_command(database_test_payload(local_target="read_replica")),
+        allow_production_replica_sample=allow_replica,
+    )
+    write_database_decision(tmp_path, database_decision())
+    assert run_database_check(tmp_path, "plan").status == "pass"
+    assert run_database_check(tmp_path, "verify").status == "pass"
+
+    result = run_database_check(tmp_path, "test")
+
+    assert result.status == expected_status
+    if expected_status == "fail":
+        assert result.blockers == ("test_evidence_invalid",)
+        assert set(json.loads(evidence_path(tmp_path).read_text())["stages"]) == {
+            "plan",
+            "verify",
+        }
+
+
+def test_test_stage_requires_waiver_when_no_test_command_is_configured(
+    tmp_path: Path,
+) -> None:
+    prepare_database_workflow(
+        tmp_path,
+        verify_command=database_command(verify_evidence()),
+    )
+    assert run_database_check(tmp_path, "plan").status == "pass"
+    before = evidence_path(tmp_path).read_bytes()
+
+    result = run_database_check(tmp_path, "test")
+
+    assert result.status == "fail"
+    assert result.blockers == ("test_waiver_missing",)
+    assert evidence_path(tmp_path).read_bytes() == before
 
 
 def test_test_stage_accepts_explicit_valid_local_data_waiver(tmp_path: Path) -> None:
@@ -908,6 +1188,61 @@ def test_unsafe_verify_output_preserves_prior_evidence_without_raw_stdout(tmp_pa
     assert result.blockers == ("command_output_unsafe",)
     assert evidence_path(tmp_path).read_bytes() == before
     assert b"RAW_SECRET" not in before
+
+
+@pytest.mark.parametrize(
+    ("stage", "mutation"),
+    [
+        ("plan", "status"),
+        ("plan", "non_utc_checked_at"),
+        ("plan", "stale_schema"),
+        ("verify", "selected_option"),
+        ("verify", "schema_hash"),
+        ("test", "selected_option"),
+        ("test", "unexpected_field"),
+    ],
+)
+def test_malformed_prior_stage_evidence_blocks_atomic_merge(
+    tmp_path: Path,
+    stage: str,
+    mutation: str,
+) -> None:
+    prepare_database_workflow(
+        tmp_path,
+        verify_command=database_command(verify_evidence()),
+        test_command=database_command(database_test_payload()),
+    )
+    assert run_database_check(tmp_path, "plan").status == "pass"
+    assert run_database_check(tmp_path, "verify").status == "pass"
+    assert run_database_check(tmp_path, "test").status == "pass"
+
+    path = evidence_path(tmp_path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    record = persisted["stages"][stage]
+    if mutation == "status":
+        record["status"] = "waived"
+    elif mutation == "non_utc_checked_at":
+        record["checked_at"] = datetime.now(
+            timezone(timedelta(hours=9))
+        ).isoformat()
+    elif mutation == "stale_schema":
+        record["schema"]["captured_at"] = (
+            datetime.now(timezone.utc) - timedelta(hours=25)
+        ).isoformat()
+    elif mutation == "selected_option":
+        record[stage]["selected_option_id"] = "broken-id"
+    elif mutation == "schema_hash":
+        record["schema"]["schema_hash"] = "b" * 64
+    else:
+        record["unexpected"] = "corrupt"
+    path.write_text(json.dumps(persisted), encoding="utf-8")
+    before = path.read_bytes()
+
+    result = run_database_check(tmp_path, "plan")
+
+    assert result.status == "fail"
+    assert result.blockers == ("evidence_invalid",)
+    assert path.read_bytes() == before
 
 
 def test_no_database_signal_is_not_applicable_without_profile_or_evidence(
