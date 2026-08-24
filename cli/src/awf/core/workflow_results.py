@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
@@ -321,6 +322,65 @@ def render_review_report(
     return "\n".join(lines), gate_passed
 
 
+_SAFE_DATABASE_REPORT_VALUE = re.compile(r"^[A-Za-z0-9._:+-]{1,128}$")
+_UNSAFE_DATABASE_WAIVER_TEXT = re.compile(
+    r"\b(?:argv|stdout|env(?:ironment)?|ddl|create\s+table|alter\s+table|"
+    r"insert\s+into|select\b|sample|raw\s+(?:data|row)|password|token|secret|dsn|url)\b",
+    re.IGNORECASE,
+)
+
+
+def _database_gate_report_detail(check: dict[str, Any]) -> str:
+    summary = check.get("database_summary")
+    if not isinstance(summary, dict):
+        return "status=unavailable"
+
+    detail: list[str] = []
+    stage = summary.get("stage")
+    if stage in {"plan", "verify", "test"}:
+        detail.append(f"stage={stage}")
+    status = summary.get("status")
+    if status in {"detected", "fail", "not_applicable", "pass", "waived"}:
+        detail.append(f"status={status}")
+
+    for key in (
+        "schema_hash_prefix",
+        "engine",
+        "engine_version",
+        "selected_option",
+        "local_target",
+    ):
+        value = summary.get(key)
+        if isinstance(value, str) and _SAFE_DATABASE_REPORT_VALUE.fullmatch(value):
+            detail.append(f"{key}={value}")
+
+    waiver_reason = summary.get("waiver_reason")
+    if isinstance(waiver_reason, str):
+        normalized_reason = " ".join(waiver_reason.split())
+        if (
+            normalized_reason
+            and len(normalized_reason) <= 240
+            and _UNSAFE_DATABASE_WAIVER_TEXT.search(normalized_reason) is None
+        ):
+            detail.append(f"waiver_reason={normalized_reason}")
+    return ",".join(detail) or "status=unavailable"
+
+
+def _render_gate_checks(gate_checks: list[dict[str, Any]]) -> list[str]:
+    rendered: list[str] = []
+    for check in gate_checks:
+        condition = str(check.get("condition", "unknown_condition"))
+        detail = (
+            _database_gate_report_detail(check)
+            if condition.startswith("database.")
+            else str(check.get("detail", ""))
+        )
+        rendered.append(
+            f"- {'PASS' if check.get('passed') else 'FAIL'}: {condition} ({detail})"
+        )
+    return rendered
+
+
 def render_verify_report(
     data: dict[str, Any],
     gate_passed: bool,
@@ -372,7 +432,7 @@ def render_verify_report(
             )
 
     lines.extend(["", "## Gate Checks"])
-    lines.extend([f"- {'PASS' if item['passed'] else 'FAIL'}: {item['condition']} ({item['detail']})" for item in gate_checks] or ["- None"])
+    lines.extend(_render_gate_checks(gate_checks) or ["- None"])
 
     lines.extend(["", "## Evidence"])
     evidence = _as_list(data.get("evidence"))
@@ -499,7 +559,7 @@ def render_test_report(
     if regressions:
         lines.extend(["", "## Regressions"] + [f"- {r.get('id', '-')}: {r.get('detail', r)}" for r in regressions])
     lines.extend(["", "## Gate Checks"])
-    lines.extend([f"- {'PASS' if item['passed'] else 'FAIL'}: {item['condition']} ({item['detail']})" for item in gate_checks] or ["- None"])
+    lines.extend(_render_gate_checks(gate_checks) or ["- None"])
     lines.append("")
     return "\n".join(lines), gate_passed
 

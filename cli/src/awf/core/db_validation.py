@@ -1779,3 +1779,242 @@ def run_database_check(
         signal_reasons=signal.reasons,
         blockers=(),
     )
+
+
+_DATABASE_GATE_CONDITIONS = {
+    "plan": (
+        "database.signal",
+        "database.risk_class",
+        "database.decision",
+        "database.production_schema",
+    ),
+    "verify": (
+        "database.production_schema",
+        "database.equivalence",
+        "database.integrity",
+        "database.query_plan",
+        "database.migration",
+        "database.rollback",
+    ),
+    "test": (
+        "database.production_schema",
+        "database.local_test",
+    ),
+}
+
+
+def _database_gate_evaluation(
+    condition: str,
+    passed: bool,
+    *,
+    stage: Optional[str] = None,
+    status: str,
+    schema: Optional[dict[str, Any]] = None,
+    decision: Optional[DatabaseDecision] = None,
+    local_target: Optional[str] = None,
+    waiver_reason: Optional[str] = None,
+) -> dict[str, Any]:
+    evaluation: dict[str, Any] = {
+        "condition": condition,
+        "passed": passed,
+        "detail": f"stage={stage},status={status}" if stage else f"status={status}",
+    }
+    if stage is None:
+        return evaluation
+
+    summary: dict[str, str] = {"stage": stage, "status": status}
+    if schema is not None:
+        summary.update(
+            {
+                "schema_hash_prefix": schema["schema_hash"][:12],
+                "engine": schema["engine"],
+                "engine_version": schema["engine_version"],
+            }
+        )
+    if decision is not None:
+        summary["selected_option"] = decision.selected_option_id
+    if local_target is not None:
+        summary["local_target"] = local_target
+    if waiver_reason is not None:
+        summary["waiver_reason"] = waiver_reason
+    evaluation["database_summary"] = summary
+    return evaluation
+
+
+def evaluate_database_gate(repo_root: Path, stage: str) -> list[dict[str, Any]]:
+    """Return mandatory, sanitized database-evidence conditions for one gate."""
+
+    if stage not in _DATABASE_GATE_CONDITIONS:
+        raise ValueError(f"database_gate_stage_invalid:{stage}")
+
+    try:
+        root = _canonical_repo_root(repo_root)
+        signal = detect_database_signal(root)
+    except DatabaseValidationError:
+        signal = DatabaseSignal(True, ())
+        root = repo_root
+
+    if not signal.detected:
+        evaluation = _database_gate_evaluation(
+            "database.signal",
+            True,
+            status="not_applicable",
+        )
+        if stage in {"verify", "test"}:
+            evaluation["database_summary"] = {
+                "stage": stage,
+                "status": "not_applicable",
+            }
+        return [evaluation]
+
+    decision: Optional[DatabaseDecision] = None
+    profile: Optional[DatabaseProfile] = None
+    evidence: Optional[dict[str, Any]] = None
+    schema: Optional[dict[str, Any]] = None
+    evidence_is_high_risk = False
+    decision_is_current = False
+    stage_is_current = False
+
+    try:
+        decision = load_database_decision(root)
+    except DatabaseValidationError:
+        pass
+    try:
+        profile = load_database_profile(root)
+    except DatabaseValidationError:
+        pass
+    try:
+        evidence = _load_existing_evidence(root)
+        evidence_is_high_risk = evidence is not None
+    except DatabaseValidationError:
+        pass
+
+    if evidence is not None and decision is not None:
+        decision_is_current = evidence["decision_hash"] == decision.decision_hash
+
+    if (
+        evidence is not None
+        and profile is not None
+        and decision is not None
+        and evidence["profile_hash"] == profile.profile_hash
+        and decision_is_current
+    ):
+        try:
+            _validated_existing_stages(evidence, profile, decision)
+            record = evidence["stages"].get(stage)
+            if record is not None:
+                schema = _validate_existing_stage_record(
+                    stage,
+                    record,
+                    profile,
+                    decision,
+                )
+                stage_is_current = True
+        except DatabaseValidationError:
+            schema = None
+
+    if stage == "plan":
+        return [
+            _database_gate_evaluation("database.signal", True, status="detected"),
+            _database_gate_evaluation(
+                "database.risk_class",
+                evidence_is_high_risk,
+                stage="plan",
+                status="pass" if evidence_is_high_risk else "fail",
+            ),
+            _database_gate_evaluation(
+                "database.decision",
+                decision_is_current,
+                stage="plan",
+                status="pass" if decision_is_current else "fail",
+                decision=decision if decision_is_current else None,
+            ),
+            _database_gate_evaluation(
+                "database.production_schema",
+                stage_is_current,
+                stage="plan",
+                status="pass" if stage_is_current else "fail",
+                schema=schema,
+                decision=decision if stage_is_current else None,
+            ),
+        ]
+
+    if stage == "verify":
+        verification = (
+            evidence["stages"]["verify"]["verify"]
+            if stage_is_current and evidence is not None
+            else None
+        )
+        return [
+            _database_gate_evaluation(
+                "database.production_schema",
+                stage_is_current,
+                stage="verify",
+                status="pass" if stage_is_current else "fail",
+                schema=schema,
+                decision=decision if stage_is_current else None,
+            ),
+            *[
+                _database_gate_evaluation(
+                    f"database.{name}",
+                    verification is not None
+                    and verification[name] in {"pass", "not_applicable"},
+                    stage="verify",
+                    status=(
+                        verification[name]
+                        if verification is not None
+                        else "fail"
+                    ),
+                    schema=schema,
+                    decision=decision if verification is not None else None,
+                )
+                for name in ("equivalence", "integrity", "query_plan", "migration", "rollback")
+            ],
+        ]
+
+    test = (
+        evidence["stages"]["test"]["test"]
+        if stage_is_current and evidence is not None
+        else None
+    )
+    if test is not None and test["status"] == "waived":
+        waiver = test["waiver"]
+        return [
+            _database_gate_evaluation(
+                "database.production_schema",
+                True,
+                stage="test",
+                status="pass",
+                schema=schema,
+                decision=decision,
+            ),
+            _database_gate_evaluation(
+                "database.local_test",
+                True,
+                stage="test",
+                status="waived",
+                decision=decision,
+                waiver_reason=waiver["reason"],
+            ),
+        ]
+
+    local_target = test["local_target"] if test is not None else None
+    return [
+        _database_gate_evaluation(
+            "database.production_schema",
+            stage_is_current,
+            stage="test",
+            status="pass" if stage_is_current else "fail",
+            schema=schema,
+            decision=decision if stage_is_current else None,
+        ),
+        _database_gate_evaluation(
+            "database.local_test",
+            test is not None and test["status"] == "pass",
+            stage="test",
+            status="pass" if test is not None and test["status"] == "pass" else "fail",
+            schema=schema,
+            decision=decision if test is not None else None,
+            local_target=local_target,
+        ),
+    ]

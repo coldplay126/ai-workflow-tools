@@ -15,11 +15,11 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from awf.core.gates import evaluate_plan_gate, _extract_fr_ids, _extract_fr_tags
+from awf.core.db_validation import run_database_check
+from awf.core.gates import _extract_fr_ids, _extract_fr_tags, evaluate_plan_gate
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +290,204 @@ def test_004_no_manifest_skips_constitution_check():
         assert not any("constitution" in e["condition"] for e in evals)
 
 
+# ---------------------------------------------------------------------------
+# P0 database evidence: G1 mandatory conditions
+# ---------------------------------------------------------------------------
+
+def _database_command(payload: dict[str, object]) -> list[str]:
+    return [sys.executable, "-c", f"print({json.dumps(payload)!r})"]
+
+
+def _database_schema() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "kind": "production_schema",
+        "target_class": "production_metadata",
+        "read_only": True,
+        "schema_only": True,
+        "engine": "mysql",
+        "engine_version": "8.0",
+        "captured_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "schema_hash": "a" * 64,
+        "object_counts": {"tables": 1, "columns": 8, "indexes": 2, "constraints": 3},
+    }
+
+
+def _database_decision() -> dict[str, object]:
+    baseline = {
+        "id": "maintain-current",
+        "kind": "maintain",
+        "applicable": True,
+        "summary": "Keep the current query",
+        "equivalence_plan": "Use the current result set",
+        "integrity_plan": "Verify existing constraints",
+        "normalization_assessment": "No model change",
+        "read_write_cost": "Measure production-shaped workload",
+        "operational_risks": [],
+        "transition_risks": [],
+        "rollback_or_exit": "No change",
+        "unavailable_reason": None,
+        "denormalization_assessment": None,
+        "physical_design_assessment": None,
+    }
+    rewrite = {
+        "id": "rewrite-query",
+        "kind": "query_change",
+        "applicable": True,
+        "summary": "Rewrite the aggregation query",
+        "equivalence_plan": "Compare baseline results",
+        "integrity_plan": "Verify constraints before and after",
+        "normalization_assessment": "No model change",
+        "read_write_cost": "Measure latency on production-shaped workload",
+        "operational_risks": [],
+        "transition_risks": [],
+        "rollback_or_exit": "Restore the current query",
+        "unavailable_reason": None,
+        "denormalization_assessment": None,
+        "physical_design_assessment": None,
+    }
+    return {
+        "schema_version": 1,
+        "status": "selected",
+        "change_surfaces": ["query"],
+        "baseline_option_id": "maintain-current",
+        "recommended_option_id": "rewrite-query",
+        "selected_option_id": "rewrite-query",
+        "candidates": [baseline, rewrite],
+        "recommendation_rationale": "Preserves correctness at the lowest lifecycle cost.",
+    }
+
+
+def _database_plan_project(tmp: Path) -> tuple[Path, Path]:
+    root = _make_project(
+        tmp,
+        spec="Database query change",
+        plan="Compare the database query options",
+        tasks="- [ ] T01 Implement the selected query",
+        test_criteria="Verify query result equivalence",
+    )
+    workflow = root / ".workflow"
+    artifacts = workflow / "artifacts"
+    (workflow / "manifest.json").write_text(
+        json.dumps(
+            {
+                "database_validation": {
+                    "enabled": True,
+                    "schema_command": _database_command(_database_schema()),
+                    "verify_command": [],
+                    "test_command": [],
+                    "command_timeout_seconds": 5,
+                    "max_schema_age_hours": 24,
+                    "allow_production_replica_sample": False,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts / "database-decision.json").write_text(
+        json.dumps(_database_decision()),
+        encoding="utf-8",
+    )
+    result = run_database_check(root, "plan")
+    assert result.status == "pass"
+    return root, artifacts / "database-validation-evidence.json"
+
+
+def _evaluation_by_condition(evaluations: list[dict[str, object]]) -> dict[str, dict[str, object]]:
+    return {str(item["condition"]): item for item in evaluations}
+
+
+def test_database_g1_valid_plan_evidence_passes() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root, _ = _database_plan_project(Path(tmp))
+
+        passed, evaluations = evaluate_plan_gate(root)
+
+        assert passed, evaluations
+        checks = _evaluation_by_condition(evaluations)
+        assert checks["database.signal"]["passed"] is True
+        assert checks["database.risk_class"]["passed"] is True
+        assert checks["database.decision"]["passed"] is True
+        assert checks["database.production_schema"]["passed"] is True
+
+
+def test_database_g1_missing_decision_fails() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root, _ = _database_plan_project(Path(tmp))
+        (root / ".workflow" / "artifacts" / "database-decision.json").unlink()
+
+        passed, evaluations = evaluate_plan_gate(root)
+
+        assert not passed
+        assert _evaluation_by_condition(evaluations)["database.decision"]["passed"] is False
+
+
+def test_database_g1_missing_plan_evidence_fails() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root, evidence = _database_plan_project(Path(tmp))
+        evidence.unlink()
+
+        passed, evaluations = evaluate_plan_gate(root)
+
+        assert not passed
+        assert _evaluation_by_condition(evaluations)["database.production_schema"]["passed"] is False
+
+
+def test_database_g1_stale_plan_evidence_fails() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root, evidence_path = _database_plan_project(Path(tmp))
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        evidence["stages"]["plan"]["schema"]["captured_at"] = "2000-01-01T00:00:00Z"
+        evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+
+        passed, evaluations = evaluate_plan_gate(root)
+
+        assert not passed
+        assert _evaluation_by_condition(evaluations)["database.production_schema"]["passed"] is False
+
+
+def test_database_g1_profile_hash_mismatch_fails() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root, evidence_path = _database_plan_project(Path(tmp))
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        evidence["profile_hash"] = "b" * 64
+        evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+
+        passed, evaluations = evaluate_plan_gate(root)
+
+        assert not passed
+        assert _evaluation_by_condition(evaluations)["database.production_schema"]["passed"] is False
+
+
+def test_database_g1_non_high_risk_evidence_fails() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root, evidence_path = _database_plan_project(Path(tmp))
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        evidence["change_class"] = "small"
+        evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+
+        passed, evaluations = evaluate_plan_gate(root)
+
+        assert not passed
+        assert _evaluation_by_condition(evaluations)["database.risk_class"]["passed"] is False
+
+
+def test_database_g1_no_signal_remains_not_applicable() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = _make_project(
+            Path(tmp),
+            spec="Plain user-interface copy change",
+            plan="Update the label",
+            tasks="- [ ] T01 Update the label",
+            test_criteria="Render the label",
+        )
+
+        passed, evaluations = evaluate_plan_gate(root)
+
+        assert passed, evaluations
+        signal = _evaluation_by_condition(evaluations)["database.signal"]
+        assert signal["passed"] is True
+        assert signal["detail"] == "status=not_applicable"
 # ---------------------------------------------------------------------------
 # Utility function tests
 # ---------------------------------------------------------------------------

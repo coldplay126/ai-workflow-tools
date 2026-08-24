@@ -85,6 +85,67 @@ def test_render_verify_report_accepts_string_evidence_entries() -> None:
     assert "- action: Use parent-to-commit diff" in markdown
 
 
+def test_database_gate_reports_render_only_sanitized_fields() -> None:
+    unsafe_detail = (
+        "argv=['db-client', '--password=secret'] stdout=CREATE TABLE users "
+        "env=DATABASE_URL sample=[customer-row]"
+    )
+    verify_data = {
+        "conclusion": "PASS",
+        "scope": {"changed_files": 0, "planned_files": 0, "violations": 0},
+        "compliance": {"pass": 1, "fail": 0, "total_requirements": 1, "percentage": 100},
+        "quality": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+    }
+    test_data = {
+        "conclusion": "PASS",
+        "suites": [{"name": "unit", "passed": 1, "failed": 0}],
+        "regressions": [],
+        "acceptance": {"passed": 1, "total": 1},
+        "coverage": {"percentage": 100},
+    }
+    gate_checks = [
+        {
+            "condition": "database.production_schema",
+            "passed": True,
+            "detail": unsafe_detail,
+            "database_summary": {
+                "schema_hash_prefix": "aaaaaaaaaaaa",
+                "engine": "mysql",
+                "engine_version": "8.0",
+                "selected_option": "rewrite-query",
+                "stage": "verify",
+                "status": "pass",
+            },
+        },
+        {
+            "condition": "database.local_test",
+            "passed": True,
+            "detail": unsafe_detail,
+            "database_summary": {
+                "selected_option": "rewrite-query",
+                "stage": "test",
+                "status": "waived",
+                "waiver_reason": "Approved local data is unavailable",
+            },
+        },
+    ]
+
+    verify_markdown, _ = render_verify_report(verify_data, True, gate_checks)
+    test_markdown, _ = render_test_report(test_data, True, gate_checks)
+    rendered = verify_markdown + test_markdown
+
+    assert "schema_hash_prefix=aaaaaaaaaaaa" in rendered
+    assert "engine=mysql" in rendered
+    assert "engine_version=8.0" in rendered
+    assert "selected_option=rewrite-query" in rendered
+    assert "waiver_reason=Approved local data is unavailable" in rendered
+    assert "db-client" not in rendered
+    assert "password=secret" not in rendered
+    assert "CREATE TABLE" not in rendered
+    assert "DATABASE_URL" not in rendered
+    assert "customer-row" not in rendered
+
+
 def test_apply_workflow_result_impl_writes_artifact(tmp_path: Path) -> None:
     repo = _make_workflow_root(tmp_path)
     result_payload = {
