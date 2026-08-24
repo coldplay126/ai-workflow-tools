@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 import json
 from pathlib import Path
 
@@ -152,3 +154,23 @@ def test_spec_writer_ask_capability_survives_omp_agent_compilation() -> None:
 
     assert name == "spec-writer"
     assert "tools: read, grep, glob, edit, write, bash, ask" in generated
+
+
+def test_checked_in_omp_agents_match_database_contract_sources() -> None:
+    generated_root = REPO_ROOT / ".omp" / "agents"
+    manifest = json.loads(
+        (generated_root / ".awf-generated-agents.json").read_text(encoding="utf-8")
+    )
+    hashes = {entry["name"]: entry["sha256"] for entry in manifest["files"]}
+
+    for name in ("spec-writer.md", "spec-verifier.md", "happy-path-tester.md"):
+        source = REPO_ROOT / "claude" / "agents" / name
+        _, expected = compile_claude_agent(source)
+        generated = (generated_root / name).read_bytes()
+
+        assert generated == expected.encode("utf-8")
+        assert hashes[name] == hashlib.sha256(generated).hexdigest()
+
+    spec_writer = (generated_root / "spec-writer.md").read_text(encoding="utf-8")
+    assert "tools: read, grep, glob, edit, write, bash, ask" in spec_writer
+    assert "database-validation-evidence.json" in spec_writer

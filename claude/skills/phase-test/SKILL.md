@@ -150,8 +150,8 @@ test-report.md의 prose는 `.workflow/artifacts/database-validation-evidence.jso
 - [ ] DB 신호 시 production schema와 local test evidence 통과 또는 유효한 waiver
 
 ```bash
-awf wf db-check --stage test --json
-awf wf gate test
+awf wf db-check --stage test --repo-root <repo-root> --json
+awf wf gate test --repo-root <repo-root> --result-file <test-result> --json
 ```
 **G6 — 수동 항목 처리:**
 수동 테스트 항목이 있는 경우:

@@ -34,12 +34,12 @@ flowchart TD
 
 ### Database signal routing
 
-plan artifacts or planned paths that signal a database change take the
-`high_risk` route even when the concept-text classifier selected a lower class.
-The route is evidence-gated, not prose-gated: plan creates the selected
-comparative decision and current production schema evidence, verify records
-equivalence/integrity/query-plan/migration/rollback evidence, and test records
-local-test evidence or its narrow waiver.
+Database changes take the `high_risk` route even when the concept-text
+classifier selected a lower class. The route is evidence-gated, not prose-gated:
+plan creates the selected comparative decision and current production schema
+evidence, verify records equivalence/integrity/query-plan/migration/rollback
+evidence, and test records local-test evidence or its narrow waiver.
+A missing index is not a recommendation.
 
 Each affected phase runs `awf wf db-check --stage <plan|verify|test> --json`
 immediately before its ordinary gate. `not_applicable` preserves the non-DB

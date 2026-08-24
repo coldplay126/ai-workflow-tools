@@ -1258,20 +1258,46 @@ def test_protected_index_entry_docs_define_supported_stage_zero_modes() -> None:
             assert requirement in prose
 
 
+DATABASE_GATE_COMMANDS = {
+    "plan": (
+        "awf wf db-check --stage plan --repo-root <repo-root> --json",
+        "awf wf gate plan --repo-root <repo-root> --json",
+    ),
+    "verify": (
+        "awf wf db-check --stage verify --repo-root <repo-root> --json",
+        "awf wf gate verify --repo-root <repo-root> --result-file <verify-result> --json",
+    ),
+    "test": (
+        "awf wf db-check --stage test --repo-root <repo-root> --json",
+        "awf wf gate test --repo-root <repo-root> --result-file <test-result> --json",
+    ),
+}
+
+
 def test_database_workflow_docs_define_evidence_and_safety_policy() -> None:
+    parser = build_parser()
     phase_skills = {
         "plan": REPO_ROOT / "claude" / "skills" / "phase-plan" / "SKILL.md",
         "verify": REPO_ROOT / "claude" / "skills" / "phase-verify" / "SKILL.md",
         "test": REPO_ROOT / "claude" / "skills" / "phase-test" / "SKILL.md",
     }
     for stage, path in phase_skills.items():
-        assert (
-            f"```bash\nawf wf db-check --stage {stage} --json\nawf wf gate {stage}\n```"
-            in path.read_text(encoding="utf-8")
+        commands = DATABASE_GATE_COMMANDS[stage]
+        assert f"```bash\n{chr(10).join(commands)}\n```" in path.read_text(
+            encoding="utf-8"
         )
+        for command in commands:
+            parser.parse_args(_argv_from_displayed_command(command))
+
+    reference_path = REPO_ROOT / "docs" / "reference" / "workflow-pipeline.md"
+    reference_block = "```bash\n" + "\n\n".join(
+        "\n".join(DATABASE_GATE_COMMANDS[stage])
+        for stage in ("plan", "verify", "test")
+    ) + "\n```"
+    assert reference_block in reference_path.read_text(encoding="utf-8")
 
     policy_paths = (
-        REPO_ROOT / "docs" / "reference" / "workflow-pipeline.md",
+        reference_path,
         CLI_README,
         REPO_ROOT / "CHANGELOG.md",
     )
@@ -1287,7 +1313,26 @@ def test_database_workflow_docs_define_evidence_and_safety_policy() -> None:
         prose = path.read_text(encoding="utf-8")
         for requirement in required_policy:
             assert requirement in prose, f"{path}: missing {requirement}"
-        assert re.search(r"auto[- ]?index", prose, re.IGNORECASE) is None
+
+    reference = policy_paths[0].read_text(encoding="utf-8")
+    required_schema_fields = (
+        '"schema_version": 1',
+        '"kind": "production_schema"',
+        '"target_class": "production_metadata"',
+        '"read_only": true',
+        '"schema_only": true',
+        '"engine"',
+        '"engine_version"',
+        '"captured_at"',
+        '"schema_hash"',
+        '"object_counts"',
+        '"tables"',
+        '"columns"',
+        '"indexes"',
+        '"constraints"',
+    )
+    for field in required_schema_fields:
+        assert field in reference, f"missing production-schema field: {field}"
 
 
 def test_database_planning_contract_compares_options_without_index_default() -> None:
@@ -1307,16 +1352,64 @@ def test_database_planning_contract_compares_options_without_index_default() -> 
         "`normalize`",
         "`denormalize`",
         "hard gate",
+        "index 변경은 명시적으로 선택된 physical-design 후보여야 한다.",
     )
     for requirement in required_contract:
         assert requirement in plan_skill, f"missing planning requirement: {requirement}"
-    assert re.search(r"auto[- ]?index", plan_skill, re.IGNORECASE) is None
+
+    candidate_fields = (
+        "`id`",
+        "`kind`",
+        "`applicable`",
+        "`unavailable_reason`",
+        "`summary`",
+        "`equivalence_plan`",
+        "`integrity_plan`",
+        "`normalization_assessment`",
+        "`denormalization_assessment`",
+        "`physical_design_assessment`",
+        "`read_write_cost`",
+        "`operational_risks`",
+        "`transition_risks`",
+        "`rollback_or_exit`",
+        "`source_of_truth`",
+        "`consistency_window`",
+        "`reconciliation`",
+        "`read_benefit`",
+        "`write_amplification`",
+        "`storage`",
+        "`build_or_lock`",
+        "`rollback`",
+    )
+    contract_paths = (
+        REPO_ROOT / "claude" / "skills" / "phase-plan" / "SKILL.md",
+        REPO_ROOT / "claude" / "agents" / "spec-writer.md",
+        REPO_ROOT / "claude" / "skills" / "multi-agent" / "protocols" / "spec_writer.md",
+    )
+    for path in contract_paths:
+        prose = path.read_text(encoding="utf-8")
+        for field in candidate_fields:
+            assert field in prose, f"{path}: missing candidate field {field}"
 
     writer = (REPO_ROOT / "claude" / "agents" / "spec-writer.md").read_text(
         encoding="utf-8"
     )
     assert "tools: Read, Grep, Glob, Edit, Write, Bash, AskUserQuestion" in writer
     assert "material" in writer
+
+
+
+def test_database_risk_routing_requires_a_selected_decision() -> None:
+    routing = (
+        REPO_ROOT
+        / "docs"
+        / "patterns"
+        / "workflow-pipeline"
+        / "03-risk-routing.md"
+    ).read_text(encoding="utf-8")
+
+    assert "take the `high_risk` route" in routing
+    assert "A missing index is not a recommendation." in routing
 
 
 def test_database_agents_require_machine_validated_evidence() -> None:

@@ -172,18 +172,14 @@ The route is signal-gated: a workflow without a detected database change reports
 the enclosing gate can pass. The exact operator sequence is:
 
 ```bash
-awf wf db-check --stage plan --json
-awf wf gate plan
-```
+awf wf db-check --stage plan --repo-root <repo-root> --json
+awf wf gate plan --repo-root <repo-root> --json
 
-```bash
-awf wf db-check --stage verify --json
-awf wf gate verify
-```
+awf wf db-check --stage verify --repo-root <repo-root> --json
+awf wf gate verify --repo-root <repo-root> --result-file <verify-result> --json
 
-```bash
-awf wf db-check --stage test --json
-awf wf gate test
+awf wf db-check --stage test --repo-root <repo-root> --json
+awf wf gate test --repo-root <repo-root> --result-file <test-result> --json
 ```
 
 | Stage | Required database conditions when signaled |
@@ -204,6 +200,31 @@ but cannot stand in for same-engine evidence. A project-specific replica sample
 requires explicit opt-in. raw primary rows are prohibited, and the test result
 must state that its rows are masked. A waiver applies only to the absence of a
 local test command and requires a decision reason, approver, and timestamp.
+
+The project schema command must return only current production metadata:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "production_schema",
+  "target_class": "production_metadata",
+  "read_only": true,
+  "schema_only": true,
+  "engine": "mysql",
+  "engine_version": "8.0",
+  "captured_at": "2026-08-24T00:00:00Z",
+  "schema_hash": "<sha256>",
+  "object_counts": {
+    "tables": 1,
+    "columns": 8,
+    "indexes": 2,
+    "constraints": 3
+  }
+}
+```
+
+The metadata command is read-only and schema-only. It must not access rows or
+run executable work against the production primary.
 
 The CLI validates sanitized JSON supplied by project commands. It does not
 implement a database driver, masking, or replica provisioning.

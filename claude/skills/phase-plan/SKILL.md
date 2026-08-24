@@ -216,16 +216,31 @@ tasks.md, plan.md, allowed-files.json에 DB 변경 신호가 있으면
 `status: "selected"`, `change_surfaces`, baseline/recommended/selected option ID,
 `candidates`, `recommendation_rationale`를 포함한다.
 
-- candidate는 정확히 2개 또는 3개여야 하며, `maintain` baseline은 항상 포함한다.
-  ID나 문장만 바꾼 후보는 별도 선택지가 아니다. 후보는 read/write 비용, 운영·전환
-  위험, rollback 또는 exit, `equivalence_plan`, `integrity_plan`에서 실질적으로 달라야 한다.
+- `candidates`는 정확히 2개 또는 3개여야 하며, `maintain` baseline은 항상
+  포함한다. ID나 문장만 바꾼 후보는 별도 선택지가 아니다. decision의
+  `baseline_option_id`, `recommended_option_id`, `selected_option_id`는 candidate
+  ID를 가리켜야 하고, baseline은 `maintain` kind여야 하며 recommendation과
+  selection은 `applicable: true` candidate만 가리킨다.
+- 모든 candidate는 다음 정확한 field를 가진다: `id`, `kind`, `applicable`,
+  `unavailable_reason`, `summary`, `equivalence_plan`, `integrity_plan`,
+  `normalization_assessment`, `denormalization_assessment`,
+  `physical_design_assessment`, `read_write_cost`, `operational_risks`,
+  `transition_risks`, `rollback_or_exit`.
+- `kind`는 `maintain`, `query_change`, `physical_design`, `normalize`,
+  `denormalize` 중 하나다. `applicable: true`이면 `unavailable_reason`은 null이고,
+  false이면 구체적인 사유가 필요하다. `operational_risks`와 `transition_risks`는
+  string 목록이다.
+- `normalization_assessment`는 null 또는 설명 string이다. `column`, `constraint`,
+  `erd` surface가 있으면 selected candidate에서 비어 있을 수 없다.
+  `denormalize` kind의 `denormalization_assessment`는
+  `source_of_truth`, `consistency_window`, `reconciliation`, `rollback`을 가진
+  object이고 다른 kind에서는 null이다. `physical_design` kind의
+  `physical_design_assessment`는 `read_benefit`, `write_amplification`, `storage`,
+  `build_or_lock`, `rollback`을 가진 object이고 다른 kind에서는 null이다.
 - `change_surfaces`는 필요한 것만 `query`, `index`, `column`, `constraint`,
-  `erd`, `normalize`, `denormalize`로 기록한다. column/constraint/ERD 또는
-  정규화 변경에는 normalization assessment를, denormalize에는 source of truth,
-  consistency window, reconciliation, rollback을 남긴다. physical design
-  후보에는 read benefit, write amplification, storage, build/lock, rollback을 남긴다.
-- index 변경은 명시적으로 선택된 physical-design 후보여야 한다. planner가
-  근거 없이 index를 추가하거나 선택하지 않는다.
+  `erd`, `normalize`, `denormalize`로 기록한다.
+- index 변경은 명시적으로 선택된 physical-design 후보여야 한다. planner가 근거 없이
+  index를 추가하거나 선택하지 않는다.
 
 Correctness, equivalence, and integrity are hard gates. A candidate without an
 equivalence and integrity plan cannot be recommended or selected.
@@ -247,8 +262,8 @@ DB 신호가 있으면 production schema는 mandatory다. manifest의
 **반드시 아래 CLI 명령으로 검증합니다** (LLM 판단이 아닌 결정론적 Python 검증기 사용):
 
 ```bash
-awf wf db-check --stage plan --json
-awf wf gate plan
+awf wf db-check --stage plan --repo-root <repo-root> --json
+awf wf gate plan --repo-root <repo-root> --json
 ```
 
 이 명령은 `evaluate_plan_gate()`를 호출하여 다음을 자동 검증합니다:

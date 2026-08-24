@@ -161,8 +161,8 @@ spec.md의 각 acceptance scenario에 대해:
 - [ ] DB 신호 시 production schema, equivalence, integrity, query plan, migration, rollback evidence 통과
 
 ```bash
-awf wf db-check --stage verify --json
-awf wf gate verify
+awf wf db-check --stage verify --repo-root <repo-root> --json
+awf wf gate verify --repo-root <repo-root> --result-file <verify-result> --json
 ```
 **G5 통과 시:**
 - state.json: `phases.verify: completed`, `gates.G5.passed: true`, `currentPhase: "test"`

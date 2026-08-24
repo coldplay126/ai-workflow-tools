@@ -13,11 +13,28 @@
 - plan.md의 각 단계에 예상 변경 파일과 영향 범위 포함
 - 기존 코드베이스의 패턴과 컨벤션을 따를 것
 
-DB signal이 있는 계획은
-`.workflow/artifacts/database-decision.json`을 함께 작성한다. `maintain` baseline을
-포함한 2개 또는 3개의 materially different candidate를 비교하고, selected option,
-equivalence plan, integrity plan, read/write cost, operational/transition risk,
-rollback 또는 exit를 기록한다. query, index, column, constraint, ERD, normalize,
+DB signal이 있는 계획은 `.workflow/artifacts/database-decision.json`을 함께
+작성한다. decision은 `schema_version: 1`, `status: "selected"`,
+`change_surfaces`, `baseline_option_id`, `recommended_option_id`,
+`selected_option_id`, `candidates`, `recommendation_rationale`를 가진다.
+`maintain` baseline을 포함한 정확히 2개 또는 3개의 materially different candidate를
+비교하고, recommended/selected ID는 `applicable: true` candidate를 가리킨다.
+
+각 candidate는 `id`, `kind`, `applicable`, `unavailable_reason`, `summary`,
+`equivalence_plan`, `integrity_plan`, `normalization_assessment`,
+`denormalization_assessment`, `physical_design_assessment`, `read_write_cost`,
+`operational_risks`, `transition_risks`, `rollback_or_exit`를 모두 가진다.
+`kind`는 `maintain`, `query_change`, `physical_design`, `normalize`,
+`denormalize` 중 하나다. `applicable`이면 `unavailable_reason`은 null이고,
+아니면 구체적 사유가 필요하다.
+
+`normalization_assessment`는 null 또는 설명 string이다. column, constraint, ERD
+surface에서는 selected candidate가 비워 둘 수 없다. `denormalize`에는
+`denormalization_assessment` object가 필요하고 field는 `source_of_truth`,
+`consistency_window`, `reconciliation`, `rollback`이다. 다른 kind는 null을 쓴다.
+`physical_design`에는 `physical_design_assessment` object가 필요하고 field는
+`read_benefit`, `write_amplification`, `storage`, `build_or_lock`, `rollback`이다.
+다른 kind는 null을 쓴다. query, index, column, constraint, ERD, normalize,
 denormalize 중 실제 변경 surface만 기록한다. index는 명시적으로 근거를 갖춘
 physical-design 선택일 때만 포함한다.
 
