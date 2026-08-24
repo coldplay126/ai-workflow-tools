@@ -461,8 +461,8 @@ def _write_database_lifecycle_smoke_fixture(repo_root: Path) -> tuple[Path, Path
         "equivalence": "pass",
         "integrity": "pass",
         "query_plan": "pass",
-        "migration": "not_applicable",
-        "rollback": "not_applicable",
+        "migration": "pass",
+        "rollback": "pass",
     }
     test = {
         "schema_version": 1,
@@ -744,8 +744,8 @@ def test_db_check_cli_smoke_completes_database_lifecycle_gates(tmp_path: Path) -
         "equivalence": "pass",
         "integrity": "pass",
         "query_plan": "pass",
-        "migration": "not_applicable",
-        "rollback": "not_applicable",
+        "migration": "pass",
+        "rollback": "pass",
     }
     assert evidence["stages"]["test"]["test"] == {
         "status": "pass",

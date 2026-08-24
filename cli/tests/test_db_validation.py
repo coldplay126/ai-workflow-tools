@@ -118,9 +118,9 @@ def test_database_signal_detects_concept_database_term(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("concept", "reason"),
     [
-        ("CREATE TABLE audit_log (id bigint)", "text:ddl"),
-        ("ALTER TABLE audit_log ADD COLUMN actor_id bigint", "text:ddl"),
-        ("DROP INDEX audit_log_actor_idx", "text:ddl"),
+        ("CREATE TABLE audit_log (id bigint)", "text:table_ddl"),
+        ("ALTER TABLE audit_log ADD COLUMN actor_id bigint", "text:table_ddl"),
+        ("DROP INDEX audit_log_actor_idx", "text:index_ddl"),
         ("Migrate the Snowflake warehouse schema", "text:database engine"),
     ],
 )
@@ -596,7 +596,7 @@ def verify_evidence(
         "equivalence": "pass",
         "integrity": "pass",
         "query_plan": "pass",
-        "migration": "not_applicable",
+        "migration": "pass",
         "rollback": "pass",
     }
     payload.update(updates)
@@ -1077,7 +1077,7 @@ def test_decision_requires_applicable_physical_candidate_for_index_surface(
 @pytest.mark.parametrize(
     ("concept", "allowed_files", "underdeclared", "declared"),
     [
-        ("CREATE TABLE audit_log (id bigint)", None, ["query"], ["index"]),
+        ("CREATE TABLE audit_log (id bigint)", None, ["query"], ["column"]),
         (
             "Coordinate the application release",
             ["src/database/migrations/001_create_audit_log.sql"],
@@ -1215,6 +1215,118 @@ def test_artifact_error_blocks_database_commands_without_guessing(tmp_path: Path
     assert result.blockers == ("artifact_invalid",)
     assert not command_marker.exists()
     assert not evidence_path(tmp_path).exists()
+
+def test_table_ddl_rejects_index_only_change_surface(tmp_path: Path) -> None:
+    write_workflow_artifacts(tmp_path, concept="CREATE TABLE audit_log (id bigint)")
+    write_database_decision(tmp_path, database_decision(change_surfaces=["index"]))
+
+    with pytest.raises(DatabaseValidationError) as raised:
+        load_database_decision(tmp_path)
+
+    assert raised.value.code == "decision_invalid"
+    write_database_decision(tmp_path, database_decision(change_surfaces=["column"]))
+
+    assert load_database_decision(tmp_path).change_surfaces == ("column",)
+
+
+@pytest.mark.parametrize(
+    ("ddl", "underdeclared", "declared", "required_reason"),
+    [
+        (
+            "CREATE INDEX audit_actor_idx ON audit_log (actor_id)",
+            ["column"],
+            ["index"],
+            "text:index_ddl",
+        ),
+        (
+            "ALTER TABLE audit_log ADD COLUMN actor_id bigint",
+            ["constraint"],
+            ["column"],
+            "text:column_ddl",
+        ),
+    ],
+    ids=["index-ddl", "column-ddl"],
+)
+def test_specific_ddl_signals_require_their_declared_surface(
+    tmp_path: Path,
+    ddl: str,
+    underdeclared: list[str],
+    declared: list[str],
+    required_reason: str,
+) -> None:
+    write_workflow_artifacts(tmp_path, concept=ddl)
+    assert required_reason in detect_database_signal(tmp_path).reasons
+    write_database_decision(
+        tmp_path,
+        database_decision(change_surfaces=underdeclared),
+    )
+
+    with pytest.raises(DatabaseValidationError) as raised:
+        load_database_decision(tmp_path)
+
+    assert raised.value.code == "decision_invalid"
+    write_database_decision(tmp_path, database_decision(change_surfaces=declared))
+
+    assert load_database_decision(tmp_path).change_surfaces == tuple(declared)
+
+
+def test_alter_table_add_index_emits_table_and_index_ddl_signals(
+    tmp_path: Path,
+) -> None:
+    write_workflow_artifacts(
+        tmp_path,
+        concept="ALTER TABLE audit_log ADD INDEX audit_actor_idx (actor_id)",
+    )
+
+    assert {
+        "text:table_ddl",
+        "text:index_ddl",
+    } <= set(detect_database_signal(tmp_path).reasons)
+
+
+def test_migration_index_verification_requires_migration_and_rollback(
+    tmp_path: Path,
+) -> None:
+    write_workflow_artifacts(
+        tmp_path,
+        concept="Coordinate the application release",
+        allowed_files=["src/database/migrations/001_add_audit_index.sql"],
+    )
+    write_database_manifest(
+        tmp_path,
+        schema_command=database_command(schema_evidence()),
+        verify_command=database_command(
+            verify_evidence(
+                migration="not_applicable",
+                rollback="not_applicable",
+            )
+        ),
+    )
+    write_database_decision(tmp_path, database_decision(change_surfaces=["index"]))
+    assert run_database_check(tmp_path, "plan").status == "pass"
+
+    result = run_database_check(tmp_path, "verify")
+
+    assert result.status == "fail"
+    assert result.blockers == ("verify_evidence_invalid",)
+
+
+def test_query_only_verification_allows_not_applicable_schema_migration(
+    tmp_path: Path,
+) -> None:
+    prepare_database_workflow(
+        tmp_path,
+        decision=database_decision(change_surfaces=["query"]),
+        verify_command=database_command(
+            verify_evidence(
+                migration="not_applicable",
+                rollback="not_applicable",
+            )
+        ),
+    )
+    assert run_database_check(tmp_path, "plan").status == "pass"
+
+    assert run_database_check(tmp_path, "verify").status == "pass"
 
 
 @pytest.mark.parametrize("schema_version", [True, 1.0, "1"])
@@ -1566,7 +1678,7 @@ def test_verify_persists_exact_safe_same_engine_target_metadata(
         "equivalence": "pass",
         "integrity": "pass",
         "query_plan": "pass",
-        "migration": "not_applicable",
+        "migration": "pass",
         "rollback": "pass",
     }
 

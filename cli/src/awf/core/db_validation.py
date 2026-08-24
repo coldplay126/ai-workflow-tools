@@ -73,15 +73,17 @@ _STRONG_TEXT_SIGNAL_PATTERNS = (
     ("unique constraint", re.compile(r"\bunique\s+constraint\b|고유\s*제약")),
     ("partition", re.compile(r"\bpartition(?:ing)?\b|파티션")),
     (
-        "ddl",
+        "table_ddl",
+        re.compile(r"\b(?:create|alter|drop|truncate)\s+table\b"),
+    ),
+    (
+        "index_ddl",
         re.compile(
-            r"\b(?:"
-            r"(?:create|alter|drop|truncate)\s+table|"
-            r"(?:create|drop)\s+index|"
-            r"(?:add|drop)\s+column"
-            r")\b"
+            r"\b(?:create|drop)\s+(?:unique\s+)?index\b|"
+            r"\balter\s+table\b.*\b(?:add|drop)\s+(?:unique\s+)?(?:index|key)\b"
         ),
     ),
+    ("column_ddl", re.compile(r"\b(?:add|drop)\s+column\b")),
     (
         "database engine",
         re.compile(
@@ -567,7 +569,7 @@ _SIGNAL_STRUCTURAL_SURFACES = {
     "denormalize",
     "partition",
 }
-_STRUCTURAL_SURFACES = {"column", "constraint", "erd", "normalize", "denormalize"}
+_STRUCTURAL_SURFACES = _SIGNAL_STRUCTURAL_SURFACES
 _VERIFY_EXECUTION_TARGETS = {"local_same_engine", "approved_read_replica"}
 _NORMALIZATION_SURFACES = {"column", "constraint", "erd"}
 _LOCAL_TARGETS = {
@@ -1092,19 +1094,21 @@ def _validate_decision_signal_surfaces(
     if any(reason.startswith("artifact_error:") for reason in signal.reasons):
         raise DatabaseValidationError("artifact_invalid")
 
-    requires_structural_surface = any(
-        reason == "text:ddl"
-        or reason.startswith(("path:migration:", "path:schema:", "path:prisma:"))
-        for reason in signal.reasons
+    signal_reasons = set(signal.reasons)
+    requires_path_structural_surface = any(
+        reason.startswith(("path:migration:", "path:schema:", "path:prisma:"))
+        for reason in signal_reasons
     )
     required_surfaces = {
         surface
         for reason, surface in (
             ("text:index", "index"),
+            ("text:index_ddl", "index"),
             ("text:column", "column"),
+            ("text:column_ddl", "column"),
             ("text:query", "query"),
         )
-        if reason in signal.reasons
+        if reason in signal_reasons
     }
     required_surfaces.update(
         surface
@@ -1113,12 +1117,20 @@ def _validate_decision_signal_surfaces(
             ("path:column:", "column"),
             ("path:query:", "query"),
         )
-        if any(signal_reason.startswith(reason) for signal_reason in signal.reasons)
+        if any(signal_reason.startswith(reason) for signal_reason in signal_reasons)
     )
+    surfaces = set(change_surfaces)
     if (
-        requires_structural_surface
-        and not set(change_surfaces) & _SIGNAL_STRUCTURAL_SURFACES
-    ) or not required_surfaces <= set(change_surfaces):
+        (
+            "text:table_ddl" in signal_reasons
+            and not surfaces & (_SIGNAL_STRUCTURAL_SURFACES - {"index"})
+        )
+        or (
+            requires_path_structural_surface
+            and not surfaces & _SIGNAL_STRUCTURAL_SURFACES
+        )
+        or not required_surfaces <= surfaces
+    ):
         raise DatabaseValidationError("decision_invalid")
 
 
