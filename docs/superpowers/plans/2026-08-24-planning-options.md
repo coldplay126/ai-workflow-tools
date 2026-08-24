@@ -91,9 +91,9 @@ git commit -m "feat(workflow): require planning selections at G1"
 - [ ] Implement `select_planning_option()` with exact artifact validation before/after mutation and sanitized result containing only IDs, status, action, and hashes.
 - [ ] Add `awf wf select-option` handler with exit 0 success/reuse, 1 validation/state blocker, 2 operational/usage.
 - [ ] Add host-only `awf wf seal-plan --repo-root . --json`: selected/no-decision
-  artifacts bind exactly five regenerated Plan artifacts in strict
-  `planning-provenance.json`; selection_required blocks sealing and drift invalidates
-  the prior seal.
+  artifacts bind exactly six regenerated Plan artifacts in strict
+  `planning-provenance.json`; selection changes archive active outputs/provenance
+  as `.stale.<previous_hash[:12]>.<name>` and drift invalidates the prior seal.
 - [ ] Run:
 
 ```bash
@@ -131,8 +131,8 @@ git commit -m "feat(workflow): select planning options and replan"
 - [ ] Validate examples with the real parser and canonical artifact loader rather than substring-only checks.
 - [ ] Require conditional `planning-provenance.json`, exact six G1 planning
   conditions, and schema-level uniqueness/cross-conditional rejection. Document the
-  selected/no-decision rerun → five artifacts → host seal → G1 order and stale-seal
-  replan behavior.
+  selected/no-decision rerun → six artifacts → host seal → G1 order and stale-seal
+  archive/replan behavior.
 - [ ] Run:
 
 ```bash
@@ -161,7 +161,7 @@ Plan writes selection_required
 → wf select-option chooses a non-recommended option
 → Plan continues
 → selected artifact drives regenerated Plan outputs
-→ host seals `planning-provenance.json` against the five regenerated Plan artifacts
+→ host seals `planning-provenance.json` against the six regenerated Plan artifacts
 → G1 passes
 → change selection after G1
 → Plan reopens and G1–G6/G3 scope reset

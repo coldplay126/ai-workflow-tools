@@ -82,13 +82,14 @@ manifest/profile plus absent artifact is `legacy_not_required`; only explicit
 Every present artifact is strictly validated regardless of profile.
 
 After a selected/no-decision rerun writes exactly `constitution.md`, `spec.md`,
-`plan.md`, `tasks.md`, and `test-criteria.md`, the parent host—not this
-worker—runs `awf wf seal-plan --repo-root . --json`. Its
+`plan.md`, `tasks.md`, `test-criteria.md`, and `allowed-files.json`, the parent
+host—not this worker—runs `awf wf seal-plan --repo-root . --json`. Its
 `planning-provenance.json` is exactly `schema_version: 1`,
-`planning_options_hash`, and `artifacts` with those five lowercase SHA-256
-hashes. Do not write, reuse, or hand-edit this seal. `selection_required` cannot
-seal; selection or any five-artifact change makes the old seal stale, so G1 must
-fail until the parent reruns and reseals.
+`planning_options_hash`, and `artifacts` with those six lowercase SHA-256 hashes.
+Do not write, reuse, or hand-edit this seal. `selection_required` cannot seal;
+selection or any six-artifact change archives active outputs/provenance as
+`.stale.<previous_hash[:12]>.<name>` and makes the old seal stale until the
+parent reruns and reseals.
 
 ## 데이터베이스 변경 결정
 

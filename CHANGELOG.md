@@ -22,9 +22,10 @@
   changed post-G1 selection re-plans the workflow and preserves the audit
   history.
 - `awf wf seal-plan --repo-root . --json` host-seals the current selected or
-  no-decision Planning Options artifact to exactly five regenerated Plan
-  artifacts. G1 now rejects missing, malformed, or stale provenance rather
-  than allowing an old selection or plan artifact snapshot to advance.
+  no-decision Planning Options artifact to exactly six regenerated Plan
+  artifacts, including `allowed-files.json`. Selection changes archive six
+  outputs plus active provenance before G1 rejects missing, malformed, or stale
+  provenance.
 
 ### Changed
 

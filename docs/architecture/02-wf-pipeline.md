@@ -86,9 +86,10 @@ awf wf select-option --decision-id D-001 --option-id O-001 --actor "${AWF_OPERAT
 ```
 
 Selected/no-decision rerun은 `constitution.md`, `spec.md`, `plan.md`, `tasks.md`,
-`test-criteria.md`를 모두 만든 뒤 host-only provenance seal을 쓴다. Unselected
-options는 seal할 수 없고, selection 또는 다섯 artifact 중 하나가 바뀌면 old seal은
-stale라 G1이 `provenance_changed`로 막힌다.
+`test-criteria.md`, `allowed-files.json`을 모두 만든 뒤 host-only provenance seal을
+쓴다. Unselected options는 seal할 수 없고, selection 또는 여섯 artifact 중 하나가
+바뀌면 host가 six outputs/provenance를 `.stale.<previous_hash[:12]>.<name>`로
+archive한 뒤 G1은 `provenance_changed`로 막힌다.
 
 ```bash
 awf wf seal-plan --repo-root . --json

@@ -440,19 +440,22 @@ loader failure is `artifact_invalid`, not an escape.
 #### Planning provenance seal
 
 After a `selected` or `no_decision_required` rerun regenerates exactly
-`constitution.md`, `spec.md`, `plan.md`, `tasks.md`, and `test-criteria.md`,
-the host writes `.workflow/artifacts/planning-provenance.json` before G1. The
-marker is an exact object with `schema_version: 1`, a lowercase 64-hex
-`planning_options_hash`, and `artifacts` containing exactly those five
+`constitution.md`, `spec.md`, `plan.md`, `tasks.md`, `test-criteria.md`, and
+`allowed-files.json`, the host writes `.workflow/artifacts/planning-provenance.json`
+before G1. The marker is an exact object with `schema_version: 1`, a lowercase
+64-hex `planning_options_hash`, and `artifacts` containing exactly those six
 filenames mapped to lowercase 64-hex content hashes. A worker does not invent
 or edit this host seal.
 
 `selection_required` cannot seal. `awf wf seal-plan` returns
 `{"status":"blocked","reason":"selection_required"}` and G1 remains blocked.
 Before any seal, G1 reports `provenance_missing`; a malformed/unsafe marker
-reports `provenance_invalid`; a changed option or any of the five regenerated
-artifacts reports `provenance_changed`. Regenerate the five artifacts and seal
-again after every changed selection; an old seal is deliberately stale.
+reports `provenance_invalid`; a changed option or any of the six regenerated
+artifacts reports `provenance_changed`. On selection change, the host archives
+the six active outputs and active provenance as
+`.stale.<previous_hash[:12]>.<name>`; retries archive recreated outputs again
+instead of reusing or overwriting stale evidence. Regenerate the six artifacts
+and seal again after every changed selection; an old seal is deliberately stale.
 
 #### Canonical provenance fixture
 
@@ -465,7 +468,8 @@ again after every changed selection; an old seal is deliberately stale.
     "spec.md": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     "plan.md": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
     "tasks.md": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-    "test-criteria.md": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    "test-criteria.md": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "allowed-files.json": "0000000000000000000000000000000000000000000000000000000000000000"
   }
 }
 ```

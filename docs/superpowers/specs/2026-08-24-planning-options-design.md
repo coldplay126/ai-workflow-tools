@@ -122,13 +122,14 @@ After every material decision has a selection, status is `selected`. Each decisi
 ### Provenance seal
 
 After a selected/no-decision Plan rerun regenerates exactly `constitution.md`,
-`spec.md`, `plan.md`, `tasks.md`, and `test-criteria.md`, the host runs
-`awf wf seal-plan --repo-root . --json`. The strict
+`spec.md`, `plan.md`, `tasks.md`, `test-criteria.md`, and `allowed-files.json`,
+the host runs `awf wf seal-plan --repo-root . --json`. The strict
 `planning-provenance.json` marker binds the current Planning Options hash and
-the five content hashes. `selection_required` is blocked; missing, malformed,
+the six content hashes. `selection_required` is blocked; missing, malformed,
 or stale seals fail G1 as `provenance_missing`, `provenance_invalid`, or
-`provenance_changed`. Any changed selection or plan artifact requires rerun and
-reseal before G1.
+`provenance_changed`. Selection changes archive the six active outputs and active
+provenance as `.stale.<previous_hash[:12]>.<name>`; retries archive newly
+recreated outputs before rerun and reseal.
 
 ```json
 {
@@ -139,7 +140,8 @@ reseal before G1.
     "spec.md": "<64 lowercase SHA-256>",
     "plan.md": "<64 lowercase SHA-256>",
     "tasks.md": "<64 lowercase SHA-256>",
-    "test-criteria.md": "<64 lowercase SHA-256>"
+    "test-criteria.md": "<64 lowercase SHA-256>",
+    "allowed-files.json": "<64 lowercase SHA-256>"
   }
 }
 ```
@@ -210,7 +212,7 @@ awf wf select-option \
   --json
 ```
 
-For initial Plan selection, the command atomically updates the artifact and resumes Plan with `continue_workflow`. The next Plan pass uses selected options as authoritative context and writes the five final Plan artifacts.
+For initial Plan selection, the command atomically updates the artifact and resumes Plan with `continue_workflow`. The next Plan pass uses selected options as authoritative context and writes the six final Plan artifacts before host sealing.
 
 ## Selection changes
 

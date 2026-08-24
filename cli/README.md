@@ -51,10 +51,11 @@ manifest/profile plus absent artifact is `legacy_not_required`. Only explicit
 present artifact is strictly validated regardless of profile.
 
 After a selected/no-decision plan rerun writes `constitution.md`, `spec.md`,
-`plan.md`, `tasks.md`, and `test-criteria.md`, the host seals their exact hashes
-with the current Planning Options hash before G1. `selection_required` cannot
-seal; changed selections or regenerated plan artifacts stale the prior seal and
-keep G1 blocked until a new seal is written.
+`plan.md`, `tasks.md`, `test-criteria.md`, and `allowed-files.json`, the host
+seals their exact hashes with the current Planning Options hash before G1.
+`selection_required` cannot seal; changed selections archive all six outputs and
+active provenance as `.stale.<previous_hash[:12]>.<name>`, while regenerated
+outputs on retry are archived again before the new seal.
 
 ```bash
 awf wf seal-plan --repo-root . --json

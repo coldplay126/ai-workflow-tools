@@ -108,7 +108,7 @@ plan card는 `input.planning_options`에서
 `artifacts/planning-provenance.json`의 conditional output이며 두 artifact 모두
 `required: false`, `required_when_planning_options: true`다. profile이 required인
 경우에만 worker가 canonical options artifact를 만들며, host가 selected/no-decision
-options와 정확히 다섯 plan artifact를 seal한다. artifact가 present이면 profile과
+options와 정확히 여섯 plan artifact를 seal한다. artifact가 present이면 profile과
 관계없이 strict validation한다.
 
 `planning_options_conditions`는 순서대로 `planning_options.artifact`, `.shape`,
@@ -128,10 +128,12 @@ awf wf seal-plan --repo-root . --json
 ```
 
 The host seals only after selected/no-decision rerun regenerates
-`constitution.md`, `spec.md`, `plan.md`, `tasks.md`, and `test-criteria.md`.
-`selection_required` is blocked; pre-seal G1 is `provenance_missing`; malformed
-markers are `provenance_invalid`; option or artifact drift is
-`provenance_changed`, requiring rerun and reseal.
+`constitution.md`, `spec.md`, `plan.md`, `tasks.md`, `test-criteria.md`, and
+`allowed-files.json`. `selection_required` is blocked; pre-seal G1 is
+`provenance_missing`; malformed markers are `provenance_invalid`; option or
+artifact drift archives six outputs plus active provenance as
+`.stale.<previous_hash[:12]>.<name>` and becomes `provenance_changed`, requiring
+rerun and reseal.
 
 partial selection은 `selected_pending`, complete selection은 `continued`이며
 selected/no-decision artifact는 plan rerun input이다. G1 이후 canonical selection

@@ -798,6 +798,7 @@ def test_planning_provenance_fixture_loads_through_canonical_loader(
         "plan.md": "d" * 64,
         "tasks.md": "e" * 64,
         "test-criteria.md": "f" * 64,
+        "allowed-files.json": "0" * 64,
     }
 def test_skill_frontmatter_has_required_identity_metadata() -> None:
     invalid: list[str] = []
