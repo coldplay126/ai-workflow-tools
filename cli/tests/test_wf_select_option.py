@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from awf.cli import build_parser
+from awf.cli import build_parser, main
 from awf.commands import wf as wf_commands
 from awf.commands.wf import run_wf_select_option
 from awf.core.planning_options import load_planning_options
@@ -87,6 +87,19 @@ def _write_artifact(root: Path, artifact: dict[str, object]) -> None:
     path = root / ".workflow" / "artifacts" / "planning-options.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(artifact), encoding="utf-8")
+
+
+def _write_derived_plan_artifacts(root: Path) -> None:
+    artifacts = root / ".workflow" / "artifacts"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    contents = {
+        "spec.md": "# Spec\n\n- FR-001: Persist the chosen rollout.\n",
+        "plan.md": "# Plan\n\n- [FR-001] Persist the chosen rollout.\n",
+        "tasks.md": "# Tasks\n\n- [ ] T001 [FR-001] Exercise the selection lifecycle.\n",
+        "test-criteria.md": "# Test Criteria\n\n- [FR-001] Selection resumes planning.\n",
+    }
+    for name, text in contents.items():
+        (artifacts / name).write_text(text, encoding="utf-8")
 
 
 def _state(*, current_phase: str, plan_status: str, g1_passed: bool | None) -> dict:
@@ -748,3 +761,216 @@ def test_aborted_later_phase_rejects_before_artifact_publication(tmp_path: Path)
     assert run_wf_select_option(_args(tmp_path, "D-001", "O-002")) == 1
 
     assert artifact_path.read_text(encoding="utf-8") == original
+
+
+def test_planning_option_lifecycle_smoke_uses_cli_and_state_apis(
+    tmp_path: Path, capsys
+) -> None:
+    selected_root = tmp_path / "selected-workflow"
+    selected_root.mkdir()
+    (selected_root / ".awf.toml").write_text("# fixture\n", encoding="utf-8")
+    workflow_state.initialize_workflow(
+        str(selected_root),
+        "Persist an explicit rollout selection for an application delivery workflow.",
+    )
+    _write_derived_plan_artifacts(selected_root)
+    _write_artifact(selected_root, _artifact())
+
+    assert main(["wf", "gate", "plan", "--repo-root", str(selected_root)]) == 1
+    selection_gate = capsys.readouterr()
+    assert "  ✗ planning_options.selection: decision_selection_required\n" in selection_gate.out
+    assert selection_gate.out.endswith("\nG-plan: FAIL\n")
+    assert selection_gate.err == ""
+
+    paused = workflow_state.record_orchestrator_decision(
+        str(selected_root),
+        "plan",
+        decision="escalate_user",
+        reason="decision_selection_required",
+    )
+    assert paused["currentPhase"] == "plan"
+    assert paused["phases"]["plan"]["status"] == "deciding"
+    assert paused["loop"]["pendingDecision"]["phase"] == "plan"
+
+    before_first_selection = load_planning_options(selected_root)
+    assert main(
+        [
+            "wf",
+            "select-option",
+            "--decision-id",
+            "D-001",
+            "--option-id",
+            "O-002",
+            "--actor",
+            "operator",
+            "--repo-root",
+            str(selected_root),
+            "--json",
+        ]
+    ) == 0
+    first_selection_output = capsys.readouterr()
+    after_first_selection = load_planning_options(selected_root)
+    assert first_selection_output.out == json.dumps(
+        {
+            "decision_id": "D-001",
+            "option_id": "O-002",
+            "status": "selected",
+            "selection_action": "selected",
+            "workflow_action": "continued",
+            "previous_hash": before_first_selection.artifact_hash,
+            "current_hash": after_first_selection.artifact_hash,
+        },
+        sort_keys=True,
+    ) + "\n"
+    assert first_selection_output.err == ""
+    assert after_first_selection.decisions[0].selected_option_id == "O-002"
+    assert [
+        (
+            entry.decision_id,
+            entry.previous_option_id,
+            entry.selected_option_id,
+            entry.selected_by,
+            entry.source,
+        )
+        for entry in after_first_selection.selection_history
+    ] == [("D-001", None, "O-002", "operator", "cli")]
+
+    resumed = workflow_state.load_workflow_state(str(selected_root))
+    assert resumed["currentPhase"] == "plan"
+    assert resumed["phases"]["plan"]["status"] == "in_progress"
+    assert resumed["planningOptions"]["action"] == "continued"
+    assert "pendingDecision" not in resumed["loop"]
+    assert [entry["action"] for entry in resumed["history"]] == ["deciding", "continued"]
+
+    assert main(["wf", "gate", "plan", "--repo-root", str(selected_root)]) == 0
+    passed_gate = capsys.readouterr()
+    assert passed_gate.out.endswith("\nG-plan: PASS\n")
+    assert passed_gate.err == ""
+    g1_state = workflow_state.apply_gate_result(str(selected_root), "plan", True)
+    assert g1_state["gates"]["G1"]["passed"] is True
+    assert g1_state["phases"]["plan"]["status"] == "completed"
+    assert g1_state["currentPhase"] == "review"
+
+    later = workflow_state.load_workflow_state(str(selected_root))
+    for phase in ("plan", "review", "approve", "impl"):
+        later["phases"][phase] = {
+            "status": "completed",
+            "retries": 2,
+            "executions": 4,
+        }
+    later["phases"]["verify"] = {
+        "status": "in_progress",
+        "retries": 3,
+        "executions": 5,
+    }
+    later["phases"]["test"] = {"status": "pending", "retries": 4, "executions": 6}
+    later["phases"]["done"] = {"status": "pending", "retries": 5, "executions": 7}
+    later["currentPhase"] = "verify"
+    later["gates"] = {
+        "G1": {"passed": True},
+        "G2": {"passed": True, "provider": "fixture", "provider_status": "PASS"},
+        "G3": {"passed": True, "scope_hash": "scope-sha-001"},
+        "G4": {"passed": True},
+        "G5": {"passed": True, "provider": "fixture", "provider_status": "PASS"},
+        "G6": {"passed": True},
+    }
+    later["totalExecutions"] = 17
+    later["loop"]["replanCount"] = 2
+    later["loop"]["maxReplans"] = 5
+    workflow_state.save_workflow_state_snapshot(str(selected_root), later)
+
+    before_changed_selection = load_planning_options(selected_root)
+    assert main(
+        [
+            "wf",
+            "select-option",
+            "--decision-id",
+            "D-001",
+            "--option-id",
+            "O-001",
+            "--actor",
+            "operator",
+            "--repo-root",
+            str(selected_root),
+            "--json",
+        ]
+    ) == 0
+    changed_selection_output = capsys.readouterr()
+    after_changed_selection = load_planning_options(selected_root)
+    assert changed_selection_output.out == json.dumps(
+        {
+            "decision_id": "D-001",
+            "option_id": "O-001",
+            "status": "selected",
+            "selection_action": "selected",
+            "workflow_action": "replanned",
+            "previous_hash": before_changed_selection.artifact_hash,
+            "current_hash": after_changed_selection.artifact_hash,
+        },
+        sort_keys=True,
+    ) + "\n"
+    assert changed_selection_output.err == ""
+    assert [
+        (
+            entry.decision_id,
+            entry.previous_option_id,
+            entry.selected_option_id,
+            entry.selected_by,
+            entry.source,
+        )
+        for entry in after_changed_selection.selection_history
+    ] == [
+        ("D-001", None, "O-002", "operator", "cli"),
+        ("D-001", "O-002", "O-001", "operator", "cli"),
+    ]
+
+    replanned = workflow_state.load_workflow_state(str(selected_root))
+    assert replanned["currentPhase"] == "plan"
+    assert {
+        phase: (phase_state["status"], phase_state["retries"], phase_state["executions"])
+        for phase, phase_state in replanned["phases"].items()
+    } == {
+        phase: ("pending", 0, 0)
+        for phase in _PHASES
+    }
+    assert replanned["gates"] == {
+        "G1": {"passed": None},
+        "G2": {"passed": None, "provider": None, "provider_status": None},
+        "G3": {"passed": None, "scope_hash": None},
+        "G4": {"passed": None},
+        "G5": {"passed": None, "provider": None, "provider_status": None},
+        "G6": {"passed": None},
+    }
+    assert replanned["loop"]["replanCount"] == 3
+    assert replanned["loop"]["maxReplans"] == 5
+    assert replanned["totalExecutions"] == 17
+    assert replanned["history"][-1]["action"] == "replanned"
+
+    no_decision_root = tmp_path / "no-decision-workflow"
+    no_decision_root.mkdir()
+    (no_decision_root / ".awf.toml").write_text("# fixture\n", encoding="utf-8")
+    workflow_state.initialize_workflow(
+        str(no_decision_root),
+        "Use the sole rollout approach for an application delivery workflow.",
+    )
+    _write_derived_plan_artifacts(no_decision_root)
+    _write_artifact(
+        no_decision_root,
+        {
+            "schema_version": 1,
+            "status": "no_decision_required",
+            "no_decision_reason": "Repository conventions leave one viable rollout.",
+            "decisions": [],
+            "selection_history": [],
+        },
+    )
+
+    assert main(["wf", "gate", "plan", "--repo-root", str(no_decision_root)]) == 0
+    no_decision_gate = capsys.readouterr()
+    assert no_decision_gate.out.endswith("\nG-plan: PASS\n")
+    assert no_decision_gate.err == ""
+    no_decision_state = workflow_state.apply_gate_result(str(no_decision_root), "plan", True)
+    assert no_decision_state["gates"]["G1"]["passed"] is True
+    assert no_decision_state["currentPhase"] == "review"
+    assert no_decision_state["phases"]["plan"]["status"] == "completed"
+    assert "pendingDecision" not in no_decision_state["loop"]
