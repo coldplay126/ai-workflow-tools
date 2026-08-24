@@ -777,6 +777,10 @@ def test_database_risk_manifest_default_is_additive_and_disabled():
         "allow_production_replica_sample": False,
     }
 
+def test_planning_options_manifest_default_requires_artifact_for_new_workflows():
+    """New workflow manifests must opt into planning-option provenance."""
+    assert DEFAULT_MANIFEST["planning_options"] == {"required": True}
+
 
 def test_database_risk_preserves_stale_production_state_update(tmp_path: Path):
     """A stale apply result cannot erase database high-risk facts."""

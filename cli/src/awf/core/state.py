@@ -479,6 +479,9 @@ DEFAULT_MANIFEST = {
         "max_schema_age_hours": 24,
         "allow_production_replica_sample": False,
     },
+    "planning_options": {
+        "required": True,
+    },
     "sibling_repos": [],
 }
 
