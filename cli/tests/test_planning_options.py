@@ -11,6 +11,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from awf.core.gates import evaluate_planning_options_gate
 from awf.core.planning_options import (
     PlanningOptionsError,
     load_planning_options,
@@ -108,6 +109,23 @@ def _write_artifact(root: Path, artifact: dict[str, object]) -> Path:
 
 def _assert_code(exc: pytest.ExceptionInfo[PlanningOptionsError], code: str) -> None:
     assert exc.value.code == code
+
+
+_PLANNING_OPTIONS_GATE_CONDITIONS = [
+    "planning_options.artifact",
+    "planning_options.shape",
+    "planning_options.selection",
+    "planning_options.recommendation",
+    "planning_options.materiality",
+]
+
+
+def _write_planning_options_manifest(root: Path, required: bool) -> None:
+    workflow = root / ".workflow"
+    workflow.mkdir(parents=True, exist_ok=True)
+    (workflow / "manifest.json").write_text(
+        json.dumps({"planning_options": {"required": required}}), encoding="utf-8"
+    )
 
 
 def test_loads_no_decision_record_as_immutable_normalized_canonical_hash(tmp_path: Path):
@@ -791,3 +809,72 @@ def test_profile_opt_out_still_validates_present_artifact(tmp_path: Path):
     with pytest.raises(PlanningOptionsError) as exc:
         resolve_planning_options_policy(tmp_path)
     _assert_code(exc, "artifact_invalid")
+
+
+def test_planning_options_gate_covers_required_legacy_and_selection_states(
+    tmp_path: Path,
+):
+    selected_at = "2026-08-24T10:00:00Z"
+    selected = _artifact(
+        status="selected",
+        decisions=[
+            _decision(
+                selected_option_id="O-002",
+                selected_by="steven",
+                selected_at=selected_at,
+            )
+        ],
+        selection_history=[
+            {
+                "decision_id": "D-001",
+                "previous_option_id": None,
+                "selected_option_id": "O-002",
+                "selected_by": "steven",
+                "selected_at": selected_at,
+                "source": "cli",
+            }
+        ],
+    )
+    cases = [
+        ("legacy", None, None, True, "status=legacy_not_required"),
+        ("required_missing", True, None, False, "artifact_missing"),
+        ("selection_required", True, _artifact(), False, "decision_selection_required"),
+        ("selected", True, selected, True, "status=selected"),
+        (
+            "no_decision_required",
+            True,
+            _artifact(status="no_decision_required"),
+            True,
+            "status=no_decision_required",
+        ),
+    ]
+
+    for name, required, artifact, expected_passed, selection_detail in cases:
+        root = tmp_path / name
+        root.mkdir()
+        if required is not None:
+            _write_planning_options_manifest(root, required)
+        if artifact is not None:
+            _write_artifact(root, artifact)
+
+        passed, evaluations = evaluate_planning_options_gate(root)
+        conditions = [item["condition"] for item in evaluations]
+        checks = {item["condition"]: item for item in evaluations}
+
+        assert conditions == _PLANNING_OPTIONS_GATE_CONDITIONS
+        assert passed is expected_passed
+        assert checks["planning_options.selection"]["detail"] == selection_detail
+
+
+def test_planning_options_gate_uses_fixed_sanitized_detail_for_malformed_artifact(
+    tmp_path: Path,
+):
+    _write_planning_options_manifest(tmp_path, True)
+    _write_artifact(tmp_path, {"schema_version": 1, "password": "top-secret"})
+
+    passed, evaluations = evaluate_planning_options_gate(tmp_path)
+
+    assert not passed
+    conditions = [item["condition"] for item in evaluations]
+    assert conditions == _PLANNING_OPTIONS_GATE_CONDITIONS
+    assert {item["detail"] for item in evaluations} == {"artifact_invalid"}

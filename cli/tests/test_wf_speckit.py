@@ -104,6 +104,37 @@ def test_004_missing_spec_fails():
         assert not spec_eval["passed"]
 
 
+
+def test_004_required_planning_options_are_checked_after_early_artifact_failure():
+    """Required planning artifact still contributes stable G1 checks on early return."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = _make_project(
+            Path(tmp),
+            plan="plan",
+            tasks="- [ ] T01 task",
+            test_criteria="criteria",
+            manifest={"planning_options": {"required": True}},
+            omit={"spec.md"},
+        )
+
+        passed, evaluations = evaluate_plan_gate(root)
+        planning_checks = {
+            str(item["condition"]): item
+            for item in evaluations
+            if str(item["condition"]).startswith("planning_options.")
+        }
+
+        assert not passed
+        assert set(planning_checks) == {
+            "planning_options.artifact",
+            "planning_options.shape",
+            "planning_options.selection",
+            "planning_options.recommendation",
+            "planning_options.materiality",
+        }
+        assert planning_checks["planning_options.artifact"]["passed"] is False
+        assert planning_checks["planning_options.artifact"]["detail"] == "artifact_missing"
+
 def test_004_missing_tasks_fails():
     """tasks.md 누락 → G1 FAIL."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -287,8 +318,20 @@ def test_004_no_manifest_skips_constitution_check():
             test_criteria="# Test",
         )
         passed, evals = evaluate_plan_gate(root)
+        planning_checks = [
+            item for item in evals if item["condition"].startswith("planning_options.")
+        ]
+
         assert passed
         assert not any("constitution" in e["condition"] for e in evals)
+        assert [item["condition"] for item in planning_checks] == [
+            "planning_options.artifact",
+            "planning_options.shape",
+            "planning_options.selection",
+            "planning_options.recommendation",
+            "planning_options.materiality",
+        ]
+        assert all(item["passed"] for item in planning_checks)
 
 
 # ---------------------------------------------------------------------------
