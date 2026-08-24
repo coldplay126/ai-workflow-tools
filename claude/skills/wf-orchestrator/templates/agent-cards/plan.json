@@ -15,9 +15,9 @@
 
   "capabilities": {
     "file_access": true,
-    "file_write": false,
+    "file_write": true,
     "git_access": false,
-    "sandbox_modes": ["read-only"],
+    "sandbox_modes": ["workspace-write"],
     "execution_modes": ["inline", "delegated"],
     "dual_strategy": "generate_then_validate",
     "protocol_hint": { "recommended_mode": "critical", "reason": "설계 심층 분석에 최적" }

@@ -113,6 +113,8 @@ test-report.md의 prose는 `.workflow/artifacts/database-validation-evidence.jso
 대체하지 않는다. AWF는 DB driver, masking, replica provisioning을 구현하지 않고
 프로젝트 command가 만든 sanitized JSON을 검증할 뿐이다.
 
+Production primary is never a verify/test benchmark or executable-query target. Production provides only read-only schema metadata; data comes only from an explicitly approved replica, warehouse, or sanitized local dataset.
+
 ### 5. test-report.md 생성
 
 ```markdown
@@ -153,8 +155,8 @@ test-report.md의 prose는 `.workflow/artifacts/database-validation-evidence.jso
 - [ ] DB 신호 시 production schema와 local test evidence 통과 또는 유효한 waiver
 
 ```bash
-awf wf db-check --stage test --repo-root <repo-root> --json
-awf wf gate test --repo-root <repo-root> --result-file <test-result> --json
+awf wf db-check --stage test --repo-root . --json
+awf wf gate test --repo-root . --result-file .workflow/tmp/test-result.json --json
 ```
 **G6 — 수동 항목 처리:**
 수동 테스트 항목이 있는 경우:

@@ -172,14 +172,14 @@ The route is signal-gated: a workflow without a detected database change reports
 the enclosing gate can pass. The exact operator sequence is:
 
 ```bash
-awf wf db-check --stage plan --repo-root <repo-root> --json
-awf wf gate plan --repo-root <repo-root> --json
+awf wf db-check --stage plan --repo-root . --json
+awf wf gate plan --repo-root . --json
 
-awf wf db-check --stage verify --repo-root <repo-root> --json
-awf wf gate verify --repo-root <repo-root> --result-file <verify-result> --json
+awf wf db-check --stage verify --repo-root . --json
+awf wf gate verify --repo-root . --result-file .workflow/tmp/verify-result.json --json
 
-awf wf db-check --stage test --repo-root <repo-root> --json
-awf wf gate test --repo-root <repo-root> --result-file <test-result> --json
+awf wf db-check --stage test --repo-root . --json
+awf wf gate test --repo-root . --result-file .workflow/tmp/test-result.json --json
 ```
 
 | Stage | Required database conditions when signaled |
@@ -200,6 +200,8 @@ but cannot stand in for same-engine evidence. A project-specific replica sample
 requires explicit opt-in. raw primary rows are prohibited, and the test result
 must state that its rows are masked. A waiver applies only to the absence of a
 local test command and requires a decision reason, approver, and timestamp.
+
+The decision's optional top-level `local_data_test_waiver` is null or omitted by default. Only when `test_command` is absent may it be an object with nonempty `reason`, `approver`, and `timestamp`; the timestamp uses UTC ISO 8601. The waiver applies only to the local data test.
 
 The project schema command must return only current production metadata:
 
@@ -225,6 +227,8 @@ The project schema command must return only current production metadata:
 
 The metadata command is read-only and schema-only. It must not access rows or
 run executable work against the production primary.
+
+Production primary is never a verify/test benchmark or executable-query target. Production provides only read-only schema metadata; data comes only from an explicitly approved replica, warehouse, or sanitized local dataset.
 
 The CLI validates sanitized JSON supplied by project commands. It does not
 implement a database driver, masking, or replica provisioning.

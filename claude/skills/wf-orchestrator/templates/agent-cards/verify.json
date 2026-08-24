@@ -17,7 +17,7 @@
     "file_access": true,
     "file_write": false,
     "git_access": true,
-    "sandbox_modes": ["read-only"],
+    "sandbox_modes": ["workspace-write"],
     "execution_modes": ["inline", "delegated"],
     "dual_strategy": "parallel_evaluate",
     "protocol_hint": { "recommended_mode": "cross", "reason": "범위+아키텍처 교차 검증에 최적" }

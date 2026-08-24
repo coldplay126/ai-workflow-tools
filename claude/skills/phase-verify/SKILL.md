@@ -77,6 +77,8 @@ DuckDB는 profiling 또는 equivalence 분석에 사용할 수 있지만 same-en
 검증을 대신하지 않는다. DB driver, 복제본 생성, masking은 AWF가 구현하는 기능이
 아니며 project-provided command가 책임진다.
 
+Production primary is never a verify/test benchmark or executable-query target. Production provides only read-only schema metadata; data comes only from an explicitly approved replica, warehouse, or sanitized local dataset.
+
 ### 3. Spec 준수 검증 (spec-verifier 에이전트, fork context)
 
 spec.md의 각 requirement(FR-NNN)에 대해:
@@ -161,8 +163,8 @@ spec.md의 각 acceptance scenario에 대해:
 - [ ] DB 신호 시 production schema, equivalence, integrity, query plan, migration, rollback evidence 통과
 
 ```bash
-awf wf db-check --stage verify --repo-root <repo-root> --json
-awf wf gate verify --repo-root <repo-root> --result-file <verify-result> --json
+awf wf db-check --stage verify --repo-root . --json
+awf wf gate verify --repo-root . --result-file .workflow/tmp/verify-result.json --json
 ```
 **G5 통과 시:**
 - state.json: `phases.verify: completed`, `gates.G5.passed: true`, `currentPhase: "test"`

@@ -257,6 +257,8 @@ equivalence and integrity plan cannot be recommended or selected.
 DB 신호가 있으면 production schema는 mandatory다. manifest의
 `database_validation` profile은 프로젝트가 제공하는 schema/verify/test command
 계약이며, AWF가 DB driver를 제공하거나 data masking을 수행한다는 약속이 아니다.
+
+Production primary is never a verify/test benchmark or executable-query target. Production provides only read-only schema metadata; data comes only from an explicitly approved replica, warehouse, or sanitized local dataset.
 `awf wf db-check`가 검증·기록한
 `.workflow/artifacts/database-validation-evidence.json`만 gate evidence로
 사용한다. plan.md의 서술, command 출력 요약, agent finding은 그 evidence를
@@ -267,8 +269,8 @@ DB 신호가 있으면 production schema는 mandatory다. manifest의
 **반드시 아래 CLI 명령으로 검증합니다** (LLM 판단이 아닌 결정론적 Python 검증기 사용):
 
 ```bash
-awf wf db-check --stage plan --repo-root <repo-root> --json
-awf wf gate plan --repo-root <repo-root> --json
+awf wf db-check --stage plan --repo-root . --json
+awf wf gate plan --repo-root . --json
 ```
 
 이 명령은 `evaluate_plan_gate()`를 호출하여 다음을 자동 검증합니다:

@@ -10,6 +10,7 @@ import pytest
 
 from awf.cli import KNOWN_COMMANDS, build_parser
 from awf.core.config import AwfConfig
+from awf.core.db_validation import load_database_decision
 from awf.core.state import PHASE_GATE, PHASE_ORDER
 
 
@@ -1260,16 +1261,16 @@ def test_protected_index_entry_docs_define_supported_stage_zero_modes() -> None:
 
 DATABASE_GATE_COMMANDS = {
     "plan": (
-        "awf wf db-check --stage plan --repo-root <repo-root> --json",
-        "awf wf gate plan --repo-root <repo-root> --json",
+        "awf wf db-check --stage plan --repo-root . --json",
+        "awf wf gate plan --repo-root . --json",
     ),
     "verify": (
-        "awf wf db-check --stage verify --repo-root <repo-root> --json",
-        "awf wf gate verify --repo-root <repo-root> --result-file <verify-result> --json",
+        "awf wf db-check --stage verify --repo-root . --json",
+        "awf wf gate verify --repo-root . --result-file .workflow/tmp/verify-result.json --json",
     ),
     "test": (
-        "awf wf db-check --stage test --repo-root <repo-root> --json",
-        "awf wf gate test --repo-root <repo-root> --result-file <test-result> --json",
+        "awf wf db-check --stage test --repo-root . --json",
+        "awf wf gate test --repo-root . --result-file .workflow/tmp/test-result.json --json",
     ),
 }
 
@@ -1288,6 +1289,7 @@ def test_database_workflow_docs_define_evidence_and_safety_policy() -> None:
         )
         for command in commands:
             parser.parse_args(_argv_from_displayed_command(command))
+            assert not any(marker in command for marker in ("<", ">", "|", ";", "$"))
 
     reference_path = REPO_ROOT / "docs" / "reference" / "workflow-pipeline.md"
     reference_block = "```bash\n" + "\n\n".join(
@@ -1333,6 +1335,32 @@ def test_database_workflow_docs_define_evidence_and_safety_policy() -> None:
     )
     for field in required_schema_fields:
         assert field in reference, f"missing production-schema field: {field}"
+
+    primary_policy_paths = (*phase_skills.values(), reference_path, CLI_README)
+    primary_policy = (
+        "Production primary is never a verify/test benchmark or executable-query target.",
+        "read-only schema metadata",
+        "explicitly approved replica",
+        "warehouse",
+        "sanitized local",
+    )
+    for path in primary_policy_paths:
+        prose = path.read_text(encoding="utf-8")
+        for requirement in primary_policy:
+            assert requirement in prose, f"{path}: missing {requirement}"
+
+    operator_waiver_contract = (
+        "`local_data_test_waiver`",
+        "null or omitted",
+        "`reason`",
+        "`approver`",
+        "`timestamp`",
+        "UTC ISO 8601",
+    )
+    for path in (reference_path, CLI_README):
+        prose = path.read_text(encoding="utf-8")
+        for requirement in operator_waiver_contract:
+            assert requirement in prose, f"{path}: missing {requirement}"
 
 
 def test_database_planning_contract_compares_options_without_index_default() -> None:
@@ -1416,6 +1444,67 @@ def test_database_planning_contract_compares_options_without_index_default() -> 
     for field in waiver_contract:
         assert field in test_skill, f"phase-test: missing waiver field {field}"
 
+
+
+def test_documented_local_data_waiver_loads_through_canonical_decision_parser(
+    tmp_path: Path,
+) -> None:
+    candidates = [
+        {
+            "id": "maintain-current",
+            "kind": "maintain",
+            "applicable": True,
+            "unavailable_reason": None,
+            "summary": "Keep the current query and schema.",
+            "equivalence_plan": "Use the current result set as a baseline.",
+            "integrity_plan": "Verify current constraints.",
+            "normalization_assessment": "No model change.",
+            "denormalization_assessment": None,
+            "physical_design_assessment": None,
+            "read_write_cost": "Measure the production-shaped workload.",
+            "operational_risks": [],
+            "transition_risks": [],
+            "rollback_or_exit": "No change.",
+        },
+        {
+            "id": "rewrite-query",
+            "kind": "query_change",
+            "applicable": True,
+            "unavailable_reason": None,
+            "summary": "Rewrite the aggregation query.",
+            "equivalence_plan": "Compare result sets with the baseline.",
+            "integrity_plan": "Verify constraints before and after the query.",
+            "normalization_assessment": "No model change.",
+            "denormalization_assessment": None,
+            "physical_design_assessment": None,
+            "read_write_cost": "Measure latency on production-shaped data.",
+            "operational_risks": [],
+            "transition_risks": [],
+            "rollback_or_exit": "Restore the current query.",
+        },
+    ]
+    payload = {
+        "schema_version": 1,
+        "status": "selected",
+        "change_surfaces": ["query"],
+        "baseline_option_id": "maintain-current",
+        "recommended_option_id": "rewrite-query",
+        "selected_option_id": "rewrite-query",
+        "candidates": candidates,
+        "recommendation_rationale": "The rewrite preserves correctness at lower cost.",
+        "local_data_test_waiver": {
+            "reason": "No approved masked fixture is available.",
+            "approver": "database-owner",
+            "timestamp": "2026-08-24T00:00:00Z",
+        },
+    }
+    decision_path = tmp_path / ".workflow" / "artifacts" / "database-decision.json"
+    decision_path.parent.mkdir(parents=True)
+    decision_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    decision = load_database_decision(tmp_path)
+
+    assert decision.local_data_test_waiver == payload["local_data_test_waiver"]
 
 
 def test_database_risk_routing_requires_a_selected_decision() -> None:

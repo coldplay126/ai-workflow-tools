@@ -687,6 +687,71 @@ def test_database_cards_declare_typed_artifacts_and_mandatory_conditions() -> No
                 "required_when_database_signal": True,
             }
 
+    plan_capabilities = json.loads(
+        (AGENT_CARD_ROOT / "agent-cards" / "plan.json").read_text()
+    )["capabilities"]
+    assert plan_capabilities["file_write"] is True
+    assert plan_capabilities["sandbox_modes"] == ["workspace-write"]
+    for phase in ("verify", "test"):
+        capabilities = json.loads(
+            (AGENT_CARD_ROOT / "agent-cards" / f"{phase}.json").read_text()
+        )["capabilities"]
+        assert capabilities["file_write"] is False
+        assert capabilities["sandbox_modes"] == ["workspace-write"]
+
+    for agent in ("spec-writer.md", "spec-verifier.md", "happy-path-tester.md"):
+        source = (REPO_ROOT / "claude" / "agents" / agent).read_text(
+            encoding="utf-8"
+        )
+        assert "codex_sandbox: workspace-write" in source
+
+    cli_readme = (REPO_ROOT / "cli" / "README.md").read_text(encoding="utf-8")
+    assert "Plan runs with `file_write: true` and `workspace-write`" in cli_readme
+    assert (
+        "verify/test keep `file_write: false` but use `workspace-write`"
+        in cli_readme
+    )
+
+
+def test_database_card_schema_rejects_phase_specific_mutations() -> None:
+    cards = _load_agent_cards()
+    _assert_agent_cards_match_declared_schema(cards)
+
+    cards = _load_agent_cards()
+    del cards["plan"]["input"]["database"]
+    with pytest.raises(AssertionError):
+        _assert_agent_cards_match_declared_schema(cards)
+
+    cards = _load_agent_cards()
+    cards["verify"]["input"]["database"]["stage"] = "plan"
+    with pytest.raises(AssertionError):
+        _assert_agent_cards_match_declared_schema(cards)
+
+    cards = _load_agent_cards()
+    cards["test"]["gate"]["database_conditions"] = ["database.signal"]
+    with pytest.raises(AssertionError):
+        _assert_agent_cards_match_declared_schema(cards)
+
+    cards = _load_agent_cards()
+    evidence = next(
+        artifact
+        for artifact in cards["verify"]["output"]["artifacts"]
+        if artifact["key"] == "database_validation_evidence"
+    )
+    del evidence["required_when_database_signal"]
+    with pytest.raises(AssertionError):
+        _assert_agent_cards_match_declared_schema(cards)
+
+    cards = _load_agent_cards()
+    cards["plan"]["output"]["artifacts"][0]["unexpected"] = True
+    with pytest.raises(AssertionError):
+        _assert_agent_cards_match_declared_schema(cards)
+
+    cards = _load_agent_cards()
+    del cards["plan"]["output"]["artifacts"][0]["format"]
+    with pytest.raises(AssertionError):
+        _assert_agent_cards_match_declared_schema(cards)
+
 
 OUTCOME_TOKENS = {
     "analysis": ("allow", "dry_run_only"),

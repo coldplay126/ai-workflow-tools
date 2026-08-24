@@ -17,7 +17,7 @@
     "file_access": true,
     "file_write": false,
     "git_access": false,
-    "sandbox_modes": ["read-only"],
+    "sandbox_modes": ["workspace-write"],
     "execution_modes": ["inline", "delegated"],
     "protocol_hint": { "recommended_mode": "precise", "reason": "테스트 커버리지 정밀 분석에 최적" }
   },
