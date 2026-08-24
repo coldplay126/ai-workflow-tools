@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import errno
 import fcntl
 import hashlib
 import json
@@ -145,7 +146,19 @@ def _read_bounded_utf8(
         if not stat.S_ISREG(metadata.st_mode):
             return None, "unreadable"
         file_fd = os.open(parts[-1], file_flags, dir_fd=directory_fd)
-        raw = os.read(file_fd, _MAX_ARTIFACT_BYTES + 1)
+        raw = bytearray()
+        while len(raw) <= _MAX_ARTIFACT_BYTES:
+            try:
+                chunk = os.read(file_fd, _MAX_ARTIFACT_BYTES + 1 - len(raw))
+            except OSError as error:
+                if error.errno == errno.EINTR:
+                    continue
+                raise
+            if not chunk:
+                break
+            raw.extend(chunk)
+            if len(raw) > _MAX_ARTIFACT_BYTES:
+                return None, "oversize"
     except OSError:
         return None, "unreadable"
     finally:
@@ -1206,11 +1219,11 @@ def _validate_existing_stage_record(
         "verify": {"status", "checked_at", "schema", "verify"},
         "test": {"status", "checked_at", "schema", "test"},
     }[stage]
-    checked_at = _parse_utc_timestamp(record["checked_at"]) if isinstance(record, dict) else None
+    if not isinstance(record, dict) or set(record) != expected_fields:
+        raise DatabaseValidationError("evidence_invalid")
+    checked_at = _parse_utc_timestamp(record["checked_at"])
     if (
-        not isinstance(record, dict)
-        or set(record) != expected_fields
-        or record["status"] != "pass"
+        record["status"] != "pass"
         or checked_at is None
         or checked_at > _utc_now()
     ):

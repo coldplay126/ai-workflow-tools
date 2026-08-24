@@ -15,6 +15,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import awf.core.db_validation as db_validation
+
 from awf.core.db_validation import (
     DatabaseDecision,
     DatabaseSignal,
@@ -1593,12 +1595,15 @@ def test_unsafe_verify_output_preserves_prior_evidence_without_raw_stdout(tmp_pa
     ("stage", "mutation"),
     [
         ("plan", "status"),
+        ("plan", "missing_checked_at"),
         ("plan", "non_utc_checked_at"),
         ("plan", "stale_schema"),
         ("verify", "selected_option"),
+        ("verify", "missing_checked_at"),
         ("verify", "schema_hash"),
         ("test", "selected_option"),
         ("test", "unexpected_field"),
+        ("test", "missing_checked_at"),
     ],
 )
 def test_malformed_prior_stage_evidence_blocks_atomic_merge(
@@ -1618,7 +1623,9 @@ def test_malformed_prior_stage_evidence_blocks_atomic_merge(
     path = evidence_path(tmp_path)
     persisted = json.loads(path.read_text(encoding="utf-8"))
     record = persisted["stages"][stage]
-    if mutation == "status":
+    if mutation == "missing_checked_at":
+        del record["checked_at"]
+    elif mutation == "status":
         record["status"] = "waived"
     elif mutation == "non_utc_checked_at":
         record["checked_at"] = datetime.now(
@@ -1703,6 +1710,50 @@ def test_workflow_artifacts_reject_symlink_escape(
         assert not outside_evidence.exists()
     else:
         assert outside_evidence.read_bytes() == outside_evidence_before
+
+
+def test_bounded_reader_retries_eintr_and_accumulates_short_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_workflow_artifacts(tmp_path, concept="Update the database query")
+    real_read = db_validation.os.read
+    actions: list[object] = ["eintr", 3, 3, 3]
+
+    def short_read(file_descriptor: int, size: int) -> bytes:
+        if actions:
+            action = actions.pop(0)
+            if action == "eintr":
+                raise InterruptedError(errno.EINTR, "interrupted")
+            return real_read(file_descriptor, min(size, int(action)))
+        return real_read(file_descriptor, size)
+
+    monkeypatch.setattr(db_validation.os, "read", short_read)
+
+    signal = detect_database_signal(tmp_path)
+    assert signal.detected is True
+    assert "text:database" in signal.reasons
+
+
+def test_bounded_reader_detects_oversize_after_short_read_sequence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_workflow_artifacts(tmp_path)
+    real_read = db_validation.os.read
+    chunks = [b"x" * (64 * 1024), b"x" * (64 * 1024 + 1)]
+
+    def short_read(file_descriptor: int, size: int) -> bytes:
+        if chunks:
+            return chunks.pop(0)
+        return real_read(file_descriptor, size)
+
+    monkeypatch.setattr(db_validation.os, "read", short_read)
+
+    assert detect_database_signal(tmp_path) == DatabaseSignal(
+        detected=True,
+        reasons=("artifact_error:.workflow/concept.md:oversize",),
+    )
 
 
 def test_no_database_signal_is_not_applicable_without_profile_or_evidence(
