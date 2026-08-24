@@ -19,6 +19,8 @@ def write_workflow_artifacts(
     tasks: str = "",
     test_criteria: str = "",
     allowed_files: list[str] | None = None,
+    legacy_files: list[str] | None = None,
+    expanded_files: list[str] | None = None,
 ) -> None:
     workflow_dir = repo_root / ".workflow"
     artifacts_dir = workflow_dir / "artifacts"
@@ -31,8 +33,13 @@ def write_workflow_artifacts(
         "test-criteria.md": test_criteria,
     }.items():
         (artifacts_dir / name).write_text(content, encoding="utf-8")
+    allowed_payload = {"planned_files": allowed_files or []}
+    if legacy_files is not None:
+        allowed_payload["files"] = legacy_files
+    if expanded_files is not None:
+        allowed_payload["expanded_files"] = expanded_files
     (artifacts_dir / "allowed-files.json").write_text(
-        json.dumps({"planned_files": allowed_files or []}),
+        json.dumps(allowed_payload),
         encoding="utf-8",
     )
 
@@ -53,6 +60,38 @@ def test_database_signal_normalizes_korean_denormalization(tmp_path: Path) -> No
     assert signal == DatabaseSignal(
         detected=True,
         reasons=("text:denormalization",),
+    )
+
+
+def test_database_signal_ignores_standalone_db_token(tmp_path: Path) -> None:
+    write_workflow_artifacts(tmp_path, concept="Reduce by 3 dB")
+
+    assert detect_database_signal(tmp_path).detected is False
+
+
+def test_database_signal_detects_db_with_relational_context(tmp_path: Path) -> None:
+    write_workflow_artifacts(tmp_path, concept="Refresh DB schema")
+
+    assert "text:database" in detect_database_signal(tmp_path).reasons
+
+
+def test_database_signal_unions_expanded_and_legacy_allowed_files(tmp_path: Path) -> None:
+    write_workflow_artifacts(
+        tmp_path,
+        allowed_files=["src/index.ts"],
+        legacy_files=["src/models/fan_log.py"],
+        expanded_files=[
+            "src/database/migrations/001_add_index.sql",
+            "src/database/migrations/001_add_index.sql",
+        ],
+    )
+
+    assert detect_database_signal(tmp_path) == DatabaseSignal(
+        detected=True,
+        reasons=(
+            "path:src/database/migrations/001_add_index.sql",
+            "path:src/models/fan_log.py",
+        ),
     )
 
 

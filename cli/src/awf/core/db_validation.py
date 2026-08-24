@@ -37,7 +37,15 @@ _PATH_DIRECTORIES = {
 
 # Reasons use a canonical English term even when the source artifact uses Korean.
 _TEXT_SIGNAL_PATTERNS = (
-    ("database", re.compile(r"\b(?:database|db)\b|데이터베이스")),
+    (
+        "database",
+        re.compile(
+            r"\bdatabase\b|"
+            r"\bdb\b(?=\s+(?:schema|table|column|query|sql|index|migration|"
+            r"normalization|denormalization|erd|foreign\s+key|primary\s+key|"
+            r"unique\s+constraint|partition|warehouse|duckdb)\b)|데이터베이스"
+        ),
+    ),
     ("schema", re.compile(r"\bschema\b|스키마")),
     ("table", re.compile(r"\btable\b|테이블")),
     ("column", re.compile(r"\bcolumn\b|컬럼")),
@@ -91,16 +99,17 @@ def _normalized_allowed_paths(root: Path) -> Iterable[str]:
         return ()
     if not isinstance(payload, dict):
         return ()
-    planned_files = payload.get("planned_files")
-    if planned_files is None:
-        planned_files = payload.get("files")
-    if not isinstance(planned_files, list):
-        return ()
-    return tuple(
-        str(value).replace("\\", "/").lstrip("./").casefold()
-        for value in planned_files
-        if isinstance(value, str) and value.strip()
-    )
+    normalized_paths = set()
+    for key in ("planned_files", "files", "expanded_files"):
+        paths = payload.get(key)
+        if not isinstance(paths, list):
+            continue
+        normalized_paths.update(
+            str(value).replace("\\", "/").lstrip("./").casefold()
+            for value in paths
+            if isinstance(value, str) and value.strip()
+        )
+    return tuple(sorted(normalized_paths))
 
 
 def _is_database_path(path: str) -> bool:

@@ -8,8 +8,10 @@ Reference: docs/tests/workflow-and-multi-agent.md
 from __future__ import annotations
 
 import json
+import multiprocessing
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -64,6 +66,43 @@ def _write_workflow_state(repo_root: Path, state: dict) -> None:
         json.dumps(state, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def _write_concurrent_phase_update(
+    repo_root: str,
+    snapshot_ready: Any,
+    release_snapshot: Any,
+) -> None:
+    from awf.core.state import (
+        _workflow_state_file_lock,
+        load_workflow_state,
+        save_workflow_state_snapshot,
+    )
+
+    root = Path(repo_root)
+    state_path = root / ".workflow" / "state.json"
+    with _workflow_state_file_lock(state_path):
+        state = load_workflow_state(repo_root)
+        snapshot_ready.set()
+        if not release_snapshot.wait(timeout=10):
+            raise TimeoutError("timed out waiting to save concurrent state update")
+        state["phases"]["impl"] = {"status": "in_progress", "retries": 0}
+        state["history"].append(
+            {
+                "phase": "impl",
+                "action": "concurrent_started",
+                "timestamp": "2026-08-24T00:00:00+00:00",
+            }
+        )
+        save_workflow_state_snapshot(repo_root, state)
+
+
+def _promote_database_risk(
+    repo_root: str,
+    completed: Any,
+) -> None:
+    promote_database_change_to_high_risk(repo_root, ("text:query",))
+    completed.set()
 
 
 # ===========================================================================
@@ -662,6 +701,48 @@ def test_database_risk_manifest_default_is_additive_and_disabled():
         "max_schema_age_hours": 24,
         "allow_production_replica_sample": False,
     }
+
+
+def test_database_risk_serializes_concurrent_state_updates(tmp_path: Path):
+    """A DB escalation cannot overwrite an update holding the state file lock."""
+    state = _make_state("small")
+    _apply_policy_skips(state)
+    _write_workflow_state(tmp_path, state)
+
+    context = multiprocessing.get_context("spawn")
+    snapshot_ready = context.Event()
+    release_snapshot = context.Event()
+    promotion_completed = context.Event()
+    updater = context.Process(
+        target=_write_concurrent_phase_update,
+        args=(str(tmp_path), snapshot_ready, release_snapshot),
+    )
+    promoter = context.Process(
+        target=_promote_database_risk,
+        args=(str(tmp_path), promotion_completed),
+    )
+    updater.start()
+    promotion_started = False
+    try:
+        assert snapshot_ready.wait(timeout=5)
+        promoter.start()
+        promotion_started = True
+        assert not promotion_completed.wait(timeout=1)
+    finally:
+        release_snapshot.set()
+        updater.join(timeout=10)
+        if promotion_started:
+            promoter.join(timeout=10)
+
+    assert updater.exitcode == 0
+    assert promoter.exitcode == 0
+    persisted = json.loads(
+        (tmp_path / ".workflow" / "state.json").read_text(encoding="utf-8")
+    )
+    assert persisted["changeClass"] == "high_risk"
+    assert persisted["phases"]["impl"] == {"status": "in_progress", "retries": 0}
+    actions = {event["action"] for event in persisted["history"]}
+    assert {"concurrent_started", "database_risk_escalated"} <= actions
 
 
 # ===========================================================================

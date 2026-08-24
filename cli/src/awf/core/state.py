@@ -9,7 +9,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from json import JSONDecodeError
 from pathlib import Path
-from typing import Optional
+from typing import ContextManager, Optional
 
 from awf.core.paths import find_repo_root
 from awf.core.workflow_loop import (
@@ -26,6 +26,7 @@ from awf.core.workflow_prompt import (
     save_workflow_result,
 )
 from awf.core.workflow_status import summarize_workflow_state
+from awf.worktrees.locking import repository_lock
 
 # --- Risk-based routing per SKILL.md §Risk-Based Routing ---
 
@@ -79,6 +80,11 @@ def _workflow_state_lock(path: Path) -> threading.Lock:
             lock = threading.Lock()
             _WORKFLOW_STATE_LOCKS[key] = lock
         return lock
+
+
+def _workflow_state_file_lock(path: Path) -> ContextManager[None]:
+    """Serialize a workflow state's read-modify-write transaction across processes."""
+    return repository_lock(path.with_name(f"{path.name}.lock"))
 
 
 def _initial_skipped_gate_state(gate_id: str) -> dict:
@@ -575,7 +581,7 @@ def promote_database_change_to_high_risk(
     state_path = root / ".workflow" / "state.json"
     normalized_reasons = _normalized_database_reasons(reasons)
 
-    with _workflow_state_lock(state_path):
+    with _workflow_state_lock(state_path), _workflow_state_file_lock(state_path):
         state = load_workflow_state(str(root))
         changed = False
         previous_change_class = state.get("changeClass", "standard")
