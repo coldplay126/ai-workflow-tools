@@ -1102,6 +1102,35 @@ def test_test_evidence_rejects_failed_outcomes_without_overwrite(
     assert result.blockers == ("test_evidence_invalid",)
     assert evidence_path(tmp_path).read_bytes() == before
 
+@pytest.mark.parametrize(
+    "test_payload",
+    [
+        database_test_payload(selected_option_id="maintain-current"),
+        database_test_payload(schema_hash="b" * 64),
+    ],
+    ids=["selected-option-id", "production-schema-hash"],
+)
+def test_test_evidence_rejects_identity_mismatches_without_overwrite(
+    tmp_path: Path,
+    test_payload: dict[str, object],
+) -> None:
+    prepare_database_workflow(
+        tmp_path,
+        verify_command=database_command(verify_evidence()),
+        test_command=database_command(test_payload),
+    )
+    assert run_database_check(tmp_path, "plan").status == "pass"
+    assert run_database_check(tmp_path, "verify").status == "pass"
+    before = evidence_path(tmp_path).read_bytes()
+
+    result = run_database_check(tmp_path, "test")
+
+    assert result.status == "fail"
+    assert result.blockers == ("test_evidence_invalid",)
+    assert evidence_path(tmp_path).read_bytes() == before
+
+
+
 
 
 
