@@ -1397,6 +1397,25 @@ def test_database_planning_contract_compares_options_without_index_default() -> 
     assert "tools: Read, Grep, Glob, Edit, Write, Bash, AskUserQuestion" in writer
     assert "material" in writer
 
+    waiver_contract = (
+        "`local_data_test_waiver`",
+        "null or omitted",
+        "`reason`",
+        "`approver`",
+        "`timestamp`",
+        "UTC ISO 8601",
+    )
+    for path in contract_paths:
+        prose = path.read_text(encoding="utf-8")
+        for field in waiver_contract:
+            assert field in prose, f"{path}: missing waiver field {field}"
+
+    test_skill = (
+        REPO_ROOT / "claude" / "skills" / "phase-test" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    for field in waiver_contract:
+        assert field in test_skill, f"phase-test: missing waiver field {field}"
+
 
 
 def test_database_risk_routing_requires_a_selected_decision() -> None:

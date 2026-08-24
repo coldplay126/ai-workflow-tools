@@ -242,6 +242,11 @@ tasks.md, plan.md, allowed-files.json에 DB 변경 신호가 있으면
 - index 변경은 명시적으로 선택된 physical-design 후보여야 한다. planner가 근거 없이
   index를 추가하거나 선택하지 않는다.
 
+`local_data_test_waiver`는 decision의 optional top-level field다. 기본값은
+null or omitted다. `test_command`가 없고 waiver를 선택할 때만 nonempty
+`reason`, `approver`, `timestamp`를 가진 object를 기록한다. `timestamp`는 UTC ISO 8601 형식이어야 하며,
+waiver는 local data test만 면제한다.
+
 Correctness, equivalence, and integrity are hard gates. A candidate without an
 equivalence and integrity plan cannot be recommended or selected.
 

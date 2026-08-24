@@ -103,9 +103,12 @@ equivalence 분석용 보조 환경이다. DuckDB 결과만으로 same-engine �
 
 raw primary rows는 허용하지 않는다. project-specific approved replica sample은
 `allow_production_replica_sample: true`가 있을 때만 가능하고, evidence는 masked
-data와 `raw_production_rows: false`를 보여야 한다. local test command가 없는
-경우에는 decision artifact의 reason, approver, timestamp가 있는 waiver만 사용할 수
-있다. waiver는 production schema 또는 verify evidence를 면제하지 않는다.
+data와 `raw_production_rows: false`를 보여야 한다. `database-decision.json`의
+optional top-level `local_data_test_waiver`는 null or omitted가 기본이다.
+`test_command`가 없고 waiver를 선택할 때만 nonempty `reason`, `approver`,
+`timestamp`를 가진 object를 기록하며 `timestamp`는 UTC ISO 8601 형식이다.
+waiver는 local data test만 면제하고 production schema 또는 verify evidence를
+면제하지 않는다.
 test-report.md의 prose는 `.workflow/artifacts/database-validation-evidence.json`을
 대체하지 않는다. AWF는 DB driver, masking, replica provisioning을 구현하지 않고
 프로젝트 command가 만든 sanitized JSON을 검증할 뿐이다.

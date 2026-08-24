@@ -38,6 +38,11 @@ surface에서는 selected candidate가 비워 둘 수 없다. `denormalize`에�
 denormalize 중 실제 변경 surface만 기록한다. index는 명시적으로 근거를 갖춘
 physical-design 선택일 때만 포함한다.
 
+`local_data_test_waiver`는 decision의 optional top-level field다. 기본값은
+null or omitted다. `test_command`가 없고 waiver를 선택할 때만 nonempty
+`reason`, `approver`, `timestamp`를 가진 object를 기록한다. `timestamp`는 UTC ISO 8601 형식이어야 하며,
+waiver는 local data test만 면제한다.
+
 production schema는 DB signal에서 mandatory이며
 `.workflow/artifacts/database-validation-evidence.json`은 `awf wf db-check`가
 검증한 결과만 참조한다. Prose is not a substitute for machine-validated database
