@@ -1168,12 +1168,19 @@ def run_wf_next(args: argparse.Namespace) -> int:
             if isinstance(normalized_result, dict)
             else None
         )
-        is_user_decision_escape = (
-            isinstance(escape, dict)
+        planning_guidance: tuple[str, ...] | None = None
+        if (
+            phase == "plan"
+            and isinstance(escape, dict)
             and normalized_result.get("status") == "escaped"
+            and escape.get("reason") == "decision_selection_required"
             and escape.get("recommended_action") == "user_decision"
-        )
-        if result.stdout and not is_user_decision_escape:
+        ):
+            candidate_guidance = _planning_option_selection_guidance(repo_root)
+            if candidate_guidance != (_PLANNING_OPTION_SELECTION_UNAVAILABLE,):
+                planning_guidance = candidate_guidance
+        is_planning_option_selection_escape = planning_guidance is not None
+        if result.stdout and not is_planning_option_selection_escape:
             try:
                 parsed = json.loads(result.stdout)
                 conclusion = parsed.get("result", parsed).get("conclusion", parsed.get("conclusion", ""))
@@ -1196,7 +1203,7 @@ def run_wf_next(args: argparse.Namespace) -> int:
                     print(f"  발견: 이슈 없음", file=sys.stderr)
             except (json.JSONDecodeError, TypeError, AttributeError):
                 pass
-        if result.stderr and not is_user_decision_escape:
+        if result.stderr and not is_planning_option_selection_escape:
             print(result.stderr.rstrip(), file=sys.stderr)
             hint = maybe_doctor_hint(candidate, result.stderr)
             if hint:
@@ -1204,14 +1211,14 @@ def run_wf_next(args: argparse.Namespace) -> int:
         if normalized_result is not None and normalized_result.get("status") != "completed":
             worker_status = str(normalized_result.get("status", "failed"))
             print(f"worker_status: {worker_status}", file=sys.stderr)
-            if isinstance(escape, dict) and not is_user_decision_escape:
+            if isinstance(escape, dict) and not is_planning_option_selection_escape:
                 summary = str(escape.get("summary", "") or "").strip()
                 reason = str(escape.get("reason", "") or "").strip()
                 if reason:
                     print(f"escape_reason: {reason}", file=sys.stderr)
                 if summary:
                     print(f"escape_summary: {summary}", file=sys.stderr)
-            if is_user_decision_escape:
+            if is_planning_option_selection_escape:
                 workflow_escape = {
                     "reason": "user_decision",
                     "recommended_action": "user_decision",
@@ -1282,8 +1289,11 @@ def run_wf_next(args: argparse.Namespace) -> int:
                         "next_step: inspect workflow history before resetting or restarting",
                         file=sys.stderr,
                     )
-                elif decision == "user_decision":
-                    for line in _planning_option_selection_guidance(repo_root):
+                elif (
+                    decision == "user_decision"
+                    and planning_guidance is not None
+                ):
+                    for line in planning_guidance:
                         print(line, file=sys.stderr)
                 else:
                     print(

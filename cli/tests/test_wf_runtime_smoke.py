@@ -5,6 +5,8 @@ import json
 import shlex
 import subprocess
 
+import pytest
+
 from fixture_support import (
     REVIEW_RESULT,
     VERIFY_RESULT,
@@ -649,3 +651,72 @@ def test_wf_next_plan_user_decision_escape_prints_safe_selection_commands(
     assert state["phases"]["plan"]["escapeSummary"] == ""
     assert state["loop"]["lastEscape"]["summary"] == ""
     assert "Worker summary" not in json.dumps(state)
+
+
+@pytest.mark.parametrize(
+    ("phase", "reason"),
+    (
+        ("review", "missing_input"),
+        ("verify", "unsafe_change"),
+        ("plan", "missing_input"),
+    ),
+)
+def test_wf_next_non_selection_user_decision_keeps_generic_escape(
+    tmp_path: Path,
+    phase: str,
+    reason: str,
+) -> None:
+    repo_root = tmp_path / "repo"
+    prepare_workflow_repo(repo_root)
+    initialized = initialize_workflow_fixture(
+        repo_root,
+        "Fixture runtime smoke concept for generic user decision handling",
+    )
+    _assert_success(initialized)
+    if phase != "plan":
+        mark_workflow_prerequisites_passed(repo_root)
+
+    summary = f"Generic {phase} escape summary remains visible."
+    escaped_result = repo_root / f"escaped-{phase}.json"
+    escaped_result.write_text(
+        json.dumps(
+            {
+                "status": "escaped",
+                "phase": phase,
+                "provider": "fixture",
+                "result": {},
+                "escape": {
+                    "severity": "blocking",
+                    "reason": reason,
+                    "summary": summary,
+                    "recommended_action": "user_decision",
+                },
+                "meta": {"format_version": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    escaped = run_awf(
+        repo_root,
+        "wf",
+        "next",
+        "--phase",
+        phase,
+        "--provider",
+        "fixture",
+        "--mode",
+        "solo",
+        "--auto-apply",
+        "--yolo",
+        extra_env={"AWF_FIXTURE_RESULT_FILE": str(escaped_result)},
+    )
+
+    assert escaped.returncode == 5
+    assert f"escape_summary: {summary}" in escaped.stderr
+    assert "next_step: review wf status and decide whether to replan, continue, or abort" in escaped.stderr
+    assert "planning option selection is unavailable" not in escaped.stderr
+    assert "awf wf select-option" not in escaped.stderr
+    state = _workflow_state(repo_root)
+    assert state["phases"][phase]["escapeSummary"] == summary
+    assert state["loop"]["lastEscape"]["summary"] == summary
