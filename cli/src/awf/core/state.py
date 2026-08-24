@@ -7,6 +7,7 @@ import secrets
 import shutil
 import stat
 import subprocess
+import uuid
 import threading
 from contextlib import contextmanager
 from copy import deepcopy
@@ -258,10 +259,21 @@ def _same_database_risk_event(left: dict, right: dict) -> bool:
     )
 
 
+def _same_workflow_generation(state: dict, current_state: dict) -> bool:
+    generation = state.get("generation")
+    current_generation = current_state.get("generation")
+    if isinstance(generation, str) and generation and isinstance(current_generation, str) and current_generation:
+        return generation == current_generation
+    if generation is not None or current_generation is not None:
+        return False
+    workflow_id = state.get("id")
+    return isinstance(workflow_id, str) and workflow_id == current_state.get("id")
+
+
 def _merge_database_risk_facts(state: dict, current_state: dict) -> None:
     """Keep DB escalation facts when saving a state loaded before promotion."""
     current_events = _database_risk_events(current_state)
-    if not current_events:
+    if not current_events or not _same_workflow_generation(state, current_state):
         return
 
     state["changeClass"] = "high_risk"
@@ -530,6 +542,7 @@ def _initial_workflow_state(root: Path, concept: str) -> dict:
     workflow_id = f"{datetime.now().strftime('%Y-%m-%d')}-{_slugify_concept(concept)}"
     return {
         "id": workflow_id,
+        "generation": uuid.uuid4().hex,
         "repo": root.name,
         "branch": _detect_current_branch(root),
         "currentPhase": "plan",

@@ -28,7 +28,10 @@ from awf.core.state import (
     apply_gate_result,
     detect_change_class,
     get_risk_investment,
+    initialize_workflow,
     promote_database_change_to_high_risk,
+    reset_workflow,
+    save_workflow_state_snapshot,
     resolve_next_phase,
 )
 from awf.core.workflow_prompt import _validate_preconditions, is_hil_phase
@@ -694,6 +697,74 @@ def test_database_risk_escalation_history_is_idempotent(tmp_path: Path):
     assert second_events == first_events
 
 
+def _escalated_initialized_workflow(root: Path) -> dict:
+    (root / ".awf.toml").write_text("", encoding="utf-8")
+    state = initialize_workflow(str(root), "database query")
+    _apply_policy_skips(state)
+    _write_workflow_state(root, state)
+    return promote_database_change_to_high_risk(root, ("text:database",))
+
+
+def _assert_fresh_non_database_workflow(state: dict, old_generation: str) -> None:
+    assert state["generation"] != old_generation
+    assert state["changeClass"] == "small"
+    assert not [
+        event
+        for event in state["history"]
+        if event["action"] == "database_risk_escalated"
+    ]
+    for phase in ("review", "approve", "verify"):
+        assert state["phases"][phase] == {"status": "pending", "retries": 0}
+    assert state["gates"]["G2"] == {
+        "passed": None,
+        "provider": None,
+        "provider_status": None,
+    }
+    assert state["gates"]["G3"] == {"passed": None, "scope_hash": None}
+    assert state["gates"]["G5"] == {
+        "passed": None,
+        "provider": None,
+        "provider_status": None,
+    }
+
+
+def test_database_risk_initialize_force_starts_new_generation(tmp_path: Path):
+    escalated = _escalated_initialized_workflow(tmp_path)
+
+    initialized = initialize_workflow(str(tmp_path), "button color", force=True)
+
+    _assert_fresh_non_database_workflow(initialized, escalated["generation"])
+
+
+def test_database_risk_reset_starts_new_generation(tmp_path: Path):
+    escalated = _escalated_initialized_workflow(tmp_path)
+
+    reset = reset_workflow(str(tmp_path), concept="button color")
+
+    _assert_fresh_non_database_workflow(reset, escalated["generation"])
+
+
+def test_database_risk_does_not_merge_when_only_one_state_has_generation(
+    tmp_path: Path,
+):
+    escalated = _escalated_initialized_workflow(tmp_path)
+    legacy_state = _make_state("small")
+    legacy_state["id"] = escalated["id"]
+    _apply_policy_skips(legacy_state)
+
+    save_workflow_state_snapshot(str(tmp_path), legacy_state)
+    saved = json.loads(
+        (tmp_path / ".workflow" / "state.json").read_text(encoding="utf-8")
+    )
+
+    assert saved["changeClass"] == "small"
+    assert not [
+        event
+        for event in saved["history"]
+        if event["action"] == "database_risk_escalated"
+    ]
+
+
 def test_database_risk_manifest_default_is_additive_and_disabled():
     """New repositories opt out until they configure database validation."""
     assert DEFAULT_MANIFEST["database_validation"] == {
@@ -710,6 +781,7 @@ def test_database_risk_manifest_default_is_additive_and_disabled():
 def test_database_risk_preserves_stale_production_state_update(tmp_path: Path):
     """A stale apply result cannot erase database high-risk facts."""
     state = _make_state("small")
+    state["generation"] = "same-generation"
     _apply_policy_skips(state)
     _write_workflow_state(tmp_path, state)
 
