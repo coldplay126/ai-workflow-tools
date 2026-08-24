@@ -55,9 +55,10 @@ null or omitted다. `test_command`가 없고 waiver를 선택할 때만 nonempty
 `reason`, `approver`, `timestamp`를 가진 object를 기록한다. `timestamp`는 UTC ISO 8601 형식이어야 하며,
 waiver는 local data test만 면제한다.
 
-index를 근거 없이 추가하거나 선택하지 않는다. 선택할 수 있는 후보가 요구사항과
-프로젝트 관례만으로 구분되지 않는 material 차이가 있을 때만 AskUserQuestion을
-사용한다. 표기나 이미 확정된 제약을 확인하는 질문은 허용되지 않는다.
+An index surface requires an applicable `physical_design` candidate. Its exact
+assessment makes the index a comparison option; the selected option may be any
+applicable candidate. AskUserQuestion is allowed only when requirements and
+project conventions cannot distinguish materially different candidates.
 
 DB signal이 있으면 production schema evidence가 mandatory다.
 `.workflow/artifacts/database-validation-evidence.json`은 `awf wf db-check`가

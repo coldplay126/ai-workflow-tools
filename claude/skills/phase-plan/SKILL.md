@@ -239,8 +239,10 @@ tasks.md, plan.md, allowed-files.json에 DB 변경 신호가 있으면
   `build_or_lock`, `rollback`을 가진 object이고 다른 kind에서는 null이다.
 - `change_surfaces`는 필요한 것만 `query`, `index`, `column`, `constraint`,
   `erd`, `normalize`, `denormalize`로 기록한다.
-- index 변경은 명시적으로 선택된 physical-design 후보여야 한다. planner가 근거 없이
-  index를 추가하거나 선택하지 않는다.
+- An index surface requires an applicable `physical_design` candidate. Its exact
+  assessment makes the index a comparison option; the selected option may be any
+  applicable `maintain`, `query_change`, `physical_design`, `normalize`, or
+  `denormalize` candidate. The planner never selects an index automatically.
 
 `local_data_test_waiver`는 decision의 optional top-level field다. 기본값은
 null or omitted다. `test_command`가 없고 waiver를 선택할 때만 nonempty

@@ -35,8 +35,8 @@ surface에서는 selected candidate가 비워 둘 수 없다. `denormalize`에�
 `physical_design`에는 `physical_design_assessment` object가 필요하고 field는
 `read_benefit`, `write_amplification`, `storage`, `build_or_lock`, `rollback`이다.
 다른 kind는 null을 쓴다. query, index, column, constraint, ERD, normalize,
-denormalize 중 실제 변경 surface만 기록한다. index는 명시적으로 근거를 갖춘
-physical-design 선택일 때만 포함한다.
+denormalize 중 실제 변경 surface만 기록한다. An index surface requires an applicable `physical_design` candidate. Its assessment is compared with the
+other applicable candidates; it does not force the selected option.
 
 `local_data_test_waiver`는 decision의 optional top-level field다. 기본값은
 null or omitted다. `test_command`가 없고 waiver를 선택할 때만 nonempty

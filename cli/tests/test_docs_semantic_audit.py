@@ -10,7 +10,7 @@ import pytest
 
 from awf.cli import KNOWN_COMMANDS, build_parser
 from awf.core.config import AwfConfig
-from awf.core.db_validation import load_database_decision
+from awf.core.db_validation import DatabaseValidationError, load_database_decision
 from awf.core.state import PHASE_GATE, PHASE_ORDER
 
 
@@ -1408,7 +1408,7 @@ def test_database_planning_contract_compares_options_without_index_default() -> 
         "`normalize`",
         "`denormalize`",
         "hard gate",
-        "index 변경은 명시적으로 선택된 physical-design 후보여야 한다.",
+        "An index surface requires an applicable `physical_design` candidate.",
     )
     for requirement in required_contract:
         assert requirement in plan_skill, f"missing planning requirement: {requirement}"
@@ -1446,6 +1446,10 @@ def test_database_planning_contract_compares_options_without_index_default() -> 
         prose = path.read_text(encoding="utf-8")
         for field in candidate_fields:
             assert field in prose, f"{path}: missing candidate field {field}"
+        assert (
+            "An index surface requires an applicable `physical_design` candidate."
+            in prose
+        )
 
     writer = (REPO_ROOT / "claude" / "agents" / "spec-writer.md").read_text(
         encoding="utf-8"
@@ -1533,6 +1537,85 @@ def test_documented_local_data_waiver_loads_through_canonical_decision_parser(
     decision = load_database_decision(tmp_path)
 
     assert decision.local_data_test_waiver == payload["local_data_test_waiver"]
+
+
+def test_index_surface_compares_physical_design_without_selecting_it(
+    tmp_path: Path,
+) -> None:
+    baseline = {
+        "id": "maintain-current",
+        "kind": "maintain",
+        "applicable": True,
+        "unavailable_reason": None,
+        "summary": "Keep the current query and schema.",
+        "equivalence_plan": "Use the current result set as a baseline.",
+        "integrity_plan": "Verify current constraints.",
+        "normalization_assessment": "No model change.",
+        "denormalization_assessment": None,
+        "physical_design_assessment": None,
+        "read_write_cost": "Measure the production-shaped workload.",
+        "operational_risks": [],
+        "transition_risks": [],
+        "rollback_or_exit": "No change.",
+    }
+    query = {
+        "id": "rewrite-query",
+        "kind": "query_change",
+        "applicable": True,
+        "unavailable_reason": None,
+        "summary": "Rewrite the aggregation query.",
+        "equivalence_plan": "Compare result sets with the baseline.",
+        "integrity_plan": "Verify constraints before and after the query.",
+        "normalization_assessment": "No model change.",
+        "denormalization_assessment": None,
+        "physical_design_assessment": None,
+        "read_write_cost": "Measure latency on production-shaped data.",
+        "operational_risks": [],
+        "transition_risks": [],
+        "rollback_or_exit": "Restore the current query.",
+    }
+    physical_design = {
+        "id": "add-covering-index",
+        "kind": "physical_design",
+        "applicable": True,
+        "unavailable_reason": None,
+        "summary": "Add a covering index for the current query.",
+        "equivalence_plan": "Compare result sets with the baseline.",
+        "integrity_plan": "Verify constraints before and after the index build.",
+        "normalization_assessment": "No model change.",
+        "denormalization_assessment": None,
+        "physical_design_assessment": {
+            "read_benefit": "Avoid a full scan.",
+            "write_amplification": "Measure insert overhead.",
+            "storage": "Measure index size.",
+            "build_or_lock": "Use the engine's online build path.",
+            "rollback": "Drop the index.",
+        },
+        "read_write_cost": "Measure read and write cost.",
+        "operational_risks": [],
+        "transition_risks": [],
+        "rollback_or_exit": "Drop the index.",
+    }
+    payload = {
+        "schema_version": 1,
+        "status": "selected",
+        "change_surfaces": ["index"],
+        "baseline_option_id": "maintain-current",
+        "recommended_option_id": "rewrite-query",
+        "selected_option_id": "rewrite-query",
+        "candidates": [baseline, query, physical_design],
+        "recommendation_rationale": "The query rewrite meets the workload budget.",
+    }
+    decision_path = tmp_path / ".workflow" / "artifacts" / "database-decision.json"
+    decision_path.parent.mkdir(parents=True)
+    decision_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert load_database_decision(tmp_path).selected_option_id == "rewrite-query"
+
+    payload["candidates"] = [baseline, query]
+    decision_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(DatabaseValidationError):
+        load_database_decision(tmp_path)
 
 
 def test_database_risk_routing_requires_a_selected_decision() -> None:

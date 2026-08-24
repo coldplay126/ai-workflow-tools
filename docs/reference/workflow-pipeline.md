@@ -200,6 +200,10 @@ integrity plans, operational and transition risk, read/write cost, and rollback
 or exit. The decision names only the relevant change surfaces: query, index,
 column, constraint, ERD, normalize, or denormalize.
 
+An index surface requires an applicable `physical_design` candidate with its
+full assessment. It is a comparison option, not a default selection: the
+selected option may be any applicable candidate after the comparison.
+
 Production schema evidence is mandatory. Use a same-engine local environment
 for DDL and planner work; DuckDB may support profiling or equivalence analysis
 but cannot stand in for same-engine evidence. A project-specific replica sample
