@@ -17,6 +17,7 @@ from awf.core.db_validation import (
     DATABASE_CHECK_STATUSES,
     DatabaseCheckResult,
     DatabaseValidationError,
+    evaluate_database_gate,
     is_database_check_evidence_hash,
     is_database_check_reason,
     run_database_check,
@@ -372,6 +373,26 @@ def run_wf_db_check(args: argparse.Namespace) -> int:
     except Exception:
         _emit_database_check_failure(stage, as_json=as_json, blocker="operational_error")
         return 2
+
+def _ensure_database_evidence_before_apply(root: Path, phase: str) -> None:
+    """Materialize stale verify/test evidence without blocking worker-report apply."""
+    if phase not in {"verify", "test"}:
+        return
+
+    try:
+        evaluations = evaluate_database_gate(root, phase)
+    except Exception:
+        evaluations = []
+    if evaluations and all(
+        isinstance(evaluation, dict) and evaluation.get("passed") is True
+        for evaluation in evaluations
+    ):
+        return
+
+    try:
+        run_database_check(root, phase)
+    except Exception:
+        pass
 
 
 _SKIP_PHASES = {"small": ["review", "approve", "verify"]}
@@ -1310,6 +1331,7 @@ def run_wf_next(args: argparse.Namespace) -> int:
                     "selection_summary": str(synthesis.get("selection_summary", "") or ""),
                 }
             has_synthesis = secondary_result_path is not None
+            _ensure_database_evidence_before_apply(resolve_repo_root(args.repo_root), phase)
             artifact_path, gate_passed = apply_workflow_result(
                 args.repo_root,
                 phase,

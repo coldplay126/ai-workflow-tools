@@ -1,6 +1,7 @@
 """Focused CLI contract tests for ``awf wf db-check``."""
 from __future__ import annotations
 
+import argparse
 import io
 import json
 import os
@@ -14,8 +15,16 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import awf.commands.wf as wf_commands
+from awf.commands import wf_apply
 from awf.cli import build_parser, main
 from awf.core.db_validation import DatabaseCheckResult
+from fixture_support import (
+    VERIFY_RESULT,
+    initialize_workflow_fixture,
+    mark_workflow_prerequisites_passed,
+    prepare_workflow_repo,
+)
+
 
 
 def capture_main(argv: list[str]) -> tuple[int, str, str]:
@@ -25,6 +34,261 @@ def capture_main(argv: list[str]) -> tuple[int, str, str]:
     with redirect_stdout(stdout), redirect_stderr(stderr):
         return_code = main(argv)
     return return_code, stdout.getvalue(), stderr.getvalue()
+
+def test_database_evidence_bridge_runs_only_when_gate_is_not_current(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        wf_commands,
+        "evaluate_database_gate",
+        lambda root, stage: [{"passed": False, "status": "fail"}],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        wf_commands,
+        "run_database_check",
+        lambda root, stage: calls.append((str(root), stage)),
+    )
+
+    wf_commands._ensure_database_evidence_before_apply(tmp_path, "verify")
+
+    assert calls == [(str(tmp_path), "verify")]
+
+
+def test_database_evidence_bridge_skips_current_or_not_applicable_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        wf_commands,
+        "evaluate_database_gate",
+        lambda root, stage: [{"passed": True, "status": "not_applicable"}],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        wf_commands,
+        "run_database_check",
+        lambda root, stage: pytest.fail("current evidence must not rerun commands"),
+    )
+
+    wf_commands._ensure_database_evidence_before_apply(tmp_path, "test")
+
+@pytest.mark.parametrize("failure", ["gate", "command"])
+def test_database_evidence_bridge_suppresses_operational_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    if failure == "gate":
+        monkeypatch.setattr(
+            wf_commands,
+            "evaluate_database_gate",
+            lambda root, stage: (_ for _ in ()).throw(
+                RuntimeError("RAW_COMMAND_OUTPUT DATABASE_URL=postgres://secret@example.test")
+            ),
+        )
+        monkeypatch.setattr(
+            wf_commands,
+            "run_database_check",
+            lambda root, stage: DatabaseCheckResult(
+                stage=stage,
+                status="fail",
+                evidence_path=None,
+                evidence_hash=None,
+                signal_reasons=("text:database",),
+                blockers=("profile_disabled",),
+            ),
+        )
+    else:
+        monkeypatch.setattr(
+            wf_commands,
+            "evaluate_database_gate",
+            lambda root, stage: [{"passed": False, "status": "fail"}],
+        )
+        monkeypatch.setattr(
+            wf_commands,
+            "run_database_check",
+            lambda root, stage: (_ for _ in ()).throw(
+                RuntimeError("RAW_COMMAND_OUTPUT DATABASE_URL=postgres://secret@example.test")
+            ),
+        )
+
+    wf_commands._ensure_database_evidence_before_apply(tmp_path, "verify")
+
+
+@pytest.mark.parametrize("phase", ["verify", "test"])
+def test_apply_result_continues_after_database_bridge_error_without_leak(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    _write_state(tmp_path)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        wf_apply,
+        "_ensure_database_evidence_before_apply",
+        lambda root, stage: (_ for _ in ()).throw(
+            RuntimeError("RAW_COMMAND_OUTPUT DATABASE_URL=postgres://secret@example.test")
+        ),
+    )
+    monkeypatch.setattr(
+        wf_apply,
+        "apply_workflow_result",
+        lambda root, stage, result_file: (
+            calls.append(f"apply:{stage}") or (tmp_path / f"{stage}-report.md", False)
+        ),
+    )
+
+    return_code = wf_apply.run_wf_apply_result(
+        argparse.Namespace(
+            repo_root=str(tmp_path),
+            phase=phase,
+            result_file=str(tmp_path / "worker-result.json"),
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert return_code == 3
+    assert calls == [f"apply:{phase}"]
+    assert "RAW_COMMAND_OUTPUT" not in captured.out
+    assert "postgres://secret" not in captured.out
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize("phase", ["verify", "test"])
+def test_apply_result_ensures_database_evidence_before_applying_worker_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    _write_state(tmp_path)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        wf_apply,
+        "_ensure_database_evidence_before_apply",
+        lambda root, stage: calls.append(f"ensure:{stage}"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        wf_apply,
+        "apply_workflow_result",
+        lambda root, stage, result_file: (
+            calls.append(f"apply:{stage}") or (tmp_path / f"{stage}-report.md", False)
+        ),
+    )
+    args = argparse.Namespace(
+        repo_root=str(tmp_path),
+        phase=phase,
+        result_file=str(tmp_path / "worker-result.json"),
+    )
+
+    return_code = wf_apply.run_wf_apply_result(args)
+
+    assert return_code == 3
+    assert calls == [f"ensure:{phase}", f"apply:{phase}"]
+
+
+def test_wf_next_auto_apply_ensures_database_evidence_before_gate_apply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = tmp_path / "repo"
+    prepare_workflow_repo(repo_root, result_file=VERIFY_RESULT)
+    assert initialize_workflow_fixture(repo_root, "Fixture verify workflow").returncode == 0
+    mark_workflow_prerequisites_passed(repo_root)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        wf_commands,
+        "_ensure_database_evidence_before_apply",
+        lambda root, phase: calls.append(f"ensure:{phase}"),
+    )
+    monkeypatch.setattr(
+        wf_commands,
+        "apply_workflow_result",
+        lambda root, phase, result_path, **kwargs: (
+            calls.append(f"apply:{phase}") or (repo_root / "verification-report.md", False)
+        ),
+    )
+    args = build_parser().parse_args(
+        [
+            "wf",
+            "next",
+            "--phase",
+            "verify",
+            "--provider",
+            "fixture",
+            "--non-interactive",
+            "--yolo",
+            "--repo-root",
+            str(repo_root),
+        ]
+    )
+
+    return_code = wf_commands.run_wf_next(args)
+
+    assert return_code == 3
+    assert calls == ["ensure:verify", "apply:verify"]
+
+
+def test_wf_next_auto_apply_continues_when_database_check_errors(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = tmp_path / "repo"
+    prepare_workflow_repo(repo_root, result_file=VERIFY_RESULT)
+    assert initialize_workflow_fixture(repo_root, "Fixture verify workflow").returncode == 0
+    mark_workflow_prerequisites_passed(repo_root)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        wf_commands,
+        "evaluate_database_gate",
+        lambda root, phase: [{"passed": False, "status": "fail"}],
+    )
+    monkeypatch.setattr(
+        wf_commands,
+        "run_database_check",
+        lambda root, phase: (
+            calls.append(f"db:{phase}")
+            or (_ for _ in ()).throw(
+                RuntimeError("RAW_COMMAND_OUTPUT DATABASE_URL=postgres://secret@example.test")
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        wf_commands,
+        "apply_workflow_result",
+        lambda root, phase, result_path, **kwargs: (
+            calls.append(f"apply:{phase}") or (repo_root / "verification-report.md", False)
+        ),
+    )
+    args = build_parser().parse_args(
+        [
+            "wf",
+            "next",
+            "--phase",
+            "verify",
+            "--provider",
+            "fixture",
+            "--non-interactive",
+            "--yolo",
+            "--repo-root",
+            str(repo_root),
+        ]
+    )
+
+    return_code = wf_commands.run_wf_next(args)
+
+    captured = capsys.readouterr()
+    assert return_code == 3
+    assert calls == ["db:verify", "apply:verify"]
+    assert "RAW_COMMAND_OUTPUT" not in captured.out
+    assert "postgres://secret" not in captured.out
+    assert "RAW_COMMAND_OUTPUT" not in captured.err
+    assert "postgres://secret" not in captured.err
 
 
 def _python_json_command(payload: dict[str, object]) -> list[str]:
@@ -290,6 +554,8 @@ def _write_database_lifecycle_smoke_fixture(repo_root: Path) -> tuple[Path, Path
                 "plan": {"status": "pending", "retries": 0},
                 **{
                     phase: {
+
+
                         "status": "skipped",
                         "retries": 0,
                         "skipReason": small_policy,
@@ -320,6 +586,7 @@ def _write_database_lifecycle_smoke_fixture(repo_root: Path) -> tuple[Path, Path
     )
     state_path.write_text(json.dumps(state), encoding="utf-8")
     return verify_result, test_result
+
 
 
 def test_db_check_cli_smoke_completes_database_lifecycle_gates(tmp_path: Path) -> None:
