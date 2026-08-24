@@ -220,19 +220,18 @@ A configured test command may use an approved warehouse, sanitized snapshot, or 
 }
 ```
 
-Later stages preserve prior stage records and add their own sanitized command result and hashes. A stage is valid only when signal, profile, and decision hashes still match the current workflow inputs and the production schema evidence is fresh. `db-check` re-detects the signal under the evidence lock before publication and fails without writing if the snapshot changed during a command.
+Later stages preserve prior stage records and add their own sanitized command result and hashes. Every stage record binds its own signal, profile, and decision hashes. A stage is valid only when those identities match the current workflow inputs and the production schema evidence is fresh. `db-check` re-detects the signal under the evidence lock before publication and fails without writing if the snapshot changed during a command. A plan refresh accepts stale or changed prior identity, replaces plan evidence, and removes verify/test whenever signal, profile, decision, or production schema identity changed.
 
 When no DB signal exists, `db-check` returns `not_applicable` and does not promote risk. G1/G5/G6 record a passing not-applicable condition without requiring profile commands.
 
 ## Gate integration
 
 DB conditions are evaluated outside `RISK_INVESTMENT.skip_checks`.
+- G1 requires DB signal classification, actual workflow `changeClass=high_risk`, a matching `database_risk_escalated` audit event, a valid decision artifact, and current plan-stage schema evidence.
+- G5 requires the same actual high-risk state plus current production schema and selected-option equivalence, integrity, applicable query-plan/migration, and rollback PASS.
+- G6 requires the same actual high-risk state plus current schema and local test PASS, or a valid explicit local-data waiver.
 
-- G1 requires DB signal classification, high-risk promotion, a valid decision artifact, and current plan-stage schema evidence.
-- G5 requires current production schema plus selected-option equivalence, integrity, applicable query-plan/migration, and rollback PASS.
-- G6 requires current schema plus local test PASS, or a valid explicit local-data waiver.
-
-A generic worker PASS cannot override a failed DB condition. Missing, malformed, stale, or hash-mismatched evidence fails closed.
+A generic worker PASS cannot override a failed DB condition. Missing, malformed, stale, state-mismatched, or hash-mismatched evidence fails closed.
 
 ## Operator flow
 
@@ -245,7 +244,10 @@ awf wf gate verify --repo-root <repo-root> --result-file <verify-result> --json
 
 awf wf db-check --stage test --repo-root <repo-root> --json
 awf wf gate test --repo-root <repo-root> --result-file <test-result> --json
+
 ```
+
+For `wf next` auto-apply and `wf apply-result`, the deterministic host checks whether verify/test DB evidence is current and runs the corresponding `db-check` before applying the worker result and evaluating G5/G6. Workers do not write canonical evidence. Manual phase operation may use the explicit commands above with the actual result path emitted by `wf next`.
 
 Plan/verify/test Skills must run `db-check` before their deterministic gate. They must not replace evidence with prose.
 
