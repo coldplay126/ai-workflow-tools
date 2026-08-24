@@ -330,6 +330,8 @@ def _database_decision() -> dict[str, object]:
         "unavailable_reason": None,
         "denormalization_assessment": None,
         "physical_design_assessment": None,
+        "covered_surfaces": ["query"],
+        "surface_assessments": {"query": "Keep the baseline query unchanged."},
     }
     rewrite = {
         "id": "rewrite-query",
@@ -346,6 +348,8 @@ def _database_decision() -> dict[str, object]:
         "unavailable_reason": None,
         "denormalization_assessment": None,
         "physical_design_assessment": None,
+        "covered_surfaces": ["query"],
+        "surface_assessments": {"query": "Rewrite the query without changing its result."},
     }
     return {
         "schema_version": 1,
