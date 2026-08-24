@@ -124,6 +124,16 @@
             "production_schema_required": { "const": true }
           }
         },
+        "planning_options": {
+          "type": "object",
+          "description": "Canonical planning-options policy and decision artifact inputs. Paths are relative to .workflow/.",
+          "required": ["policy", "artifact"],
+          "additionalProperties": false,
+          "properties": {
+            "policy": { "type": "string" },
+            "artifact": { "type": "string" }
+          }
+        },
         "optional_context": {
           "type": "array",
           "items": {
@@ -151,6 +161,10 @@
               "format": { "enum": ["markdown", "json"] },
               "required": { "type": "boolean", "default": true },
               "required_when_database_signal": {
+                "type": "boolean",
+                "default": false
+              },
+              "required_when_planning_options": {
                 "type": "boolean",
                 "default": false
               }
@@ -197,6 +211,20 @@
           },
           "description": "Mandatory machine-evaluated database conditions when a database signal is present."
         },
+        "planning_options_conditions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "planning_options.artifact",
+              "planning_options.shape",
+              "planning_options.selection",
+              "planning_options.recommendation",
+              "planning_options.materiality"
+            ]
+          },
+          "description": "Mandatory machine-evaluated Planning Options conditions for phase-plan."
+        },
         "on_pass": {
           "type": "object",
           "required": ["next_phase"],
@@ -212,7 +240,10 @@
             "properties": {
               "next_phase": { "type": ["string", "null"] },
               "prompt_user": { "type": "boolean" },
-              "creates": { "type": "string" }
+              "creates": { "type": "string" },
+              "recommended_action": {
+                "enum": ["continue", "replan", "abort", "user_decision"]
+              }
             }
           }
         }
@@ -235,15 +266,21 @@
       "then": {
         "properties": {
           "input": {
-            "required": ["database"],
+            "required": ["database", "planning_options"],
             "properties": {
               "database": {
                 "properties": { "stage": { "const": "plan" } }
+              },
+              "planning_options": {
+                "properties": {
+                  "policy": { "const": "manifest.planning_options.required" },
+                  "artifact": { "const": "artifacts/planning-options.json" }
+                }
               }
             }
           },
           "gate": {
-            "required": ["database_conditions"],
+            "required": ["database_conditions", "planning_options_conditions"],
             "properties": {
               "database_conditions": {
                 "const": [
@@ -252,6 +289,27 @@
                   "database.decision",
                   "database.production_schema"
                 ]
+              },
+              "planning_options_conditions": {
+                "const": [
+                  "planning_options.artifact",
+                  "planning_options.shape",
+                  "planning_options.selection",
+                  "planning_options.recommendation",
+                  "planning_options.materiality"
+                ]
+              },
+              "on_fail": {
+                "required": ["decision_selection_required"],
+                "properties": {
+                  "decision_selection_required": {
+                    "const": {
+                      "next_phase": "plan",
+                      "prompt_user": true,
+                      "recommended_action": "user_decision"
+                    }
+                  }
+                }
               }
             }
           },
@@ -285,8 +343,67 @@
                         "required_when_database_signal": { "const": true }
                       }
                     }
+                  },
+                  {
+                    "contains": {
+                      "const": {
+                        "key": "planning_options",
+                        "path": "artifacts/planning-options.json",
+                        "format": "json",
+                        "required": false,
+                        "required_when_planning_options": true
+                      }
+                    },
+                    "minContains": 1,
+                    "maxContains": 1
                   }
-                ]
+                ],
+                "items": {
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": { "key": { "const": "planning_options" } },
+                        "required": ["key"]
+                      },
+                      "then": {
+                        "const": {
+                          "key": "planning_options",
+                          "path": "artifacts/planning-options.json",
+                          "format": "json",
+                          "required": false,
+                          "required_when_planning_options": true
+                        }
+                      }
+                    },
+                    {
+                      "if": {
+                        "properties": { "key": { "not": { "const": "planning_options" } } },
+                        "required": ["key"]
+                      },
+                      "then": {
+                        "not": { "required": ["required_when_planning_options"] }
+                      }
+                    },
+                    {
+                      "if": {
+                        "properties": {
+                          "key": {
+                            "not": {
+                              "enum": [
+                                "database_decision",
+                                "database_validation_evidence"
+                              ]
+                            }
+                          }
+                        },
+                        "required": ["key"]
+                      },
+                      "then": {
+                        "not": { "required": ["required_when_database_signal"] }
+                      }
+                    }
+                  ]
+                }
               }
             }
           }

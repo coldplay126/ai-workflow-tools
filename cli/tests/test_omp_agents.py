@@ -147,33 +147,38 @@ def test_agents_sync_omp_cli_supports_dry_run_json(tmp_path: Path, capsys):
     assert not (tmp_path / ".omp").exists()
 
 
-def test_spec_writer_ask_capability_survives_omp_agent_compilation() -> None:
+def test_spec_writer_omits_direct_user_prompt_capability() -> None:
     source = REPO_ROOT / "claude" / "agents" / "spec-writer.md"
 
     name, generated = compile_claude_agent(source)
 
     assert name == "spec-writer"
-    assert "tools: read, grep, glob, edit, write, bash, ask" in generated
+    assert generated.splitlines()[3] == "tools: read, grep, glob, edit, write, bash"
 
 
-def test_checked_in_omp_agents_match_database_contract_sources() -> None:
+def test_checked_in_omp_agents_match_all_canonical_sources() -> None:
     generated_root = REPO_ROOT / ".omp" / "agents"
     manifest = json.loads(
         (generated_root / ".awf-generated-agents.json").read_text(encoding="utf-8")
     )
-    hashes = {entry["name"]: entry["sha256"] for entry in manifest["files"]}
+    records = manifest["files"]
+    sources = sorted((REPO_ROOT / "claude" / "agents").glob("*.md"))
 
-    for name in ("spec-writer.md", "spec-verifier.md", "happy-path-tester.md"):
-        source = REPO_ROOT / "claude" / "agents" / name
-        _, expected = compile_claude_agent(source)
-        generated = (generated_root / name).read_bytes()
+    assert manifest["generator"] == "awf agents sync-omp"
+    assert manifest["schema_version"] == 1
+    assert manifest["source_roots"] == ["claude/agents"]
+    assert len(records) == len(sources)
+    assert [record["name"] for record in records] == [source.name for source in sources]
 
+    for source, record in zip(sources, records, strict=True):
+        output_name, expected = compile_claude_agent(source)
+        generated = (generated_root / record["name"]).read_bytes()
+
+        assert record["source"] == f"claude/agents/{source.name}"
+        assert record["name"] == f"{output_name}.md"
         assert generated == expected.encode("utf-8")
-        assert hashes[name] == hashlib.sha256(generated).hexdigest()
+        assert record["sha256"] == hashlib.sha256(generated).hexdigest()
 
-    spec_writer = (generated_root / "spec-writer.md").read_text(encoding="utf-8")
-    assert "tools: read, grep, glob, edit, write, bash, ask" in spec_writer
-    assert "database-validation-evidence.json" in spec_writer
 
     primary_policy = (
         "Production primary is never a verify/test benchmark or executable-query target.",

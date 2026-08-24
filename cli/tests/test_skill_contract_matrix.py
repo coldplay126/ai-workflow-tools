@@ -494,6 +494,7 @@ PHASE_CONTRACTS = {
             "missing_artifact": "plan",
             "clarification_needed": "plan",
             "fr_coverage_gap": "plan",
+            "decision_selection_required": "plan",
         },
         "hil": False,
         "modes": {"inline", "delegated"},
@@ -767,6 +768,146 @@ def test_database_card_schema_rejects_phase_specific_mutations() -> None:
     with pytest.raises(AssertionError):
         _assert_agent_cards_match_declared_schema(cards)
 
+
+PLANNING_OPTIONS_CONDITIONS = (
+    "planning_options.artifact",
+    "planning_options.shape",
+    "planning_options.selection",
+    "planning_options.recommendation",
+    "planning_options.materiality",
+)
+
+
+def test_plan_card_declares_typed_planning_options_contract() -> None:
+    schema = json.loads((AGENT_CARD_ROOT / "agent-card.schema.json").read_text())
+    planning_options_schema = schema["properties"]["input"]["properties"][
+        "planning_options"
+    ]
+    assert planning_options_schema == {
+        "type": "object",
+        "description": (
+            "Canonical planning-options policy and decision artifact inputs. "
+            "Paths are relative to .workflow/."
+        ),
+        "required": ["policy", "artifact"],
+        "additionalProperties": False,
+        "properties": {
+            "policy": {"type": "string"},
+            "artifact": {"type": "string"},
+        },
+    }
+
+    artifact_schema = schema["properties"]["output"]["properties"]["artifacts"][
+        "items"
+    ]
+    assert artifact_schema["properties"]["required_when_planning_options"] == {
+        "type": "boolean",
+        "default": False,
+    }
+    condition_schema = schema["properties"]["gate"]["properties"][
+        "planning_options_conditions"
+    ]
+    assert condition_schema == {
+        "type": "array",
+        "uniqueItems": True,
+        "items": {"enum": list(PLANNING_OPTIONS_CONDITIONS)},
+        "description": (
+            "Mandatory machine-evaluated Planning Options conditions for "
+            "phase-plan."
+        ),
+    }
+
+    plan = _load_agent_cards()["plan"]
+    assert plan["input"]["planning_options"] == {
+        "policy": "manifest.planning_options.required",
+        "artifact": "artifacts/planning-options.json",
+    }
+    assert tuple(plan["gate"]["planning_options_conditions"]) == (
+        PLANNING_OPTIONS_CONDITIONS
+    )
+    planning_options_artifacts = [
+        artifact
+        for artifact in plan["output"]["artifacts"]
+        if artifact["key"] == "planning_options"
+    ]
+    assert planning_options_artifacts == [
+        {
+            "key": "planning_options",
+            "path": "artifacts/planning-options.json",
+            "format": "json",
+            "required": False,
+            "required_when_planning_options": True,
+        }
+    ]
+    assert plan["gate"]["on_fail"]["decision_selection_required"] == {
+        "next_phase": "plan",
+        "prompt_user": True,
+        "recommended_action": "user_decision",
+    }
+
+
+def test_planning_options_card_schema_rejects_missing_or_corrupt_contract() -> None:
+    cards = _load_agent_cards()
+    _assert_agent_cards_match_declared_schema(cards)
+
+    cards = _load_agent_cards()
+    del cards["plan"]["input"]["planning_options"]
+    with pytest.raises(AssertionError):
+        _assert_agent_cards_match_declared_schema(cards)
+
+    cards = _load_agent_cards()
+    planning_options_artifact = next(
+        artifact
+        for artifact in cards["plan"]["output"]["artifacts"]
+        if artifact["key"] == "planning_options"
+    )
+    del planning_options_artifact["required_when_planning_options"]
+    with pytest.raises(AssertionError):
+        _assert_agent_cards_match_declared_schema(cards)
+
+    cards = _load_agent_cards()
+    cards["plan"]["gate"]["planning_options_conditions"] = [
+        "planning_options.shape"
+    ]
+    with pytest.raises(AssertionError):
+        _assert_agent_cards_match_declared_schema(cards)
+
+    cards = _load_agent_cards()
+    cards["plan"]["gate"]["on_fail"]["decision_selection_required"][
+        "recommended_action"
+    ] = "replan"
+    with pytest.raises(AssertionError):
+        _assert_agent_cards_match_declared_schema(cards)
+
+    cards = _load_agent_cards()
+    planning_options_artifact = next(
+        artifact
+        for artifact in cards["plan"]["output"]["artifacts"]
+        if artifact["key"] == "planning_options"
+    )
+    cards["plan"]["output"]["artifacts"].append(dict(planning_options_artifact))
+    with pytest.raises(AssertionError):
+        _assert_agent_cards_match_declared_schema(cards)
+
+    cards = _load_agent_cards()
+    planning_options_artifact = next(
+        artifact
+        for artifact in cards["plan"]["output"]["artifacts"]
+        if artifact["key"] == "planning_options"
+    )
+    planning_options_artifact["required_when_database_signal"] = True
+    with pytest.raises(AssertionError):
+        _assert_agent_cards_match_declared_schema(cards)
+
+    cards = _load_agent_cards()
+    database_artifact = next(
+        artifact
+        for artifact in cards["plan"]["output"]["artifacts"]
+        if artifact["key"] == "database_decision"
+    )
+    database_artifact["required_when_planning_options"] = True
+    with pytest.raises(AssertionError):
+        _assert_agent_cards_match_declared_schema(cards)
 
 OUTCOME_TOKENS = {
     "analysis": ("allow", "dry_run_only"),

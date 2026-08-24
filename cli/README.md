@@ -30,6 +30,23 @@
 - `awf wf status [--watch] [--interval N]`: `.workflow/state.json` 요약 출력 + 최근 work_history 세션 표시. `--watch`는 일정 간격(기본 5초, 1~60초 clamp)으로 화면을 in-place refresh — `awf-cli[tui]` extras 설치 시 Rich Live, 미설치 시 ANSI fallback. 자세한 동작은 아래 `awf wf status --watch (live refresh)` 섹션 참조
 - `awf wf next [--phase <name>] [--mode solo|quick|precise|cross|critical] [--auto-apply] [--non-interactive] [--no-ready-gate]`: 다음 phase 해석, delegated prompt 생성, `.workflow/tmp/`에 prompt/result 저장, fallback chain 시도, phase를 `in_progress`로 표시. Provider-backed 실행은 기본적으로 `awf ready --gate workflow-run`를 먼저 통과해야 한다. `--dry-run --output-format json`은 prompt preview를 구조화 JSON으로 출력하고 state/prompt 파일을 쓰지 않는다
 - `awf wf decide <continue|replan|abort> [--phase <name>] [--target <phase>]`: deciding 상태의 closed-loop workflow phase에 수동 결정을 반영
+- `awf wf select-option --decision-id <D-NNN> --option-id <O-NNN> --actor <actor> [--repo-root <path>] [--json]`: canonical `.workflow/artifacts/planning-options.json`에서 material decision option을 atomic selection journal로 선택한다. `actor`는 `planner` placeholder가 아니라 실제 human 또는 service identity여야 한다. missing option/actor, malformed artifact, 또는 ambiguous IDs는 fail closed한다. plan이 `deciding`이면 partial selection은 `selected_pending`, all-selected는 `continued`; G1 뒤 selection 변경은 `replanned`, unchanged canonical selection hash는 `reuse`다.
+
+Planning Options는 요구사항과 프로젝트 관례로 해결할 수 없는 material choice만
+2개 또는 3개의 substantively different option과 recommendation-first rationale으로
+기록한다. 되돌릴 수 있거나 material하지 않은 선호는 질문하지 않는다.
+`no_decision_required` artifact는 non-empty reason으로 G1을 계속하고, present artifact는
+profile과 관계없이 strict validation한다. `selection_required`는 parent-owned
+`user_decision` escape/`deciding` lifecycle이다.
+
+```bash
+awf wf select-option --decision-id D-001 --option-id O-001 --actor "${AWF_OPERATOR:?set operator identity}" --repo-root . --json
+```
+
+selected/no-decision artifact는 다음 plan rerun의 input이다. G1 후 changed selection은
+plan~done phases, retries/executions, runtime/skip marker, G1–G6 initial gate shape
+(`G3.scope_hash: null`)를 reset하면서 replan/history semantics를 보존한다. missing
+legacy profile/artifact는 `legacy_not_required` 또는 `not_required`로 호환한다.
 - `awf wf apply-result <phase> <result-file>`: review/verify/impl/test JSON 결과를 artifact markdown으로 반영하고 gate/state를 갱신
 - `awf wf gate <phase>`: plan/review/verify/impl/test deterministic gate 평가
 - `awf wf db-check --stage <plan|verify|test> [--repo-root <path>] [--json]`: DB 신호가 있으면 해당 stage의 project-owned JSON command 결과를 검증하고 `.workflow/artifacts/database-validation-evidence.json`에 current evidence를 기록한다. exit `0`은 pass 또는 not_applicable, `1`은 DB profile/decision/evidence blocker, `2`는 사용법·root·운영상 오류다. plan/verify/test는 각각 일반 G1/G5/G6 gate 직전에 이 명령을 실행한다. production schema는 mandatory이며 same-engine local은 DDL/planner 검증에 사용한다. DuckDB는 profiling/equivalence 분석용 보조 환경이다. project-specific replica sample은 명시적 opt-in만 허용하고 raw primary rows는 금지한다. local test command가 없을 때만 reason/approver/timestamp waiver를 사용한다. CLI는 DB driver, masking, replica provisioning을 구현하지 않고 project command의 sanitized JSON을 검증한다

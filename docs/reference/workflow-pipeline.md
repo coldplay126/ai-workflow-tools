@@ -100,11 +100,39 @@ pattern 문서의 불변식/파생 규칙이 참조하는 구체적 수치와 �
 }
 ```
 
+### Plan의 conditional Planning Options output
+
+plan card는 `input.planning_options`에서
+`policy: "manifest.planning_options.required"`와
+`artifact: "artifacts/planning-options.json"`을 선언한다. 같은 artifact는
+`required: false`, `required_when_planning_options: true` output이다. profile이
+required인 경우에만 worker가 canonical artifact를 만들어야 하며, artifact가
+present이면 profile과 관계없이 strict validation한다.
+
+`planning_options_conditions`는 순서대로 `planning_options.artifact`,
+`.shape`, `.selection`, `.recommendation`, `.materiality`다. `selected` 또는
+`no_decision_required` status는 G1을 통과한다. `selection_required`는
+`decision_selection_required` on-fail route로
+`recommended_action: "user_decision"` escape를 생성한다. plan card의 `hil`은
+계속 false이고, parent workflow만 `deciding`을 소유한다.
+
+```bash
+awf wf select-option --decision-id D-001 --option-id O-001 --actor "${AWF_OPERATOR:?set operator identity}" --repo-root . --json
+```
+
+partial selection은 `selected_pending`, complete selection은 `continued`이며
+selected/no-decision artifact는 plan rerun input이다. G1 이후 canonical selection
+변경은 `replanned`로 plan~done phase, retries/executions, runtime/skip marker,
+G1–G6 initial gate shape(`G3.scope_hash: null`)를 reset하고 replan/history
+semantics를 보존한다. unchanged selection hash는 `reuse`다. artifact/profile
+부재의 legacy path는 `legacy_not_required` 또는 `not_required`다.
+
+
 ### Phase별 Agent Card 비교
 
 | Phase | Gate ID | retry.max | hil | on_pass | on_fail 주요 분기 |
 |-------|---------|-----------|-----|---------|------------------|
-| plan | G1 | 3 | false | review | missing_artifact → plan |
+| plan | G1 | 3 | false | review | missing_artifact → plan, decision_selection_required → user_decision/plan |
 | review | G2 | 2 | false | approve | critical_found → plan, high_only → prompt_user |
 | approve | G3 | 1 | true | impl | revision → plan, rejected → 중단 |
 | impl | G4 | 5 | false | verify | incomplete_tasks → impl |
@@ -120,6 +148,7 @@ pattern 문서의 불변식/파생 규칙이 참조하는 구체적 수치와 �
 |-------|----------|------|-----------|
 | plan | missing_artifact | prompt_user + replan | plan |
 | plan | clarification_needed | prompt_user + replan | plan |
+| plan | decision_selection_required | `user_decision` escape → deciding → exact option journal → selected plan rerun | plan |
 | review | critical_found | replan + feedback 생성 | plan |
 | review | high_only | prompt_user | -- |
 | approve | revision | replan + feedback 생성 | plan |
@@ -302,6 +331,7 @@ implement a database driver, masking, or replica provisioning.
 │   ├── plan.md
 │   ├── tasks.md
 │   ├── allowed-files.json
+│   ├── planning-options.json
 │   ├── review-report.md
 │   ├── approval.json
 │   ├── impl-log.md

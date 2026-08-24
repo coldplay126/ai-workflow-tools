@@ -57,8 +57,8 @@ stateDiagram-v2
     in_progress --> escaped: Worker escape
     escaped --> deciding: severity×reason 자동 규칙
 
-    deciding --> continued: advisory 또는 degraded+quality
-    deciding --> replanned: spec/scope divergence
+    deciding --> continued: advisory/degraded or all plan selections recorded
+    deciding --> replanned: spec/scope divergence or changed post-G1 selection
     deciding --> aborted: constraint violation
     deciding --> escalated: 규칙 매칭 없음 또는 budget 소진
 
@@ -68,6 +68,29 @@ stateDiagram-v2
     aborted --> [*]
     escalated --> [*]: 사용자 판단 대기
 ```
+
+## Planning Options lifecycle
+
+plan worker는 requirement/convention으로 결정할 수 없는 material choice만 canonical
+`.workflow/artifacts/planning-options.json`에 2개 또는 3개의 substantively
+different option과 recommendation-first rationale으로 작성한다. 되돌릴 수 있거나
+material하지 않은 선호는 질문하지 않는다.
+
+`no_decision_required`는 non-empty reason을 기록하고 G1으로 계속한다.
+`selection_required`는 worker가 state를 mutation하지 않은 채
+`recommended_action: "user_decision"` escape를 반환한다. parent workflow가 plan을
+`deciding`으로 전환한 뒤 user는 exact CLI로 append-only selection journal을 쓴다.
+
+```bash
+awf wf select-option --decision-id D-001 --option-id O-001 --actor "${AWF_OPERATOR:?set operator identity}" --repo-root . --json
+```
+
+partial selection은 `selected_pending`, all-selected plan은 `continued`이며,
+selected/no-decision artifact는 plan rerun input이다. G1 후 selection 변경은
+`replanned`: plan~done phases, retries/executions, runtime/skip marker와 G1–G6
+initial shape(`G3.scope_hash: null`)를 reset하되 loop/history를 보존한다. same hash는
+`reuse`; artifact/profile 없는 legacy workflow는 `legacy_not_required` 또는
+`not_required`다. present artifact는 strict validation한다.
 
 ## Replan Budget
 

@@ -52,7 +52,7 @@
     },
     {
       "name": "spec-writer.md",
-      "sha256": "a70d42634909a6526f69f3aed21c204f8a0ae936008f110c99598351707ce381",
+      "sha256": "0a15a7fb3bd777106802039646f604517b9e5ec145dd923bea2eb56dad85ab46",
       "source": "claude/agents/spec-writer.md"
     }
   ],

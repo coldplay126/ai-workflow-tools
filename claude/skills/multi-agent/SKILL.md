@@ -1,6 +1,6 @@
 ---
 name: multi-agent
-version: 2.1.0
+version: 2.2.0
 description: "멀티에이전트 교차 검증. 서브에이전트 5모드 + 에이전트 팀 3레이어 아키텍처."
 type: protocol
 
@@ -92,6 +92,11 @@ OMP의 `task`/`hub`가 제공되면 Python team runner의 결정론적 gate를 �
    처리하고, 약하거나 재현 불가능한 PASS/FAIL 불일치는 `ESCALATE`로 재검증합니다.
 7. `.workflow/state.json`, gate, scope hash와 approve/done HIL은 parent가 계속
    단독 소유합니다.
+8. Plan worker는 material choice를 canonical
+   `.workflow/artifacts/planning-options.json`으로만 제안한다. `selection_required`
+   일 때 worker는 `recommended_action: "user_decision"` escape를 반환하며,
+   `deciding`, `awf wf select-option` journal, selected rerun과 G1 후 replan은
+   parent workflow가 단독 소유한다.
 
 순차 의존 작업, 같은 파일을 동시에 수정하는 작업, 단일 파일의 짧은 변경에는
 fan-out하지 않습니다.
