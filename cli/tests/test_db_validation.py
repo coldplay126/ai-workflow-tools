@@ -89,20 +89,59 @@ def _assert_redacted_path_reason(reasons: tuple[str, ...], path: str, category: 
 
 
 
+def _assert_database_signal(
+    signal: DatabaseSignal,
+    *,
+    detected: bool,
+    reasons: tuple[str, ...],
+) -> None:
+    assert signal.detected is detected
+    assert signal.reasons == reasons
+    assert len(signal.snapshot_hash) == 64
+    assert all(character in "0123456789abcdef" for character in signal.snapshot_hash)
+
+
 def test_database_signal_detects_concept_database_term(tmp_path: Path) -> None:
     write_workflow_artifacts(tmp_path, concept="Update the database retention policy")
 
     signal = detect_database_signal(tmp_path)
 
-    assert signal == DatabaseSignal(detected=True, reasons=("text:database",))
+    _assert_database_signal(
+        signal,
+        detected=True,
+        reasons=("text:database",),
+    )
 
+
+
+def test_database_signal_snapshot_hash_is_stable_and_tracks_artifact_content(
+    tmp_path: Path,
+) -> None:
+    write_workflow_artifacts(
+        tmp_path,
+        concept="Update the database retention policy",
+        spec="Initial planning context",
+    )
+
+    initial = detect_database_signal(tmp_path)
+    repeated = detect_database_signal(tmp_path)
+    (tmp_path / ".workflow" / "artifacts" / "spec.md").write_text(
+        "Revised planning context",
+        encoding="utf-8",
+    )
+    revised = detect_database_signal(tmp_path)
+
+    assert repeated.snapshot_hash == initial.snapshot_hash
+    assert revised.reasons == initial.reasons
+    assert revised.snapshot_hash != initial.snapshot_hash
 
 def test_database_signal_normalizes_korean_denormalization(tmp_path: Path) -> None:
     write_workflow_artifacts(tmp_path, tasks="- [ ] 비정규화 모델 검토")
 
     signal = detect_database_signal(tmp_path)
 
-    assert signal == DatabaseSignal(
+    _assert_database_signal(
+        signal,
         detected=True,
         reasons=("text:denormalization",),
     )
@@ -257,7 +296,8 @@ def test_database_signal_reports_oversized_known_artifacts(
     write_workflow_artifacts(tmp_path)
     (tmp_path / relative_path).write_bytes(b"x" * (128 * 1024 + 1))
 
-    assert detect_database_signal(tmp_path) == DatabaseSignal(
+    _assert_database_signal(
+        detect_database_signal(tmp_path),
         detected=True,
         reasons=(_artifact_error_reason(relative_path, "oversize"),),
     )
@@ -281,7 +321,8 @@ def test_database_signal_reports_invalid_utf8_known_artifacts(
     write_workflow_artifacts(tmp_path)
     (tmp_path / relative_path).write_bytes(b"\xff")
 
-    assert detect_database_signal(tmp_path) == DatabaseSignal(
+    _assert_database_signal(
+        detect_database_signal(tmp_path),
         detected=True,
         reasons=(_artifact_error_reason(relative_path, "invalid_utf8"),),
     )
@@ -309,7 +350,8 @@ def test_database_signal_reports_invalid_allowed_files_artifact(
     allowed_path = tmp_path / ".workflow" / "artifacts" / "allowed-files.json"
     allowed_path.write_text(allowed_files, encoding="utf-8")
 
-    assert detect_database_signal(tmp_path) == DatabaseSignal(
+    _assert_database_signal(
+        detect_database_signal(tmp_path),
         detected=True,
         reasons=(
             _artifact_error_reason(".workflow/artifacts/allowed-files.json", error),
@@ -355,7 +397,8 @@ def test_database_signal_rejects_unsafe_allowed_paths(
 ) -> None:
     write_workflow_artifacts(tmp_path, allowed_files=[unsafe_path])
 
-    assert detect_database_signal(tmp_path) == DatabaseSignal(
+    _assert_database_signal(
+        detect_database_signal(tmp_path),
         detected=True,
         reasons=(
             _artifact_error_reason(
@@ -1802,7 +1845,8 @@ def test_bounded_reader_detects_oversize_after_short_read_sequence(
 
     monkeypatch.setattr(db_validation.os, "read", short_read)
 
-    assert detect_database_signal(tmp_path) == DatabaseSignal(
+    _assert_database_signal(
+        detect_database_signal(tmp_path),
         detected=True,
         reasons=(_artifact_error_reason(".workflow/concept.md", "oversize"),),
     )
