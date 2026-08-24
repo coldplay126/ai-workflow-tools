@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+import os
 import sys
 import threading
+from types import SimpleNamespace
 from pathlib import Path
 from typing import Any
 
@@ -770,33 +772,24 @@ def test_database_risk_atomic_save_cleans_temporary_file(
     state_path.write_text(original_state, encoding="utf-8")
 
     if failure == "write":
-        original_write = Path.write_text
+        def fail_temporary_write(_fd: int, _data: bytes) -> int:
+            raise OSError("temporary write failed")
 
-        def fail_temporary_write(path: Path, *args: Any, **kwargs: Any) -> int:
-            result = original_write(path, *args, **kwargs)
-            if path.name.startswith("state.json."):
-                raise OSError("temporary write failed")
-            return result
-
-        monkeypatch.setattr(Path, "write_text", fail_temporary_write)
+        monkeypatch.setattr(os, "write", fail_temporary_write)
     else:
-        original_replace = Path.replace
+        def fail_temporary_replace(*_args: Any, **_kwargs: Any) -> None:
+            raise OSError("replace failed")
 
-        def fail_temporary_replace(path: Path, target: Path) -> Path:
-            if path.name.startswith("state.json."):
-                raise OSError("replace failed")
-            return original_replace(path, target)
-
-        monkeypatch.setattr(Path, "replace", fail_temporary_replace)
+        monkeypatch.setattr(os, "replace", fail_temporary_replace)
 
     with pytest.raises(OSError):
-        workflow_state._write_workflow_state_unlocked(
-            tmp_path,
+        workflow_state.save_workflow_state_snapshot(
+            str(tmp_path),
             {"changeClass": "high_risk"},
         )
 
     assert state_path.read_text(encoding="utf-8") == original_state
-    assert not list(workflow_dir.glob("state.json.*.tmp"))
+    assert not list(workflow_dir.glob("*.tmp"))
 
 
 def test_database_risk_threads_share_a_deadlock_free_lock_order(tmp_path: Path) -> None:
@@ -838,6 +831,125 @@ def test_database_risk_threads_share_a_deadlock_free_lock_order(tmp_path: Path) 
     ) == 1
 
 
+
+
+def _write_small_workflow_state(root: Path) -> Path:
+    state = _make_state("small")
+    _apply_policy_skips(state)
+    _write_workflow_state(root, state)
+    return root / ".workflow" / "state.json"
+
+
+def test_database_risk_rejects_workflow_directory_symlink(tmp_path: Path) -> None:
+    import awf.core.state as workflow_state
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    outside = tmp_path / "outside-workflow"
+    outside.mkdir()
+    external_state = outside / "state.json"
+    original = '{"outside":true}\n'
+    external_state.write_text(original, encoding="utf-8")
+    (root / ".workflow").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="Unsafe workflow state"):
+        workflow_state.save_workflow_state_snapshot(
+            str(root),
+            {"changeClass": "high_risk"},
+        )
+
+    assert external_state.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize("link_kind", ["symlink", "hardlink"])
+def test_database_risk_rejects_unsafe_state_file_links(
+    tmp_path: Path,
+    link_kind: str,
+) -> None:
+    import awf.core.state as workflow_state
+
+    root = tmp_path / "repo"
+    workflow_dir = root / ".workflow"
+    workflow_dir.mkdir(parents=True)
+    external_state = tmp_path / f"external-state-{link_kind}.json"
+    state = _make_state("small")
+    _apply_policy_skips(state)
+    original = json.dumps(state, ensure_ascii=False) + "\n"
+    external_state.write_text(original, encoding="utf-8")
+    state_path = workflow_dir / "state.json"
+    if link_kind == "symlink":
+        state_path.symlink_to(external_state)
+    else:
+        os.link(external_state, state_path)
+
+    with pytest.raises(ValueError, match="Unsafe workflow state"):
+        workflow_state.promote_database_change_to_high_risk(
+            str(root),
+            ("text:query",),
+        )
+
+    assert external_state.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize("link_kind", ["symlink", "hardlink"])
+def test_database_risk_rejects_unsafe_lock_file_links(
+    tmp_path: Path,
+    link_kind: str,
+) -> None:
+    import awf.core.state as workflow_state
+
+    root = tmp_path / "repo"
+    state_path = _write_small_workflow_state(root)
+    external_lock = tmp_path / f"external-lock-{link_kind}"
+    original = "lock target must not change\n"
+    external_lock.write_text(original, encoding="utf-8")
+    lock_path = state_path.with_name("state.json.lock")
+    if link_kind == "symlink":
+        lock_path.symlink_to(external_lock)
+    else:
+        os.link(external_lock, lock_path)
+
+    with pytest.raises(ValueError, match="Unsafe workflow state"):
+        workflow_state.promote_database_change_to_high_risk(
+            str(root),
+            ("text:query",),
+        )
+
+    assert external_lock.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize("link_kind", ["symlink", "hardlink"])
+def test_database_risk_rejects_preexisting_temporary_links(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    link_kind: str,
+) -> None:
+    import awf.core.state as workflow_state
+
+    root = tmp_path / "repo"
+    state_path = _write_small_workflow_state(root)
+    external_temp = tmp_path / f"external-temp-{link_kind}"
+    original = "temporary target must not change\n"
+    external_temp.write_text(original, encoding="utf-8")
+    temporary_path = state_path.with_name(".state.json.fixed.tmp")
+    if link_kind == "symlink":
+        temporary_path.symlink_to(external_temp)
+    else:
+        os.link(external_temp, temporary_path)
+    monkeypatch.setattr(
+        workflow_state,
+        "secrets",
+        SimpleNamespace(token_hex=lambda _size: "fixed"),
+        raising=False,
+    )
+
+    with pytest.raises(ValueError, match="Unsafe workflow state"):
+        workflow_state.save_workflow_state_snapshot(
+            str(root),
+            {"changeClass": "high_risk"},
+        )
+
+    assert external_temp.read_text(encoding="utf-8") == original
 
 
 # ===========================================================================

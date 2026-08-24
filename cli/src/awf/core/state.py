@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
+import secrets
 import shutil
+import stat
 import subprocess
 import threading
+from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 from json import JSONDecodeError
 from pathlib import Path
-from typing import ContextManager, Optional
+from typing import Iterator, Optional
 
 from awf.core.paths import find_repo_root
 from awf.core.workflow_loop import (
@@ -26,7 +30,6 @@ from awf.core.workflow_prompt import (
     save_workflow_result,
 )
 from awf.core.workflow_status import summarize_workflow_state
-from awf.worktrees.locking import repository_lock
 
 # --- Risk-based routing per SKILL.md §Risk-Based Routing ---
 
@@ -82,9 +85,120 @@ def _workflow_state_lock(path: Path) -> threading.Lock:
         return lock
 
 
-def _workflow_state_file_lock(path: Path) -> ContextManager[None]:
-    """Serialize a workflow state's read-modify-write transaction across processes."""
-    return repository_lock(path.with_name(f"{path.name}.lock"))
+def _unsafe_workflow_state(path: str) -> ValueError:
+    return ValueError(f"Unsafe workflow state: {path}")
+
+
+def _open_workflow_state_directory(root: Path) -> int:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        root_fd = os.open(root, flags)
+    except OSError as error:
+        raise _unsafe_workflow_state("repository root") from error
+    try:
+        return os.open(".workflow", flags, dir_fd=root_fd)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Missing workflow state: {root / '.workflow' / 'state.json'}")
+    except OSError as error:
+        raise _unsafe_workflow_state(".workflow") from error
+    finally:
+        os.close(root_fd)
+
+
+def _validate_workflow_state_file(descriptor: int, name: str) -> None:
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or metadata.st_nlink != 1
+    ):
+        raise _unsafe_workflow_state(name)
+
+
+def _open_workflow_state_file(
+    directory_fd: int,
+    name: str,
+    *,
+    missing_ok: bool = False,
+) -> Optional[int]:
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        descriptor = os.open(name, flags, dir_fd=directory_fd)
+    except FileNotFoundError:
+        if missing_ok:
+            return None
+        raise
+    except OSError as error:
+        raise _unsafe_workflow_state(name) from error
+    try:
+        _validate_workflow_state_file(descriptor, name)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _read_workflow_state_from_directory(directory_fd: int) -> dict:
+    descriptor = _open_workflow_state_file(directory_fd, "state.json")
+    if descriptor is None:
+        raise FileNotFoundError("Missing workflow state")
+    try:
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 64 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(descriptor)
+    raw = b"".join(chunks).decode("utf-8")
+    try:
+        return json.loads(raw)
+    except JSONDecodeError:
+        return json.loads(
+            _read_workflow_state_from_directory_bytes(directory_fd).decode("utf-8")
+        )
+
+
+def _read_workflow_state_from_directory_bytes(directory_fd: int) -> bytes:
+    descriptor = _open_workflow_state_file(directory_fd, "state.json")
+    if descriptor is None:
+        raise FileNotFoundError("Missing workflow state")
+    try:
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 64 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+@contextmanager
+def _workflow_state_transaction(root: Path) -> Iterator[int]:
+    directory_fd = _open_workflow_state_directory(root)
+    lock_fd: Optional[int] = None
+    locked = False
+    try:
+        flags = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
+        try:
+            lock_fd = os.open("state.json.lock", flags, 0o600, dir_fd=directory_fd)
+        except OSError as error:
+            raise _unsafe_workflow_state("state.json.lock") from error
+        _validate_workflow_state_file(lock_fd, "state.json.lock")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        locked = True
+        yield directory_fd
+    finally:
+        if lock_fd is not None:
+            try:
+                if locked:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(lock_fd)
+        os.close(directory_fd)
 
 
 def _initial_skipped_gate_state(gate_id: str) -> dict:
@@ -561,16 +675,15 @@ def reset_workflow(explicit_root: Optional[str], concept: Optional[str] = None) 
 
 def load_workflow_state(explicit_root: Optional[str] = None) -> dict:
     root = find_repo_root(explicit_root)
-    state_path = root / ".workflow" / "state.json"
-    if not state_path.exists():
-        raise FileNotFoundError(f"Missing workflow state: {state_path}")
-    raw = state_path.read_text(encoding="utf-8")
+    directory_fd = _open_workflow_state_directory(root)
     try:
-        return json.loads(raw)
-    except JSONDecodeError:
-        # Event handlers may observe the file while another process is replacing it.
-        retry_raw = state_path.read_text(encoding="utf-8")
-        return json.loads(retry_raw)
+        return _read_workflow_state_from_directory(directory_fd)
+    except FileNotFoundError as error:
+        raise FileNotFoundError(
+            f"Missing workflow state: {root / '.workflow' / 'state.json'}"
+        ) from error
+    finally:
+        os.close(directory_fd)
 
 
 def record_phase_telemetry(
@@ -653,35 +766,85 @@ def resolve_next_phase(state: dict, explicit_phase: Optional[str] = None) -> str
     raise ValueError("No pending workflow phase found. Pass --phase to force a delegated prompt.")
 
 
-def _write_workflow_state_unlocked(root: Path, state: dict) -> Path:
-    state_path = root / ".workflow" / "state.json"
-    tmp_path = state_path.with_name(
-        f"{state_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+def _write_all(descriptor: int, payload: bytes) -> None:
+    remaining = memoryview(payload)
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written <= 0:
+            raise OSError("Could not write workflow state")
+        remaining = remaining[written:]
+
+
+def _write_workflow_state_unlocked(
+    root: Path,
+    state: dict,
+    directory_fd: int,
+) -> Path:
+    existing_state = _open_workflow_state_file(
+        directory_fd,
+        "state.json",
+        missing_ok=True,
     )
+    if existing_state is not None:
+        os.close(existing_state)
+
+    payload = (json.dumps(state, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    temporary_name = f".state.json.{secrets.token_hex(16)}.tmp"
+    temporary_fd: Optional[int] = None
+    temporary_created = False
     try:
-        tmp_path.write_text(
-            json.dumps(state, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+        try:
+            temporary_fd = os.open(
+                temporary_name,
+                flags,
+                0o600,
+                dir_fd=directory_fd,
+            )
+            temporary_created = True
+        except FileExistsError as error:
+            raise _unsafe_workflow_state(temporary_name) from error
+        except OSError as error:
+            raise _unsafe_workflow_state(temporary_name) from error
+        try:
+            _validate_workflow_state_file(temporary_fd, temporary_name)
+            _write_all(temporary_fd, payload)
+            os.fsync(temporary_fd)
+        finally:
+            os.close(temporary_fd)
+            temporary_fd = None
+
+        os.replace(
+            temporary_name,
+            "state.json",
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
         )
-        tmp_path.replace(state_path)
+        os.fsync(directory_fd)
     finally:
-        if tmp_path.exists():
+        if temporary_fd is not None:
+            os.close(temporary_fd)
+        if temporary_created:
             try:
-                tmp_path.unlink()
+                os.unlink(temporary_name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
             except OSError:
                 pass
-    return state_path
+    return root / ".workflow" / "state.json"
 
 
 def _save_workflow_state(explicit_root: Optional[str], state: dict) -> Path:
     root = find_repo_root(explicit_root)
     state_path = root / ".workflow" / "state.json"
-    with _workflow_state_lock(state_path), _workflow_state_file_lock(state_path):
-        if state_path.exists():
-            current_state = load_workflow_state(str(root))
-            if isinstance(current_state, dict):
-                _merge_database_risk_facts(state, current_state)
-        return _write_workflow_state_unlocked(root, state)
+    with _workflow_state_lock(state_path), _workflow_state_transaction(root) as directory_fd:
+        try:
+            current_state = _read_workflow_state_from_directory(directory_fd)
+        except FileNotFoundError:
+            current_state = None
+        if isinstance(current_state, dict):
+            _merge_database_risk_facts(state, current_state)
+        return _write_workflow_state_unlocked(root, state, directory_fd)
 
 
 def promote_database_change_to_high_risk(
@@ -693,8 +856,8 @@ def promote_database_change_to_high_risk(
     state_path = root / ".workflow" / "state.json"
     normalized_reasons = _normalized_database_reasons(reasons)
 
-    with _workflow_state_lock(state_path), _workflow_state_file_lock(state_path):
-        state = load_workflow_state(str(root))
+    with _workflow_state_lock(state_path), _workflow_state_transaction(root) as directory_fd:
+        state = _read_workflow_state_from_directory(directory_fd)
         changed = False
         previous_change_class = state.get("changeClass", "standard")
         if previous_change_class != "high_risk":
@@ -762,7 +925,7 @@ def promote_database_change_to_high_risk(
             changed = True
 
         if changed:
-            _write_workflow_state_unlocked(root, state)
+            _write_workflow_state_unlocked(root, state, directory_fd)
         return state
 
 
