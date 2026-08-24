@@ -705,21 +705,39 @@ def test_decision_rejects_required_candidate_mutations(
 def test_decision_allows_materially_distinct_same_kind_candidates(tmp_path: Path) -> None:
     write_workflow_artifacts(tmp_path, concept="Update the database query")
     baseline = database_decision()["candidates"][0]
-    duplicate_maintain = {
+    alternative_maintain = {
         **baseline,
         "id": "maintain-copy",
-        "summary": "Keep the schema and query with a separate label.",
+        "equivalence_plan": "Compare a restored backup against the current ledger.",
+        "operational_risks": ["The backup restore extends the maintenance window."],
     }
     write_database_decision(
         tmp_path,
         database_decision(
-            candidates=[baseline, duplicate_maintain],
+            candidates=[baseline, alternative_maintain],
             recommended_option_id="maintain-copy",
             selected_option_id="maintain-copy",
         ),
     )
 
     assert load_database_decision(tmp_path).selected_option_id == "maintain-copy"
+
+
+def test_decision_rejects_candidate_that_only_changes_its_id(tmp_path: Path) -> None:
+    write_workflow_artifacts(tmp_path, concept="Update the database query")
+    baseline = database_decision()["candidates"][0]
+    id_only_copy = {**baseline, "id": "maintain-copy"}
+    write_database_decision(
+        tmp_path,
+        database_decision(
+            candidates=[baseline, id_only_copy],
+            recommended_option_id="maintain-copy",
+            selected_option_id="maintain-copy",
+        ),
+    )
+
+    with pytest.raises(DatabaseValidationError):
+        load_database_decision(tmp_path)
 
 
 @pytest.mark.parametrize(

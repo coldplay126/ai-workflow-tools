@@ -723,6 +723,17 @@ def load_database_decision(repo_root: Path) -> DatabaseDecision:
     candidate_ids = [candidate["id"] for candidate in parsed_candidates]
     if len(set(candidate_ids)) != len(candidate_ids):
         raise DatabaseValidationError("decision_invalid")
+    candidate_fingerprints = {
+        _canonical_hash(
+            {
+                field: candidate[field]
+                for field in sorted(_CANDIDATE_FIELDS - {"id"})
+            }
+        )
+        for candidate in parsed_candidates
+    }
+    if len(candidate_fingerprints) != len(parsed_candidates):
+        raise DatabaseValidationError("decision_invalid")
     candidates_by_id = {candidate["id"]: candidate for candidate in parsed_candidates}
 
     baseline_id = _nonempty_string(decision["baseline_option_id"])
