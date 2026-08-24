@@ -5,6 +5,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from awf.core.db_validation import DatabaseSignal, detect_database_signal
@@ -148,3 +150,149 @@ def test_database_signal_ignores_frontend_index_file(tmp_path: Path) -> None:
     write_workflow_artifacts(tmp_path, allowed_files=["src/index.ts"])
 
     assert detect_database_signal(tmp_path).detected is False
+
+
+def test_database_signal_weak_terms_require_database_context(tmp_path: Path) -> None:
+    write_workflow_artifacts(
+        tmp_path,
+        spec="\n".join(
+            [
+                "- Update src/index.ts",
+                "- Publish an OpenAPI and JSON schema",
+                "- Preserve the URL query parameter",
+                "- Render an HTML table",
+                "- Train the ML model",
+            ]
+        ),
+    )
+
+    assert detect_database_signal(tmp_path).detected is False
+
+
+def test_database_signal_detects_weak_terms_with_database_context(tmp_path: Path) -> None:
+    write_workflow_artifacts(
+        tmp_path,
+        tasks="- [ ] Update the database schema and query [FR-001]",
+    )
+
+    signal = detect_database_signal(tmp_path)
+
+    assert {"text:database", "text:schema", "text:query"} <= set(signal.reasons)
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        ".workflow/concept.md",
+        ".workflow/artifacts/spec.md",
+        ".workflow/artifacts/plan.md",
+        ".workflow/artifacts/tasks.md",
+        ".workflow/artifacts/test-criteria.md",
+        ".workflow/artifacts/allowed-files.json",
+    ],
+)
+def test_database_signal_reports_oversized_known_artifacts(
+    tmp_path: Path,
+    relative_path: str,
+) -> None:
+    write_workflow_artifacts(tmp_path)
+    (tmp_path / relative_path).write_bytes(b"x" * (128 * 1024 + 1))
+
+    assert detect_database_signal(tmp_path) == DatabaseSignal(
+        detected=True,
+        reasons=(f"artifact_error:{relative_path}:oversize",),
+    )
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        ".workflow/concept.md",
+        ".workflow/artifacts/spec.md",
+        ".workflow/artifacts/plan.md",
+        ".workflow/artifacts/tasks.md",
+        ".workflow/artifacts/test-criteria.md",
+        ".workflow/artifacts/allowed-files.json",
+    ],
+)
+def test_database_signal_reports_invalid_utf8_known_artifacts(
+    tmp_path: Path,
+    relative_path: str,
+) -> None:
+    write_workflow_artifacts(tmp_path)
+    (tmp_path / relative_path).write_bytes(b"\xff")
+
+    assert detect_database_signal(tmp_path) == DatabaseSignal(
+        detected=True,
+        reasons=(f"artifact_error:{relative_path}:invalid_utf8",),
+    )
+
+
+@pytest.mark.parametrize(
+    ("allowed_files", "error"),
+    [
+        ("{", "invalid_json"),
+        (
+            '{"planned_files": [], "planned_files": ["src/database/schema.sql"]}',
+            "invalid_json",
+        ),
+        ("[]", "invalid_shape"),
+        ('{"planned_files": "src/database/schema.sql"}', "invalid_shape"),
+        ('{"expanded_files": {"path": "src/database/schema.sql"}}', "invalid_shape"),
+    ],
+)
+def test_database_signal_reports_invalid_allowed_files_artifact(
+    tmp_path: Path,
+    allowed_files: str,
+    error: str,
+) -> None:
+    write_workflow_artifacts(tmp_path)
+    allowed_path = tmp_path / ".workflow" / "artifacts" / "allowed-files.json"
+    allowed_path.write_text(allowed_files, encoding="utf-8")
+
+    assert detect_database_signal(tmp_path) == DatabaseSignal(
+        detected=True,
+        reasons=(f"artifact_error:.workflow/artifacts/allowed-files.json:{error}",),
+    )
+
+
+def test_database_signal_canonicalizes_windows_and_dot_paths(tmp_path: Path) -> None:
+    write_workflow_artifacts(
+        tmp_path,
+        allowed_files=[r".\src\.\database\migrations\001_add_index.sql"],
+    )
+
+    assert detect_database_signal(tmp_path).reasons == (
+        "path:src/database/migrations/001_add_index.sql",
+    )
+
+
+def test_database_signal_preserves_hidden_directories_and_collapses_parent_paths(
+    tmp_path: Path,
+) -> None:
+    write_workflow_artifacts(
+        tmp_path,
+        allowed_files=[".models/inference.py", "database/../ui/component.ts"],
+    )
+
+    assert detect_database_signal(tmp_path).detected is False
+
+
+@pytest.mark.parametrize(
+    "unsafe_path",
+    [
+        "/var/lib/schema.sql",
+        r"C:\database\schema.sql",
+        "../../database/schema.sql",
+    ],
+)
+def test_database_signal_rejects_unsafe_allowed_paths(
+    tmp_path: Path,
+    unsafe_path: str,
+) -> None:
+    write_workflow_artifacts(tmp_path, allowed_files=[unsafe_path])
+
+    assert detect_database_signal(tmp_path) == DatabaseSignal(
+        detected=True,
+        reasons=("artifact_error:.workflow/artifacts/allowed-files.json:unsafe_path",),
+    )

@@ -10,8 +10,11 @@ from __future__ import annotations
 import json
 import multiprocessing
 import sys
+import threading
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -92,6 +95,16 @@ def _apply_gate_result_after_stale_read(
 
 def _promote_database_risk(repo_root: str) -> None:
     promote_database_change_to_high_risk(repo_root, ("text:query",))
+
+
+def _finish_process(process: Any) -> None:
+    process.join(timeout=10)
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=2)
+    if process.is_alive():
+        process.kill()
+        process.join(timeout=2)
 
 
 # ===========================================================================
@@ -707,15 +720,18 @@ def test_database_risk_preserves_stale_production_state_update(tmp_path: Path):
     )
     promoter = context.Process(target=_promote_database_risk, args=(str(tmp_path),))
     updater.start()
+    promoter_started = False
     try:
         assert snapshot_ready.wait(timeout=5)
         promoter.start()
-        promoter.join(timeout=10)
+        promoter_started = True
+        _finish_process(promoter)
         assert promoter.exitcode == 0
     finally:
         release_snapshot.set()
-        updater.join(timeout=10)
-
+        _finish_process(updater)
+        if promoter_started:
+            _finish_process(promoter)
     assert updater.exitcode == 0
     persisted = json.loads(
         (tmp_path / ".workflow" / "state.json").read_text(encoding="utf-8")
@@ -737,6 +753,91 @@ def test_database_risk_preserves_stale_production_state_update(tmp_path: Path):
     }
     actions = {event["action"] for event in persisted["history"]}
     assert {"completed", "database_risk_escalated"} <= actions
+
+
+@pytest.mark.parametrize("failure", ["write", "replace"])
+def test_database_risk_atomic_save_cleans_temporary_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    import awf.core.state as workflow_state
+
+    workflow_dir = tmp_path / ".workflow"
+    workflow_dir.mkdir()
+    state_path = workflow_dir / "state.json"
+    original_state = '{"changeClass":"small"}\n'
+    state_path.write_text(original_state, encoding="utf-8")
+
+    if failure == "write":
+        original_write = Path.write_text
+
+        def fail_temporary_write(path: Path, *args: Any, **kwargs: Any) -> int:
+            result = original_write(path, *args, **kwargs)
+            if path.name.startswith("state.json."):
+                raise OSError("temporary write failed")
+            return result
+
+        monkeypatch.setattr(Path, "write_text", fail_temporary_write)
+    else:
+        original_replace = Path.replace
+
+        def fail_temporary_replace(path: Path, target: Path) -> Path:
+            if path.name.startswith("state.json."):
+                raise OSError("replace failed")
+            return original_replace(path, target)
+
+        monkeypatch.setattr(Path, "replace", fail_temporary_replace)
+
+    with pytest.raises(OSError):
+        workflow_state._write_workflow_state_unlocked(
+            tmp_path,
+            {"changeClass": "high_risk"},
+        )
+
+    assert state_path.read_text(encoding="utf-8") == original_state
+    assert not list(workflow_dir.glob("state.json.*.tmp"))
+
+
+def test_database_risk_threads_share_a_deadlock_free_lock_order(tmp_path: Path) -> None:
+    state = _make_state("small")
+    _apply_policy_skips(state)
+    _write_workflow_state(tmp_path, state)
+    start = threading.Event()
+    errors: list[BaseException] = []
+
+    def promote() -> None:
+        start.wait(timeout=5)
+        try:
+            promote_database_change_to_high_risk(tmp_path, ("text:query",))
+        except BaseException as error:
+            errors.append(error)
+
+    threads = [
+        threading.Thread(target=promote, daemon=True),
+        threading.Thread(target=promote, daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    start.set()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert not [thread for thread in threads if thread.is_alive()]
+    assert not errors
+    persisted = json.loads(
+        (tmp_path / ".workflow" / "state.json").read_text(encoding="utf-8")
+    )
+    assert persisted["changeClass"] == "high_risk"
+    assert len(
+        [
+            event
+            for event in persisted["history"]
+            if event["action"] == "database_risk_escalated"
+        ]
+    ) == 1
+
+
 
 
 # ===========================================================================

@@ -658,8 +658,18 @@ def _write_workflow_state_unlocked(root: Path, state: dict) -> Path:
     tmp_path = state_path.with_name(
         f"{state_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
     )
-    tmp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp_path.replace(state_path)
+    try:
+        tmp_path.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        tmp_path.replace(state_path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
     return state_path
 
 
