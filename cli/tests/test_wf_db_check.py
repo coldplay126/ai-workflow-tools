@@ -298,6 +298,20 @@ def _python_json_command(payload: dict[str, object]) -> list[str]:
         f"import json; print(json.dumps({payload!r}, sort_keys=True))",
     ]
 
+
+def _dynamic_schema_command(schema_path: Path) -> list[str]:
+    return [
+        sys.executable,
+        "-c",
+        (
+            "import datetime, json, pathlib, sys; "
+            "schema = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')); "
+            "schema['captured_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat(); "
+            "print(json.dumps(schema, sort_keys=True))"
+        ),
+        str(schema_path),
+    ]
+
 def _write_state(repo_root: Path) -> None:
     workflow_dir = repo_root / ".workflow"
     workflow_dir.mkdir(parents=True, exist_ok=True)
@@ -446,7 +460,9 @@ def _write_valid_database_workflow(repo_root: Path) -> None:
     )
 
 
-def _write_database_lifecycle_smoke_fixture(repo_root: Path) -> tuple[Path, Path]:
+def _write_database_lifecycle_smoke_fixture(
+    repo_root: Path,
+) -> tuple[Path, Path, Path]:
     """Create a hermetic database workflow that can traverse G1, G5, and G6."""
     _write_valid_database_workflow(repo_root)
     workflow_dir = repo_root / ".workflow"
@@ -494,7 +510,9 @@ def _write_database_lifecycle_smoke_fixture(repo_root: Path) -> tuple[Path, Path
     manifest_path = workflow_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     profile = manifest["database_validation"]
-    profile["schema_command"] = _python_json_command(schema)
+    schema_path = repo_root / "production-schema.json"
+    schema_path.write_text(json.dumps(schema), encoding="utf-8")
+    profile["schema_command"] = _dynamic_schema_command(schema_path)
     profile["verify_command"] = _python_json_command(verify)
     profile["test_command"] = _python_json_command(test)
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -604,12 +622,12 @@ def _write_database_lifecycle_smoke_fixture(repo_root: Path) -> tuple[Path, Path
         }
     )
     state_path.write_text(json.dumps(state), encoding="utf-8")
-    return verify_result, test_result
+    return schema_path, verify_result, test_result
 
 
 
 def test_db_check_cli_smoke_completes_database_lifecycle_gates(tmp_path: Path) -> None:
-    verify_result, test_result = _write_database_lifecycle_smoke_fixture(tmp_path)
+    _, verify_result, test_result = _write_database_lifecycle_smoke_fixture(tmp_path)
     state_path = tmp_path / ".workflow" / "state.json"
     initial_state = json.loads(state_path.read_text(encoding="utf-8"))
     assert all(
@@ -774,6 +792,67 @@ def test_db_check_cli_smoke_completes_database_lifecycle_gates(tmp_path: Path) -
         "performance": "pass",
     }
     assert "secret" not in evidence_text.casefold()
+
+
+def test_db_check_cli_plan_refresh_on_schema_identity_drift_blocks_g5_and_g6(
+    tmp_path: Path,
+) -> None:
+    schema_path, verify_result, test_result = _write_database_lifecycle_smoke_fixture(
+        tmp_path
+    )
+    for stage in ("plan", "verify", "test"):
+        return_code, _, stderr = capture_main(
+            ["wf", "db-check", "--stage", stage, "--repo-root", str(tmp_path)]
+        )
+        assert return_code == 0
+        assert stderr == ""
+
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    schema["object_counts"]["indexes"] += 1
+    schema_path.write_text(json.dumps(schema), encoding="utf-8")
+
+    plan_code, _, plan_stderr = capture_main(
+        ["wf", "db-check", "--stage", "plan", "--repo-root", str(tmp_path)]
+    )
+
+    assert plan_code == 0
+    assert plan_stderr == ""
+    evidence = json.loads(
+        (tmp_path / _DATABASE_EVIDENCE_PATH).read_text(encoding="utf-8")
+    )
+    assert set(evidence["stages"]) == {"plan"}
+
+    g5_code, g5_stdout, g5_stderr = capture_main(
+        [
+            "wf",
+            "gate",
+            "verify",
+            "--repo-root",
+            str(tmp_path),
+            "--result-file",
+            str(verify_result),
+        ]
+    )
+    g6_code, g6_stdout, g6_stderr = capture_main(
+        [
+            "wf",
+            "gate",
+            "test",
+            "--repo-root",
+            str(tmp_path),
+            "--result-file",
+            str(test_result),
+        ]
+    )
+
+    assert g5_code == 1
+    assert g5_stderr == ""
+    assert "database.production_schema" in g5_stdout
+    assert "G-verify: FAIL" in g5_stdout
+    assert g6_code == 1
+    assert g6_stderr == ""
+    assert "database.production_schema" in g6_stdout
+    assert "G-test: FAIL" in g6_stdout
 
 
 @pytest.mark.parametrize("stage", ["plan", "verify", "test"])

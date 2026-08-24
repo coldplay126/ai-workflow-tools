@@ -137,6 +137,99 @@ def test_database_signal_detects_strong_ddl_and_warehouse_terms(
     assert reason in detect_database_signal(tmp_path).reasons
 
 
+
+@pytest.mark.parametrize(
+    ("concept", "reason"),
+    [
+        (
+            "CREATE\nOR REPLACE\nTABLE audit_log (id bigint)",
+            "text:table_ddl",
+        ),
+        (
+            "CREATE\nOR REPLACE\nVIEW audit_summary AS\nSELECT actor_id\nFROM audit_log",
+            "text:view_ddl",
+        ),
+        ("ALTER\nSCHEMA reporting RENAME TO archive", "text:schema_ddl"),
+        ("ALTER\nDATABASE reporting SET owner = audit", "text:database_ddl"),
+        ("ALTER\nTYPE audit_status ADD VALUE 'closed'", "text:type_ddl"),
+        ("ALTER\nSEQUENCE audit_id RESTART WITH 1", "text:sequence_ddl"),
+        ("ALTER\nTRIGGER audit_trigger ENABLE", "text:trigger_ddl"),
+        ("ALTER\nPROCEDURE archive_audit() RENAME TO archive_log", "text:routine_ddl"),
+        ("ALTER\nFUNCTION audit_count() RENAME TO event_count", "text:routine_ddl"),
+        ("ALTER\nINDEX audit_actor_idx RENAME TO actor_idx", "text:index_ddl"),
+        ("ALTER TABLE audit_log\nRENAME COLUMN actor_id\nTO user_id", "text:column_ddl"),
+        ("ALTER TABLE audit_log\nRENAME TO archived_audit_log", "text:table_ddl"),
+        ("ALTER TABLE audit_log\nRENAME TABLE archived_audit_log", "text:table_ddl"),
+        ("TRUNCATE\naudit_log", "text:table_ddl"),
+        (
+            "MERGE\nINTO audit_summary target\nUSING audit_log source\nON target.id = source.id",
+            "text:sql syntax",
+        ),
+        (
+            "UPDATE reporting.audit_log AS audit\nSET actor_id = replacement_id",
+            "text:sql syntax",
+        ),
+        ("SELECT actor_id\nFROM audit_log", "text:sql syntax"),
+        ("INSERT\nINTO audit_log (id) VALUES (1)", "text:sql syntax"),
+        ("DELETE\nFROM audit_log", "text:sql syntax"),
+        ("SELECT actor_id\nFROM audit_log\nORDER\nBY actor_id", "text:order by"),
+        (
+            "SELECT audit.id\nFROM audit_log audit\nJOIN actor ON actor.id = audit.actor_id",
+            "text:sql syntax",
+        ),
+    ],
+    ids=[
+        "create-or-replace-table",
+        "create-or-replace-view",
+        "alter-schema",
+        "alter-database",
+        "alter-type",
+        "alter-sequence",
+        "alter-trigger",
+        "alter-procedure",
+        "alter-function",
+        "alter-index",
+        "rename-column",
+        "rename-table-to",
+        "rename-table-table",
+        "truncate-without-table",
+        "merge-into",
+        "qualified-aliased-update",
+        "multiline-select-from",
+        "multiline-insert",
+        "multiline-delete",
+        "multiline-order-by",
+        "multiline-join",
+    ],
+)
+def test_database_signal_detects_normalized_multiline_sql_grammar(
+    tmp_path: Path,
+    concept: str,
+    reason: str,
+) -> None:
+    write_workflow_artifacts(tmp_path, concept=concept)
+
+    assert reason in detect_database_signal(tmp_path).reasons
+
+
+def test_database_signal_keeps_openapi_and_frontend_controls_non_database(
+    tmp_path: Path,
+) -> None:
+    write_workflow_artifacts(
+        tmp_path,
+        spec="\n".join(
+            [
+                "OpenAPI operationId: createTableLayout",
+                "The frontend should update the table component state.",
+                "Join the design review on Thursday.",
+                "Insert the panel into the responsive page.",
+                "Delete the selected row from the client cache.",
+            ]
+        ),
+    )
+
+    assert detect_database_signal(tmp_path).detected is False
+
 def test_database_signal_snapshot_hash_is_stable_and_tracks_artifact_content(
     tmp_path: Path,
 ) -> None:
@@ -439,6 +532,16 @@ def database_command(payload: object, *, exit_code: int = 0) -> list[str]:
         f"raise SystemExit({exit_code})"
     )
     return [sys.executable, "-c", script]
+
+
+def dynamic_schema_command(schema_path: Path) -> list[str]:
+    script = (
+        "import datetime, json, pathlib, sys; "
+        "payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')); "
+        "payload['captured_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat(); "
+        "print(json.dumps(payload))"
+    )
+    return [sys.executable, "-c", script, str(schema_path)]
 
 
 def write_database_manifest(
@@ -2632,6 +2735,236 @@ def test_schema_drift_does_not_overwrite_valid_plan_evidence(tmp_path: Path) -> 
     assert result.status == "fail"
     assert result.blockers == ("production_schema_changed",)
     assert evidence_path(tmp_path).read_bytes() == before
+
+
+def test_schema_identity_is_canonical_and_excludes_capture_time() -> None:
+    first = schema_evidence(
+        captured_at=datetime(2026, 8, 24, 10, tzinfo=timezone.utc),
+        object_counts={"tables": 1, "columns": 8, "indexes": 2, "constraints": 3},
+    )
+    second = schema_evidence(
+        captured_at=datetime(2026, 8, 24, 11, tzinfo=timezone.utc),
+        object_counts={"constraints": 3, "indexes": 2, "columns": 8, "tables": 1},
+    )
+
+    assert db_validation._schema_identity(first) == (
+        "a" * 64,
+        "mysql",
+        "8.0",
+        (("columns", 8), ("constraints", 3), ("indexes", 2), ("tables", 1)),
+    )
+    assert db_validation._schema_identity(second) == db_validation._schema_identity(first)
+
+
+@pytest.mark.parametrize(
+    "schema_update",
+    [
+        {"engine": "postgres"},
+        {"engine_version": "8.1"},
+        {
+            "object_counts": {
+                "tables": 2,
+                "columns": 8,
+                "indexes": 2,
+                "constraints": 3,
+            }
+        },
+        {
+            "object_counts": {
+                "tables": 1,
+                "columns": 9,
+                "indexes": 2,
+                "constraints": 3,
+            }
+        },
+        {
+            "object_counts": {
+                "tables": 1,
+                "columns": 8,
+                "indexes": 3,
+                "constraints": 3,
+            }
+        },
+        {
+            "object_counts": {
+                "tables": 1,
+                "columns": 8,
+                "indexes": 2,
+                "constraints": 4,
+            }
+        },
+    ],
+    ids=[
+        "engine",
+        "engine-version",
+        "table-count",
+        "column-count",
+        "index-count",
+        "constraint-count",
+    ],
+)
+def test_plan_refresh_invalidates_verify_test_and_gates_on_full_schema_identity_drift(
+    tmp_path: Path,
+    schema_update: dict[str, object],
+) -> None:
+    schema_path = tmp_path / "current-schema.json"
+    schema_path.write_text(json.dumps(schema_evidence()), encoding="utf-8")
+    prepare_database_workflow(
+        tmp_path,
+        schema_command=dynamic_schema_command(schema_path),
+        verify_command=database_command(verify_evidence()),
+        test_command=database_command(database_test_payload()),
+    )
+    assert run_database_check(tmp_path, "plan").status == "pass"
+    assert run_database_check(tmp_path, "verify").status == "pass"
+    assert run_database_check(tmp_path, "test").status == "pass"
+
+    schema_path.write_text(
+        json.dumps(schema_evidence(**schema_update)),
+        encoding="utf-8",
+    )
+
+    assert run_database_check(tmp_path, "plan").status == "pass"
+    persisted = json.loads(evidence_path(tmp_path).read_text(encoding="utf-8"))
+    assert set(persisted["stages"]) == {"plan"}
+    verify_conditions = {
+        check["condition"]: check
+        for check in evaluate_database_gate(tmp_path, "verify")
+    }
+    test_conditions = {
+        check["condition"]: check
+        for check in evaluate_database_gate(tmp_path, "test")
+    }
+    assert verify_conditions["database.production_schema"]["passed"] is False
+    assert verify_conditions["database.equivalence"]["passed"] is False
+    assert test_conditions["database.production_schema"]["passed"] is False
+    assert test_conditions["database.local_test"]["passed"] is False
+
+
+@pytest.mark.parametrize(
+    ("schema_update", "verify_engine"),
+    [
+        ({"engine": "postgres"}, "postgres"),
+        ({"engine_version": "8.1"}, "mysql"),
+        (
+            {
+                "object_counts": {
+                    "tables": 2,
+                    "columns": 8,
+                    "indexes": 2,
+                    "constraints": 3,
+                }
+            },
+            "mysql",
+        ),
+        (
+            {
+                "object_counts": {
+                    "tables": 1,
+                    "columns": 9,
+                    "indexes": 2,
+                    "constraints": 3,
+                }
+            },
+            "mysql",
+        ),
+        (
+            {
+                "object_counts": {
+                    "tables": 1,
+                    "columns": 8,
+                    "indexes": 3,
+                    "constraints": 3,
+                }
+            },
+            "mysql",
+        ),
+        (
+            {
+                "object_counts": {
+                    "tables": 1,
+                    "columns": 8,
+                    "indexes": 2,
+                    "constraints": 4,
+                }
+            },
+            "mysql",
+        ),
+    ],
+    ids=[
+        "engine",
+        "engine-version",
+        "table-count",
+        "column-count",
+        "index-count",
+        "constraint-count",
+    ],
+)
+def test_verify_and_test_reject_full_schema_identity_drift(
+    tmp_path: Path,
+    schema_update: dict[str, object],
+    verify_engine: str,
+) -> None:
+    schema_path = tmp_path / "current-schema.json"
+    schema_path.write_text(json.dumps(schema_evidence()), encoding="utf-8")
+    prepare_database_workflow(
+        tmp_path,
+        schema_command=dynamic_schema_command(schema_path),
+        verify_command=database_command(verify_evidence(engine=verify_engine)),
+        test_command=database_command(database_test_payload()),
+    )
+    assert run_database_check(tmp_path, "plan").status == "pass"
+    before = evidence_path(tmp_path).read_bytes()
+    schema_path.write_text(
+        json.dumps(schema_evidence(**schema_update)),
+        encoding="utf-8",
+    )
+
+    verify_result = run_database_check(tmp_path, "verify")
+    test_result = run_database_check(tmp_path, "test")
+
+    assert verify_result.status == "fail"
+    assert verify_result.blockers == ("production_schema_changed",)
+    assert test_result.status == "fail"
+    assert test_result.blockers == ("production_schema_changed",)
+    assert evidence_path(tmp_path).read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("engine_version", "8.1"),
+        (
+            "object_counts",
+            {"tables": 1, "columns": 8, "indexes": 3, "constraints": 3},
+        ),
+    ],
+    ids=["engine-version", "object-counts"],
+)
+def test_stored_stages_require_matching_full_schema_identity(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    prepare_database_workflow(
+        tmp_path,
+        verify_command=database_command(verify_evidence()),
+        test_command=database_command(database_test_payload()),
+    )
+    assert run_database_check(tmp_path, "plan").status == "pass"
+    assert run_database_check(tmp_path, "verify").status == "pass"
+    assert run_database_check(tmp_path, "test").status == "pass"
+    path = evidence_path(tmp_path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted["stages"]["verify"]["schema"][field] = value
+    path.write_text(json.dumps(persisted), encoding="utf-8")
+    before = path.read_bytes()
+
+    result = run_database_check(tmp_path, "plan")
+
+    assert result.status == "fail"
+    assert result.blockers == ("evidence_invalid",)
+    assert path.read_bytes() == before
 
 
 def test_unsafe_verify_output_preserves_prior_evidence_without_raw_stdout(tmp_path: Path) -> None:

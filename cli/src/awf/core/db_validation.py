@@ -49,19 +49,12 @@ _PATH_DIRECTORIES = {
 }
 _WINDOWS_DRIVE_PATH = re.compile(r"^[a-zA-Z]:")
 
-# Strong terms are database-specific on their own. Weak terms need a DB anchor
-# on the same artifact line so HTML, OpenAPI, and ML vocabulary stays neutral.
+# Strong non-SQL terms are database-specific on their own. Weak terms need a
+# DB anchor on the same artifact line so HTML, OpenAPI, and ML vocabulary stays
+# neutral.
 _STRONG_TEXT_SIGNAL_PATTERNS = (
     ("database", re.compile(r"\bdatabase\b|데이터베이스")),
     ("sql", re.compile(r"\bsql\b")),
-    (
-        "sql syntax",
-        re.compile(
-            r"\b(?:select\s+.+\s+from|insert\s+into|update\s+\w+\s+set|"
-            r"delete\s+from|group\s+by|join)\b"
-        ),
-    ),
-    ("order by", re.compile(r"\border\s+by\b")),
     ("migration", re.compile(r"\bmigration(?:s)?\b|마이그레이션")),
     ("normalization", re.compile(r"\bnormalization\b|(?<!비)정규화")),
     ("denormalization", re.compile(r"\bdenormalization\b|비정규화")),
@@ -72,48 +65,6 @@ _STRONG_TEXT_SIGNAL_PATTERNS = (
     ("partition", re.compile(r"\bpartition(?:ing)?\b|파티션")),
     ("schema object", re.compile(r"\bschema\s+object\b")),
     (
-        "table_ddl",
-        re.compile(r"\b(?:create|drop|truncate)\s+(?:temporary\s+)?table\b"),
-    ),
-    (
-        "column_ddl",
-        re.compile(
-            r"\b(?:add|alter|drop)\s+column\b|"
-            r"\balter\s+table\b[^\n;]*?\b(?:add|alter|drop)\s+"
-            r"(?!(?:constraint|unique|check|index|key)\b|"
-            r"(?:primary|foreign)\s+key\b)\w+"
-        ),
-    ),
-    (
-        "index_ddl",
-        re.compile(
-            r"\b(?:create|drop)\s+(?:unique\s+)?index\b|"
-            r"\balter\s+table\b[^\n;]*?\b(?:add|drop)\s+"
-            r"(?:unique\s+)?(?:index|key)\b"
-        ),
-    ),
-    (
-        "constraint_ddl",
-        re.compile(
-            r"\balter\s+table\b[^\n;]*?\b(?:add|drop)\s+constraint\b|"
-            r"\balter\s+table\b[^\n;]*?\b(?:add|drop)\s+"
-            r"(?:primary\s+key|foreign\s+key|unique|check)\b"
-        ),
-    ),
-    ("schema_ddl", re.compile(r"\b(?:create|alter|drop)\s+schema\b")),
-    ("database_ddl", re.compile(r"\b(?:create|alter|drop)\s+database\b")),
-    (
-        "view_ddl",
-        re.compile(r"\b(?:create|alter|drop)\s+(?:materialized\s+)?view\b"),
-    ),
-    ("type_ddl", re.compile(r"\b(?:create|alter|drop)\s+type\b")),
-    ("sequence_ddl", re.compile(r"\b(?:create|alter|drop)\s+sequence\b")),
-    ("trigger_ddl", re.compile(r"\b(?:create|alter|drop)\s+trigger\b")),
-    (
-        "routine_ddl",
-        re.compile(r"\b(?:create|alter|drop)\s+(?:procedure|function)\b"),
-    ),
-    (
         "database engine",
         re.compile(
             r"\b(?:mysql|mariadb|postgres(?:ql)?|sqlite|mongodb|duckdb|"
@@ -122,6 +73,112 @@ _STRONG_TEXT_SIGNAL_PATTERNS = (
     ),
     ("warehouse", re.compile(r"\bwarehouse\b|웨어하우스")),
 )
+
+
+_SQL_IDENTIFIER = (
+    r'(?:[a-z_][a-z0-9_$]*|"(?:[^"]|"")*"|`[^`]+`|\[[^\]]+\])'
+)
+_SQL_OBJECT = rf"{_SQL_IDENTIFIER}(?:\s*\.\s*{_SQL_IDENTIFIER})*"
+_ALTER_TABLE_TARGET = rf"\balter\s+table\s+{_SQL_OBJECT}"
+_STRONG_SQL_SIGNAL_PATTERNS = (
+    (
+        "sql syntax",
+        re.compile(
+            rf"(?:"
+            rf"\bselect\b[^;]{{0,4096}}?\bfrom\s+{_SQL_OBJECT}"
+            rf"|\binsert\s+into\s+{_SQL_OBJECT}"
+            rf"|\bdelete\s+from\s+{_SQL_OBJECT}"
+            rf"|\bmerge\s+into\s+{_SQL_OBJECT}"
+            rf"|\bupdate\s+{_SQL_OBJECT}"
+            rf"(?:\s+(?:as\s+)?{_SQL_IDENTIFIER})?\s+set\b"
+            rf"|\b(?:join|(?:inner|left|right|full|cross)(?:\s+outer)?\s+join)"
+            rf"\s+{_SQL_OBJECT}(?:\s+(?:as\s+)?{_SQL_IDENTIFIER})?"
+            rf"\s+on\s+{_SQL_OBJECT}\s*=\s*{_SQL_OBJECT}"
+            rf")"
+        ),
+    ),
+    ("order by", re.compile(r"\border\s+by\s+[a-z_\"`[]")),
+    (
+        "table_ddl",
+        re.compile(
+            rf"(?:"
+            rf"\b(?:create(?:\s+or\s+replace)?|drop)\s+"
+            rf"(?:temporary\s+)?table\b"
+            rf"|\btruncate(?:\s+table)?\s+{_SQL_OBJECT}"
+            rf"|{_ALTER_TABLE_TARGET}\s+"
+            rf"(?!(?:(?:add|alter|drop)\s+|rename\s+column\b))"
+            rf")"
+        ),
+    ),
+    (
+        "column_ddl",
+        re.compile(
+            rf"(?:"
+            rf"{_ALTER_TABLE_TARGET}[^;]{{0,4096}}?"
+            rf"\b(?:rename\s+column|(?:add|alter|drop)\s+column)\b"
+            rf"|{_ALTER_TABLE_TARGET}[^;]{{0,4096}}?"
+            rf"\b(?:add|alter|drop)\s+"
+            rf"(?!(?:constraint|unique|check|index|key)\b|"
+            rf"(?:primary|foreign)\s+key\b)\w+"
+            rf")"
+        ),
+    ),
+    (
+        "index_ddl",
+        re.compile(
+            rf"(?:"
+            rf"\b(?:create(?:\s+or\s+replace)?|alter|drop)\s+"
+            rf"(?:unique\s+)?index\b"
+            rf"|{_ALTER_TABLE_TARGET}[^;]{{0,4096}}?"
+            rf"\b(?:add|drop)\s+(?:unique\s+)?(?:index|key)\b"
+            rf")"
+        ),
+    ),
+    (
+        "constraint_ddl",
+        re.compile(
+            rf"{_ALTER_TABLE_TARGET}[^;]{{0,4096}}?"
+            rf"\b(?:add|drop)\s+(?:constraint|primary\s+key|foreign\s+key|"
+            rf"unique|check)\b"
+        ),
+    ),
+    (
+        "schema_ddl",
+        re.compile(r"\b(?:create(?:\s+or\s+replace)?|alter|drop)\s+schema\b"),
+    ),
+    (
+        "database_ddl",
+        re.compile(r"\b(?:create(?:\s+or\s+replace)?|alter|drop)\s+database\b"),
+    ),
+    (
+        "view_ddl",
+        re.compile(
+            r"\b(?:create(?:\s+or\s+replace)?|alter|drop)\s+"
+            r"(?:materialized\s+)?view\b"
+        ),
+    ),
+    (
+        "type_ddl",
+        re.compile(r"\b(?:create(?:\s+or\s+replace)?|alter|drop)\s+type\b"),
+    ),
+    (
+        "sequence_ddl",
+        re.compile(r"\b(?:create(?:\s+or\s+replace)?|alter|drop)\s+sequence\b"),
+    ),
+    (
+        "trigger_ddl",
+        re.compile(r"\b(?:create(?:\s+or\s+replace)?|alter|drop)\s+trigger\b"),
+    ),
+    (
+        "routine_ddl",
+        re.compile(
+            r"\b(?:create(?:\s+or\s+replace)?|alter|drop)\s+"
+            r"(?:procedure|function)\b"
+        ),
+    ),
+)
+
+
 _WEAK_TEXT_SIGNAL_PATTERNS = (
     ("index", re.compile(r"\bindex\b|인덱스")),
     ("schema", re.compile(r"\bschema\b|스키마")),
@@ -174,6 +231,7 @@ DATABASE_CHECK_BLOCKERS = frozenset({
 DATABASE_CHECK_TEXT_REASONS = frozenset(
     {
         *(f"text:{reason}" for reason, _ in _STRONG_TEXT_SIGNAL_PATTERNS),
+        *(f"text:{reason}" for reason, _ in _STRONG_SQL_SIGNAL_PATTERNS),
         *(f"text:{reason}" for reason, _ in _WEAK_TEXT_SIGNAL_PATTERNS),
     }
 )
@@ -386,6 +444,10 @@ def _read_bounded_utf8(
 
 
 def _text_reasons(text: str) -> Iterable[str]:
+    normalized_sql = " ".join(text.split()).casefold()
+    for reason, pattern in _STRONG_SQL_SIGNAL_PATTERNS:
+        if pattern.search(normalized_sql):
+            yield f"text:{reason}"
     for line in text.splitlines():
         normalized_line = line.casefold()
         for reason, pattern in _STRONG_TEXT_SIGNAL_PATTERNS:
@@ -1628,6 +1690,18 @@ def _validate_schema_evidence(
     }
 
 
+def _schema_identity(
+    schema: dict[str, Any],
+) -> tuple[str, str, str, tuple[tuple[str, int], ...]]:
+    """Return the stable schema identity without capture-time freshness metadata."""
+    return (
+        schema["schema_hash"],
+        schema["engine"],
+        schema["engine_version"],
+        tuple(sorted(schema["object_counts"].items())),
+    )
+
+
 def _validate_verify_evidence(
     payload: dict[str, Any],
     decision: DatabaseDecision,
@@ -1991,8 +2065,11 @@ def _validated_existing_stages(
         )
         for name, record in stages.items()
     }
-    plan_hash = schemas["plan"]["schema_hash"]
-    if any(schema["schema_hash"] != plan_hash for schema in schemas.values()):
+    plan_schema_identity = _schema_identity(schemas["plan"])
+    if any(
+        _schema_identity(schema) != plan_schema_identity
+        for schema in schemas.values()
+    ):
         raise DatabaseValidationError("evidence_invalid")
     return schemas["plan"]
 
@@ -2344,15 +2421,16 @@ def run_database_check(
 
             if stage in {"verify", "test"}:
                 assert locked_plan_schema is not None
-                if schema["schema_hash"] != locked_plan_schema["schema_hash"]:
+                if _schema_identity(schema) != _schema_identity(locked_plan_schema):
                     raise DatabaseValidationError("production_schema_changed")
 
             checked_at = _utc_timestamp(_utc_now())
             if stage == "plan":
+                existing_plan_schema = stages.get("plan", {}).get("schema")
                 if (
                     refresh_invalidates_downstream
-                    or stages.get("plan", {}).get("schema", {}).get("schema_hash")
-                    != schema["schema_hash"]
+                    or existing_plan_schema is None
+                    or _schema_identity(existing_plan_schema) != _schema_identity(schema)
                 ):
                     stages.pop("verify", None)
                     stages.pop("test", None)
