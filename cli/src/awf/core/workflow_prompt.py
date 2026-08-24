@@ -337,7 +337,7 @@ def build_workflow_prompt(explicit_root: Optional[str], state: dict, provider_co
                     "result": result_schema,
                     "escape": {
                         "severity": "blocking|degraded|advisory",
-                        "reason": "scope_divergence|missing_dependency|contract_conflict|unsafe_change|missing_input|unknown",
+                        "reason": "scope_divergence|missing_dependency|contract_conflict|unsafe_change|missing_input|decision_selection_required|unknown",
                         "summary": "short description",
                         "evidence": [{"kind": "file|symbol|log|note", "value": "evidence"}],
                         "affected_files": ["path/to/file"],

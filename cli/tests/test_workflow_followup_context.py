@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from awf.core.workflow_envelope import normalize_worker_result
 from awf.core.workflow_prompt import build_workflow_prompt
 
 
@@ -103,3 +104,49 @@ def test_workflow_prompt_keeps_review_provider_read_only(tmp_path: Path):
     assert "Return the required structured result only." in prompt
     assert "Do not write workflow artifacts" in prompt
     assert "write any required outputs to the documented paths" not in prompt
+
+
+def test_plan_prompt_declares_selection_escape_and_normalizes_it(
+    tmp_path: Path,
+) -> None:
+    cards = tmp_path / ".workflow" / "agent-cards"
+    cards.mkdir(parents=True)
+    (cards / "plan.json").write_text(
+        json.dumps(
+            {
+                "description": "Plan",
+                "capabilities": {},
+                "input": {"required_artifacts": []},
+                "output": {"structured_result": {"plan_artifact": "artifact path"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    prompt = build_workflow_prompt(
+        str(tmp_path),
+        {"repo": "fixture", "branch": "main"},
+        {},
+        "plan",
+    )
+    normalized = normalize_worker_result(
+        {
+            "status": "escaped",
+            "phase": "plan",
+            "provider": "fixture",
+            "result": {},
+            "escape": {
+                "severity": "blocking",
+                "reason": "decision_selection_required",
+                "summary": "A material plan decision needs an option selection.",
+                "recommended_action": "user_decision",
+            },
+            "meta": {"format_version": 1},
+        },
+        phase="plan",
+        provider="fixture",
+    )
+
+    assert "decision_selection_required" in prompt
+    assert normalized["escape"]["reason"] == "decision_selection_required"
+    assert normalized["escape"]["recommended_action"] == "user_decision"
