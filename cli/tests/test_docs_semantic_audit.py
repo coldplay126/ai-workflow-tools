@@ -11,7 +11,10 @@ import pytest
 from awf.cli import KNOWN_COMMANDS, build_parser
 from awf.core.config import AwfConfig
 from awf.core.db_validation import load_database_decision
-from awf.core.planning_options import load_planning_options
+from awf.core.planning_options import (
+    load_planning_options,
+    load_planning_options_provenance,
+)
 from awf.core.workflow_envelope import normalize_worker_result
 from awf.core.state import PHASE_GATE, PHASE_ORDER
 
@@ -740,6 +743,62 @@ def test_planning_options_docs_separate_legacy_and_explicit_opt_out() -> None:
         normalized = " ".join(path.read_text(encoding="utf-8").split())
         for sentence in LEGACY_POLICY_SENTENCES:
             assert sentence in normalized, f"{path}: missing policy: {sentence}"
+
+PLANNING_SEAL_COMMAND = "awf wf seal-plan --repo-root . --json"
+PLANNING_SEAL_COMMAND_DOCS = (
+    REPO_ROOT / "claude" / "skills" / "phase-plan" / "SKILL.md",
+    REPO_ROOT / "docs" / "architecture" / "02-wf-pipeline.md",
+    REPO_ROOT / "docs" / "architecture" / "wf-architecture.md",
+    REPO_ROOT / "docs" / "reference" / "workflow-pipeline.md",
+    CLI_README,
+)
+
+
+def test_planning_provenance_docs_use_parseable_seal_command() -> None:
+    parser = build_parser()
+    expected = parser.parse_args(["wf", "seal-plan", "--repo-root", ".", "--json"])
+    assert expected.wf_command == "seal-plan"
+    assert expected.repo_root == "."
+    assert expected.json is True
+
+    for path in PLANNING_SEAL_COMMAND_DOCS:
+        commands = _shell_fenced_awf_commands(path.read_text(encoding="utf-8"))
+        assert PLANNING_SEAL_COMMAND in commands
+        assert vars(
+            parser.parse_args(_argv_from_displayed_command(PLANNING_SEAL_COMMAND))
+        ) == vars(expected)
+
+
+PLANNING_PROVENANCE_FIXTURE_RE = re.compile(
+    r"#### Canonical provenance fixture\n\n```json\n(?P<payload>.*?)\n```",
+    re.DOTALL,
+)
+
+
+def test_planning_provenance_fixture_loads_through_canonical_loader(
+    tmp_path: Path,
+) -> None:
+    phase_plan = (
+        REPO_ROOT / "claude" / "skills" / "phase-plan" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    match = PLANNING_PROVENANCE_FIXTURE_RE.search(phase_plan)
+    assert match is not None
+    payload = json.loads(match.group("payload"))
+    marker_path = tmp_path / ".workflow" / "artifacts" / "planning-provenance.json"
+    marker_path.parent.mkdir(parents=True)
+    marker_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    provenance = load_planning_options_provenance(tmp_path)
+
+    assert provenance.schema_version == 1
+    assert provenance.planning_options_hash == "a" * 64
+    assert dict(provenance.artifacts) == {
+        "constitution.md": "b" * 64,
+        "spec.md": "c" * 64,
+        "plan.md": "d" * 64,
+        "tasks.md": "e" * 64,
+        "test-criteria.md": "f" * 64,
+    }
 def test_skill_frontmatter_has_required_identity_metadata() -> None:
     invalid: list[str] = []
     required = {"name", "version", "description", "type"}
@@ -1506,6 +1565,7 @@ def test_protected_index_entry_docs_define_supported_stage_zero_modes() -> None:
 DATABASE_GATE_COMMANDS = {
     "plan": (
         "awf wf db-check --stage plan --repo-root . --json",
+        "awf wf seal-plan --repo-root . --json",
         "awf wf gate plan --repo-root . --json",
     ),
     "verify": (

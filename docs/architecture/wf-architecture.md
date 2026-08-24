@@ -40,6 +40,7 @@ done (P7)  | —    | 완료                 | —
 │   ├── test-criteria.md        ← P1: FR별 수락·회귀 검증 기준
 │   ├── allowed-files.json      ← P1: planned_files + 선택적 expanded_files (graph 확장) + graph_expansion audit
 │   ├── planning-options.json  ← P1: conditional material decision + append-only CLI selection journal
+│   ├── planning-provenance.json ← P1: host-sealed Planning Options + five plan artifact hashes
 │   ├── review-report.md        ← P2: 교차 검증 결과
 │   ├── approval.json           ← P3: 승인 기록 + scope hash
 │   ├── impl-log.md             ← P4: 구현 로그
@@ -68,6 +69,16 @@ substantively different option과 recommendation-first rationale으로 기록한
 
 ```bash
 awf wf select-option --decision-id D-001 --option-id O-001 --actor "${AWF_OPERATOR:?set operator identity}" --repo-root . --json
+```
+
+After selected/no-decision rerun writes the five plan artifacts
+(`constitution.md`, `spec.md`, `plan.md`, `tasks.md`, `test-criteria.md`), only
+the host may write `planning-provenance.json`. `selection_required` blocks seal.
+Any later option or plan-artifact change makes the old seal stale and G1 fails
+`provenance_changed` until rerun and reseal.
+
+```bash
+awf wf seal-plan --repo-root . --json
 ```
 
 Partial plan selection은 `selected_pending`, 마지막 plan selection은 `continued`다.

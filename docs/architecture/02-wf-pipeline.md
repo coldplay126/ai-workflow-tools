@@ -85,6 +85,15 @@ material하지 않은 선호는 질문하지 않는다.
 awf wf select-option --decision-id D-001 --option-id O-001 --actor "${AWF_OPERATOR:?set operator identity}" --repo-root . --json
 ```
 
+Selected/no-decision rerun은 `constitution.md`, `spec.md`, `plan.md`, `tasks.md`,
+`test-criteria.md`를 모두 만든 뒤 host-only provenance seal을 쓴다. Unselected
+options는 seal할 수 없고, selection 또는 다섯 artifact 중 하나가 바뀌면 old seal은
+stale라 G1이 `provenance_changed`로 막힌다.
+
+```bash
+awf wf seal-plan --repo-root . --json
+```
+
 partial selection은 `selected_pending`, all-selected plan은 `continued`이며,
 selected/no-decision artifact는 plan rerun input이다. G1 후 selection 변경은
 `replanned`: plan~done phases, retries/executions, runtime/skip marker와 G1–G6

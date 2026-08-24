@@ -84,6 +84,15 @@ manifest/profile plus absent artifact is `legacy_not_required`; only explicit
 `planning_options.required: false` plus absent artifact is `not_required`.
 Every present artifact is strictly validated regardless of profile.
 
+After a selected/no-decision rerun writes exactly `constitution.md`, `spec.md`,
+`plan.md`, `tasks.md`, and `test-criteria.md`, the parent host—not this
+worker—runs `awf wf seal-plan --repo-root . --json`. Its
+`planning-provenance.json` is exactly `schema_version: 1`,
+`planning_options_hash`, and `artifacts` with those five lowercase SHA-256
+hashes. Do not write, reuse, or hand-edit this seal. `selection_required` cannot
+seal; selection or any five-artifact change makes the old seal stale, so G1 must
+fail until the parent reruns and reseals.
+
 ## 데이터베이스 변경 결정
 
 DB signal이 있으면 `.workflow/artifacts/database-decision.json`을 작성한다.

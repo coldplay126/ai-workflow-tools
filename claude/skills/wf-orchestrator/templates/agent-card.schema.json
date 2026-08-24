@@ -220,7 +220,8 @@
               "planning_options.shape",
               "planning_options.selection",
               "planning_options.recommendation",
-              "planning_options.materiality"
+              "planning_options.materiality",
+              "planning_options.provenance"
             ]
           },
           "description": "Mandatory machine-evaluated Planning Options conditions for phase-plan."
@@ -296,7 +297,8 @@
                   "planning_options.shape",
                   "planning_options.selection",
                   "planning_options.recommendation",
-                  "planning_options.materiality"
+                  "planning_options.materiality",
+                  "planning_options.provenance"
                 ]
               },
               "on_fail": {
@@ -356,6 +358,19 @@
                     },
                     "minContains": 1,
                     "maxContains": 1
+                  },
+                  {
+                    "contains": {
+                      "const": {
+                        "key": "planning_provenance",
+                        "path": "artifacts/planning-provenance.json",
+                        "format": "json",
+                        "required": false,
+                        "required_when_planning_options": true
+                      }
+                    },
+                    "minContains": 1,
+                    "maxContains": 1
                   }
                 ],
                 "items": {
@@ -377,7 +392,28 @@
                     },
                     {
                       "if": {
-                        "properties": { "key": { "not": { "const": "planning_options" } } },
+                        "properties": { "key": { "const": "planning_provenance" } },
+                        "required": ["key"]
+                      },
+                      "then": {
+                        "const": {
+                          "key": "planning_provenance",
+                          "path": "artifacts/planning-provenance.json",
+                          "format": "json",
+                          "required": false,
+                          "required_when_planning_options": true
+                        }
+                      }
+                    },
+                    {
+                      "if": {
+                        "properties": {
+                          "key": {
+                            "not": {
+                              "enum": ["planning_options", "planning_provenance"]
+                            }
+                          }
+                        },
                         "required": ["key"]
                       },
                       "then": {

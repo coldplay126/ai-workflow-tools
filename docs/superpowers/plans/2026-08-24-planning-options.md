@@ -53,6 +53,7 @@ planning_options.shape
 planning_options.selection
 planning_options.recommendation
 planning_options.materiality
+planning_options.provenance
 ```
 
 - [ ] Append planning checks to existing G1 conditions without replacing artifact/FR/constitution/DB checks.
@@ -89,6 +90,10 @@ git commit -m "feat(workflow): require planning selections at G1"
 - [ ] Add symlink/hardlink, concurrent selection, owner/link-count, random temp, fsync/replace tests.
 - [ ] Implement `select_planning_option()` with exact artifact validation before/after mutation and sanitized result containing only IDs, status, action, and hashes.
 - [ ] Add `awf wf select-option` handler with exit 0 success/reuse, 1 validation/state blocker, 2 operational/usage.
+- [ ] Add host-only `awf wf seal-plan --repo-root . --json`: selected/no-decision
+  artifacts bind exactly five regenerated Plan artifacts in strict
+  `planning-provenance.json`; selection_required blocks sealing and drift invalidates
+  the prior seal.
 - [ ] Run:
 
 ```bash
@@ -124,6 +129,10 @@ git commit -m "feat(workflow): select planning options and replan"
 - [ ] Keep direct Ask capability out of source/generated spec-writer agents; material selections use a canonical `user_decision` escape owned by the parent workflow, then sync generated OMP through `awf agents sync-omp`.
 - [ ] Document `wf select-option`, initial continue, post-G1 replan, legacy compatibility, and artifact inventory.
 - [ ] Validate examples with the real parser and canonical artifact loader rather than substring-only checks.
+- [ ] Require conditional `planning-provenance.json`, exact six G1 planning
+  conditions, and schema-level uniqueness/cross-conditional rejection. Document the
+  selected/no-decision rerun → five artifacts → host seal → G1 order and stale-seal
+  replan behavior.
 - [ ] Run:
 
 ```bash
@@ -152,6 +161,7 @@ Plan writes selection_required
 → wf select-option chooses a non-recommended option
 → Plan continues
 → selected artifact drives regenerated Plan outputs
+→ host seals `planning-provenance.json` against the five regenerated Plan artifacts
 → G1 passes
 → change selection after G1
 → Plan reopens and G1–G6/G3 scope reset

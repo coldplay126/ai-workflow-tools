@@ -1,6 +1,6 @@
 ---
 name: phase-plan
-version: 2.3.0
+version: 2.4.0
 description: "Phase 1: 기획. spec-kit 루틴으로 5 산출물 생성 (constitution/spec/plan/tasks/test-criteria) 및 G1 게이트."
 type: workflow-phase
 phase: plan
@@ -437,6 +437,39 @@ loader failure is `artifact_invalid`, not an escape.
 }
 ```
 
+#### Planning provenance seal
+
+After a `selected` or `no_decision_required` rerun regenerates exactly
+`constitution.md`, `spec.md`, `plan.md`, `tasks.md`, and `test-criteria.md`,
+the host writes `.workflow/artifacts/planning-provenance.json` before G1. The
+marker is an exact object with `schema_version: 1`, a lowercase 64-hex
+`planning_options_hash`, and `artifacts` containing exactly those five
+filenames mapped to lowercase 64-hex content hashes. A worker does not invent
+or edit this host seal.
+
+`selection_required` cannot seal. `awf wf seal-plan` returns
+`{"status":"blocked","reason":"selection_required"}` and G1 remains blocked.
+Before any seal, G1 reports `provenance_missing`; a malformed/unsafe marker
+reports `provenance_invalid`; a changed option or any of the five regenerated
+artifacts reports `provenance_changed`. Regenerate the five artifacts and seal
+again after every changed selection; an old seal is deliberately stale.
+
+#### Canonical provenance fixture
+
+```json
+{
+  "schema_version": 1,
+  "planning_options_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "artifacts": {
+    "constitution.md": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "spec.md": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "plan.md": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "tasks.md": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "test-criteria.md": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  }
+}
+```
+
 사용자는 recommendation-first output을 검토한 뒤 아래의 **정확한 실행 명령**으로
 한 decision을 선택한다. `AWF_OPERATOR`에는 `planner` 같은 placeholder가 아니라
 실제 human 또는 service actor identity를 설정한다. 다른 flag 순서, positional
@@ -470,6 +503,7 @@ malformed profile 또는 artifact는 fail closed이며 G1 detail은
 
 ```bash
 awf wf db-check --stage plan --repo-root . --json
+awf wf seal-plan --repo-root . --json
 awf wf gate plan --repo-root . --json
 ```
 
@@ -480,9 +514,10 @@ awf wf gate plan --repo-root . --json
 - spec.md의 모든 FR-NNN이 plan.md/tasks.md/test-criteria.md에 태그로 존재
 - manifest.constitution_path 설정 시 constitution 파일 존재
 - Planning Options의 `planning_options.artifact`, `.shape`, `.selection`,
-  `.recommendation`, `.materiality` 조건. `selected`와
-  `no_decision_required`는 통과하며 `selection_required`는
-  `decision_selection_required` detail로 사용자 결정을 요구한다.
+  `.recommendation`, `.materiality`, `.provenance` 조건. `selected`와
+  `no_decision_required`는 current host seal이 있어야 통과하며
+  `selection_required`는 `decision_selection_required` detail로 사용자 결정을
+  요구한다.
 
 명령 결과가 `G-plan: PASS`이면 통과, `FAIL`이면 실패.
 JSON 상세 결과가 필요하면 `awf wf gate plan --json`.
@@ -508,6 +543,9 @@ JSON 상세 결과가 필요하면 `awf wf gate plan --json`.
 - `artifact_invalid`, `profile_invalid`, 또는 required artifact missing은 먼저
   canonical artifact/profile을 고친 뒤 rerun한다. legacy/no-decision path는
   질문 없이 G1 평가를 계속한다.
+- `provenance_missing`, `provenance_invalid`, 또는 `provenance_changed`이면 plan
+  artifacts를 다시 생성하고 `seal-plan`을 실행한 뒤 G1을 재평가한다. stale seal을
+  재사용하거나 content hash를 수동으로 수정하지 않는다.
 
 - `db-check`가 통과한 뒤 G1이 실패하면 `phases.plan.retries += 1`
 - CLI 출력에서 ✗ 표시된 조건을 확인하고 해당 산출물을 수정

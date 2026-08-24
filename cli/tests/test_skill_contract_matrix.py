@@ -775,6 +775,7 @@ PLANNING_OPTIONS_CONDITIONS = (
     "planning_options.selection",
     "planning_options.recommendation",
     "planning_options.materiality",
+    "planning_options.provenance",
 )
 
 
@@ -834,6 +835,20 @@ def test_plan_card_declares_typed_planning_options_contract() -> None:
         {
             "key": "planning_options",
             "path": "artifacts/planning-options.json",
+            "format": "json",
+            "required": False,
+            "required_when_planning_options": True,
+        }
+    ]
+    planning_provenance_artifacts = [
+        artifact
+        for artifact in plan["output"]["artifacts"]
+        if artifact["key"] == "planning_provenance"
+    ]
+    assert planning_provenance_artifacts == [
+        {
+            "key": "planning_provenance",
+            "path": "artifacts/planning-provenance.json",
             "format": "json",
             "required": False,
             "required_when_planning_options": True,
@@ -906,6 +921,26 @@ def test_planning_options_card_schema_rejects_missing_or_corrupt_contract() -> N
         if artifact["key"] == "database_decision"
     )
     database_artifact["required_when_planning_options"] = True
+    with pytest.raises(AssertionError):
+        _assert_agent_cards_match_declared_schema(cards)
+
+    cards = _load_agent_cards()
+    planning_provenance = next(
+        artifact
+        for artifact in cards["plan"]["output"]["artifacts"]
+        if artifact["key"] == "planning_provenance"
+    )
+    cards["plan"]["output"]["artifacts"].append(dict(planning_provenance))
+    with pytest.raises(AssertionError):
+        _assert_agent_cards_match_declared_schema(cards)
+
+    cards = _load_agent_cards()
+    planning_provenance = next(
+        artifact
+        for artifact in cards["plan"]["output"]["artifacts"]
+        if artifact["key"] == "planning_provenance"
+    )
+    planning_provenance["required_when_database_signal"] = True
     with pytest.raises(AssertionError):
         _assert_agent_cards_match_declared_schema(cards)
 

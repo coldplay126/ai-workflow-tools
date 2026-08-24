@@ -119,6 +119,31 @@ After every material decision has a selection, status is `selected`. Each decisi
 }
 ```
 
+### Provenance seal
+
+After a selected/no-decision Plan rerun regenerates exactly `constitution.md`,
+`spec.md`, `plan.md`, `tasks.md`, and `test-criteria.md`, the host runs
+`awf wf seal-plan --repo-root . --json`. The strict
+`planning-provenance.json` marker binds the current Planning Options hash and
+the five content hashes. `selection_required` is blocked; missing, malformed,
+or stale seals fail G1 as `provenance_missing`, `provenance_invalid`, or
+`provenance_changed`. Any changed selection or plan artifact requires rerun and
+reseal before G1.
+
+```json
+{
+  "schema_version": 1,
+  "planning_options_hash": "<64 lowercase SHA-256>",
+  "artifacts": {
+    "constitution.md": "<64 lowercase SHA-256>",
+    "spec.md": "<64 lowercase SHA-256>",
+    "plan.md": "<64 lowercase SHA-256>",
+    "tasks.md": "<64 lowercase SHA-256>",
+    "test-criteria.md": "<64 lowercase SHA-256>"
+  }
+}
+```
+
 ## Validation
 
 The strict validator requires:
@@ -153,6 +178,7 @@ planning_options.shape
 planning_options.selection
 planning_options.recommendation
 planning_options.materiality
+planning_options.provenance
 ```
 
 - `no_decision_required` passes with a concrete reason.

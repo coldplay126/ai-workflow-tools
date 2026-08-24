@@ -49,6 +49,21 @@ plan~done phases, retries/executions, runtime/skip marker, G1–G6 initial gate 
 manifest/profile plus absent artifact is `legacy_not_required`. Only explicit
 `planning_options.required: false` plus absent artifact is `not_required`. Every
 present artifact is strictly validated regardless of profile.
+
+After a selected/no-decision plan rerun writes `constitution.md`, `spec.md`,
+`plan.md`, `tasks.md`, and `test-criteria.md`, the host seals their exact hashes
+with the current Planning Options hash before G1. `selection_required` cannot
+seal; changed selections or regenerated plan artifacts stale the prior seal and
+keep G1 blocked until a new seal is written.
+
+```bash
+awf wf seal-plan --repo-root . --json
+```
+
+- `awf wf seal-plan [--repo-root <path>] [--json]`: writes strict
+  `.workflow/artifacts/planning-provenance.json` only for `selected` or
+  `no_decision_required` options. JSON exit contracts are sealed/0,
+  selection_required-blocked/1, and unavailable-failed/2.
 - `awf wf apply-result <phase> <result-file>`: review/verify/impl/test JSON 결과를 artifact markdown으로 반영하고 gate/state를 갱신
 - `awf wf gate <phase>`: plan/review/verify/impl/test deterministic gate 평가
 - `awf wf db-check --stage <plan|verify|test> [--repo-root <path>] [--json]`: DB 신호가 있으면 해당 stage의 project-owned JSON command 결과를 검증하고 `.workflow/artifacts/database-validation-evidence.json`에 current evidence를 기록한다. exit `0`은 pass 또는 not_applicable, `1`은 DB profile/decision/evidence blocker, `2`는 사용법·root·운영상 오류다. plan/verify/test는 각각 일반 G1/G5/G6 gate 직전에 이 명령을 실행한다. production schema는 mandatory이며 same-engine local은 DDL/planner 검증에 사용한다. DuckDB는 profiling/equivalence 분석용 보조 환경이다. project-specific replica sample은 명시적 opt-in만 허용하고 raw primary rows는 금지한다. local test command가 없을 때만 reason/approver/timestamp waiver를 사용한다. CLI는 DB driver, masking, replica provisioning을 구현하지 않고 project command의 sanitized JSON을 검증한다
