@@ -71,6 +71,8 @@ query plan, migration, rollback 결과를 확인하고, report의 narrative만�
 DB driver, masking, replica access를 이 에이전트가 제공하거나 실행한다고 가정하지
 않는다.
 
+Production primary is never a verify/test benchmark or executable-query target. Production provides only read-only schema metadata; data and workload checks use an explicitly approved replica, warehouse, or sanitized local dataset.
+
 ### 5. 코드 품질 빠른 스캔
 
 변경된 파일에서 명백한 문제만 확인:

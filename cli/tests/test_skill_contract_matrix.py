@@ -752,6 +752,16 @@ def test_database_card_schema_rejects_phase_specific_mutations() -> None:
     with pytest.raises(AssertionError):
         _assert_agent_cards_match_declared_schema(cards)
 
+    cards = _load_agent_cards()
+    cards["plan"]["output"] = {}
+    with pytest.raises(AssertionError):
+        _assert_agent_cards_match_declared_schema(cards)
+
+    cards = _load_agent_cards()
+    del cards["verify"]["output"]["artifacts"]
+    with pytest.raises(AssertionError):
+        _assert_agent_cards_match_declared_schema(cards)
+
 
 OUTCOME_TOKENS = {
     "analysis": ("allow", "dry_run_only"),

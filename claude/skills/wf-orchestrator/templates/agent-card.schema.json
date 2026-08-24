@@ -256,6 +256,7 @@
             }
           },
           "output": {
+            "required": ["artifacts"],
             "properties": {
               "artifacts": {
                 "allOf": [
@@ -320,6 +321,7 @@
             }
           },
           "output": {
+            "required": ["artifacts"],
             "properties": {
               "artifacts": {
                 "contains": {
@@ -363,6 +365,7 @@
             }
           },
           "output": {
+            "required": ["artifacts"],
             "properties": {
               "artifacts": {
                 "contains": {

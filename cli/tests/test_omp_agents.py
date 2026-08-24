@@ -174,3 +174,15 @@ def test_checked_in_omp_agents_match_database_contract_sources() -> None:
     spec_writer = (generated_root / "spec-writer.md").read_text(encoding="utf-8")
     assert "tools: read, grep, glob, edit, write, bash, ask" in spec_writer
     assert "database-validation-evidence.json" in spec_writer
+
+    primary_policy = (
+        "Production primary is never a verify/test benchmark or executable-query target.",
+        "read-only schema metadata",
+        "explicitly approved replica",
+        "warehouse",
+        "sanitized local",
+    )
+    for name in ("spec-verifier.md", "happy-path-tester.md"):
+        generated = (generated_root / name).read_text(encoding="utf-8")
+        for requirement in primary_policy:
+            assert requirement in generated, f"{name}: missing {requirement}"

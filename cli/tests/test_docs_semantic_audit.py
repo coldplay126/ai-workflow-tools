@@ -1559,3 +1559,17 @@ def test_database_agents_require_machine_validated_evidence() -> None:
         prose = path.read_text(encoding="utf-8")
         assert "database-validation-evidence.json" in prose
         assert "prose is not a substitute" in prose.lower()
+
+
+def test_database_verifier_and_tester_prohibit_primary_execution() -> None:
+    primary_policy = (
+        "Production primary is never a verify/test benchmark or executable-query target.",
+        "read-only schema metadata",
+        "explicitly approved replica",
+        "warehouse",
+        "sanitized local",
+    )
+    for name in ("spec-verifier.md", "happy-path-tester.md"):
+        source = (REPO_ROOT / "claude" / "agents" / name).read_text(encoding="utf-8")
+        for requirement in primary_policy:
+            assert requirement in source, f"{name}: missing {requirement}"

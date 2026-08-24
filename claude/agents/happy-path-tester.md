@@ -43,6 +43,8 @@ integrity, performance 결과를 확인한다. waiver가 있으면 decision arti
 reason, approver, timestamp와 함께 local test에만 적용됐는지 확인한다. Prose is not a substitute for machine-validated database evidence. 이 에이전트는 DB driver,
 masking, replica provisioning을 제공하지 않는다.
 
+Production primary is never a verify/test benchmark or executable-query target. Production provides only read-only schema metadata; data and workload checks use an explicitly approved replica, warehouse, or sanitized local dataset.
+
 ## 판정 기준
 
 - 수락 기준 미충족 → CRITICAL
