@@ -10,6 +10,7 @@ from pathlib import Path
 
 from awf.core.config import load_awf_config, resolve_runtime_paths
 from awf.core.artifact_manager import ArtifactManager
+from awf.core.db_validation import run_database_check
 from awf.core.events import EventType
 from awf.core.event_processor import EventProcessor, run_complete_with_events
 from awf.core.event_sync_summary import summarize_event_sync
@@ -42,6 +43,7 @@ from awf.core.state import (
     save_workflow_prompt,
     record_workflow_synthesis,
     summarize_workflow_state,
+    promote_database_change_to_high_risk,
 )
 from awf.core.judge import explain_judge_reasons, synthesize_workflow_multi_provider_results
 from awf.core.task import TaskConstraints, TaskContext, TaskDefinition, TaskType, resolve_execution_mode
@@ -183,6 +185,131 @@ def run_wf_gate(args: argparse.Namespace) -> int:
         print(json.dumps({"phase": phase, "passed": passed, "evaluations": evaluations}, ensure_ascii=False, indent=2))
 
     return 0 if passed else 1
+
+_DATABASE_CHECK_STAGES = {"plan", "verify", "test"}
+_DATABASE_CHECK_SCHEMA_VERSION = 1
+_DATABASE_CHECK_OPERATIONAL_BLOCKERS = {"repo_root_invalid"}
+
+
+def _database_check_payload(
+    *,
+    stage: str,
+    status: str,
+    evidence_path: str | None,
+    evidence_hash: str | None,
+    signal_reasons: tuple[str, ...] = (),
+    blockers: tuple[str, ...] = (),
+) -> dict[str, object]:
+    """Build the only result schema exposed by ``wf db-check``."""
+    return {
+        "schema_version": _DATABASE_CHECK_SCHEMA_VERSION,
+        "stage": stage,
+        "status": status,
+        "evidence_path": evidence_path,
+        "evidence_hash": evidence_hash,
+        "signal_reasons": list(signal_reasons),
+        "blockers": list(blockers),
+    }
+
+
+def _emit_database_check_result(payload: dict[str, object], *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False))
+        return
+
+    print(f"database check: stage={payload['stage']} status={payload['status']}")
+    if payload["evidence_path"] is not None:
+        print(f"evidence_path: {payload['evidence_path']}")
+    if payload["evidence_hash"] is not None:
+        print(f"evidence_hash: {payload['evidence_hash']}")
+    if payload["signal_reasons"]:
+        print(f"signal_reasons: {', '.join(payload['signal_reasons'])}")
+    if payload["blockers"]:
+        print(f"blockers: {', '.join(payload['blockers'])}")
+
+
+def run_wf_db_check(args: argparse.Namespace) -> int:
+    """Validate one sanitized database-evidence stage for the workflow."""
+    requested_stage = getattr(args, "stage", None)
+    stage = requested_stage if requested_stage in _DATABASE_CHECK_STAGES else "invalid"
+    as_json = bool(getattr(args, "json", False))
+
+    if stage == "invalid":
+        _emit_database_check_result(
+            _database_check_payload(
+                stage=stage,
+                status="fail",
+                evidence_path=None,
+                evidence_hash=None,
+                blockers=("stage_invalid",),
+            ),
+            as_json=as_json,
+        )
+        return 2
+
+    repo_root_arg = getattr(args, "repo_root", None)
+    try:
+        repo_root = Path(repo_root_arg) if repo_root_arg else Path.cwd()
+        result = run_database_check(repo_root, stage)
+    except Exception:
+        _emit_database_check_result(
+            _database_check_payload(
+                stage=stage,
+                status="fail",
+                evidence_path=None,
+                evidence_hash=None,
+                blockers=("operational_error",),
+            ),
+            as_json=as_json,
+        )
+        return 2
+
+    if result.status not in {"pass", "fail", "not_applicable"}:
+        _emit_database_check_result(
+            _database_check_payload(
+                stage=stage,
+                status="fail",
+                evidence_path=None,
+                evidence_hash=None,
+                blockers=("operational_error",),
+            ),
+            as_json=as_json,
+        )
+        return 2
+
+    if stage == "plan" and result.status == "pass":
+        try:
+            promote_database_change_to_high_risk(
+                repo_root_arg,
+                result.signal_reasons,
+            )
+        except Exception:
+            _emit_database_check_result(
+                _database_check_payload(
+                    stage=stage,
+                    status="fail",
+                    evidence_path=None,
+                    evidence_hash=None,
+                    blockers=("state_promotion_failed",),
+                ),
+                as_json=as_json,
+            )
+            return 2
+
+    payload = _database_check_payload(
+        stage=stage,
+        status=result.status,
+        evidence_path=result.evidence_path,
+        evidence_hash=result.evidence_hash,
+        signal_reasons=result.signal_reasons,
+        blockers=result.blockers,
+    )
+    _emit_database_check_result(payload, as_json=as_json)
+    if result.status == "fail" and any(
+        blocker in _DATABASE_CHECK_OPERATIONAL_BLOCKERS for blocker in result.blockers
+    ):
+        return 2
+    return 0 if result.status in {"pass", "not_applicable"} else 1
 
 
 _SKIP_PHASES = {"small": ["review", "approve", "verify"]}

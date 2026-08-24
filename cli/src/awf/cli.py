@@ -33,6 +33,7 @@ from awf.commands.wt import (
     run_wt_gc,
 )
 from awf.commands.wf import (
+    run_wf_db_check,
     run_wf_decide,
     run_wf_detect_class,
     run_wf_expand_scope,
@@ -245,6 +246,26 @@ def build_parser() -> argparse.ArgumentParser:
     wf_gate_parser.add_argument("--result-file", help="Path to provider result file (required for review/verify). Accepts raw or enveloped JSON.")
     wf_gate_parser.add_argument("--json", action="store_true", help="Also print structured JSON output.")
     wf_gate_parser.set_defaults(handler=run_wf_gate)
+    wf_db_check_parser = wf_subparsers.add_parser(
+        "db-check",
+        help="Validate database workflow evidence for plan, verify, or test.",
+    )
+    wf_db_check_parser.add_argument(
+        "--stage",
+        choices=["plan", "verify", "test"],
+        required=True,
+        help="Database evidence stage to validate.",
+    )
+    wf_db_check_parser.add_argument(
+        "--repo-root",
+        help="Repository root containing .workflow/. Defaults to the current directory.",
+    )
+    wf_db_check_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a sanitized versioned JSON result.",
+    )
+    wf_db_check_parser.set_defaults(handler=run_wf_db_check)
 
     wf_pr_parser = wf_subparsers.add_parser(
         "pr",
