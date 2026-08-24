@@ -705,7 +705,7 @@ chat compaction은 현재 다음 순서로 동작한다:
 - provider-assisted summary 우선
 - 실패 시 heuristic truncation summary fallback
 - manual compaction JSON 응답에는 `summary_mode = provider|heuristic|none`가 포함된다
-`codex`는 `AWF_CODEX_TIMEOUT_SEC`(기본 300초)로 제어하며, `wf next`와 `analyze`는 provider 실행 시작/종료 시 timeout과 경과 시간을 출력합니다. `wf next`의 plan/review/verify/test phase와 multi-agent quick/secondary Codex 실행은 read-only sandbox로 낮추고, 결과 파일 작성은 AWF CLI 호스트가 수행합니다.
+`codex`는 `AWF_CODEX_TIMEOUT_SEC`(기본 300초)로 제어하며, `wf next`와 `analyze`는 provider 실행 시작/종료 시 timeout과 경과 시간을 출력합니다. `wf next`에서 Codex `review`만 read-only sandbox로 강제하고, `verify`를 포함한 나머지 workflow phase는 host/project evidence와 test command의 side effect를 위해 `workspace-write`를 사용합니다. agent card의 `file_write: false`는 direct file write를 계속 금지하며, 결과 파일 작성은 AWF CLI 호스트가 수행합니다.
 
 실운영 검증 순서:
 

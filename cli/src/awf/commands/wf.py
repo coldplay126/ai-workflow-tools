@@ -91,7 +91,7 @@ def _run_provider_with_heartbeat(provider, prompt: str, cwd: str, label: str, *,
     )
 
 
-_CODEX_READ_ONLY_PHASES = {"review", "verify"}
+_CODEX_READ_ONLY_PHASES = {"review"}
 
 
 def _apply_provider_permission_mode(provider, *, yolo: bool) -> None:
