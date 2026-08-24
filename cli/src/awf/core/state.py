@@ -67,6 +67,35 @@ PHASE_GATE = {
 }
 MAX_TOTAL_EXECUTIONS = 30
 
+_WORKFLOW_STATE_LOCKS: dict[str, threading.Lock] = {}
+_WORKFLOW_STATE_LOCKS_GUARD = threading.Lock()
+
+
+def _workflow_state_lock(path: Path) -> threading.Lock:
+    key = str(path.resolve())
+    with _WORKFLOW_STATE_LOCKS_GUARD:
+        lock = _WORKFLOW_STATE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _WORKFLOW_STATE_LOCKS[key] = lock
+        return lock
+
+
+def _initial_skipped_gate_state(gate_id: str) -> dict:
+    if gate_id in {"G2", "G5"}:
+        return {"passed": None, "provider": None, "provider_status": None}
+    if gate_id == "G3":
+        return {"passed": None, "scope_hash": None}
+    return {"passed": None}
+
+
+def _normalized_database_reasons(reasons: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(sorted({
+        str(reason).strip().casefold()
+        for reason in reasons
+        if str(reason).strip()
+    }))
+
 # Phase skip policy per change class (I3)
 CHANGE_CLASS_SKIP_PHASES: dict[str, set[str]] = {
     "small": {"review", "approve", "verify"},
@@ -216,6 +245,15 @@ DEFAULT_MANIFEST = {
         "unit": None,
         "integration": None,
         "e2e": None,
+    },
+    "database_validation": {
+        "enabled": False,
+        "schema_command": [],
+        "verify_command": [],
+        "test_command": [],
+        "command_timeout_seconds": 30,
+        "max_schema_age_hours": 24,
+        "allow_production_replica_sample": False,
     },
     "sibling_repos": [],
 }
@@ -526,6 +564,88 @@ def _save_workflow_state(explicit_root: Optional[str], state: dict) -> Path:
     tmp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tmp_path.replace(state_path)
     return state_path
+
+
+def promote_database_change_to_high_risk(
+    explicit_root: Optional[str],
+    reasons: tuple[str, ...],
+) -> dict:
+    """Promote DB work and restore only phases skipped by the small policy."""
+    root = find_repo_root(explicit_root)
+    state_path = root / ".workflow" / "state.json"
+    normalized_reasons = _normalized_database_reasons(reasons)
+
+    with _workflow_state_lock(state_path):
+        state = load_workflow_state(str(root))
+        changed = False
+        previous_change_class = state.get("changeClass", "standard")
+        if previous_change_class != "high_risk":
+            state["changeClass"] = "high_risk"
+            changed = True
+
+        phases = state.setdefault("phases", {})
+        gates = state.setdefault("gates", {})
+        for phase in ("review", "approve", "verify"):
+            phase_state = phases.get(phase)
+            skip_reason = (
+                phase_state.get("skipReason")
+                if isinstance(phase_state, dict)
+                else None
+            )
+            if (
+                not isinstance(phase_state, dict)
+                or phase_state.get("status") != "skipped"
+                or not isinstance(skip_reason, str)
+                or not skip_reason.startswith("policy:change_class=small")
+            ):
+                continue
+
+            phases[phase] = {"status": "pending", "retries": 0}
+            changed = True
+            gate_id = PHASE_GATE[phase]
+            gate_state = gates.get(gate_id)
+            gate_skip_reason = (
+                gate_state.get("skip_reason")
+                if isinstance(gate_state, dict)
+                else None
+            )
+            if (
+                isinstance(gate_state, dict)
+                and gate_state.get("auto_pass") is True
+                and gate_state.get("provider") == "policy"
+                and isinstance(gate_skip_reason, str)
+                and gate_skip_reason.startswith("policy:change_class=small")
+            ):
+                gates[gate_id] = _initial_skipped_gate_state(gate_id)
+                changed = True
+
+        history = state.setdefault("history", [])
+        if not isinstance(history, list):
+            history = []
+            state["history"] = history
+            changed = True
+        already_audited = any(
+            isinstance(event, dict)
+            and event.get("action") == "database_risk_escalated"
+            and isinstance(event.get("reasons"), list)
+            and _normalized_database_reasons(tuple(event["reasons"])) == normalized_reasons
+            for event in history
+        )
+        if not already_audited:
+            history.append({
+                "action": "database_risk_escalated",
+                "timestamp": _now_iso(),
+                "details": (
+                    f"changeClass={previous_change_class}->high_risk "
+                    f"reasons={','.join(normalized_reasons)}"
+                ),
+                "reasons": list(normalized_reasons),
+            })
+            changed = True
+
+        if changed:
+            _save_workflow_state(str(root), state)
+        return state
 
 
 def save_workflow_state_snapshot(explicit_root: Optional[str], state: dict) -> Path:

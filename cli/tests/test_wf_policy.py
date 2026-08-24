@@ -14,12 +14,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from awf.core.state import (
+    DEFAULT_MANIFEST,
     PHASE_GATE,
     PHASE_ORDER,
     _apply_policy_skips,
     apply_gate_result,
     detect_change_class,
     get_risk_investment,
+    promote_database_change_to_high_risk,
     resolve_next_phase,
 )
 from awf.core.workflow_prompt import _validate_preconditions, is_hil_phase
@@ -565,6 +567,101 @@ def test_006_unknown_change_class_fallback():
     inv = get_risk_investment("unknown_class", "review")
     standard_inv = get_risk_investment("standard", "review")
     assert inv == standard_inv
+
+
+# ===========================================================================
+# Database risk promotion
+# ===========================================================================
+
+def test_database_risk_promotes_only_small_policy_skips(tmp_path: Path):
+    """DB work restores skipped review, approval, and verification phases."""
+    state = _make_state("small", current_phase="impl")
+    _apply_policy_skips(state)
+    _write_workflow_state(tmp_path, state)
+
+    updated = promote_database_change_to_high_risk(tmp_path, ("text:query",))
+
+    assert updated["changeClass"] == "high_risk"
+    for phase in ("review", "approve", "verify"):
+        assert updated["phases"][phase] == {"status": "pending", "retries": 0}
+    assert updated["gates"]["G2"] == {
+        "passed": None,
+        "provider": None,
+        "provider_status": None,
+    }
+    assert updated["gates"]["G3"] == {"passed": None, "scope_hash": None}
+    assert updated["gates"]["G5"] == {
+        "passed": None,
+        "provider": None,
+        "provider_status": None,
+    }
+    escalation = updated["history"][-1]
+    assert escalation["action"] == "database_risk_escalated"
+    assert escalation["reasons"] == ["text:query"]
+
+
+def test_database_risk_preserves_completed_provider_work(tmp_path: Path):
+    """Completed phases and provider gates are not reset by DB escalation."""
+    state = _make_state("small")
+    _apply_policy_skips(state)
+    state["phases"]["review"] = {"status": "completed", "retries": 0}
+    state["gates"]["G2"] = {
+        "passed": True,
+        "provider": "reviewer",
+        "provider_status": "completed",
+    }
+    _write_workflow_state(tmp_path, state)
+
+    updated = promote_database_change_to_high_risk(tmp_path, ("path:migrations/001.sql",))
+
+    assert updated["phases"]["review"] == {"status": "completed", "retries": 0}
+    assert updated["gates"]["G2"] == {
+        "passed": True,
+        "provider": "reviewer",
+        "provider_status": "completed",
+    }
+    assert updated["phases"]["approve"]["status"] == "pending"
+    assert updated["phases"]["verify"]["status"] == "pending"
+
+
+def test_database_risk_escalation_history_is_idempotent(tmp_path: Path):
+    """Repeating the same normalized reasons does not add another audit event."""
+    state = _make_state("small")
+    _apply_policy_skips(state)
+    _write_workflow_state(tmp_path, state)
+
+    first = promote_database_change_to_high_risk(
+        tmp_path,
+        ("text:query", "path:src/database/schema.sql"),
+    )
+    second = promote_database_change_to_high_risk(
+        tmp_path,
+        ("path:src/database/schema.sql", "text:query"),
+    )
+
+    first_events = [
+        event for event in first["history"]
+        if event["action"] == "database_risk_escalated"
+    ]
+    second_events = [
+        event for event in second["history"]
+        if event["action"] == "database_risk_escalated"
+    ]
+    assert len(first_events) == 1
+    assert second_events == first_events
+
+
+def test_database_risk_manifest_default_is_additive_and_disabled():
+    """New repositories opt out until they configure database validation."""
+    assert DEFAULT_MANIFEST["database_validation"] == {
+        "enabled": False,
+        "schema_command": [],
+        "verify_command": [],
+        "test_command": [],
+        "command_timeout_seconds": 30,
+        "max_schema_age_hours": 24,
+        "allow_production_replica_sample": False,
+    }
 
 
 # ===========================================================================
