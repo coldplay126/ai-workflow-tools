@@ -454,6 +454,10 @@ def _write_database_lifecycle_smoke_fixture(repo_root: Path) -> tuple[Path, Path
         "kind": "database_verify",
         "production_schema_hash": schema_hash,
         "selected_option_id": "rewrite-query",
+        "engine": "mysql",
+        "execution_target": "local_same_engine",
+        "production_primary_queries": False,
+        "raw_production_rows": False,
         "equivalence": "pass",
         "integrity": "pass",
         "query_plan": "pass",
@@ -733,6 +737,10 @@ def test_db_check_cli_smoke_completes_database_lifecycle_gates(tmp_path: Path) -
     assert evidence["stages"]["verify"]["verify"] == {
         "production_schema_hash": "a" * 64,
         "selected_option_id": "rewrite-query",
+        "engine": "mysql",
+        "execution_target": "local_same_engine",
+        "production_primary_queries": False,
+        "raw_production_rows": False,
         "equivalence": "pass",
         "integrity": "pass",
         "query_plan": "pass",
@@ -745,11 +753,11 @@ def test_db_check_cli_smoke_completes_database_lifecycle_gates(tmp_path: Path) -
         "selected_option_id": "rewrite-query",
         "local_target": "sanitized_snapshot",
         "masked": True,
+        "raw_production_rows": False,
         "equivalence": "pass",
         "integrity": "pass",
         "performance": "pass",
     }
-    assert "raw_production_rows" not in evidence_text
     assert "secret" not in evidence_text.casefold()
 
 

@@ -23,6 +23,7 @@ from awf.core.db_validation import (
     DatabaseSignal,
     DatabaseValidationError,
     detect_database_signal,
+    evaluate_database_gate,
     load_database_decision,
     load_database_profile,
     run_database_check,
@@ -588,6 +589,10 @@ def verify_evidence(
         "kind": "database_verify",
         "production_schema_hash": schema_hash,
         "selected_option_id": selected_option_id,
+        "engine": "mysql",
+        "execution_target": "local_same_engine",
+        "production_primary_queries": False,
+        "raw_production_rows": False,
         "equivalence": "pass",
         "integrity": "pass",
         "query_plan": "pass",
@@ -874,7 +879,7 @@ def test_decision_rejects_required_candidate_mutations(
 
 
 def test_decision_allows_materially_distinct_same_kind_candidates(tmp_path: Path) -> None:
-    write_workflow_artifacts(tmp_path, concept="Update the database query")
+    write_workflow_artifacts(tmp_path, concept="Update the database schema")
     baseline = database_decision()["candidates"][0]
     alternative_maintain = {
         **baseline,
@@ -977,7 +982,7 @@ def test_decision_accepts_exact_structured_kind_assessments(
     assessment: dict[str, str],
     change_surfaces: list[str],
 ) -> None:
-    write_workflow_artifacts(tmp_path, concept="Update the database query")
+    write_workflow_artifacts(tmp_path, concept="Update the database schema")
     baseline, alternative = database_decision()["candidates"][:2]
     candidate = {
         **alternative,
@@ -1068,6 +1073,148 @@ def test_decision_requires_applicable_physical_candidate_for_index_surface(
 
     with pytest.raises(DatabaseValidationError):
         load_database_decision(tmp_path)
+
+@pytest.mark.parametrize(
+    ("concept", "allowed_files", "underdeclared", "declared"),
+    [
+        ("CREATE TABLE audit_log (id bigint)", None, ["query"], ["index"]),
+        (
+            "Coordinate the application release",
+            ["src/database/migrations/001_create_audit_log.sql"],
+            ["query"],
+            ["constraint"],
+        ),
+        (
+            "Coordinate the application release",
+            ["src/database/schema.prisma"],
+            ["query"],
+            ["erd"],
+        ),
+        ("Add a database index for audit lookup", None, ["query"], ["index"]),
+        ("Add a database column for audit actor", None, ["query"], ["column"]),
+        ("Tune the database query plan", None, ["index"], ["query"]),
+        (
+            "Coordinate the application release",
+            ["src/database/indexes/audit_lookup.py"],
+            ["query"],
+            ["index"],
+        ),
+        (
+            "Coordinate the application release",
+            ["src/database/columns/audit_actor.py"],
+            ["query"],
+            ["column"],
+        ),
+        (
+            "Coordinate the application release",
+            ["src/database/queries/audit_lookup.py"],
+            ["index"],
+            ["query"],
+        ),
+    ],
+    ids=[
+        "text-ddl",
+        "migration-path",
+        "prisma-path",
+        "text-index",
+        "text-column",
+        "text-query",
+        "index-path",
+        "column-path",
+        "query-path",
+    ],
+)
+def test_decision_binds_database_signals_to_change_surfaces(
+    tmp_path: Path,
+    concept: str,
+    allowed_files: list[str] | None,
+    underdeclared: list[str],
+    declared: list[str],
+) -> None:
+    write_workflow_artifacts(
+        tmp_path,
+        concept=concept,
+        allowed_files=allowed_files,
+    )
+    write_database_decision(
+        tmp_path,
+        database_decision(change_surfaces=underdeclared),
+    )
+
+    with pytest.raises(DatabaseValidationError) as raised:
+        load_database_decision(tmp_path)
+
+    assert raised.value.code == "decision_invalid"
+    write_database_decision(tmp_path, database_decision(change_surfaces=declared))
+
+    assert load_database_decision(tmp_path).change_surfaces == tuple(declared)
+
+
+@pytest.mark.parametrize(
+    ("concept", "allowed_files"),
+    [
+        ("ALTER TABLE audit_log ADD COLUMN actor_id bigint", None),
+        (
+            "Coordinate the application release",
+            ["src/database/migrations/001_add_actor.sql"],
+        ),
+    ],
+    ids=["ddl", "migration"],
+)
+def test_underdeclared_decision_blocks_schema_command(
+    tmp_path: Path,
+    concept: str,
+    allowed_files: list[str] | None,
+) -> None:
+    command_marker = tmp_path / "schema-command-ran"
+    schema_command = [
+        sys.executable,
+        "-c",
+        (
+            "from pathlib import Path; "
+            f"Path({str(command_marker)!r}).write_text('ran', encoding='utf-8'); "
+            f"print({json.dumps(schema_evidence())!r})"
+        ),
+    ]
+    write_workflow_artifacts(
+        tmp_path,
+        concept=concept,
+        allowed_files=allowed_files,
+    )
+    write_database_manifest(tmp_path, schema_command=schema_command)
+    write_database_decision(tmp_path, database_decision(change_surfaces=["query"]))
+
+    result = run_database_check(tmp_path, "plan")
+
+    assert result.status == "fail"
+    assert result.blockers == ("decision_invalid",)
+    assert not command_marker.exists()
+    assert not evidence_path(tmp_path).exists()
+
+
+def test_artifact_error_blocks_database_commands_without_guessing(tmp_path: Path) -> None:
+    command_marker = tmp_path / "schema-command-ran"
+    schema_command = [
+        sys.executable,
+        "-c",
+        (
+            "from pathlib import Path; "
+            f"Path({str(command_marker)!r}).write_text('ran', encoding='utf-8'); "
+            f"print({json.dumps(schema_evidence())!r})"
+        ),
+    ]
+    prepare_database_workflow(tmp_path, schema_command=schema_command)
+    (tmp_path / ".workflow" / "artifacts" / "allowed-files.json").write_text(
+        "[]",
+        encoding="utf-8",
+    )
+
+    result = run_database_check(tmp_path, "plan")
+
+    assert result.status == "fail"
+    assert result.blockers == ("artifact_invalid",)
+    assert not command_marker.exists()
+    assert not evidence_path(tmp_path).exists()
 
 
 @pytest.mark.parametrize("schema_version", [True, 1.0, "1"])
@@ -1334,7 +1481,7 @@ def test_verify_evidence_requires_migration_and_rollback_for_column_surfaces(
 ) -> None:
     prepare_database_workflow(
         tmp_path,
-        decision=database_decision(change_surfaces=["column"]),
+        decision=database_decision(change_surfaces=["query", "column"]),
         verify_command=database_command(verify_evidence(migration="not_applicable")),
     )
     assert run_database_check(tmp_path, "plan").status == "pass"
@@ -1395,6 +1542,85 @@ def test_verify_evidence_rejects_identity_mismatches_without_overwrite(
     assert result.status == "fail"
     assert result.blockers == ("verify_evidence_invalid",)
     assert evidence_path(tmp_path).read_bytes() == before
+
+def test_verify_persists_exact_safe_same_engine_target_metadata(
+    tmp_path: Path,
+) -> None:
+    prepare_database_workflow(
+        tmp_path,
+        verify_command=database_command(verify_evidence()),
+    )
+    assert run_database_check(tmp_path, "plan").status == "pass"
+
+    result = run_database_check(tmp_path, "verify")
+
+    persisted = json.loads(evidence_path(tmp_path).read_text(encoding="utf-8"))
+    assert result.status == "pass"
+    assert persisted["stages"]["verify"]["verify"] == {
+        "production_schema_hash": "a" * 64,
+        "selected_option_id": "rewrite-query",
+        "engine": "mysql",
+        "execution_target": "local_same_engine",
+        "production_primary_queries": False,
+        "raw_production_rows": False,
+        "equivalence": "pass",
+        "integrity": "pass",
+        "query_plan": "pass",
+        "migration": "not_applicable",
+        "rollback": "pass",
+    }
+
+
+def test_query_verify_allows_approved_read_replica_same_engine_target(
+    tmp_path: Path,
+) -> None:
+    prepare_database_workflow(
+        tmp_path,
+        decision=database_decision(change_surfaces=["query"]),
+        verify_command=database_command(
+            verify_evidence(execution_target="approved_read_replica")
+        ),
+    )
+    assert run_database_check(tmp_path, "plan").status == "pass"
+
+    result = run_database_check(tmp_path, "verify")
+
+    assert result.status == "pass"
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"engine": "duckdb"},
+        {"engine": "postgres"},
+        {"execution_target": "production_primary"},
+        {"execution_target": "approved_read_replica"},
+        {"production_primary_queries": True},
+        {"raw_production_rows": True},
+    ],
+    ids=[
+        "duckdb",
+        "cross-engine",
+        "production-primary",
+        "structural-read-replica",
+        "production-primary-queries",
+        "raw-production-rows",
+    ],
+)
+def test_verify_evidence_rejects_unsafe_targets_engines_and_production_rows(
+    tmp_path: Path,
+    updates: dict[str, object],
+) -> None:
+    prepare_database_workflow(
+        tmp_path,
+        verify_command=database_command(verify_evidence(**updates)),
+    )
+    assert run_database_check(tmp_path, "plan").status == "pass"
+
+    result = run_database_check(tmp_path, "verify")
+
+    assert result.status == "fail"
+    assert result.blockers == ("verify_evidence_invalid",)
 
 
 
@@ -1530,6 +1756,29 @@ def test_test_evidence_rejects_identity_mismatches_without_overwrite(
     assert result.blockers == ("test_evidence_invalid",)
     assert evidence_path(tmp_path).read_bytes() == before
 
+def test_persisted_test_record_requires_raw_production_rows_false(
+    tmp_path: Path,
+) -> None:
+    prepare_database_workflow(
+        tmp_path,
+        verify_command=database_command(verify_evidence()),
+        test_command=database_command(database_test_payload()),
+    )
+    assert run_database_check(tmp_path, "plan").status == "pass"
+    assert run_database_check(tmp_path, "verify").status == "pass"
+    assert run_database_check(tmp_path, "test").status == "pass"
+
+    path = evidence_path(tmp_path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["stages"]["test"]["test"]["raw_production_rows"] is False
+    del persisted["stages"]["test"]["test"]["raw_production_rows"]
+    path.write_text(json.dumps(persisted), encoding="utf-8")
+
+    result = run_database_check(tmp_path, "plan")
+
+    assert result.status == "fail"
+    assert result.blockers == ("evidence_invalid",)
+
 
 
 
@@ -1606,6 +1855,48 @@ def test_test_stage_accepts_explicit_valid_local_data_waiver(tmp_path: Path) -> 
     assert result.status == "pass"
     assert persisted["stages"]["test"]["test"]["status"] == "waived"
     assert persisted["stages"]["test"]["test"]["waiver"]["approver"] == "database-owner"
+
+def test_stored_test_waiver_requires_empty_current_test_command(tmp_path: Path) -> None:
+    decision = database_decision(
+        local_data_test_waiver={
+            "reason": "No approved masked production-shaped fixture is available.",
+            "approver": "database-owner",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    prepare_database_workflow(
+        tmp_path,
+        verify_command=database_command(verify_evidence()),
+        decision=decision,
+    )
+    assert run_database_check(tmp_path, "plan").status == "pass"
+    assert run_database_check(tmp_path, "verify").status == "pass"
+    assert run_database_check(tmp_path, "test").status == "pass"
+
+    manifest_path = tmp_path / ".workflow" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["database_validation"]["test_command"] = database_command(
+        database_test_payload()
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    profile_hash = load_database_profile(tmp_path).profile_hash
+
+    path = evidence_path(tmp_path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted["profile_hash"] = profile_hash
+    for record in persisted["stages"].values():
+        record["profile_hash"] = profile_hash
+    path.write_text(json.dumps(persisted), encoding="utf-8")
+
+    result = run_database_check(tmp_path, "plan")
+
+    assert result.status == "fail"
+    assert result.blockers == ("evidence_invalid",)
+    assert all(
+        condition["passed"] is False
+        for condition in evaluate_database_gate(tmp_path, "test")
+        if condition["condition"] == "database.local_test"
+    )
 
 
 def test_waiver_timestamp_is_canonical_utc_in_hash_and_evidence(tmp_path: Path) -> None:
@@ -1830,10 +2121,10 @@ def test_malformed_prior_stage_evidence_blocks_atomic_merge(
 @pytest.mark.parametrize(
     ("escaped_path", "expected_blocker"),
     [
-        ("workflow", "profile_invalid"),
+        ("workflow", "artifact_invalid"),
         ("manifest", "profile_invalid"),
         ("decision", "decision_invalid"),
-        ("artifacts", "decision_invalid"),
+        ("artifacts", "artifact_invalid"),
         ("evidence", "evidence_invalid"),
     ],
 )

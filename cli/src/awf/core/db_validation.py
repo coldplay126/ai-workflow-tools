@@ -40,6 +40,10 @@ _PATH_DIRECTORIES = {
     "repositories",
     "query",
     "queries",
+    "index",
+    "indexes",
+    "column",
+    "columns",
     "database",
     "databases",
     "schema",
@@ -107,6 +111,7 @@ DATABASE_CHECK_EVIDENCE_PATH = ".workflow/artifacts/database-validation-evidence
 _DATABASE_CHECK_EVIDENCE_HASH = re.compile(r"^[a-f0-9]{64}$")
 DATABASE_CHECK_BLOCKERS = frozenset({
         "repo_root_invalid",
+        "artifact_invalid",
         "profile_missing",
         "profile_invalid",
         "profile_incomplete",
@@ -167,13 +172,17 @@ _DATABASE_PATH_CATEGORY = {
     "repositories": "repository",
     "query": "query",
     "queries": "query",
+    "index": "index",
+    "indexes": "index",
+    "column": "column",
+    "columns": "column",
     "database": "database",
     "databases": "database",
     "schema": "schema",
     "schemas": "schema",
 }
 _DATABASE_PATH_REASON = re.compile(
-    r"^path:(?:(?:sql|prisma|migration|model|entity|repository|query|database|schema):[a-f0-9]{16}|truncated:[1-9][0-9]*)$"
+    r"^path:(?:(?:sql|prisma|migration|model|entity|repository|query|index|column|database|schema):[a-f0-9]{16}|truncated:[1-9][0-9]*)$"
 )
 
 
@@ -196,25 +205,27 @@ def _database_path_reason(path: str) -> str:
         for part in Path(path).parts[:-1]
         if part in _DATABASE_PATH_CATEGORY
     }
-    category = next(
-        (
-            candidate
-            for candidate in (
-                "migration",
-                "query",
-                "schema",
-                "database",
-                "repository",
-                "entity",
-                "model",
-            )
-            if candidate in categories
-        ),
-        "sql"
-        if Path(path).suffix == ".sql"
-        else "prisma"
+    category = (
+        "prisma"
         if Path(path).suffix == ".prisma"
-        else "database",
+        else next(
+            (
+                candidate
+                for candidate in (
+                    "migration",
+                    "query",
+                    "index",
+                    "column",
+                    "schema",
+                    "database",
+                    "repository",
+                    "entity",
+                    "model",
+                )
+                if candidate in categories
+            ),
+            "sql" if Path(path).suffix == ".sql" else "database",
+        )
     )
     digest = hashlib.sha256(path.encode("utf-8")).hexdigest()[:16]
     return f"path:{category}:{digest}"
@@ -545,8 +556,19 @@ _CHANGE_SURFACES = {
     "erd",
     "normalize",
     "denormalize",
+    "partition",
+}
+_SIGNAL_STRUCTURAL_SURFACES = {
+    "index",
+    "column",
+    "constraint",
+    "erd",
+    "normalize",
+    "denormalize",
+    "partition",
 }
 _STRUCTURAL_SURFACES = {"column", "constraint", "erd", "normalize", "denormalize"}
+_VERIFY_EXECUTION_TARGETS = {"local_same_engine", "approved_read_replica"}
 _NORMALIZATION_SURFACES = {"column", "constraint", "erd"}
 _LOCAL_TARGETS = {
     "same_engine",
@@ -622,6 +644,10 @@ _VERIFY_FIELDS = {
     "kind",
     "production_schema_hash",
     "selected_option_id",
+    "engine",
+    "execution_target",
+    "production_primary_queries",
+    "raw_production_rows",
     "equivalence",
     "integrity",
     "query_plan",
@@ -1058,6 +1084,44 @@ def _validate_waiver(value: object) -> Optional[dict[str, str]]:
     }
 
 
+def _validate_decision_signal_surfaces(
+    root: Path,
+    change_surfaces: tuple[str, ...],
+) -> None:
+    signal = detect_database_signal(root)
+    if any(reason.startswith("artifact_error:") for reason in signal.reasons):
+        raise DatabaseValidationError("artifact_invalid")
+
+    requires_structural_surface = any(
+        reason == "text:ddl"
+        or reason.startswith(("path:migration:", "path:schema:", "path:prisma:"))
+        for reason in signal.reasons
+    )
+    required_surfaces = {
+        surface
+        for reason, surface in (
+            ("text:index", "index"),
+            ("text:column", "column"),
+            ("text:query", "query"),
+        )
+        if reason in signal.reasons
+    }
+    required_surfaces.update(
+        surface
+        for reason, surface in (
+            ("path:index:", "index"),
+            ("path:column:", "column"),
+            ("path:query:", "query"),
+        )
+        if any(signal_reason.startswith(reason) for signal_reason in signal.reasons)
+    )
+    if (
+        requires_structural_surface
+        and not set(change_surfaces) & _SIGNAL_STRUCTURAL_SURFACES
+    ) or not required_surfaces <= set(change_surfaces):
+        raise DatabaseValidationError("decision_invalid")
+
+
 def load_database_decision(repo_root: Path) -> DatabaseDecision:
     """Load the selected, comparable database design decision artifact."""
 
@@ -1086,6 +1150,8 @@ def load_database_decision(repo_root: Path) -> DatabaseDecision:
         or any(surface not in _CHANGE_SURFACES for surface in normalized_surfaces)
     ):
         raise DatabaseValidationError("decision_invalid")
+
+    _validate_decision_signal_surfaces(root, normalized_surfaces)
 
     candidates = decision["candidates"]
     if not isinstance(candidates, list) or not 2 <= len(candidates) <= 3:
@@ -1340,20 +1406,29 @@ def _validate_schema_evidence(
 def _validate_verify_evidence(
     payload: dict[str, Any],
     decision: DatabaseDecision,
-    schema_hash: str,
-) -> dict[str, str]:
+    schema: dict[str, Any],
+) -> dict[str, object]:
     statuses = ("equivalence", "integrity", "query_plan", "migration", "rollback")
     if (
         not _is_strict_int(payload["schema_version"])
         or payload["schema_version"] != 1
         or payload["kind"] != "database_verify"
-        or payload["production_schema_hash"] != schema_hash
+        or payload["production_schema_hash"] != schema["schema_hash"]
         or not _is_safe_persisted_identifier(payload["selected_option_id"])
         or payload["selected_option_id"] != decision.selected_option_id
+        or payload["engine"] != schema["engine"]
+        or payload["execution_target"] not in _VERIFY_EXECUTION_TARGETS
+        or payload["production_primary_queries"] is not False
+        or payload["raw_production_rows"] is not False
         or any(payload[field] not in {"pass", "fail", "not_applicable"} for field in statuses)
         or payload["equivalence"] != "pass"
         or payload["integrity"] != "pass"
         or any(payload[field] == "fail" for field in ("query_plan", "migration", "rollback"))
+    ):
+        raise DatabaseValidationError("verify_evidence_invalid")
+    if (
+        set(decision.change_surfaces) & _SIGNAL_STRUCTURAL_SURFACES
+        and payload["execution_target"] != "local_same_engine"
     ):
         raise DatabaseValidationError("verify_evidence_invalid")
     if "query" in decision.change_surfaces or "index" in decision.change_surfaces:
@@ -1369,6 +1444,10 @@ def _validate_verify_evidence(
     return {
         "production_schema_hash": payload["production_schema_hash"],
         "selected_option_id": payload["selected_option_id"],
+        "engine": payload["engine"],
+        "execution_target": payload["execution_target"],
+        "production_primary_queries": False,
+        "raw_production_rows": False,
         "equivalence": payload["equivalence"],
         "integrity": payload["integrity"],
         "query_plan": payload["query_plan"],
@@ -1406,6 +1485,7 @@ def _validate_test_evidence(
         "selected_option_id": payload["selected_option_id"],
         "local_target": payload["local_target"],
         "masked": True,
+        "raw_production_rows": False,
         "equivalence": payload["equivalence"],
         "integrity": payload["integrity"],
         "performance": payload["performance"],
@@ -1518,7 +1598,7 @@ def _evidence_matches_current(
 
 def _validate_stored_verify_shape(
     verification: object,
-    schema_hash: str,
+    schema: dict[str, Any],
 ) -> None:
     statuses = ("equivalence", "integrity", "query_plan", "migration", "rollback")
     if (
@@ -1527,14 +1607,22 @@ def _validate_stored_verify_shape(
         != {
             "production_schema_hash",
             "selected_option_id",
+            "engine",
+            "execution_target",
+            "production_primary_queries",
+            "raw_production_rows",
             "equivalence",
             "integrity",
             "query_plan",
             "migration",
             "rollback",
         }
-        or verification["production_schema_hash"] != schema_hash
+        or verification["production_schema_hash"] != schema["schema_hash"]
         or not _is_safe_persisted_identifier(verification["selected_option_id"])
+        or verification["engine"] != schema["engine"]
+        or verification["execution_target"] not in _VERIFY_EXECUTION_TARGETS
+        or verification["production_primary_queries"] is not False
+        or verification["raw_production_rows"] is not False
         or any(verification[field] not in {"pass", "fail", "not_applicable"} for field in statuses)
         or verification["equivalence"] != "pass"
         or verification["integrity"] != "pass"
@@ -1543,10 +1631,16 @@ def _validate_stored_verify_shape(
         raise DatabaseValidationError("evidence_invalid")
 
 
-def _validate_stored_test_shape(test: object, schema_hash: str) -> None:
+def _validate_stored_test_shape(
+    test: object,
+    schema_hash: str,
+    profile: Optional[DatabaseProfile],
+) -> None:
     if not isinstance(test, dict):
         raise DatabaseValidationError("evidence_invalid")
     if test.get("status") == "waived":
+        if profile is not None and profile.test_command:
+            raise DatabaseValidationError("evidence_invalid")
         if set(test) != {"status", "waiver"}:
             raise DatabaseValidationError("evidence_invalid")
         try:
@@ -1564,6 +1658,7 @@ def _validate_stored_test_shape(test: object, schema_hash: str) -> None:
             "selected_option_id",
             "local_target",
             "masked",
+            "raw_production_rows",
             "equivalence",
             "integrity",
             "performance",
@@ -1573,6 +1668,7 @@ def _validate_stored_test_shape(test: object, schema_hash: str) -> None:
         or not _is_safe_persisted_identifier(test["selected_option_id"])
         or test["local_target"] not in _LOCAL_TARGETS
         or test["masked"] is not True
+        or test["raw_production_rows"] is not False
         or any(test[field] != "pass" for field in ("equivalence", "integrity", "performance"))
     ):
         raise DatabaseValidationError("evidence_invalid")
@@ -1605,18 +1701,22 @@ def _validate_existing_stage_record(
         raise DatabaseValidationError("evidence_invalid")
     schema = _validated_stored_schema(record["schema"], profile)
     if stage == "verify":
-        _validate_stored_verify_shape(record["verify"], schema["schema_hash"])
+        _validate_stored_verify_shape(record["verify"], schema)
         if decision is not None:
             try:
                 _validate_verify_evidence(
                     {"schema_version": 1, "kind": "database_verify", **record["verify"]},
                     decision,
-                    schema["schema_hash"],
+                    schema,
                 )
             except DatabaseValidationError:
                 raise DatabaseValidationError("evidence_invalid") from None
     elif stage == "test":
-        _validate_stored_test_shape(record["test"], schema["schema_hash"])
+        _validate_stored_test_shape(
+            record["test"],
+            schema["schema_hash"],
+            profile,
+        )
         if decision is not None and record["test"]["status"] == "waived":
             if (
                 decision.local_data_test_waiver is None
@@ -1629,7 +1729,6 @@ def _validate_existing_stage_record(
                     {
                         "schema_version": 1,
                         "kind": "database_test",
-                        "raw_production_rows": False,
                         **record["test"],
                     },
                     decision,
@@ -1861,6 +1960,9 @@ def run_database_check(
             signal_reasons=(),
             blockers=(),
         )
+    if any(reason.startswith("artifact_error:") for reason in signal.reasons):
+        return _failed_check(stage, signal, "artifact_invalid")
+
     if stage == "plan" and on_database_signal is not None:
         try:
             on_database_signal(signal.reasons)
@@ -1907,7 +2009,7 @@ def run_database_check(
             allowed_fields=_SCHEMA_FIELDS,
         )
         schema = _validate_schema_evidence(schema_payload, profile)
-        verify: Optional[dict[str, str]] = None
+        verify: Optional[dict[str, object]] = None
         test: Optional[dict[str, object]] = None
         if stage == "verify":
             if not profile.verify_command:
@@ -1921,7 +2023,7 @@ def run_database_check(
             verify = _validate_verify_evidence(
                 verify_payload,
                 decision,
-                schema["schema_hash"],
+                schema,
             )
         elif stage == "test" and profile.test_command:
             test_payload = _run_json_command(
