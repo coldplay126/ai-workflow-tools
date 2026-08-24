@@ -91,10 +91,13 @@ Plan creates `.workflow/artifacts/database-decision.json` before `db-check --sta
       "id": "maintain-current",
       "kind": "maintain",
       "applicable": true,
+      "unavailable_reason": null,
       "summary": "Keep the current query and schema",
       "equivalence_plan": "Baseline",
       "integrity_plan": "Verify current constraints",
       "normalization_assessment": "No model change",
+      "denormalization_assessment": null,
+      "physical_design_assessment": null,
       "read_write_cost": "Measure production-shaped workload",
       "operational_risks": [],
       "transition_risks": [],
@@ -107,15 +110,15 @@ Plan creates `.workflow/artifacts/database-decision.json` before `db-check --sta
 
 Rules:
 
-- two or three materially different candidates;
+- two or three materially different candidates, where canonical candidate content other than ID must differ;
 - a `maintain` baseline candidate is mandatory;
 - candidate kinds are `maintain`, `query_change`, `physical_design`, `normalize`, and `denormalize`;
-- recommendation and selection IDs must reference candidates;
+- every candidate declares `unavailable_reason`, `denormalization_assessment`, and `physical_design_assessment`; non-applicable candidates require a concrete unavailable reason;
+- recommendation and selection IDs must reference applicable candidates;
 - no candidate may be selected without an equivalence and integrity plan;
-- column, constraint, or ERD surfaces require normalization assessment;
-- denormalize candidates require source of truth, consistency window, reconciliation, and rollback in their assessment text;
-- physical-design candidates must cover read benefit, write amplification, storage, online build/lock, and rollback;
-- unavailable candidates remain present with `applicable=false` and a concrete reason.
+- column, constraint, or ERD surfaces require a non-empty normalization assessment;
+- `denormalize` candidates require a structured `denormalization_assessment` with `source_of_truth`, `consistency_window`, `reconciliation`, and `rollback`; other kinds set it to null;
+- `physical_design` candidates require a structured `physical_design_assessment` with `read_benefit`, `write_amplification`, `storage`, `build_or_lock`, and `rollback`; other kinds set it to null.
 
 The validator does not assign a winning score. Correctness and integrity are hard gates; the planner records comparative lifecycle evidence and the user's selected option.
 

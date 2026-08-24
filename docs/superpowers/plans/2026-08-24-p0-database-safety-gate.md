@@ -122,9 +122,9 @@ git commit -m "feat(workflow): classify database changes as high risk"
 
 - [ ] **Step 1: Write failing profile and decision tests**
 
-Cover disabled/incomplete profiles, unsafe command shapes, candidate counts, missing maintain baseline, broken IDs, missing equivalence/integrity, surface-specific assessments, denormalization consistency/reconciliation, and physical-design write/storage/build/rollback text.
+Cover disabled/incomplete profiles, unsafe command shapes, candidate counts, missing maintain baseline, broken IDs, missing equivalence/integrity, and unavailable candidates without a concrete reason. Require exact structured `denormalization_assessment` and `physical_design_assessment` objects only for their matching kinds.
 
-Use a valid fixture containing two candidates and assert `load_database_decision()` returns the selected ID and normalized surfaces.
+Use a valid fixture containing two materially different candidates and assert `load_database_decision()` returns the selected ID and normalized surfaces. Reject candidates whose canonical content differs only by ID; allow same-kind candidates when their plans, costs, or risks differ substantively.
 
 - [ ] **Step 2: Write failing command-safety tests**
 
