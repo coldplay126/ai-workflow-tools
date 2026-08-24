@@ -245,7 +245,7 @@ database.local_test
 
 - [ ] **Step 5: Render sanitized summaries**
 
-Verify/test reports may show schema hash prefix, engine/version, selected option, stage status, local target, and waiver reason. They must never render command argv, raw stdout, environment, data samples, or DDL.
+Verify/test reports may show schema hash prefix, engine/version, selected option, stage status, local target, and only the fixed flag `waiver_present=true`. They must never render waiver reason text, command argv, raw stdout, environment, data samples, or DDL.
 
 - [ ] **Step 6: Run GREEN and commit**
 
