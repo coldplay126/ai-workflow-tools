@@ -114,6 +114,25 @@ def test_database_signal_detects_concept_database_term(tmp_path: Path) -> None:
 
 
 
+@pytest.mark.parametrize(
+    ("concept", "reason"),
+    [
+        ("CREATE TABLE audit_log (id bigint)", "text:ddl"),
+        ("ALTER TABLE audit_log ADD COLUMN actor_id bigint", "text:ddl"),
+        ("DROP INDEX audit_log_actor_idx", "text:ddl"),
+        ("Migrate the Snowflake warehouse schema", "text:database engine"),
+    ],
+)
+def test_database_signal_detects_strong_ddl_and_warehouse_terms(
+    tmp_path: Path,
+    concept: str,
+    reason: str,
+) -> None:
+    write_workflow_artifacts(tmp_path, concept=concept)
+
+    assert reason in detect_database_signal(tmp_path).reasons
+
+
 def test_database_signal_snapshot_hash_is_stable_and_tracks_artifact_content(
     tmp_path: Path,
 ) -> None:
@@ -516,6 +535,28 @@ def database_decision(
         "denormalization_assessment": None,
         "physical_design_assessment": None,
     }
+    physical = {
+        "id": "add-query-index",
+        "kind": "physical_design",
+        "applicable": True,
+        "summary": "Add a targeted index for the query path",
+        "equivalence_plan": "Compare result sets with the baseline",
+        "integrity_plan": "Verify constraints before and after the build",
+        "normalization_assessment": "No model change",
+        "read_write_cost": "Measure read benefit and write amplification",
+        "operational_risks": [],
+        "transition_risks": [],
+        "rollback_or_exit": "Drop the index online",
+        "unavailable_reason": None,
+        "denormalization_assessment": None,
+        "physical_design_assessment": {
+            "read_benefit": "The index narrows lookup work.",
+            "write_amplification": "Each write updates one index.",
+            "storage": "Storage is bounded by projected keys.",
+            "build_or_lock": "Build online with a bounded metadata lock.",
+            "rollback": "Drop the index online.",
+        },
+    }
     payload: dict[str, object] = {
         "schema_version": 1,
         "status": "selected",
@@ -523,7 +564,7 @@ def database_decision(
         "baseline_option_id": "maintain-current",
         "recommended_option_id": "rewrite-query",
         "selected_option_id": selected_option_id,
-        "candidates": candidates or [baseline, rewrite],
+        "candidates": candidates or [baseline, rewrite, physical],
         "recommendation_rationale": "It preserves correctness at the lowest cost.",
     }
     payload.update(updates)
@@ -844,6 +885,7 @@ def test_decision_allows_materially_distinct_same_kind_candidates(tmp_path: Path
     write_database_decision(
         tmp_path,
         database_decision(
+            change_surfaces=["column"],
             candidates=[baseline, alternative_maintain],
             recommended_option_id="maintain-copy",
             selected_option_id="maintain-copy",
@@ -936,7 +978,7 @@ def test_decision_accepts_exact_structured_kind_assessments(
     change_surfaces: list[str],
 ) -> None:
     write_workflow_artifacts(tmp_path, concept="Update the database query")
-    baseline, alternative = database_decision()["candidates"]
+    baseline, alternative = database_decision()["candidates"][:2]
     candidate = {
         **alternative,
         "id": f"{kind}-option",
@@ -1014,6 +1056,20 @@ def test_decision_returns_selected_id_and_normalized_surfaces(tmp_path: Path) ->
     assert decision.selected_option_id == "rewrite-query"
     assert decision.change_surfaces == ("index", "query")
     assert len(decision.decision_hash) == 64
+def test_decision_requires_applicable_physical_candidate_for_index_surface(
+    tmp_path: Path,
+) -> None:
+    write_workflow_artifacts(tmp_path, concept="Update the database query")
+    decision = database_decision(
+        change_surfaces=["query", "index"],
+        candidates=database_decision()["candidates"][:2],
+    )
+    write_database_decision(tmp_path, decision)
+
+    with pytest.raises(DatabaseValidationError):
+        load_database_decision(tmp_path)
+
+
 @pytest.mark.parametrize("schema_version", [True, 1.0, "1"])
 def test_schema_version_requires_integer_one_everywhere(
     tmp_path: Path,
@@ -1628,6 +1684,31 @@ def test_changed_profile_or_decision_does_not_overwrite_valid_plan_evidence(
     assert result.status == "fail"
     assert result.blockers == (f"{changed_artifact}_changed",)
     assert evidence_path(tmp_path).read_bytes() == before
+
+
+def test_plan_refresh_accepts_changed_profile_and_invalidates_downstream(
+    tmp_path: Path,
+) -> None:
+    prepare_database_workflow(
+        tmp_path,
+        verify_command=database_command(verify_evidence()),
+        test_command=database_command(database_test_payload()),
+    )
+    assert run_database_check(tmp_path, "plan").status == "pass"
+    assert run_database_check(tmp_path, "verify").status == "pass"
+    assert run_database_check(tmp_path, "test").status == "pass"
+    write_database_manifest(
+        tmp_path,
+        schema_command=database_command(schema_evidence()),
+        verify_command=database_command(verify_evidence()),
+        test_command=database_command(database_test_payload()),
+        timeout_seconds=1,
+    )
+
+    result = run_database_check(tmp_path, "plan")
+
+    assert result.status == "pass"
+    assert set(json.loads(evidence_path(tmp_path).read_text())["stages"]) == {"plan"}
 
 
 def test_schema_drift_does_not_overwrite_valid_plan_evidence(tmp_path: Path) -> None:

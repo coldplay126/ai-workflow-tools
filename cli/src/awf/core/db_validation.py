@@ -69,8 +69,21 @@ _STRONG_TEXT_SIGNAL_PATTERNS = (
     ("unique constraint", re.compile(r"\bunique\s+constraint\b|고유\s*제약")),
     ("partition", re.compile(r"\bpartition(?:ing)?\b|파티션")),
     (
+        "ddl",
+        re.compile(
+            r"\b(?:"
+            r"(?:create|alter|drop|truncate)\s+table|"
+            r"(?:create|drop)\s+index|"
+            r"(?:add|drop)\s+column"
+            r")\b"
+        ),
+    ),
+    (
         "database engine",
-        re.compile(r"\b(?:mysql|mariadb|postgres(?:ql)?|sqlite|mongodb|duckdb)\b"),
+        re.compile(
+            r"\b(?:mysql|mariadb|postgres(?:ql)?|sqlite|mongodb|duckdb|"
+            r"snowflake|redshift|bigquery)\b"
+        ),
     ),
     ("warehouse", re.compile(r"\bwarehouse\b|웨어하우스")),
 )
@@ -1022,6 +1035,21 @@ def load_database_decision(repo_root: Path) -> DatabaseDecision:
     if len(candidate_fingerprints) != len(parsed_candidates):
         raise DatabaseValidationError("decision_invalid")
     candidates_by_id = {candidate["id"]: candidate for candidate in parsed_candidates}
+    required_candidate_kinds = {
+        "query": "query_change",
+        "index": "physical_design",
+        "normalize": "normalize",
+        "denormalize": "denormalize",
+    }
+    if any(
+        not any(
+            candidate["applicable"] and candidate["kind"] == required_kind
+            for candidate in parsed_candidates
+        )
+        for surface, required_kind in required_candidate_kinds.items()
+        if surface in normalized_surfaces
+    ):
+        raise DatabaseValidationError("decision_invalid")
 
     baseline_id = _nonempty_string(decision["baseline_option_id"])
     recommended_id = _nonempty_string(decision["recommended_option_id"])
@@ -1695,19 +1723,24 @@ def run_database_check(
         pre_run_decision_hash = decision.decision_hash
         existing = _load_existing_evidence(root)
         if existing is not None:
-            if existing["profile_hash"] != profile.profile_hash:
-                raise DatabaseValidationError("profile_changed")
-            if existing["decision_hash"] != decision.decision_hash:
-                raise DatabaseValidationError("decision_changed")
-            if (
-                stage in {"verify", "test"}
-                and (
+            if stage in {"verify", "test"}:
+                if existing["profile_hash"] != profile.profile_hash:
+                    raise DatabaseValidationError("profile_changed")
+                if existing["decision_hash"] != decision.decision_hash:
+                    raise DatabaseValidationError("decision_changed")
+                if (
                     existing["signal_hash"] != signal.snapshot_hash
                     or tuple(existing["signal_reasons"]) != signal.reasons
-                )
+                ):
+                    raise DatabaseValidationError("database_signal_changed")
+                _validated_existing_stages(existing, profile, decision)
+            elif (
+                existing["profile_hash"] == profile.profile_hash
+                and existing["decision_hash"] == decision.decision_hash
+                and existing["signal_hash"] == signal.snapshot_hash
+                and tuple(existing["signal_reasons"]) == signal.reasons
             ):
-                raise DatabaseValidationError("database_signal_changed")
-            _validated_existing_stages(existing, profile, decision)
+                _validated_existing_stages(existing, profile, decision)
         elif stage in {"verify", "test"}:
             raise DatabaseValidationError("plan_evidence_missing")
 
@@ -1771,16 +1804,32 @@ def run_database_check(
                     raise DatabaseValidationError("plan_evidence_missing")
                 stages: dict[str, Any] = {}
                 locked_plan_schema = None
+                refresh_invalidates_downstream = False
             else:
-                if current["profile_hash"] != locked_profile.profile_hash:
-                    raise DatabaseValidationError("profile_changed")
-                if current["decision_hash"] != locked_decision.decision_hash:
-                    raise DatabaseValidationError("decision_changed")
-                locked_plan_schema = _validated_existing_stages(
-                    current,
-                    locked_profile,
-                    locked_decision,
+                refresh_invalidates_downstream = (
+                    current["profile_hash"] != locked_profile.profile_hash
+                    or current["decision_hash"] != locked_decision.decision_hash
+                    or current["signal_hash"] != locked_signal.snapshot_hash
+                    or tuple(current["signal_reasons"]) != locked_signal.reasons
                 )
+                if stage == "plan" and not refresh_invalidates_downstream:
+                    _validated_existing_stages(
+                        current,
+                        locked_profile,
+                        locked_decision,
+                    )
+                if stage in {"verify", "test"}:
+                    if current["profile_hash"] != locked_profile.profile_hash:
+                        raise DatabaseValidationError("profile_changed")
+                    if current["decision_hash"] != locked_decision.decision_hash:
+                        raise DatabaseValidationError("decision_changed")
+                    locked_plan_schema = _validated_existing_stages(
+                        current,
+                        locked_profile,
+                        locked_decision,
+                    )
+                else:
+                    locked_plan_schema = current["stages"].get("plan", {}).get("schema")
                 stages = dict(current["stages"])
 
             if stage in {"verify", "test"}:
@@ -1791,7 +1840,8 @@ def run_database_check(
             checked_at = _utc_timestamp(_utc_now())
             if stage == "plan":
                 if (
-                    stages.get("plan", {}).get("schema", {}).get("schema_hash")
+                    refresh_invalidates_downstream
+                    or stages.get("plan", {}).get("schema", {}).get("schema_hash")
                     != schema["schema_hash"]
                 ):
                     stages.pop("verify", None)
