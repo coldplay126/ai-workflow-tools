@@ -1656,3 +1656,61 @@ def test_database_verifier_and_tester_prohibit_primary_execution() -> None:
         source = (REPO_ROOT / "claude" / "agents" / name).read_text(encoding="utf-8")
         for requirement in primary_policy:
             assert requirement in source, f"{name}: missing {requirement}"
+
+
+def test_database_verify_and_signal_contracts_match_the_core_policy() -> None:
+    verify_paths = (
+        REPO_ROOT / "claude" / "skills" / "phase-verify" / "SKILL.md",
+        REPO_ROOT / "claude" / "agents" / "spec-verifier.md",
+        REPO_ROOT / "docs" / "reference" / "workflow-pipeline.md",
+        CLI_README,
+        REPO_ROOT
+        / "docs"
+        / "superpowers"
+        / "specs"
+        / "2026-08-24-p0-database-safety-gate-design.md",
+    )
+    verify_contract = (
+        "`engine`",
+        "`execution_target`",
+        "`production_primary_queries`: false",
+        "`raw_production_rows`: false",
+        "`local_same_engine`",
+        "`approved_read_replica`",
+        "DuckDB",
+        "cross-engine",
+        "production primary",
+    )
+    for path in verify_paths:
+        prose = path.read_text(encoding="utf-8")
+        for requirement in verify_contract:
+            assert requirement in prose, f"{path}: missing {requirement}"
+
+    test_evidence_paths = (
+        REPO_ROOT / "claude" / "skills" / "phase-test" / "SKILL.md",
+        REPO_ROOT / "docs" / "reference" / "workflow-pipeline.md",
+    )
+    for path in test_evidence_paths:
+        prose = path.read_text(encoding="utf-8")
+        assert "`raw_production_rows`: false" in prose
+        assert "profile.test_command" in prose
+
+    planner_paths = (
+        REPO_ROOT / "claude" / "skills" / "phase-plan" / "SKILL.md",
+        REPO_ROOT / "claude" / "agents" / "spec-writer.md",
+        REPO_ROOT / "claude" / "skills" / "multi-agent" / "protocols" / "spec_writer.md",
+    )
+    signal_rules = (
+        "`text:ddl`",
+        "`path:migration:`",
+        "`path:schema:`",
+        "`path:prisma:`",
+        "`text:index`",
+        "`text:column`",
+        "`text:query`",
+        "`artifact_error:`",
+    )
+    for path in planner_paths:
+        prose = path.read_text(encoding="utf-8")
+        for rule in signal_rules:
+            assert rule in prose, f"{path}: missing signal rule {rule}"

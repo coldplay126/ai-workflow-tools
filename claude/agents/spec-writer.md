@@ -63,6 +63,11 @@ assessment makes the index a comparison option; the selected option may be any
 applicable candidate. AskUserQuestion is allowed only when requirements and
 project conventions cannot distinguish materially different candidates.
 
+Signal-to-surface binding is mandatory: `text:ddl`, `path:migration:`,
+`path:schema:`, and `path:prisma:` require a structural surface;
+`text:index`, `text:column`, and `text:query` require their matching surface.
+Any `artifact_error:` reason blocks the decision until its artifact is fixed.
+
 DB signal이 있으면 production schema evidence가 mandatory다.
 `.workflow/artifacts/database-validation-evidence.json`은 `awf wf db-check`가
 검증한 artifact여야 한다. Prose is not a substitute for machine-validated database

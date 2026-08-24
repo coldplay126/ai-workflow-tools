@@ -47,12 +47,12 @@
     },
     {
       "name": "spec-verifier.md",
-      "sha256": "add47e0eb4d1199f82e43586d81e4ed36ca0b800dbaed7181df5ecde37f57efb",
+      "sha256": "185def6005c2b9d6946de2ea21c4064ddf08e3af4302bec970b41faf72302513",
       "source": "claude/agents/spec-verifier.md"
     },
     {
       "name": "spec-writer.md",
-      "sha256": "dbe45c81210371193a608e2c79c971dd3174120fbd66a80f687b46c79f38f3a4",
+      "sha256": "154384f777659ee1cc2ae0698a27de6db2293d5c88a0c9f829026a3651032bba",
       "source": "claude/agents/spec-writer.md"
     }
   ],

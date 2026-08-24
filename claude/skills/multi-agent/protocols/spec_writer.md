@@ -42,6 +42,10 @@ other applicable candidates; it does not force the selected option.
 null or omitted다. `test_command`가 없고 waiver를 선택할 때만 nonempty
 `reason`, `approver`, `timestamp`를 가진 object를 기록한다. `timestamp`는 UTC ISO 8601 형식이어야 하며,
 waiver는 local data test만 면제한다.
+Signal-to-surface binding is mandatory: `text:ddl`, `path:migration:`,
+`path:schema:`, and `path:prisma:` require a structural surface;
+`text:index`, `text:column`, and `text:query` require their matching surface.
+Any `artifact_error:` reason blocks the decision until its artifact is fixed.
 
 production schema는 DB signal에서 mandatory이며
 `.workflow/artifacts/database-validation-evidence.json`은 `awf wf db-check`가

@@ -164,6 +164,10 @@ Required at verify:
   "kind": "database_verify",
   "production_schema_hash": "<sha256>",
   "selected_option_id": "rewrite-query",
+  "engine": "mysql",
+  "execution_target": "local_same_engine",
+  "production_primary_queries": false,
+  "raw_production_rows": false,
   "equivalence": "pass",
   "integrity": "pass",
   "query_plan": "pass",
@@ -173,6 +177,13 @@ Required at verify:
 ```
 
 `equivalence` and `integrity` must pass. Query-only work requires query-plan evidence. Column/constraint/ERD/normalization work requires migration and rollback evidence. Values may be `pass`, `fail`, or `not_applicable`; `not_applicable` is accepted only when the change surfaces make that check irrelevant.
+
+Verify evidence must include `engine`, `execution_target`,
+`production_primary_queries`: false, and `raw_production_rows`: false.
+`execution_target` is `local_same_engine` or `approved_read_replica`. Index and
+structural work require `local_same_engine` and the production schema engine.
+Only query planner work may use `approved_read_replica`; DuckDB, cross-engine
+execution, and the production primary are prohibited.
 
 ### Test command or waiver
 
@@ -193,7 +204,7 @@ The preferred path runs masked production-shaped data locally in the same engine
 }
 ```
 
-If `test_command` is absent, `database-decision.json` must contain a `local_data_test_waiver` with non-empty reason, approver, and timestamp. The test gate reports limited confidence but may pass the DB-specific condition because the high-risk workflow still requires G3 approval and full manual test range.
+If `profile.test_command` is absent, `database-decision.json` must contain a `local_data_test_waiver` with non-empty reason, approver, and timestamp. The test gate reports limited confidence but may pass the DB-specific condition because the high-risk workflow still requires G3 approval and full manual test range.
 
 A configured test command may use an approved warehouse, sanitized snapshot, or explicitly enabled read replica. It may never benchmark the production primary. Raw local files remain outside workflow artifacts in ignored, access-controlled storage with project-owned retention.
 

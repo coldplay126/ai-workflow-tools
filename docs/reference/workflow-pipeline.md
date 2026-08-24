@@ -204,6 +204,13 @@ An index surface requires an applicable `physical_design` candidate with its
 full assessment. It is a comparison option, not a default selection: the
 selected option may be any applicable candidate after the comparison.
 
+Verify evidence includes `engine`, `execution_target`,
+`production_primary_queries`: false, and `raw_production_rows`: false.
+`execution_target` is `local_same_engine` or `approved_read_replica`. Index and
+other structural work require `local_same_engine` with the production schema
+engine. Only query planner work may use `approved_read_replica`; DuckDB,
+cross-engine execution, and the production primary are prohibited.
+
 Production schema evidence is mandatory. Use a same-engine local environment
 for DDL and planner work; DuckDB may support profiling or equivalence analysis
 but cannot stand in for same-engine evidence. A project-specific replica sample
@@ -211,7 +218,7 @@ requires explicit opt-in. raw primary rows are prohibited, and the test result
 must state that its rows are masked. A waiver applies only to the absence of a
 local test command and requires a decision reason, approver, and timestamp.
 
-The decision's optional top-level `local_data_test_waiver` is null or omitted by default. Only when `test_command` is absent may it be an object with nonempty `reason`, `approver`, and `timestamp`; the timestamp uses UTC ISO 8601. The waiver applies only to the local data test.
+The decision's optional top-level `local_data_test_waiver` is null or omitted by default. Only when `profile.test_command` is absent may it be an object with nonempty `reason`, `approver`, and `timestamp`; the timestamp uses UTC ISO 8601. The waiver applies only to the local data test.
 
 The project schema command must return only current production metadata:
 

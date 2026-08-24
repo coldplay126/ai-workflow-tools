@@ -311,6 +311,7 @@
               "database_conditions": {
                 "const": [
                   "database.production_schema",
+                  "database.risk_class",
                   "database.equivalence",
                   "database.integrity",
                   "database.query_plan",
@@ -359,6 +360,7 @@
               "database_conditions": {
                 "const": [
                   "database.production_schema",
+                  "database.risk_class",
                   "database.local_test"
                 ]
               }

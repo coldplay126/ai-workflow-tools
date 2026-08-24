@@ -95,6 +95,7 @@
     ],
     "database_conditions": [
       "database.production_schema",
+      "database.risk_class",
       "database.equivalence",
       "database.integrity",
       "database.query_plan",

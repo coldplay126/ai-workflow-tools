@@ -244,6 +244,11 @@ tasks.md, plan.md, allowed-files.json에 DB 변경 신호가 있으면
   applicable `maintain`, `query_change`, `physical_design`, `normalize`, or
   `denormalize` candidate. The planner never selects an index automatically.
 
+Signal-to-surface binding is mandatory: `text:ddl`, `path:migration:`,
+`path:schema:`, and `path:prisma:` require a structural surface;
+`text:index`, `text:column`, and `text:query` require their matching surface.
+Any `artifact_error:` reason blocks the decision until its artifact is fixed.
+
 `local_data_test_waiver`는 decision의 optional top-level field다. 기본값은
 null or omitted다. `test_command`가 없고 waiver를 선택할 때만 nonempty
 `reason`, `approver`, `timestamp`를 가진 object를 기록한다. `timestamp`는 UTC ISO 8601 형식이어야 하며,

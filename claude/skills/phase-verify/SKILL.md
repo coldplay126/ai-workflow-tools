@@ -79,6 +79,16 @@ DuckDB는 profiling 또는 equivalence 분석에 사용할 수 있지만 same-en
 
 Production primary is never a verify/test benchmark or executable-query target. Production provides only read-only schema metadata; data comes only from an explicitly approved replica, warehouse, or sanitized local dataset.
 
+### 2.6 verify evidence execution contract
+
+verify command evidence에는 `engine`, `execution_target`,
+`production_primary_queries`: false, `raw_production_rows`: false가 필요하다.
+`execution_target`은 `local_same_engine` 또는 `approved_read_replica`다.
+index를 포함한 structural surface는 `local_same_engine`과 production schema의
+동일 `engine`을 요구한다. query planner 확인만 `approved_read_replica`를 사용할 수
+있다. DuckDB, cross-engine 실행, production primary는 이 verify evidence의 target이
+될 수 없다.
+
 ### 3. Spec 준수 검증 (spec-verifier 에이전트, fork context)
 
 spec.md의 각 requirement(FR-NNN)에 대해:

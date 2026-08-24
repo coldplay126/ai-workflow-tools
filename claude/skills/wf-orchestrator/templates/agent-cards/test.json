@@ -90,6 +90,7 @@
     ],
     "database_conditions": [
       "database.production_schema",
+      "database.risk_class",
       "database.local_test"
     ],
     "_pass_conditions_doc": "Worker result schema: { suites: [{passed,failed,...}], regressions: [...], acceptance: {passed,total}, coverage: {percentage} }",

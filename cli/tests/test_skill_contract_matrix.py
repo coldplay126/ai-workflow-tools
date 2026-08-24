@@ -603,6 +603,7 @@ DATABASE_STAGE_CONTRACTS = {
     "verify": {
         "conditions": (
             "database.production_schema",
+            "database.risk_class",
             "database.equivalence",
             "database.integrity",
             "database.query_plan",
@@ -612,7 +613,11 @@ DATABASE_STAGE_CONTRACTS = {
         "decision_artifact": False,
     },
     "test": {
-        "conditions": ("database.production_schema", "database.local_test"),
+        "conditions": (
+            "database.production_schema",
+            "database.risk_class",
+            "database.local_test",
+        ),
         "decision_artifact": False,
     },
 }

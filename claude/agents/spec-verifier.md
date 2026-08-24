@@ -73,6 +73,15 @@ DB driver, masking, replica access를 이 에이전트가 제공하거나 실행
 
 Production primary is never a verify/test benchmark or executable-query target. Production provides only read-only schema metadata; data and workload checks use an explicitly approved replica, warehouse, or sanitized local dataset.
 
+## Verify evidence execution contract
+
+Verify evidence must include `engine`, `execution_target`,
+`production_primary_queries`: false, and `raw_production_rows`: false.
+`execution_target` is `local_same_engine` or `approved_read_replica`. Structural
+and index work requires `local_same_engine` with the production schema engine.
+Only query planner work may use `approved_read_replica`; DuckDB, cross-engine
+execution, and the production primary are prohibited.
+
 ### 5. 코드 품질 빠른 스캔
 
 변경된 파일에서 명백한 문제만 확인:
