@@ -122,7 +122,7 @@ def test_database_signal_detects_concept_database_term(tmp_path: Path) -> None:
     ("concept", "reason"),
     [
         ("CREATE TABLE audit_log (id bigint)", "text:table_ddl"),
-        ("ALTER TABLE audit_log ADD COLUMN actor_id bigint", "text:table_ddl"),
+        ("ALTER TABLE audit_log ADD COLUMN actor_id bigint", "text:column_ddl"),
         ("DROP INDEX audit_log_actor_idx", "text:index_ddl"),
         ("Migrate the Snowflake warehouse schema", "text:database engine"),
     ],
@@ -1096,7 +1096,7 @@ def test_decision_allows_holistic_candidates_without_each_surface_kind(
 @pytest.mark.parametrize(
     ("concept", "allowed_files", "underdeclared", "declared"),
     [
-        ("CREATE TABLE audit_log (id bigint)", None, ["query"], ["column"]),
+        ("CREATE TABLE audit_log (id bigint)", None, ["query"], ["erd"]),
         (
             "Coordinate the application release",
             ["src/database/migrations/001_create_audit_log.sql"],
@@ -1245,7 +1245,13 @@ def test_table_ddl_rejects_index_only_change_surface(tmp_path: Path) -> None:
     assert raised.value.code == "decision_invalid"
     write_database_decision(tmp_path, database_decision(change_surfaces=["column"]))
 
-    assert load_database_decision(tmp_path).change_surfaces == ("column",)
+    with pytest.raises(DatabaseValidationError) as raised:
+        load_database_decision(tmp_path)
+
+    assert raised.value.code == "decision_invalid"
+    write_database_decision(tmp_path, database_decision(change_surfaces=["erd"]))
+
+    assert load_database_decision(tmp_path).change_surfaces == ("erd",)
 
 
 @pytest.mark.parametrize(
@@ -1289,7 +1295,7 @@ def test_specific_ddl_signals_require_their_declared_surface(
     assert load_database_decision(tmp_path).change_surfaces == tuple(declared)
 
 
-def test_alter_table_add_index_emits_table_and_index_ddl_signals(
+def test_alter_table_specific_ddl_does_not_emit_a_generic_table_reason(
     tmp_path: Path,
 ) -> None:
     write_workflow_artifacts(
@@ -1297,10 +1303,186 @@ def test_alter_table_add_index_emits_table_and_index_ddl_signals(
         concept="ALTER TABLE audit_log ADD INDEX audit_actor_idx (actor_id)",
     )
 
-    assert {
-        "text:table_ddl",
-        "text:index_ddl",
-    } <= set(detect_database_signal(tmp_path).reasons)
+    assert detect_database_signal(tmp_path).reasons == ("text:index_ddl",)
+
+
+@pytest.mark.parametrize(
+    ("ddl", "reason", "declared"),
+    [
+        ("CREATE TABLE audit_log (id bigint)", "text:table_ddl", ["erd"]),
+        ("DROP TABLE audit_log", "text:table_ddl", ["erd"]),
+        ("TRUNCATE TABLE audit_log", "text:table_ddl", ["erd"]),
+        (
+            "ALTER TABLE audit_log ALTER COLUMN actor_id TYPE bigint",
+            "text:column_ddl",
+            ["column"],
+        ),
+        (
+            "ALTER TABLE audit_log ADD KEY audit_actor_idx (actor_id)",
+            "text:index_ddl",
+            ["index"],
+        ),
+        (
+            "ALTER TABLE audit_log ADD CONSTRAINT audit_actor_fk "
+            "FOREIGN KEY (actor_id) REFERENCES actor(id)",
+            "text:constraint_ddl",
+            ["constraint"],
+        ),
+    ],
+    ids=[
+        "create-table",
+        "drop-table",
+        "truncate-table",
+        "alter-column",
+        "add-key",
+        "add-constraint",
+    ],
+)
+def test_ddl_reasons_require_their_exact_change_surface(
+    tmp_path: Path,
+    ddl: str,
+    reason: str,
+    declared: list[str],
+) -> None:
+    write_workflow_artifacts(tmp_path, concept=ddl)
+
+    assert reason in detect_database_signal(tmp_path).reasons
+    write_database_decision(tmp_path, database_decision(change_surfaces=["query"]))
+
+    with pytest.raises(DatabaseValidationError) as raised:
+        load_database_decision(tmp_path)
+
+    assert raised.value.code == "decision_invalid"
+    write_database_decision(tmp_path, database_decision(change_surfaces=declared))
+
+    assert load_database_decision(tmp_path).change_surfaces == tuple(declared)
+
+
+@pytest.mark.parametrize(
+    ("ddl", "reason", "declared"),
+    [
+        ("CREATE SCHEMA reporting", "text:schema_ddl", ["schema_object"]),
+        ("DROP SCHEMA reporting", "text:schema_ddl", ["schema_object"]),
+        ("CREATE DATABASE reporting", "text:database_ddl", ["schema_object"]),
+        ("DROP DATABASE reporting", "text:database_ddl", ["schema_object"]),
+        (
+            "CREATE VIEW audit_summary AS SELECT actor_id FROM audit_log",
+            "text:view_ddl",
+            ["query", "schema_object"],
+        ),
+        ("DROP VIEW audit_summary", "text:view_ddl", ["query", "schema_object"]),
+        ("CREATE TYPE status AS ENUM ('open')", "text:type_ddl", ["schema_object"]),
+        ("DROP TYPE status", "text:type_ddl", ["schema_object"]),
+        ("CREATE SEQUENCE audit_sequence", "text:sequence_ddl", ["schema_object"]),
+        ("DROP SEQUENCE audit_sequence", "text:sequence_ddl", ["schema_object"]),
+        ("CREATE TRIGGER audit_log_trigger", "text:trigger_ddl", ["schema_object"]),
+        ("DROP TRIGGER audit_log_trigger", "text:trigger_ddl", ["schema_object"]),
+        ("CREATE PROCEDURE archive_audit()", "text:routine_ddl", ["schema_object"]),
+        ("DROP PROCEDURE archive_audit", "text:routine_ddl", ["schema_object"]),
+        ("CREATE FUNCTION audit_count()", "text:routine_ddl", ["schema_object"]),
+        ("DROP FUNCTION audit_count", "text:routine_ddl", ["schema_object"]),
+    ],
+    ids=[
+        "create-schema",
+        "drop-schema",
+        "create-database",
+        "drop-database",
+        "create-view",
+        "drop-view",
+        "create-type",
+        "drop-type",
+        "create-sequence",
+        "drop-sequence",
+        "create-trigger",
+        "drop-trigger",
+        "create-procedure",
+        "drop-procedure",
+        "create-function",
+        "drop-function",
+    ],
+)
+def test_schema_object_ddl_requires_the_declared_surfaces(
+    tmp_path: Path,
+    ddl: str,
+    reason: str,
+    declared: list[str],
+) -> None:
+    write_workflow_artifacts(tmp_path, concept=ddl)
+
+    assert reason in detect_database_signal(tmp_path).reasons
+    write_database_decision(tmp_path, database_decision(change_surfaces=["query"]))
+
+    with pytest.raises(DatabaseValidationError) as raised:
+        load_database_decision(tmp_path)
+
+    assert raised.value.code == "decision_invalid"
+    write_database_decision(tmp_path, database_decision(change_surfaces=declared))
+
+    assert load_database_decision(tmp_path).change_surfaces == tuple(declared)
+
+
+def test_text_migration_rejects_a_query_only_decision(tmp_path: Path) -> None:
+    write_workflow_artifacts(tmp_path, concept="Plan the database migration rollout")
+    write_database_decision(tmp_path, database_decision(change_surfaces=["query"]))
+
+    with pytest.raises(DatabaseValidationError) as raised:
+        load_database_decision(tmp_path)
+
+    assert raised.value.code == "decision_invalid"
+    write_database_decision(
+        tmp_path,
+        database_decision(change_surfaces=["schema_object"]),
+    )
+
+    assert load_database_decision(tmp_path).change_surfaces == ("schema_object",)
+
+
+def test_order_by_rejects_a_nonquery_decision(tmp_path: Path) -> None:
+    write_workflow_artifacts(tmp_path, concept="Update database ORDER BY semantics")
+    write_database_decision(tmp_path, database_decision(change_surfaces=["index"]))
+
+    with pytest.raises(DatabaseValidationError) as raised:
+        load_database_decision(tmp_path)
+
+    assert raised.value.code == "decision_invalid"
+    write_database_decision(tmp_path, database_decision(change_surfaces=["query"]))
+
+    assert load_database_decision(tmp_path).change_surfaces == ("query",)
+
+
+def test_schema_object_text_requires_the_schema_object_surface(tmp_path: Path) -> None:
+    write_workflow_artifacts(tmp_path, concept="Update the database schema object")
+    write_database_decision(tmp_path, database_decision(change_surfaces=["query"]))
+
+    with pytest.raises(DatabaseValidationError) as raised:
+        load_database_decision(tmp_path)
+
+    assert raised.value.code == "decision_invalid"
+    write_database_decision(
+        tmp_path,
+        database_decision(change_surfaces=["schema_object"]),
+    )
+
+    assert load_database_decision(tmp_path).change_surfaces == ("schema_object",)
+
+
+def test_generic_model_paths_do_not_signal_but_database_models_do(
+    tmp_path: Path,
+) -> None:
+    write_workflow_artifacts(tmp_path, allowed_files=["src/models/inference.py"])
+
+    assert detect_database_signal(tmp_path).detected is False
+    database_path = "src/database/models/audit.py"
+    (tmp_path / ".workflow" / "artifacts" / "allowed-files.json").write_text(
+        json.dumps({"planned_files": [database_path]}),
+        encoding="utf-8",
+    )
+
+    _assert_redacted_path_reason(
+        detect_database_signal(tmp_path).reasons,
+        database_path,
+        "database",
+    )
 
 
 def test_migration_index_verification_requires_migration_and_rollback(
@@ -1346,6 +1528,65 @@ def test_query_only_verification_allows_not_applicable_schema_migration(
     assert run_database_check(tmp_path, "plan").status == "pass"
 
     assert run_database_check(tmp_path, "verify").status == "pass"
+
+def test_ddl_rejects_not_applicable_migration_and_rollback_evidence(
+    tmp_path: Path,
+) -> None:
+    write_workflow_artifacts(
+        tmp_path,
+        concept="CREATE VIEW audit_summary AS SELECT actor_id FROM audit_log",
+    )
+    write_database_manifest(
+        tmp_path,
+        schema_command=database_command(schema_evidence()),
+        verify_command=database_command(
+            verify_evidence(
+                migration="not_applicable",
+                rollback="not_applicable",
+            )
+        ),
+    )
+    write_database_decision(
+        tmp_path,
+        database_decision(change_surfaces=["query", "schema_object"]),
+    )
+
+    decision = load_database_decision(tmp_path)
+
+    assert decision.requires_query_plan is True
+    assert decision.requires_migration_rollback is True
+    assert run_database_check(tmp_path, "plan").status == "pass"
+    result = run_database_check(tmp_path, "verify")
+
+    assert result.status == "fail"
+    assert result.blockers == ("verify_evidence_invalid",)
+
+
+def test_sql_signal_requires_a_query_plan_without_a_query_surface(
+    tmp_path: Path,
+) -> None:
+    write_workflow_artifacts(tmp_path, concept="Update the database SQL integration")
+    write_database_manifest(
+        tmp_path,
+        schema_command=database_command(schema_evidence()),
+        verify_command=database_command(
+            verify_evidence(query_plan="not_applicable"),
+        ),
+    )
+    write_database_decision(
+        tmp_path,
+        database_decision(change_surfaces=["schema_object"]),
+    )
+
+    decision = load_database_decision(tmp_path)
+
+    assert decision.requires_query_plan is True
+    assert decision.requires_migration_rollback is False
+    assert run_database_check(tmp_path, "plan").status == "pass"
+    result = run_database_check(tmp_path, "verify")
+
+    assert result.status == "fail"
+    assert result.blockers == ("verify_evidence_invalid",)
 
 @pytest.mark.parametrize(
     ("concept", "surface", "reason"),
@@ -1415,13 +1656,13 @@ def test_strong_structural_text_signal_requires_its_matching_surface(
 @pytest.mark.parametrize(
     ("planned_path", "category"),
     [
-        ("src/database/models/audit.py", "model"),
+        ("src/database/models/audit.py", "database"),
         ("src/database/entities/audit.py", "entity"),
         ("src/database/schemas/audit.py", "schema"),
         ("src/database/schema.prisma", "prisma"),
         ("src/database/migrations/001_audit.sql", "migration"),
     ],
-    ids=["model", "entity", "schema", "prisma", "migration"],
+    ids=["database-model", "entity", "schema", "prisma", "migration"],
 )
 def test_structural_database_path_requires_a_structural_surface(
     tmp_path: Path,
@@ -2174,6 +2415,43 @@ def test_test_stage_accepts_explicit_valid_local_data_waiver(tmp_path: Path) -> 
     assert persisted["stages"]["test"]["test"]["status"] == "waived"
     assert persisted["stages"]["test"]["test"]["waiver"]["approver"] == "database-owner"
 
+@pytest.mark.parametrize("stage", ["plan", "verify", "test"])
+def test_test_command_and_waiver_are_mutually_exclusive_before_commands(
+    tmp_path: Path,
+    stage: str,
+) -> None:
+    command_marker = tmp_path / "database-command-ran"
+    schema_command = [
+        sys.executable,
+        "-c",
+        (
+            "from pathlib import Path; "
+            f"Path({str(command_marker)!r}).write_text('ran', encoding='utf-8'); "
+            f"print({json.dumps(schema_evidence())!r})"
+        ),
+    ]
+    decision = database_decision(
+        local_data_test_waiver={
+            "reason": "No approved masked production-shaped fixture is available.",
+            "approver": "database-owner",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    prepare_database_workflow(
+        tmp_path,
+        schema_command=schema_command,
+        verify_command=database_command(verify_evidence()),
+        test_command=database_command(database_test_payload()),
+        decision=decision,
+    )
+
+    result = run_database_check(tmp_path, stage)
+
+    assert result.status == "fail"
+    assert result.blockers == ("decision_invalid",)
+    assert not command_marker.exists()
+    assert not evidence_path(tmp_path).exists()
+
 def test_stored_test_waiver_requires_empty_current_test_command(tmp_path: Path) -> None:
     decision = database_decision(
         local_data_test_waiver={
@@ -2209,7 +2487,7 @@ def test_stored_test_waiver_requires_empty_current_test_command(tmp_path: Path) 
     result = run_database_check(tmp_path, "plan")
 
     assert result.status == "fail"
-    assert result.blockers == ("evidence_invalid",)
+    assert result.blockers == ("decision_invalid",)
     assert all(
         condition["passed"] is False
         for condition in evaluate_database_gate(tmp_path, "test")

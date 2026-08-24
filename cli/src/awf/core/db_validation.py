@@ -32,8 +32,6 @@ _PATH_SUFFIXES = {".sql", ".prisma"}
 _PATH_DIRECTORIES = {
     "migration",
     "migrations",
-    "model",
-    "models",
     "entity",
     "entities",
     "repository",
@@ -72,18 +70,49 @@ _STRONG_TEXT_SIGNAL_PATTERNS = (
     ("primary key", re.compile(r"\bprimary\s+key\b|기본\s*키")),
     ("unique constraint", re.compile(r"\bunique\s+constraint\b|고유\s*제약")),
     ("partition", re.compile(r"\bpartition(?:ing)?\b|파티션")),
+    ("schema object", re.compile(r"\bschema\s+object\b")),
     (
         "table_ddl",
-        re.compile(r"\b(?:create|alter|drop|truncate)\s+table\b"),
+        re.compile(r"\b(?:create|drop|truncate)\s+(?:temporary\s+)?table\b"),
+    ),
+    (
+        "column_ddl",
+        re.compile(
+            r"\b(?:add|alter|drop)\s+column\b|"
+            r"\balter\s+table\b[^\n;]*?\b(?:add|alter|drop)\s+"
+            r"(?!(?:constraint|unique|check|index|key)\b|"
+            r"(?:primary|foreign)\s+key\b)\w+"
+        ),
     ),
     (
         "index_ddl",
         re.compile(
             r"\b(?:create|drop)\s+(?:unique\s+)?index\b|"
-            r"\balter\s+table\b.*\b(?:add|drop)\s+(?:unique\s+)?(?:index|key)\b"
+            r"\balter\s+table\b[^\n;]*?\b(?:add|drop)\s+"
+            r"(?:unique\s+)?(?:index|key)\b"
         ),
     ),
-    ("column_ddl", re.compile(r"\b(?:add|drop)\s+column\b")),
+    (
+        "constraint_ddl",
+        re.compile(
+            r"\balter\s+table\b[^\n;]*?\b(?:add|drop)\s+constraint\b|"
+            r"\balter\s+table\b[^\n;]*?\b(?:add|drop)\s+"
+            r"(?:primary\s+key|foreign\s+key|unique|check)\b"
+        ),
+    ),
+    ("schema_ddl", re.compile(r"\b(?:create|alter|drop)\s+schema\b")),
+    ("database_ddl", re.compile(r"\b(?:create|alter|drop)\s+database\b")),
+    (
+        "view_ddl",
+        re.compile(r"\b(?:create|alter|drop)\s+(?:materialized\s+)?view\b"),
+    ),
+    ("type_ddl", re.compile(r"\b(?:create|alter|drop)\s+type\b")),
+    ("sequence_ddl", re.compile(r"\b(?:create|alter|drop)\s+sequence\b")),
+    ("trigger_ddl", re.compile(r"\b(?:create|alter|drop)\s+trigger\b")),
+    (
+        "routine_ddl",
+        re.compile(r"\b(?:create|alter|drop)\s+(?:procedure|function)\b"),
+    ),
     (
         "database engine",
         re.compile(
@@ -99,6 +128,8 @@ _WEAK_TEXT_SIGNAL_PATTERNS = (
     ("query", re.compile(r"\bquer(?:y|ies)\b|쿼리")),
     ("table", re.compile(r"\btable\b|테이블")),
     ("column", re.compile(r"\bcolumn\b|컬럼")),
+    ("constraint", re.compile(r"\bconstraint\b|제약")),
+    ("view", re.compile(r"\bview\b")),
     ("model", re.compile(r"\bmodel\b|모델")),
 )
 _DATABASE_CONTEXT_PATTERN = re.compile(
@@ -166,8 +197,6 @@ DATABASE_CHECK_ARTIFACT_REASONS = frozenset(
 _DATABASE_PATH_CATEGORY = {
     "migration": "migration",
     "migrations": "migration",
-    "model": "model",
-    "models": "model",
     "entity": "entity",
     "entities": "entity",
     "repository": "repository",
@@ -184,7 +213,8 @@ _DATABASE_PATH_CATEGORY = {
     "schemas": "schema",
 }
 _DATABASE_PATH_REASON = re.compile(
-    r"^path:(?:(?:sql|prisma|migration|model|entity|repository|query|index|column|database|schema):[a-f0-9]{16}|truncated:[1-9][0-9]*)$"
+    r"^path:(?:(?:sql|prisma|migration|entity|repository|query|index|column|"
+    r"database|schema):[a-f0-9]{16}|truncated:[1-9][0-9]*)$"
 )
 
 
@@ -220,7 +250,6 @@ def _database_path_reason(path: str) -> str:
                     "column",
                     "schema",
                     "entity",
-                    "model",
                     "database",
                     "repository",
                 )
@@ -533,8 +562,9 @@ _PERSISTED_SECRET = re.compile(
     re.IGNORECASE,
 )
 _PERSISTED_DDL = re.compile(
-    r"\b(?:create|alter|drop|truncate)\s+(?:table|index|schema|database)|"
-    r"\b(?:add|drop)\s+column\b",
+    r"\b(?:create|alter|drop|truncate)\s+"
+    r"(?:table|index|schema|database|view|type|sequence|trigger|procedure|function)\b|"
+    r"\b(?:add|alter|drop)\s+(?:column|constraint)\b",
     re.IGNORECASE,
 )
 _PERSISTED_RAW_DATA = re.compile(
@@ -559,6 +589,7 @@ _CHANGE_SURFACES = {
     "normalize",
     "denormalize",
     "partition",
+    "schema_object",
 }
 _SIGNAL_STRUCTURAL_SURFACES = {
     "index",
@@ -568,8 +599,186 @@ _SIGNAL_STRUCTURAL_SURFACES = {
     "normalize",
     "denormalize",
     "partition",
+    "schema_object",
 }
 _STRUCTURAL_SURFACES = _SIGNAL_STRUCTURAL_SURFACES
+
+
+@dataclass(frozen=True)
+class _SignalPolicy:
+    required_surfaces: frozenset[str] = frozenset()
+    requires_structural_surface: bool = False
+    requires_query_plan: bool = False
+    requires_migration_rollback: bool = False
+
+
+def _signal_policy(
+    *required_surfaces: str,
+    structural: bool = False,
+    query_plan: bool = False,
+    migration_rollback: bool = False,
+) -> _SignalPolicy:
+    return _SignalPolicy(
+        required_surfaces=frozenset(required_surfaces),
+        requires_structural_surface=structural,
+        requires_query_plan=query_plan,
+        requires_migration_rollback=migration_rollback,
+    )
+
+
+_SIGNAL_POLICY_BY_REASON = {
+    "text:sql": _signal_policy(query_plan=True),
+    "text:sql syntax": _signal_policy("query", query_plan=True),
+    "text:order by": _signal_policy("query", query_plan=True),
+    "text:migration": _signal_policy(structural=True, migration_rollback=True),
+    "text:normalization": _signal_policy(
+        "normalize",
+        migration_rollback=True,
+    ),
+    "text:denormalization": _signal_policy(
+        "denormalize",
+        migration_rollback=True,
+    ),
+    "text:erd": _signal_policy("erd", migration_rollback=True),
+    "text:foreign key": _signal_policy("constraint", migration_rollback=True),
+    "text:primary key": _signal_policy("constraint", migration_rollback=True),
+    "text:unique constraint": _signal_policy("constraint", migration_rollback=True),
+    "text:partition": _signal_policy("partition", migration_rollback=True),
+    "text:schema object": _signal_policy(
+        "schema_object",
+        migration_rollback=True,
+    ),
+    "text:table_ddl": _signal_policy("erd", migration_rollback=True),
+    "text:column_ddl": _signal_policy("column", migration_rollback=True),
+    "text:index_ddl": _signal_policy(
+        "index",
+        query_plan=True,
+        migration_rollback=True,
+    ),
+    "text:constraint_ddl": _signal_policy(
+        "constraint",
+        migration_rollback=True,
+    ),
+    "text:schema_ddl": _signal_policy(
+        "schema_object",
+        migration_rollback=True,
+    ),
+    "text:database_ddl": _signal_policy(
+        "schema_object",
+        migration_rollback=True,
+    ),
+    "text:view_ddl": _signal_policy(
+        "schema_object",
+        "query",
+        query_plan=True,
+        migration_rollback=True,
+    ),
+    "text:type_ddl": _signal_policy("schema_object", migration_rollback=True),
+    "text:sequence_ddl": _signal_policy(
+        "schema_object",
+        migration_rollback=True,
+    ),
+    "text:trigger_ddl": _signal_policy(
+        "schema_object",
+        migration_rollback=True,
+    ),
+    "text:routine_ddl": _signal_policy(
+        "schema_object",
+        migration_rollback=True,
+    ),
+    "text:index": _signal_policy(
+        "index",
+        query_plan=True,
+        migration_rollback=True,
+    ),
+    "text:query": _signal_policy("query", query_plan=True),
+    "text:table": _signal_policy("erd", migration_rollback=True),
+    "text:column": _signal_policy("column", migration_rollback=True),
+    "text:constraint": _signal_policy(
+        "constraint",
+        migration_rollback=True,
+    ),
+    "text:view": _signal_policy(
+        "schema_object",
+        "query",
+        query_plan=True,
+        migration_rollback=True,
+    ),
+}
+_SIGNAL_POLICY_BY_PATH_PREFIX = (
+    ("path:sql:", _signal_policy(query_plan=True)),
+    (
+        "path:prisma:",
+        _signal_policy(structural=True, migration_rollback=True),
+    ),
+    (
+        "path:migration:",
+        _signal_policy(structural=True, migration_rollback=True),
+    ),
+    (
+        "path:entity:",
+        _signal_policy(structural=True, migration_rollback=True),
+    ),
+    (
+        "path:repository:",
+        _signal_policy(structural=True, migration_rollback=True),
+    ),
+    ("path:query:", _signal_policy("query", query_plan=True)),
+    (
+        "path:index:",
+        _signal_policy("index", query_plan=True, migration_rollback=True),
+    ),
+    (
+        "path:column:",
+        _signal_policy("column", migration_rollback=True),
+    ),
+    (
+        "path:database:",
+        _signal_policy(structural=True, migration_rollback=True),
+    ),
+    (
+        "path:schema:",
+        _signal_policy(structural=True, migration_rollback=True),
+    ),
+    (
+        "path:truncated:",
+        _signal_policy(
+            structural=True,
+            query_plan=True,
+            migration_rollback=True,
+        ),
+    ),
+)
+
+
+def _database_signal_policy(signal: DatabaseSignal) -> _SignalPolicy:
+    required_surfaces: set[str] = set()
+    requires_structural_surface = False
+    requires_query_plan = False
+    requires_migration_rollback = False
+    for reason in signal.reasons:
+        policy = _SIGNAL_POLICY_BY_REASON.get(reason)
+        if policy is None:
+            policy = next(
+                (
+                    candidate
+                    for prefix, candidate in _SIGNAL_POLICY_BY_PATH_PREFIX
+                    if reason.startswith(prefix)
+                ),
+                _SignalPolicy(),
+            )
+        required_surfaces.update(policy.required_surfaces)
+        requires_structural_surface |= policy.requires_structural_surface
+        requires_query_plan |= policy.requires_query_plan
+        requires_migration_rollback |= policy.requires_migration_rollback
+    return _SignalPolicy(
+        required_surfaces=frozenset(required_surfaces),
+        requires_structural_surface=requires_structural_surface,
+        requires_query_plan=requires_query_plan,
+        requires_migration_rollback=requires_migration_rollback,
+    )
+
+
 _VERIFY_EXECUTION_TARGETS = {"local_same_engine", "approved_read_replica"}
 _NORMALIZATION_SURFACES = {"column", "constraint", "erd"}
 _LOCAL_TARGETS = {
@@ -731,6 +940,8 @@ class DatabaseDecision:
     recommended_option_id: str
     baseline_option_id: str
     change_surfaces: tuple[str, ...]
+    requires_query_plan: bool
+    requires_migration_rollback: bool
     decision_hash: str
     local_data_test_waiver: Optional[dict[str, str]]
 
@@ -1116,64 +1327,22 @@ def _validate_waiver(value: object) -> Optional[dict[str, str]]:
 def _validate_decision_signal_surfaces(
     root: Path,
     change_surfaces: tuple[str, ...],
-) -> None:
+) -> _SignalPolicy:
     signal = detect_database_signal(root)
     if any(reason.startswith("artifact_error:") for reason in signal.reasons):
         raise DatabaseValidationError("artifact_invalid")
 
-    signal_reasons = set(signal.reasons)
-    requires_path_structural_surface = any(
-        reason.startswith(
-            (
-                "path:model:",
-                "path:entity:",
-                "path:migration:",
-                "path:schema:",
-                "path:prisma:",
-            )
-        )
-        for reason in signal_reasons
-    )
-    required_surfaces = {
-        surface
-        for reason, surface in (
-            ("text:normalization", "normalize"),
-            ("text:denormalization", "denormalize"),
-            ("text:erd", "erd"),
-            ("text:foreign key", "constraint"),
-            ("text:primary key", "constraint"),
-            ("text:unique constraint", "constraint"),
-            ("text:partition", "partition"),
-            ("text:index", "index"),
-            ("text:index_ddl", "index"),
-            ("text:column", "column"),
-            ("text:column_ddl", "column"),
-            ("text:query", "query"),
-        )
-        if reason in signal_reasons
-    }
-    required_surfaces.update(
-        surface
-        for reason, surface in (
-            ("path:index:", "index"),
-            ("path:column:", "column"),
-            ("path:query:", "query"),
-        )
-        if any(signal_reason.startswith(reason) for signal_reason in signal_reasons)
-    )
+    policy = _database_signal_policy(signal)
     surfaces = set(change_surfaces)
     if (
         (
-            "text:table_ddl" in signal_reasons
-            and not surfaces & (_SIGNAL_STRUCTURAL_SURFACES - {"index"})
-        )
-        or (
-            requires_path_structural_surface
+            policy.requires_structural_surface
             and not surfaces & _SIGNAL_STRUCTURAL_SURFACES
         )
-        or not required_surfaces <= surfaces
+        or not policy.required_surfaces <= surfaces
     ):
         raise DatabaseValidationError("decision_invalid")
+    return policy
 
 
 def load_database_decision(repo_root: Path) -> DatabaseDecision:
@@ -1205,7 +1374,10 @@ def load_database_decision(repo_root: Path) -> DatabaseDecision:
     ):
         raise DatabaseValidationError("decision_invalid")
 
-    _validate_decision_signal_surfaces(root, normalized_surfaces)
+    signal_policy = _validate_decision_signal_surfaces(
+        root,
+        normalized_surfaces,
+    )
 
     candidates = decision["candidates"]
     if not isinstance(candidates, list) or not 2 <= len(candidates) <= 3:
@@ -1253,9 +1425,19 @@ def load_database_decision(repo_root: Path) -> DatabaseDecision:
         recommended_option_id=recommended_id,
         baseline_option_id=baseline_id,
         change_surfaces=normalized_surfaces,
+        requires_query_plan=signal_policy.requires_query_plan,
+        requires_migration_rollback=signal_policy.requires_migration_rollback,
         decision_hash=_canonical_hash(canonical_decision),
         local_data_test_waiver=waiver,
     )
+
+
+def _validate_decision_profile(
+    profile: DatabaseProfile,
+    decision: DatabaseDecision,
+) -> None:
+    if profile.test_command and decision.local_data_test_waiver is not None:
+        raise DatabaseValidationError("decision_invalid")
 
 
 _PROCESS_GROUP_GRACE_SECONDS = 0.2
@@ -1469,21 +1651,27 @@ def _validate_verify_evidence(
         or any(payload[field] == "fail" for field in ("query_plan", "migration", "rollback"))
     ):
         raise DatabaseValidationError("verify_evidence_invalid")
-    if (
+    structural_surface = bool(
         set(decision.change_surfaces) & _SIGNAL_STRUCTURAL_SURFACES
+    )
+    requires_query_plan = decision.requires_query_plan or bool(
+        {"query", "index"} & set(decision.change_surfaces)
+    )
+    requires_migration_rollback = (
+        decision.requires_migration_rollback or structural_surface
+    )
+    if (
+        requires_migration_rollback
         and payload["execution_target"] != "local_same_engine"
     ):
         raise DatabaseValidationError("verify_evidence_invalid")
-    if "query" in decision.change_surfaces or "index" in decision.change_surfaces:
-        if payload["query_plan"] != "pass":
-            raise DatabaseValidationError("verify_evidence_invalid")
-    elif payload["query_plan"] == "not_applicable":
-        pass
-    if set(decision.change_surfaces) & _STRUCTURAL_SURFACES:
-        if payload["migration"] != "pass" or payload["rollback"] != "pass":
-            raise DatabaseValidationError("verify_evidence_invalid")
-    elif payload["migration"] == "not_applicable":
-        pass
+    if requires_query_plan and payload["query_plan"] != "pass":
+        raise DatabaseValidationError("verify_evidence_invalid")
+    if (
+        requires_migration_rollback
+        and (payload["migration"] != "pass" or payload["rollback"] != "pass")
+    ):
+        raise DatabaseValidationError("verify_evidence_invalid")
     return {
         "production_schema_hash": payload["production_schema_hash"],
         "selected_option_id": payload["selected_option_id"],
@@ -2022,6 +2210,7 @@ def run_database_check(
     try:
         profile = load_database_profile(root)
         decision = load_database_decision(root)
+        _validate_decision_profile(profile, decision)
         pre_run_profile_hash = profile.profile_hash
         pre_run_decision_hash = decision.decision_hash
         current_identity = _database_evidence_identity(signal, profile, decision)
