@@ -76,9 +76,10 @@ awf wf select-option --decision-id D-001 --option-id O-001 --actor "${AWF_OPERAT
 ```
 
 `selected` and `no_decision_required` artifacts are the next plan rerun input.
-G1-postselection changes are parent-owned `replanned` transitions; missing
-profile/artifact remains `legacy_not_required` or `not_required`, while every
-present artifact is strictly validated.
+G1-postselection changes are parent-owned `replanned` transitions. Missing
+manifest/profile plus absent artifact is `legacy_not_required`; only explicit
+`planning_options.required: false` plus absent artifact is `not_required`.
+Every present artifact is strictly validated regardless of profile.
 
 ## 데이터베이스 변경 결정
 

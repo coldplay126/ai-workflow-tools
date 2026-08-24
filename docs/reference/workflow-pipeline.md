@@ -124,8 +124,10 @@ partial selection은 `selected_pending`, complete selection은 `continued`이며
 selected/no-decision artifact는 plan rerun input이다. G1 이후 canonical selection
 변경은 `replanned`로 plan~done phase, retries/executions, runtime/skip marker,
 G1–G6 initial gate shape(`G3.scope_hash: null`)를 reset하고 replan/history
-semantics를 보존한다. unchanged selection hash는 `reuse`다. artifact/profile
-부재의 legacy path는 `legacy_not_required` 또는 `not_required`다.
+semantics를 보존한다. unchanged selection hash는 `reuse`다. Missing
+manifest/profile plus absent artifact is `legacy_not_required`. Only explicit
+`planning_options.required: false` plus absent artifact is `not_required`. Every
+present artifact is strictly validated regardless of profile.
 
 
 ### Phase별 Agent Card 비교

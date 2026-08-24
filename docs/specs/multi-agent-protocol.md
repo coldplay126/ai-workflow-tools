@@ -101,9 +101,10 @@ awf wf select-option --decision-id D-001 --option-id O-001 --actor "${AWF_OPERAT
 
 `selected` artifact는 다음 plan rerun의 canonical input이다. G1 후 selection이
 달라지면 parent CLI가 `replanned`로 phase/gate runtime state를 reset한다. 동일
-selection hash는 `reuse`이고, legacy profile/artifact 부재는
-`legacy_not_required`/`not_required`로 호환한다. Present artifact는 항상 strict
-validation한다.
+selection hash는 `reuse`이다. Missing manifest/profile plus absent artifact is
+`legacy_not_required`. Only explicit `planning_options.required: false` plus absent
+artifact is `not_required`. Every present artifact is strictly validated regardless
+of profile.
 
 ## Codex Host 변형
 

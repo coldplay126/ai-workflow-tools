@@ -82,6 +82,15 @@ Plan writes `.workflow/artifacts/planning-options.json`.
           "work_risks": ["Additional implementation and test paths"],
           "transition_risks": ["Temporary dual-state reconciliation"],
           "rollback_or_exit": "Disable new reads and retain the old source of truth"
+        },
+        {
+          "id": "O-002",
+          "summary": "Perform a single-cutover rollout without compatibility reads",
+          "affected_work": ["service", "all consumers", "release coordination"],
+          "acceptance_delta": "Requires every consumer to switch before release",
+          "work_risks": ["Coordinated consumer deployment and broader release verification"],
+          "transition_risks": ["Unmigrated consumers fail at the irreversible cutover"],
+          "rollback_or_exit": "Restore the previous deployment before clients send the new contract"
         }
       ],
       "recommended_option_id": "O-001",

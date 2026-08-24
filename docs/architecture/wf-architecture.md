@@ -73,9 +73,10 @@ awf wf select-option --decision-id D-001 --option-id O-001 --actor "${AWF_OPERAT
 Partial plan selection은 `selected_pending`, 마지막 plan selection은 `continued`다.
 G1 이후 selection을 변경하면 CLI는 `replanned`로 plan~done phases와 G1–G6
 gate/runtime state를 initial shape로 reset하고 `loop.replanCount`/history를
-보존한다. 같은 selection hash는 `reuse`다. artifact/profile이 없는 legacy workflow는
-`legacy_not_required` 또는 `not_required`로 호환하되 present artifact는 strict
-validation한다.
+보존한다. 같은 selection hash는 `reuse`다. Missing manifest/profile plus absent
+artifact is `legacy_not_required`. Only explicit `planning_options.required: false`
+plus absent artifact is `not_required`. Every present artifact is strictly
+validated regardless of profile.
 
 ## Dual Mode (provider-config.json)
 

@@ -89,8 +89,9 @@ partial selection은 `selected_pending`, all-selected plan은 `continued`이며,
 selected/no-decision artifact는 plan rerun input이다. G1 후 selection 변경은
 `replanned`: plan~done phases, retries/executions, runtime/skip marker와 G1–G6
 initial shape(`G3.scope_hash: null`)를 reset하되 loop/history를 보존한다. same hash는
-`reuse`; artifact/profile 없는 legacy workflow는 `legacy_not_required` 또는
-`not_required`다. present artifact는 strict validation한다.
+`reuse`. Missing manifest/profile plus absent artifact is `legacy_not_required`.
+Only explicit `planning_options.required: false` plus absent artifact is
+`not_required`. Every present artifact is strictly validated regardless of profile.
 
 ## Replan Budget
 

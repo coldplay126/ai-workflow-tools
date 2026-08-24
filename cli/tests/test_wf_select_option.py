@@ -163,6 +163,60 @@ def _args(
     )
 
 
+def test_selection_guidance_uses_only_unselected_ids_and_a_quoted_local_actor(
+    tmp_path: Path, monkeypatch
+) -> None:
+    artifact = _artifact(decision_count=2)
+    decisions = artifact["decisions"]
+    assert isinstance(decisions, list)
+    first = decisions[0]
+    assert isinstance(first, dict)
+    first["selected_option_id"] = "O-001"
+    first["selected_by"] = "prior-operator"
+    first["selected_at"] = "2026-08-24T10:00:00Z"
+    artifact["selection_history"] = [
+        {
+            "decision_id": "D-001",
+            "previous_option_id": None,
+            "selected_option_id": "O-001",
+            "selected_by": "prior-operator",
+            "selected_at": "2026-08-24T10:00:00Z",
+            "source": "cli",
+        }
+    ]
+    _write_artifact(tmp_path, artifact)
+    monkeypatch.setattr("getpass.getuser", lambda: "local operator")
+
+    guidance = wf_commands._planning_option_selection_guidance(tmp_path)
+
+    assert guidance == (
+        "decision_id: D-002",
+        "recommended_option_id: O-001",
+        "option_ids: O-001, O-002",
+        "select_option: awf wf select-option --decision-id D-002 --option-id O-001 --actor 'local operator' --repo-root . --json",
+        "select_option: awf wf select-option --decision-id D-002 --option-id O-002 --actor 'local operator' --repo-root . --json",
+    )
+    rendered = "\n".join(guidance)
+    assert "D-001" not in rendered
+    assert "guarded rollout" not in rendered
+    assert "Which rollout" not in rendered
+
+
+def test_selection_guidance_returns_fixed_generic_error_for_malformed_artifact(
+    tmp_path: Path,
+) -> None:
+    artifact_path = tmp_path / ".workflow" / "artifacts" / "planning-options.json"
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text(
+        '{"unknown": "sensitive option body that must not appear"}',
+        encoding="utf-8",
+    )
+
+    guidance = wf_commands._planning_option_selection_guidance(tmp_path)
+
+    assert guidance == ("error: planning option selection is unavailable",)
+
+
 def test_select_option_parser_requires_exact_flags_and_supports_json() -> None:
     parsed = build_parser().parse_args(
         [

@@ -686,6 +686,60 @@ def test_spec_writer_documents_real_completed_and_selection_escape_envelopes() -
         "affected_files": [".workflow/artifacts/planning-options.json"],
         "recommended_action": "user_decision",
     }
+
+DESIGN_SELECTION_REQUIRED_RE = re.compile(
+    r"### Material decision awaiting selection\n\n```json\n(?P<payload>.*?)\n```",
+    re.DOTALL,
+)
+
+
+def test_design_selection_required_fixture_loads_with_two_material_options(
+    tmp_path: Path,
+) -> None:
+    design = (
+        REPO_ROOT
+        / "docs"
+        / "superpowers"
+        / "specs"
+        / "2026-08-24-planning-options-design.md"
+    ).read_text(encoding="utf-8")
+    match = DESIGN_SELECTION_REQUIRED_RE.search(design)
+    assert match is not None
+    payload = json.loads(match.group("payload"))
+    artifact_path = (
+        tmp_path / ".workflow" / "artifacts" / "planning-options.json"
+    )
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    artifact = load_planning_options(tmp_path)
+
+    assert artifact.status == "selection_required"
+    assert len(artifact.decisions) == 1
+    decision = artifact.decisions[0]
+    assert [option.id for option in decision.options] == ["O-001", "O-002"]
+    assert decision.options[0] != decision.options[1]
+
+
+LEGACY_POLICY_DOCS = (
+    CLI_README,
+    REPO_ROOT / "docs" / "architecture" / "02-wf-pipeline.md",
+    REPO_ROOT / "docs" / "architecture" / "wf-architecture.md",
+    REPO_ROOT / "docs" / "reference" / "workflow-pipeline.md",
+    REPO_ROOT / "docs" / "specs" / "multi-agent-protocol.md",
+)
+LEGACY_POLICY_SENTENCES = (
+    "Missing manifest/profile plus absent artifact is `legacy_not_required`.",
+    "Only explicit `planning_options.required: false` plus absent artifact is `not_required`.",
+    "Every present artifact is strictly validated regardless of profile.",
+)
+
+
+def test_planning_options_docs_separate_legacy_and_explicit_opt_out() -> None:
+    for path in LEGACY_POLICY_DOCS:
+        normalized = " ".join(path.read_text(encoding="utf-8").split())
+        for sentence in LEGACY_POLICY_SENTENCES:
+            assert sentence in normalized, f"{path}: missing policy: {sentence}"
 def test_skill_frontmatter_has_required_identity_metadata() -> None:
     invalid: list[str] = []
     required = {"name", "version", "description", "type"}
