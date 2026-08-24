@@ -16,7 +16,7 @@ import threading
 import stat
 import time
 import unicodedata
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Callable, Iterable, Optional, Sequence
 
 
 _MAX_ARTIFACT_BYTES = 128 * 1024
@@ -88,6 +88,81 @@ _DATABASE_CONTEXT_PATTERN = re.compile(
 )
 _DATABASE_ANCHOR_PATTERN = re.compile(r"\b(?:database|db)\b|데이터베이스")
 
+DATABASE_CHECK_STATUSES = frozenset({"pass", "fail", "not_applicable"})
+DATABASE_CHECK_MAX_VALUES = 64
+DATABASE_CHECK_EVIDENCE_PATH = ".workflow/artifacts/database-validation-evidence.json"
+_DATABASE_CHECK_EVIDENCE_HASH = re.compile(r"^[a-f0-9]{64}$")
+DATABASE_CHECK_BLOCKERS = frozenset(
+    {
+        "repo_root_invalid",
+        "profile_missing",
+        "profile_invalid",
+        "profile_incomplete",
+        "profile_disabled",
+        "decision_invalid",
+        "command_start_failed",
+        "command_timeout",
+        "command_output_oversize",
+        "command_nonzero",
+        "command_output_invalid",
+        "command_output_unsafe",
+        "schema_evidence_invalid",
+        "verify_evidence_invalid",
+        "test_evidence_invalid",
+        "evidence_invalid",
+        "evidence_write_failed",
+        "profile_changed",
+        "decision_changed",
+        "plan_evidence_missing",
+        "test_waiver_missing",
+        "production_schema_changed",
+        "stage_invalid",
+        "signal_callback_failed",
+    }
+)
+DATABASE_CHECK_TEXT_REASONS = frozenset(
+    {
+        *(f"text:{reason}" for reason, _ in _STRONG_TEXT_SIGNAL_PATTERNS),
+        *(f"text:{reason}" for reason, _ in _WEAK_TEXT_SIGNAL_PATTERNS),
+    }
+)
+_ARTIFACT_CATEGORIES = {
+    ".workflow": "workflow",
+    ".workflow/concept.md": "concept",
+    ".workflow/artifacts/spec.md": "spec",
+    ".workflow/artifacts/plan.md": "plan",
+    ".workflow/artifacts/tasks.md": "tasks",
+    ".workflow/artifacts/test-criteria.md": "test_criteria",
+    ".workflow/artifacts/allowed-files.json": "allowed_files",
+}
+_ARTIFACT_ERROR_CODES = frozenset(
+    {"unsafe_path", "unreadable", "oversize", "invalid_utf8", "invalid_json", "invalid_shape"}
+)
+DATABASE_CHECK_ARTIFACT_REASONS = frozenset(
+    f"artifact_error:{category}:{code}"
+    for category in _ARTIFACT_CATEGORIES.values()
+    for code in _ARTIFACT_ERROR_CODES
+)
+_DATABASE_PATH_CATEGORY = {
+    "migration": "migration",
+    "migrations": "migration",
+    "model": "model",
+    "models": "model",
+    "entity": "entity",
+    "entities": "entity",
+    "repository": "repository",
+    "repositories": "repository",
+    "query": "query",
+    "queries": "query",
+    "database": "database",
+    "databases": "database",
+    "schema": "schema",
+    "schemas": "schema",
+}
+_DATABASE_PATH_REASON = re.compile(
+    r"^path:(?:(?:sql|prisma|migration|model|entity|repository|query|database|schema):[a-f0-9]{16}|truncated:[1-9][0-9]*)$"
+)
+
 
 @dataclass(frozen=True)
 class DatabaseSignal:
@@ -98,7 +173,76 @@ class DatabaseSignal:
 
 
 def _artifact_error(relative_path: str, code: str) -> str:
-    return f"artifact_error:{relative_path}:{code}"
+    return f"artifact_error:{_ARTIFACT_CATEGORIES[relative_path]}:{code}"
+
+
+def _database_path_reason(path: str) -> str:
+    categories = {
+        _DATABASE_PATH_CATEGORY[part]
+        for part in Path(path).parts[:-1]
+        if part in _DATABASE_PATH_CATEGORY
+    }
+    category = next(
+        (
+            candidate
+            for candidate in (
+                "migration",
+                "query",
+                "schema",
+                "database",
+                "repository",
+                "entity",
+                "model",
+            )
+            if candidate in categories
+        ),
+        "sql"
+        if Path(path).suffix == ".sql"
+        else "prisma"
+        if Path(path).suffix == ".prisma"
+        else "database",
+    )
+    digest = hashlib.sha256(path.encode("utf-8")).hexdigest()[:16]
+    return f"path:{category}:{digest}"
+
+def _bounded_database_signal_reasons(reasons: set[str]) -> tuple[str, ...]:
+    normalized = tuple(sorted(reasons))
+    if len(normalized) <= DATABASE_CHECK_MAX_VALUES:
+        return normalized
+
+    static_reasons = [reason for reason in normalized if not reason.startswith("path:")]
+    path_reasons = [reason for reason in normalized if reason.startswith("path:")]
+    path_slots = DATABASE_CHECK_MAX_VALUES - len(static_reasons)
+    if path_slots <= 0:
+        return tuple(static_reasons[:DATABASE_CHECK_MAX_VALUES])
+
+    retained_paths = path_reasons[: path_slots - 1]
+    truncated_count = len(path_reasons) - len(retained_paths)
+    return tuple(
+        sorted(
+            [
+                *static_reasons,
+                *retained_paths,
+                f"path:truncated:{truncated_count}",
+            ]
+        )
+    )
+
+def is_database_check_evidence_hash(value: object) -> bool:
+    """Return whether an evidence hash has the canonical SHA-256 form."""
+    return isinstance(value, str) and _DATABASE_CHECK_EVIDENCE_HASH.fullmatch(value) is not None
+
+
+def is_database_check_reason(value: object) -> bool:
+    """Return whether a reason is safe for CLI/state exposure."""
+    return (
+        isinstance(value, str)
+        and (
+            value in DATABASE_CHECK_TEXT_REASONS
+            or value in DATABASE_CHECK_ARTIFACT_REASONS
+            or _DATABASE_PATH_REASON.fullmatch(value) is not None
+        )
+    )
 
 
 def _canonical_repo_root(repo_root: Path) -> Path:
@@ -291,15 +435,15 @@ def detect_database_signal(repo_root: Path) -> DatabaseSignal:
     else:
         for path in paths:
             if _is_database_path(path):
-                reasons.add(f"path:{path}")
+                reasons.add(_database_path_reason(path))
 
-    normalized_reasons = tuple(sorted(reasons))
+    normalized_reasons = _bounded_database_signal_reasons(reasons)
     return DatabaseSignal(detected=bool(normalized_reasons), reasons=normalized_reasons)
 
 
 _PROFILE_ARTIFACT = ".workflow/manifest.json"
 _DECISION_ARTIFACT = ".workflow/artifacts/database-decision.json"
-_EVIDENCE_ARTIFACT = ".workflow/artifacts/database-validation-evidence.json"
+_EVIDENCE_ARTIFACT = DATABASE_CHECK_EVIDENCE_PATH
 _MAX_COMMAND_OUTPUT_BYTES = 128 * 1024
 _MAX_COMMAND_TIMEOUT_SECONDS = 300
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -1461,7 +1605,12 @@ def _failed_check(
     )
 
 
-def run_database_check(repo_root: Path, stage: str) -> DatabaseCheckResult:
+def run_database_check(
+    repo_root: Path,
+    stage: str,
+    *,
+    on_database_signal: Optional[Callable[[tuple[str, ...]], None]] = None,
+) -> DatabaseCheckResult:
     """Run one DB-evidence stage and atomically merge only validated metadata."""
 
     try:
@@ -1485,6 +1634,12 @@ def run_database_check(repo_root: Path, stage: str) -> DatabaseCheckResult:
             signal_reasons=(),
             blockers=(),
         )
+    if stage == "plan" and on_database_signal is not None:
+        try:
+            on_database_signal(signal.reasons)
+        except Exception:
+            return _failed_check(stage, signal, "signal_callback_failed")
+
 
     try:
         profile = load_database_profile(root)

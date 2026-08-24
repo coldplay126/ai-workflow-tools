@@ -10,7 +10,16 @@ from pathlib import Path
 
 from awf.core.config import load_awf_config, resolve_runtime_paths
 from awf.core.artifact_manager import ArtifactManager
-from awf.core.db_validation import run_database_check
+from awf.core.db_validation import (
+    DATABASE_CHECK_BLOCKERS,
+    DATABASE_CHECK_EVIDENCE_PATH,
+    DATABASE_CHECK_MAX_VALUES,
+    DATABASE_CHECK_STATUSES,
+    DatabaseCheckResult,
+    is_database_check_evidence_hash,
+    is_database_check_reason,
+    run_database_check,
+)
 from awf.core.events import EventType
 from awf.core.event_processor import EventProcessor, run_complete_with_events
 from awf.core.event_sync_summary import summarize_event_sync
@@ -188,7 +197,29 @@ def run_wf_gate(args: argparse.Namespace) -> int:
 
 _DATABASE_CHECK_STAGES = {"plan", "verify", "test"}
 _DATABASE_CHECK_SCHEMA_VERSION = 1
-_DATABASE_CHECK_OPERATIONAL_BLOCKERS = {"repo_root_invalid"}
+_DATABASE_CHECK_OPERATIONAL_BLOCKERS = {"repo_root_invalid", "signal_callback_failed"}
+
+
+def _database_check_sequence(values: object) -> tuple[str, ...]:
+    if not isinstance(values, (list, tuple)) or len(values) > DATABASE_CHECK_MAX_VALUES:
+        raise ValueError("database_check_values_invalid")
+    if not all(isinstance(value, str) for value in values):
+        raise ValueError("database_check_values_invalid")
+    return tuple(sorted(set(values)))
+
+
+def _database_check_reasons(values: object) -> tuple[str, ...]:
+    reasons = _database_check_sequence(values)
+    if any(not is_database_check_reason(reason) for reason in reasons):
+        raise ValueError("database_check_reasons_invalid")
+    return reasons
+
+
+def _database_check_blockers(values: object) -> tuple[str, ...]:
+    blockers = _database_check_sequence(values)
+    if any(blocker not in DATABASE_CHECK_BLOCKERS for blocker in blockers):
+        raise ValueError("database_check_blockers_invalid")
+    return blockers
 
 
 def _database_check_payload(
@@ -212,6 +243,55 @@ def _database_check_payload(
     }
 
 
+def _normalize_database_check_result(
+    result: object,
+    *,
+    stage: str,
+) -> tuple[dict[str, object], str, tuple[str, ...], tuple[str, ...]]:
+    """Validate untrusted core-boundary data before it reaches CLI output."""
+    if not isinstance(result, DatabaseCheckResult):
+        raise ValueError("database_check_result_invalid")
+    if not isinstance(result.stage, str) or result.stage != stage:
+        raise ValueError("database_check_result_invalid")
+    if not isinstance(result.status, str) or result.status not in DATABASE_CHECK_STATUSES:
+        raise ValueError("database_check_result_invalid")
+    if result.evidence_path not in {None, DATABASE_CHECK_EVIDENCE_PATH}:
+        raise ValueError("database_check_result_invalid")
+    if result.evidence_hash is not None and not is_database_check_evidence_hash(result.evidence_hash):
+        raise ValueError("database_check_result_invalid")
+
+    reasons = _database_check_reasons(result.signal_reasons)
+    blockers = _database_check_blockers(result.blockers)
+    if result.status == "pass":
+        if (
+            result.evidence_path != DATABASE_CHECK_EVIDENCE_PATH
+            or result.evidence_hash is None
+            or not reasons
+            or blockers
+        ):
+            raise ValueError("database_check_result_invalid")
+    elif result.evidence_path is not None or result.evidence_hash is not None:
+        raise ValueError("database_check_result_invalid")
+    elif result.status == "not_applicable" and (reasons or blockers):
+        raise ValueError("database_check_result_invalid")
+    elif result.status == "fail" and not blockers:
+        raise ValueError("database_check_result_invalid")
+
+    return (
+        _database_check_payload(
+            stage=stage,
+            status=result.status,
+            evidence_path=result.evidence_path,
+            evidence_hash=result.evidence_hash,
+            signal_reasons=reasons,
+            blockers=blockers,
+        ),
+        result.status,
+        reasons,
+        blockers,
+    )
+
+
 def _emit_database_check_result(payload: dict[str, object], *, as_json: bool) -> None:
     if as_json:
         print(json.dumps(payload, ensure_ascii=False))
@@ -228,88 +308,63 @@ def _emit_database_check_result(payload: dict[str, object], *, as_json: bool) ->
         print(f"blockers: {', '.join(payload['blockers'])}")
 
 
+def _emit_database_check_failure(stage: str, *, as_json: bool, blocker: str) -> None:
+    """Best-effort static error output that never interpolates exception text."""
+    try:
+        _emit_database_check_result(
+            _database_check_payload(
+                stage=stage,
+                status="fail",
+                evidence_path=None,
+                evidence_hash=None,
+                blockers=(blocker,),
+            ),
+            as_json=as_json,
+        )
+    except Exception:
+        pass
+
+
 def run_wf_db_check(args: argparse.Namespace) -> int:
     """Validate one sanitized database-evidence stage for the workflow."""
-    requested_stage = getattr(args, "stage", None)
-    stage = requested_stage if requested_stage in _DATABASE_CHECK_STAGES else "invalid"
-    as_json = bool(getattr(args, "json", False))
-
-    if stage == "invalid":
-        _emit_database_check_result(
-            _database_check_payload(
-                stage=stage,
-                status="fail",
-                evidence_path=None,
-                evidence_hash=None,
-                blockers=("stage_invalid",),
-            ),
-            as_json=as_json,
-        )
-        return 2
-
-    repo_root_arg = getattr(args, "repo_root", None)
+    stage = "invalid"
+    as_json = False
     try:
-        repo_root = Path(repo_root_arg) if repo_root_arg else Path.cwd()
-        result = run_database_check(repo_root, stage)
-    except Exception:
-        _emit_database_check_result(
-            _database_check_payload(
-                stage=stage,
-                status="fail",
-                evidence_path=None,
-                evidence_hash=None,
-                blockers=("operational_error",),
-            ),
-            as_json=as_json,
-        )
-        return 2
-
-    if result.status not in {"pass", "fail", "not_applicable"}:
-        _emit_database_check_result(
-            _database_check_payload(
-                stage=stage,
-                status="fail",
-                evidence_path=None,
-                evidence_hash=None,
-                blockers=("operational_error",),
-            ),
-            as_json=as_json,
-        )
-        return 2
-
-    if stage == "plan" and result.status == "pass":
-        try:
-            promote_database_change_to_high_risk(
-                repo_root_arg,
-                result.signal_reasons,
-            )
-        except Exception:
-            _emit_database_check_result(
-                _database_check_payload(
-                    stage=stage,
-                    status="fail",
-                    evidence_path=None,
-                    evidence_hash=None,
-                    blockers=("state_promotion_failed",),
-                ),
-                as_json=as_json,
-            )
+        requested_stage = getattr(args, "stage", None)
+        stage = requested_stage if requested_stage in _DATABASE_CHECK_STAGES else "invalid"
+        as_json = bool(getattr(args, "json", False))
+        if stage == "invalid":
+            _emit_database_check_failure(stage, as_json=as_json, blocker="stage_invalid")
             return 2
 
-    payload = _database_check_payload(
-        stage=stage,
-        status=result.status,
-        evidence_path=result.evidence_path,
-        evidence_hash=result.evidence_hash,
-        signal_reasons=result.signal_reasons,
-        blockers=result.blockers,
-    )
-    _emit_database_check_result(payload, as_json=as_json)
-    if result.status == "fail" and any(
-        blocker in _DATABASE_CHECK_OPERATIONAL_BLOCKERS for blocker in result.blockers
-    ):
+        try:
+            repo_root = resolve_repo_root(getattr(args, "repo_root", None))
+        except Exception:
+            _emit_database_check_failure(stage, as_json=as_json, blocker="repo_root_invalid")
+            return 2
+
+        def on_database_signal(reasons: tuple[str, ...]) -> None:
+            normalized_reasons = _database_check_reasons(reasons)
+            if not normalized_reasons:
+                raise ValueError("database_check_signal_invalid")
+            promote_database_change_to_high_risk(str(repo_root), normalized_reasons)
+
+        result = run_database_check(
+            repo_root,
+            stage,
+            on_database_signal=on_database_signal if stage == "plan" else None,
+        )
+        payload, status, _, blockers = _normalize_database_check_result(result, stage=stage)
+        if status == "fail" and any(
+            blocker in _DATABASE_CHECK_OPERATIONAL_BLOCKERS for blocker in blockers
+        ):
+            _emit_database_check_failure(stage, as_json=as_json, blocker="operational_error")
+            return 2
+        _emit_database_check_result(payload, as_json=as_json)
+        return 0 if status in {"pass", "not_applicable"} else 1
+    except Exception:
+        _emit_database_check_failure(stage, as_json=as_json, blocker="operational_error")
         return 2
-    return 0 if result.status in {"pass", "not_applicable"} else 1
 
 
 _SKIP_PHASES = {"small": ["review", "approve", "verify"]}

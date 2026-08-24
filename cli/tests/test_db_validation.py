@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import errno
 import os
@@ -63,6 +64,30 @@ def write_workflow_artifacts(
         encoding="utf-8",
     )
 
+_ARTIFACT_CATEGORY = {
+    ".workflow": "workflow",
+    ".workflow/concept.md": "concept",
+    ".workflow/artifacts/spec.md": "spec",
+    ".workflow/artifacts/plan.md": "plan",
+    ".workflow/artifacts/tasks.md": "tasks",
+    ".workflow/artifacts/test-criteria.md": "test_criteria",
+    ".workflow/artifacts/allowed-files.json": "allowed_files",
+}
+
+
+def _redacted_path_reason(path: str, category: str) -> str:
+    return f"path:{category}:{hashlib.sha256(path.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _artifact_error_reason(relative_path: str, error: str) -> str:
+    return f"artifact_error:{_ARTIFACT_CATEGORY[relative_path]}:{error}"
+
+
+def _assert_redacted_path_reason(reasons: tuple[str, ...], path: str, category: str) -> None:
+    assert _redacted_path_reason(path, category) in reasons
+    assert path not in reasons
+
+
 
 def test_database_signal_detects_concept_database_term(tmp_path: Path) -> None:
     write_workflow_artifacts(tmp_path, concept="Update the database retention policy")
@@ -108,10 +133,21 @@ def test_database_signal_uses_expanded_files_with_canonical_planned_files(
         ],
     )
 
-    assert detect_database_signal(tmp_path) == DatabaseSignal(
-        detected=True,
-        reasons=("path:src/database/migrations/001_add_index.sql",),
-    )
+    path = "src/database/migrations/001_add_index.sql"
+    signal = detect_database_signal(tmp_path)
+    assert signal.detected is True
+    _assert_redacted_path_reason(signal.reasons, path, "migration")
+
+def test_database_signal_bounds_many_database_paths_with_a_safe_marker(tmp_path: Path) -> None:
+    paths = [f"src/database/migrations/{number:03d}.sql" for number in range(65)]
+    write_workflow_artifacts(tmp_path, allowed_files=paths)
+
+    signal = detect_database_signal(tmp_path)
+
+    assert signal.detected is True
+    assert len(signal.reasons) == 64
+    assert "path:truncated:2" in signal.reasons
+    assert all(path not in signal.reasons for path in paths)
 
 
 def test_database_signal_ignores_stale_legacy_files_when_planned_exist(
@@ -134,8 +170,11 @@ def test_database_signal_falls_back_to_legacy_files_when_planned_absent(
         legacy_files=["src/database/migrations/001_add_index.sql"],
     )
 
-    assert detect_database_signal(tmp_path).reasons == (
-        "path:src/database/migrations/001_add_index.sql",
+    path = "src/database/migrations/001_add_index.sql"
+    _assert_redacted_path_reason(
+        detect_database_signal(tmp_path).reasons,
+        path,
+        "migration",
     )
 
 
@@ -150,7 +189,11 @@ def test_database_signal_detects_query_and_migration_path(tmp_path: Path) -> Non
 
     assert signal.detected is True
     assert "text:order by" in signal.reasons
-    assert "path:src/database/migrations/add_fan_log_index.sql" in signal.reasons
+    _assert_redacted_path_reason(
+        signal.reasons,
+        "src/database/migrations/add_fan_log_index.sql",
+        "migration",
+    )
 
 
 def test_database_signal_does_not_scan_unlisted_repository_files(tmp_path: Path) -> None:
@@ -216,7 +259,7 @@ def test_database_signal_reports_oversized_known_artifacts(
 
     assert detect_database_signal(tmp_path) == DatabaseSignal(
         detected=True,
-        reasons=(f"artifact_error:{relative_path}:oversize",),
+        reasons=(_artifact_error_reason(relative_path, "oversize"),),
     )
 
 
@@ -240,7 +283,7 @@ def test_database_signal_reports_invalid_utf8_known_artifacts(
 
     assert detect_database_signal(tmp_path) == DatabaseSignal(
         detected=True,
-        reasons=(f"artifact_error:{relative_path}:invalid_utf8",),
+        reasons=(_artifact_error_reason(relative_path, "invalid_utf8"),),
     )
 
 
@@ -268,7 +311,9 @@ def test_database_signal_reports_invalid_allowed_files_artifact(
 
     assert detect_database_signal(tmp_path) == DatabaseSignal(
         detected=True,
-        reasons=(f"artifact_error:.workflow/artifacts/allowed-files.json:{error}",),
+        reasons=(
+            _artifact_error_reason(".workflow/artifacts/allowed-files.json", error),
+        ),
     )
 
 
@@ -278,8 +323,10 @@ def test_database_signal_canonicalizes_windows_and_dot_paths(tmp_path: Path) -> 
         allowed_files=[r".\src\.\database\migrations\001_add_index.sql"],
     )
 
-    assert detect_database_signal(tmp_path).reasons == (
-        "path:src/database/migrations/001_add_index.sql",
+    _assert_redacted_path_reason(
+        detect_database_signal(tmp_path).reasons,
+        "src/database/migrations/001_add_index.sql",
+        "migration",
     )
 
 
@@ -310,7 +357,12 @@ def test_database_signal_rejects_unsafe_allowed_paths(
 
     assert detect_database_signal(tmp_path) == DatabaseSignal(
         detected=True,
-        reasons=("artifact_error:.workflow/artifacts/allowed-files.json:unsafe_path",),
+        reasons=(
+            _artifact_error_reason(
+                ".workflow/artifacts/allowed-files.json",
+                "unsafe_path",
+            ),
+        ),
     )
 
 
@@ -1752,8 +1804,89 @@ def test_bounded_reader_detects_oversize_after_short_read_sequence(
 
     assert detect_database_signal(tmp_path) == DatabaseSignal(
         detected=True,
-        reasons=("artifact_error:.workflow/concept.md:oversize",),
+        reasons=(_artifact_error_reason(".workflow/concept.md", "oversize"),),
     )
+
+
+def test_plan_signal_callback_precedes_hermetic_command_and_redacts_path_reasons(
+    tmp_path: Path,
+) -> None:
+    callback_marker = tmp_path / "callback-ran"
+    command_marker = tmp_path / "schema-command-ran"
+    payload = schema_evidence()
+    script = (
+        "from pathlib import Path; "
+        f"callback = Path({str(callback_marker)!r}); "
+        "assert callback.is_file(); "
+        f"Path({str(command_marker)!r}).write_text('ran', encoding='utf-8'); "
+        f"print({json.dumps(payload)!r})"
+    )
+    prepare_database_workflow(
+        tmp_path,
+        schema_command=[sys.executable, "-c", script],
+    )
+    allowed_path = "src/database/migrations/supersecretapikey.sql"
+    (tmp_path / ".workflow" / "artifacts" / "allowed-files.json").write_text(
+        json.dumps({"planned_files": [allowed_path]}),
+        encoding="utf-8",
+    )
+    callback_reasons: list[tuple[str, ...]] = []
+
+    def callback(reasons: tuple[str, ...]) -> None:
+        callback_reasons.append(reasons)
+        callback_marker.write_text("callback", encoding="utf-8")
+
+    result = run_database_check(tmp_path, "plan", on_database_signal=callback)
+
+    assert result.status == "pass"
+    assert command_marker.read_text(encoding="utf-8") == "ran"
+    assert evidence_path(tmp_path).exists()
+    assert any(reason.startswith("path:migration:") for reason in callback_reasons[0])
+    assert all("supersecretapikey" not in reason for reason in callback_reasons[0])
+    assert all("supersecretapikey" not in reason for reason in result.signal_reasons)
+
+
+def test_plan_signal_callback_failure_blocks_hermetic_command_and_evidence(
+    tmp_path: Path,
+) -> None:
+    command_marker = tmp_path / "schema-command-ran"
+    payload = schema_evidence()
+    script = (
+        "from pathlib import Path; "
+        f"Path({str(command_marker)!r}).write_text('ran', encoding='utf-8'); "
+        f"print({json.dumps(payload)!r})"
+    )
+    prepare_database_workflow(
+        tmp_path,
+        schema_command=[sys.executable, "-c", script],
+    )
+
+    result = run_database_check(
+        tmp_path,
+        "plan",
+        on_database_signal=lambda reasons: (_ for _ in ()).throw(
+            RuntimeError("DATABASE_URL=postgres://secret@example.test")
+        ),
+    )
+
+    assert result.status == "fail"
+    assert result.blockers == ("signal_callback_failed",)
+    assert not command_marker.exists()
+    assert not evidence_path(tmp_path).exists()
+
+
+def test_no_signal_does_not_invoke_database_callback(tmp_path: Path) -> None:
+    write_workflow_artifacts(tmp_path)
+    callback_reasons: list[tuple[str, ...]] = []
+
+    result = run_database_check(
+        tmp_path,
+        "plan",
+        on_database_signal=lambda reasons: callback_reasons.append(reasons),
+    )
+
+    assert result.status == "not_applicable"
+    assert callback_reasons == []
 
 
 def test_no_database_signal_is_not_applicable_without_profile_or_evidence(
