@@ -124,6 +124,27 @@ def _write_state(root: Path, state: dict) -> None:
 def _load_state(root: Path) -> dict:
     return json.loads((root / ".workflow" / "state.json").read_text(encoding="utf-8"))
 
+def _reconciliation_journal(root: Path) -> dict[str, object]:
+    artifact = load_planning_options(root)
+    return {
+        "schema_version": 1,
+        "current_hash": artifact.artifact_hash,
+        "previous_hash": "f" * 64,
+        "decision_id": "D-001",
+        "option_id": "O-001",
+        "artifact_status": artifact.status,
+        "source": "cli",
+    }
+
+
+def _write_reconciliation_marker(root: Path, journal: dict[str, object]) -> None:
+    with planning_options.planning_option_selection_transaction(
+        root
+    ) as (_, directory_fd):
+        planning_options._write_reconciliation_marker(directory_fd, journal)
+
+
+
 
 def _args(
     root: Path,
@@ -256,6 +277,88 @@ def test_empty_reconciliation_journal_blocks_retry_without_state_transition(
     assert run_wf_select_option(_args(tmp_path, "D-001", "O-001")) == 1
 
     assert _load_state(tmp_path)["loop"]["replanCount"] == 0
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "boolean_schema_version",
+        "invalid_previous_hash",
+        "equal_previous_hash",
+        "unexpected_source",
+        "unexpected_status",
+        "partial_artifact_claims_selected",
+        "unknown_decision",
+        "wrong_option",
+        "history_mismatch",
+    ),
+)
+def test_forged_reconciliation_journal_never_transitions_state(
+    tmp_path: Path, case: str
+) -> None:
+    artifact = _artifact(
+        decision_count=2
+        if case in {"partial_artifact_claims_selected", "history_mismatch"}
+        else 1,
+        selected=True,
+    )
+    if case == "partial_artifact_claims_selected":
+        artifact["status"] = "selection_required"
+        partial_decision = artifact["decisions"][1]
+        assert isinstance(partial_decision, dict)
+        partial_decision.update(
+            {
+                "selected_option_id": None,
+                "selected_by": None,
+                "selected_at": None,
+            }
+        )
+        artifact["selection_history"] = artifact["selection_history"][:1]
+    _write_artifact(tmp_path, artifact)
+    _write_state(
+        tmp_path,
+        _state(current_phase="plan", plan_status="deciding", g1_passed=None),
+    )
+
+    journal = _reconciliation_journal(tmp_path)
+    if case == "boolean_schema_version":
+        journal["schema_version"] = True
+    elif case == "invalid_previous_hash":
+        journal["previous_hash"] = "not-a-sha256"
+    elif case == "equal_previous_hash":
+        journal["previous_hash"] = journal["current_hash"]
+    elif case == "unexpected_source":
+        journal["source"] = "agent"
+    elif case == "unexpected_status":
+        journal["artifact_status"] = "selection_required"
+    elif case == "partial_artifact_claims_selected":
+        journal["artifact_status"] = "selected"
+    elif case == "unknown_decision":
+        journal["decision_id"] = "D-999"
+    elif case == "wrong_option":
+        journal["option_id"] = "O-002"
+    _write_reconciliation_marker(tmp_path, journal)
+
+    state_path = tmp_path / ".workflow" / "state.json"
+    artifact_path = tmp_path / ".workflow" / "artifacts" / "planning-options.json"
+    state_before = state_path.read_bytes()
+    state_before_payload = json.loads(state_before)
+    artifact_before = artifact_path.read_bytes()
+    artifact_before_hash = load_planning_options(tmp_path).artifact_hash
+    artifact_before_history_count = len(load_planning_options(tmp_path).selection_history)
+
+    assert run_wf_select_option(_args(tmp_path, "D-001", "O-001")) == 1
+
+    assert state_path.read_bytes() == state_before
+    state_after = _load_state(tmp_path)
+    assert state_after["currentPhase"] == "plan"
+    assert state_after["phases"]["plan"]["status"] == "deciding"
+    assert state_after["gates"] == state_before_payload["gates"]
+    assert artifact_path.read_bytes() == artifact_before
+    artifact_after = load_planning_options(tmp_path)
+    assert artifact_after.artifact_hash == artifact_before_hash
+    assert len(artifact_after.selection_history) == artifact_before_history_count
+
+
 def test_retry_after_state_failure_reconciles_without_duplicate_replan_history(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
