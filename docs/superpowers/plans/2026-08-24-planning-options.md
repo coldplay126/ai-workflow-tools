@@ -121,7 +121,7 @@ git commit -m "feat(workflow): select planning options and replan"
 
 - [ ] Add semantic RED tests for canonical artifact fields, materiality axes, 2–3 options, recommendation-first, work/transition risks, no-decision policy, selection escape, selected rerun, and no reversible-detail questions.
 - [ ] Require plan card conditional planning-options output and `user_decision` escape while preserving DB decision artifacts.
-- [ ] Give source spec-writer Ask capability only for material selections and sync generated OMP through `awf agents sync-omp`.
+- [ ] Keep direct Ask capability out of source/generated spec-writer agents; material selections use a canonical `user_decision` escape owned by the parent workflow, then sync generated OMP through `awf agents sync-omp`.
 - [ ] Document `wf select-option`, initial continue, post-G1 replan, legacy compatibility, and artifact inventory.
 - [ ] Validate examples with the real parser and canonical artifact loader rather than substring-only checks.
 - [ ] Run:
