@@ -373,6 +373,11 @@ def _write_valid_database_workflow(repo_root: Path) -> None:
         "transition_risks": [],
         "rollback_or_exit": "No change",
         "unavailable_reason": None,
+        "covered_surfaces": ["index", "query"],
+        "surface_assessments": {
+            "index": "Assess index maintenance and lookup cost.",
+            "query": "Assess result equivalence and latency.",
+        },
         "denormalization_assessment": None,
         "physical_design_assessment": None,
     }
@@ -389,6 +394,11 @@ def _write_valid_database_workflow(repo_root: Path) -> None:
         "transition_risks": [],
         "rollback_or_exit": "Restore the current query",
         "unavailable_reason": None,
+        "covered_surfaces": ["index", "query"],
+        "surface_assessments": {
+            "index": "Assess index maintenance and lookup cost.",
+            "query": "Assess result equivalence and latency.",
+        },
         "denormalization_assessment": None,
         "physical_design_assessment": None,
     }
@@ -405,6 +415,11 @@ def _write_valid_database_workflow(repo_root: Path) -> None:
         "transition_risks": [],
         "rollback_or_exit": "Drop the index online",
         "unavailable_reason": None,
+        "covered_surfaces": ["index", "query"],
+        "surface_assessments": {
+            "index": "Assess index maintenance and lookup cost.",
+            "query": "Assess result equivalence and latency.",
+        },
         "denormalization_assessment": None,
         "physical_design_assessment": {
             "read_benefit": "The index narrows lookup work.",

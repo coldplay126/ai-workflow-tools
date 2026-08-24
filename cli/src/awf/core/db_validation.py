@@ -613,6 +613,8 @@ _CANDIDATE_FIELDS = {
     "transition_risks",
     "rollback_or_exit",
     "unavailable_reason",
+    "covered_surfaces",
+    "surface_assessments",
     "denormalization_assessment",
     "physical_design_assessment",
 }
@@ -978,7 +980,10 @@ def _validate_structured_assessment(
         raise DatabaseValidationError("decision_invalid")
 
 
-def _validate_candidate(candidate: object) -> dict[str, Any]:
+def _validate_candidate(
+    candidate: object,
+    change_surfaces: tuple[str, ...],
+) -> dict[str, Any]:
     if not isinstance(candidate, dict):
         raise DatabaseValidationError("decision_invalid")
     _reject_sensitive_fields(candidate, "decision_invalid")
@@ -1005,8 +1010,26 @@ def _validate_candidate(candidate: object) -> dict[str, Any]:
         or not _validate_string_list(candidate["operational_risks"])
         or not _validate_string_list(candidate["transition_risks"])
     ):
+        raise DatabaseValidationError("decision_invalid")
 
-
+    covered_surfaces = candidate["covered_surfaces"]
+    surface_assessments = candidate["surface_assessments"]
+    if (
+        not isinstance(covered_surfaces, list)
+        or len(covered_surfaces) != len(change_surfaces)
+        or any(
+            not isinstance(surface, str)
+            or surface != surface.strip().casefold()
+            for surface in covered_surfaces
+        )
+        or tuple(sorted(covered_surfaces)) != change_surfaces
+        or not isinstance(surface_assessments, dict)
+        or set(surface_assessments) != set(change_surfaces)
+        or any(
+            not _is_safe_persisted_text(assessment)
+            for assessment in surface_assessments.values()
+        )
+    ):
         raise DatabaseValidationError("decision_invalid")
 
     unavailable_reason = candidate["unavailable_reason"]
@@ -1057,7 +1080,11 @@ def _normalize_material_value(value: object) -> object:
 
 def _candidate_material_fingerprint(candidate: dict[str, Any]) -> str:
     fingerprint = {
-        field: _normalize_material_value(candidate[field])
+        field: _normalize_material_value(
+            sorted(candidate[field])
+            if field == "covered_surfaces"
+            else candidate[field]
+        )
         for field in sorted(_CANDIDATE_FIELDS - {"id", "summary"})
     }
     for field in ("operational_risks", "transition_risks"):
@@ -1183,7 +1210,10 @@ def load_database_decision(repo_root: Path) -> DatabaseDecision:
     candidates = decision["candidates"]
     if not isinstance(candidates, list) or not 2 <= len(candidates) <= 3:
         raise DatabaseValidationError("decision_invalid")
-    parsed_candidates = [_validate_candidate(candidate) for candidate in candidates]
+    parsed_candidates = [
+        _validate_candidate(candidate, normalized_surfaces)
+        for candidate in candidates
+    ]
     candidate_ids = [candidate["id"] for candidate in parsed_candidates]
     if len(set(candidate_ids)) != len(candidate_ids):
         raise DatabaseValidationError("decision_invalid")
@@ -1194,21 +1224,6 @@ def load_database_decision(repo_root: Path) -> DatabaseDecision:
     if len(candidate_fingerprints) != len(parsed_candidates):
         raise DatabaseValidationError("decision_invalid")
     candidates_by_id = {candidate["id"]: candidate for candidate in parsed_candidates}
-    required_candidate_kinds = {
-        "query": "query_change",
-        "index": "physical_design",
-        "normalize": "normalize",
-        "denormalize": "denormalize",
-    }
-    if any(
-        not any(
-            candidate["applicable"] and candidate["kind"] == required_kind
-            for candidate in parsed_candidates
-        )
-        for surface, required_kind in required_candidate_kinds.items()
-        if surface in normalized_surfaces
-    ):
-        raise DatabaseValidationError("decision_invalid")
 
     baseline_id = decision["baseline_option_id"] if _is_safe_persisted_identifier(decision["baseline_option_id"]) else None
     recommended_id = decision["recommended_option_id"] if _is_safe_persisted_identifier(decision["recommended_option_id"]) else None
@@ -1825,24 +1840,30 @@ def _open_artifacts_directory(root: Path) -> int:
 def _acquire_evidence_lock(root: Path) -> tuple[int, int]:
     directory_fd = _open_artifacts_directory(root)
     lock_flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    lock_fd: Optional[int] = None
     try:
-        try:
-            metadata = os.lstat(_EVIDENCE_LOCK_FILENAME, dir_fd=directory_fd)
-        except FileNotFoundError:
-            metadata = None
-        if metadata is not None and (
-            stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode)
-        ):
-            raise DatabaseValidationError("evidence_invalid")
         lock_fd = os.open(
             _EVIDENCE_LOCK_FILENAME,
             lock_flags,
             0o600,
             dir_fd=directory_fd,
         )
+        metadata = os.fstat(lock_fd)
+        path_metadata = os.lstat(_EVIDENCE_LOCK_FILENAME, dir_fd=directory_fd)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+            or not stat.S_ISREG(path_metadata.st_mode)
+            or (metadata.st_dev, metadata.st_ino)
+            != (path_metadata.st_dev, path_metadata.st_ino)
+        ):
+            raise DatabaseValidationError("evidence_invalid")
         os.fchmod(lock_fd, 0o600)
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
     except (OSError, DatabaseValidationError):
+        if lock_fd is not None:
+            os.close(lock_fd)
         os.close(directory_fd)
         raise DatabaseValidationError("evidence_invalid") from None
     return directory_fd, lock_fd

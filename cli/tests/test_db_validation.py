@@ -11,6 +11,9 @@ from pathlib import Path
 import shutil
 import time
 import threading
+import stat
+from typing import Callable
+
 
 import pytest
 
@@ -569,6 +572,23 @@ def database_decision(
         "recommendation_rationale": "It preserves correctness at the lowest cost.",
     }
     payload.update(updates)
+    surfaces = payload["change_surfaces"]
+    candidates_payload = payload["candidates"]
+    if (
+        isinstance(surfaces, list)
+        and all(isinstance(surface, str) for surface in surfaces)
+        and isinstance(candidates_payload, list)
+    ):
+        normalized_surfaces = sorted(
+            {surface.strip().casefold() for surface in surfaces}
+        )
+        for candidate in candidates_payload:
+            if isinstance(candidate, dict):
+                candidate["covered_surfaces"] = normalized_surfaces
+                candidate["surface_assessments"] = {
+                    surface: f"Assess the {surface} change surface."
+                    for surface in normalized_surfaces
+                }
     return payload
 
 
@@ -1061,7 +1081,7 @@ def test_decision_returns_selected_id_and_normalized_surfaces(tmp_path: Path) ->
     assert decision.selected_option_id == "rewrite-query"
     assert decision.change_surfaces == ("index", "query")
     assert len(decision.decision_hash) == 64
-def test_decision_requires_applicable_physical_candidate_for_index_surface(
+def test_decision_allows_holistic_candidates_without_each_surface_kind(
     tmp_path: Path,
 ) -> None:
     write_workflow_artifacts(tmp_path, concept="Update the database query")
@@ -1071,8 +1091,7 @@ def test_decision_requires_applicable_physical_candidate_for_index_surface(
     )
     write_database_decision(tmp_path, decision)
 
-    with pytest.raises(DatabaseValidationError):
-        load_database_decision(tmp_path)
+    assert load_database_decision(tmp_path).selected_option_id == "rewrite-query"
 
 @pytest.mark.parametrize(
     ("concept", "allowed_files", "underdeclared", "declared"),
@@ -1428,6 +1447,91 @@ def test_structural_database_path_requires_a_structural_surface(
 
     assert load_database_decision(tmp_path).change_surfaces == ("index",)
 
+
+@pytest.mark.parametrize(
+    "dominant_surface",
+    ["normalize", "denormalize"],
+)
+def test_holistic_candidates_support_composite_structural_decisions(
+    tmp_path: Path,
+    dominant_surface: str,
+) -> None:
+    surfaces = ["query", "index", dominant_surface]
+    write_workflow_artifacts(
+        tmp_path,
+        concept=f"Update the database query index and {dominant_surface} design",
+    )
+    decision = database_decision(change_surfaces=surfaces)
+    dominant_candidate = {
+        **decision["candidates"][2],
+        "id": f"{dominant_surface}-strategy",
+        "kind": dominant_surface,
+        "physical_design_assessment": None,
+    }
+    if dominant_surface == "denormalize":
+        dominant_candidate["denormalization_assessment"] = {
+            "source_of_truth": "The audit ledger remains authoritative.",
+            "consistency_window": "Summary writes converge within one minute.",
+            "reconciliation": "A scheduled job compares summary and ledger.",
+            "rollback": "Stop summary writes and rebuild from the ledger.",
+        }
+    decision["candidates"] = [
+        decision["candidates"][0],
+        decision["candidates"][1],
+        dominant_candidate,
+    ]
+    decision["recommended_option_id"] = dominant_candidate["id"]
+    decision["selected_option_id"] = dominant_candidate["id"]
+    write_database_decision(tmp_path, decision)
+
+    assert load_database_decision(tmp_path).selected_option_id == (
+        dominant_candidate["id"]
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda candidate: candidate.update(covered_surfaces=["query", "index"]),
+        lambda candidate: candidate.update(
+            covered_surfaces=["column", "index", "normalize", "query"],
+            surface_assessments={
+                "column": "Assess the column change surface.",
+                "index": "Assess the index change surface.",
+                "normalize": "Assess the normalize change surface.",
+                "query": "Assess the query change surface.",
+            },
+        ),
+        lambda candidate: candidate["surface_assessments"].pop("normalize"),
+        lambda candidate: candidate["surface_assessments"].update(
+            column="Assess the column change surface."
+        ),
+    ],
+    ids=[
+        "missing-covered-surface",
+        "extra-covered-surface",
+        "missing-surface-assessment",
+        "extra-surface-assessment",
+    ],
+)
+def test_holistic_candidate_rejects_incomplete_or_extra_surface_coverage(
+    tmp_path: Path,
+    mutation: Callable[[dict[str, object]], object],
+) -> None:
+    write_workflow_artifacts(
+        tmp_path,
+        concept="Update the database query index and normalization design",
+    )
+    decision = database_decision(
+        change_surfaces=["query", "index", "normalize"],
+    )
+    mutation(decision["candidates"][0])
+    write_database_decision(tmp_path, decision)
+
+    with pytest.raises(DatabaseValidationError) as raised:
+        load_database_decision(tmp_path)
+
+    assert raised.value.code == "decision_invalid"
 
 @pytest.mark.parametrize("schema_version", [True, 1.0, "1"])
 def test_schema_version_requires_integer_one_everywhere(
@@ -2389,6 +2493,36 @@ def test_workflow_artifacts_reject_symlink_escape(
         assert not outside_evidence.exists()
     else:
         assert outside_evidence.read_bytes() == outside_evidence_before
+
+@pytest.mark.skipif(not hasattr(os, "link"), reason="requires hard-link support")
+@pytest.mark.parametrize("link_kind", ["hardlink", "symlink"])
+def test_evidence_lock_rejects_external_executable_links_without_mutation(
+    tmp_path: Path,
+    link_kind: str,
+) -> None:
+    prepare_database_workflow(tmp_path)
+    external_lock = tmp_path.parent / f"{tmp_path.name}-{link_kind}-executable"
+    external_lock.write_bytes(b"#!/bin/sh\nexit 0\n")
+    external_lock.chmod(0o755)
+    original_bytes = external_lock.read_bytes()
+    original_mode = stat.S_IMODE(external_lock.stat().st_mode)
+    lock_path = (
+        tmp_path
+        / ".workflow"
+        / "artifacts"
+        / ".database-validation-evidence.lock"
+    )
+    if link_kind == "hardlink":
+        os.link(external_lock, lock_path)
+    else:
+        lock_path.symlink_to(external_lock)
+
+    result = run_database_check(tmp_path, "plan")
+
+    assert result.status == "fail"
+    assert result.blockers == ("evidence_invalid",)
+    assert external_lock.read_bytes() == original_bytes
+    assert stat.S_IMODE(external_lock.stat().st_mode) == original_mode
 
 
 def test_bounded_reader_retries_eintr_and_accumulates_short_reads(
