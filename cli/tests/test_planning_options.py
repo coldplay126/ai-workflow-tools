@@ -808,7 +808,7 @@ def test_profile_opt_out_still_validates_present_artifact(tmp_path: Path):
     policy = resolve_planning_options_policy(tmp_path)
 
     assert policy.status == "selection_required"
-    assert policy.required is False
+    assert policy.required is True
     assert policy.artifact is not None
 
     _write_artifact(tmp_path, {"schema_version": 1})

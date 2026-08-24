@@ -742,7 +742,7 @@ def resolve_planning_options_policy(repo_root: Path) -> PlanningOptionsPolicy:
     if not isinstance(required, bool):
         raise PlanningOptionsError("profile_invalid")
     return PlanningOptionsPolicy(
-        required=required,
+        required=required or artifact is not None,
         status=(
             artifact.status
             if artifact is not None
