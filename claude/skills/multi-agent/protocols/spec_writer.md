@@ -22,12 +22,18 @@ DB signal이 있는 계획은 `.workflow/artifacts/database-decision.json`을 �
 
 각 candidate는 `id`, `kind`, `applicable`, `unavailable_reason`, `summary`,
 `equivalence_plan`, `integrity_plan`, `normalization_assessment`,
-`denormalization_assessment`, `physical_design_assessment`, `read_write_cost`,
-`operational_risks`, `transition_risks`, `rollback_or_exit`를 모두 가진다.
-`kind`는 `maintain`, `query_change`, `physical_design`, `normalize`,
-`denormalize` 중 하나다. `applicable`이면 `unavailable_reason`은 null이고,
-아니면 구체적 사유가 필요하다.
+`denormalization_assessment`, `physical_design_assessment`, `covered_surfaces`,
+`surface_assessments`, `read_write_cost`, `operational_risks`,
+`transition_risks`, `rollback_or_exit`를 모두 가진다.
+Every candidate covers every decision surface. `covered_surfaces`는
+`change_surfaces` 전체와 같고 `surface_assessments`는 정확히 같은 key와
+nonempty value를 가진다.
 
+`kind`는 `maintain`, `query_change`, `physical_design`, `normalize`,
+`denormalize` 중 하나인 dominant strategy다. surface마다 별도 candidate kind를
+강제하지 않는다. index surface에서는 모든 holistic option이 add, reject, 또는
+maintain을 평가하며 index를 자동으로 선택하지 않는다. `applicable`이면
+`unavailable_reason`은 null이고, 아니면 구체적 사유가 필요하다.
 `normalization_assessment`는 null 또는 설명 string이다. column, constraint, ERD
 surface에서는 selected candidate가 비워 둘 수 없다. `denormalize`에는
 `denormalization_assessment` object가 필요하고 field는 `source_of_truth`,
@@ -35,8 +41,7 @@ surface에서는 selected candidate가 비워 둘 수 없다. `denormalize`에�
 `physical_design`에는 `physical_design_assessment` object가 필요하고 field는
 `read_benefit`, `write_amplification`, `storage`, `build_or_lock`, `rollback`이다.
 다른 kind는 null을 쓴다. query, index, column, constraint, ERD, normalize,
-denormalize 중 실제 변경 surface만 기록한다. An index surface requires an applicable `physical_design` candidate. Its assessment is compared with the
-other applicable candidates; it does not force the selected option.
+denormalize 중 실제 변경 surface만 기록한다.
 
 `local_data_test_waiver`는 decision의 optional top-level field다. 기본값은
 null or omitted다. `test_command`가 없고 waiver를 선택할 때만 nonempty

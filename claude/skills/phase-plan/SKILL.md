@@ -224,12 +224,17 @@ tasks.md, plan.md, allowed-files.json에 DB 변경 신호가 있으면
 - 모든 candidate는 다음 정확한 field를 가진다: `id`, `kind`, `applicable`,
   `unavailable_reason`, `summary`, `equivalence_plan`, `integrity_plan`,
   `normalization_assessment`, `denormalization_assessment`,
-  `physical_design_assessment`, `read_write_cost`, `operational_risks`,
-  `transition_risks`, `rollback_or_exit`.
+  `physical_design_assessment`, `covered_surfaces`, `surface_assessments`,
+  `read_write_cost`, `operational_risks`, `transition_risks`, `rollback_or_exit`.
+- Every candidate covers every decision surface. `covered_surfaces`는 정렬된
+  `change_surfaces`와 정확히 같고, `surface_assessments`는 같은 key를 모두 가지며
+  각 value는 비어 있지 않은 평가다. index surface에서는 각 holistic option이
+  add, reject, 또는 maintain 결론을 평가한다. index를 자동으로 선택하지 않는다.
 - `kind`는 `maintain`, `query_change`, `physical_design`, `normalize`,
-  `denormalize` 중 하나다. `applicable: true`이면 `unavailable_reason`은 null이고,
-  false이면 구체적인 사유가 필요하다. `operational_risks`와 `transition_risks`는
-  string 목록이다.
+  `denormalize` 중 하나이며 candidate의 dominant strategy다. surface마다 별도의
+  candidate kind를 강제하지 않는다. `applicable: true`이면 `unavailable_reason`은
+  null이고, false이면 구체적인 사유가 필요하다. `operational_risks`와
+  `transition_risks`는 string 목록이다.
 - `normalization_assessment`는 null 또는 설명 string이다. `column`, `constraint`,
   `erd` surface가 있으면 selected candidate에서 비어 있을 수 없다.
   `denormalize` kind의 `denormalization_assessment`는
@@ -239,10 +244,6 @@ tasks.md, plan.md, allowed-files.json에 DB 변경 신호가 있으면
   `build_or_lock`, `rollback`을 가진 object이고 다른 kind에서는 null이다.
 - `change_surfaces`는 필요한 것만 `query`, `index`, `column`, `constraint`,
   `erd`, `normalize`, `denormalize`로 기록한다.
-- An index surface requires an applicable `physical_design` candidate. Its exact
-  assessment makes the index a comparison option; the selected option may be any
-  applicable `maintain`, `query_change`, `physical_design`, `normalize`, or
-  `denormalize` candidate. The planner never selects an index automatically.
 
 Signal-to-surface binding is mandatory: `text:ddl`, `path:migration:`,
 `path:schema:`, and `path:prisma:` require a structural surface;

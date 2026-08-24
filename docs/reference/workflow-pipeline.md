@@ -194,15 +194,16 @@ awf wf gate test --repo-root . --result-file "$TEST_RESULT" --json
 | verify | production schema, equivalence, integrity, query plan, migration, rollback |
 | test | production schema and local test, or a recorded waiver for the missing local test command |
 
-`database-decision.json` contains two or three materially different candidates,
-including a `maintain` baseline. Each candidate documents equivalence and
-integrity plans, operational and transition risk, read/write cost, and rollback
-or exit. The decision names only the relevant change surfaces: query, index,
-column, constraint, ERD, normalize, or denormalize.
+`database-decision.json` contains two or three materially different holistic
+candidates, including a `maintain` baseline. Each candidate includes
+`covered_surfaces` and `surface_assessments`. Every candidate covers every
+decision surface: the sorted `covered_surfaces` list equals `change_surfaces`,
+and `surface_assessments` has exactly those keys with nonempty assessments.
 
-An index surface requires an applicable `physical_design` candidate with its
-full assessment. It is a comparison option, not a default selection: the
-selected option may be any applicable candidate after the comparison.
+`kind` is the candidate's dominant strategy, not a required kind per surface.
+Each candidate can assess query, index, schema, normalization, and
+denormalization together. For an index surface, every option records whether it
+would add, reject, or maintain the index. No option is selected automatically.
 
 Verify evidence includes `engine`, `execution_target`,
 `production_primary_queries`: false, and `raw_production_rows`: false.
@@ -310,6 +311,7 @@ implement a database driver, masking, or replica provisioning.
 | `totalExecutions` | 전체 실행 횟수 | Phase 시작 및 Gate 결과마다 증가 |
 | `loop.replanCount` | 누적 replan 횟수 | replan 실행 시 증가 |
 | `changeClass` | 변경 위험 등급 | 워크플로우 초기화 |
+| `generation` | workflow generation 식별자 | reset은 새 generation을 만들며 이전 generation의 DB risk promotion을 병합하지 않음 |
 | `history` | 모든 상태 전이 이력 | 모든 상태 변경 |
 
 ---

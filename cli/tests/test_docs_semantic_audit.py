@@ -10,7 +10,7 @@ import pytest
 
 from awf.cli import KNOWN_COMMANDS, build_parser
 from awf.core.config import AwfConfig
-from awf.core.db_validation import DatabaseValidationError, load_database_decision
+from awf.core.db_validation import load_database_decision
 from awf.core.state import PHASE_GATE, PHASE_ORDER
 
 
@@ -1408,7 +1408,7 @@ def test_database_planning_contract_compares_options_without_index_default() -> 
         "`normalize`",
         "`denormalize`",
         "hard gate",
-        "An index surface requires an applicable `physical_design` candidate.",
+        "Every candidate covers every decision surface.",
     )
     for requirement in required_contract:
         assert requirement in plan_skill, f"missing planning requirement: {requirement}"
@@ -1424,6 +1424,8 @@ def test_database_planning_contract_compares_options_without_index_default() -> 
         "`normalization_assessment`",
         "`denormalization_assessment`",
         "`physical_design_assessment`",
+        "`covered_surfaces`",
+        "`surface_assessments`",
         "`read_write_cost`",
         "`operational_risks`",
         "`transition_risks`",
@@ -1446,10 +1448,7 @@ def test_database_planning_contract_compares_options_without_index_default() -> 
         prose = path.read_text(encoding="utf-8")
         for field in candidate_fields:
             assert field in prose, f"{path}: missing candidate field {field}"
-        assert (
-            "An index surface requires an applicable `physical_design` candidate."
-            in prose
-        )
+        assert "Every candidate covers every decision surface." in prose
 
     writer = (REPO_ROOT / "claude" / "agents" / "spec-writer.md").read_text(
         encoding="utf-8"
@@ -1493,6 +1492,8 @@ def test_documented_local_data_waiver_loads_through_canonical_decision_parser(
             "normalization_assessment": "No model change.",
             "denormalization_assessment": None,
             "physical_design_assessment": None,
+            "covered_surfaces": ["query"],
+            "surface_assessments": {"query": "Maintain the current query."},
             "read_write_cost": "Measure the production-shaped workload.",
             "operational_risks": [],
             "transition_risks": [],
@@ -1509,6 +1510,8 @@ def test_documented_local_data_waiver_loads_through_canonical_decision_parser(
             "normalization_assessment": "No model change.",
             "denormalization_assessment": None,
             "physical_design_assessment": None,
+            "covered_surfaces": ["query"],
+            "surface_assessments": {"query": "Rewrite the aggregation query."},
             "read_write_cost": "Measure latency on production-shaped data.",
             "operational_risks": [],
             "transition_risks": [],
@@ -1539,7 +1542,7 @@ def test_documented_local_data_waiver_loads_through_canonical_decision_parser(
     assert decision.local_data_test_waiver == payload["local_data_test_waiver"]
 
 
-def test_index_surface_compares_physical_design_without_selecting_it(
+def test_index_surface_compares_holistic_options_without_forcing_physical_kind(
     tmp_path: Path,
 ) -> None:
     baseline = {
@@ -1553,6 +1556,8 @@ def test_index_surface_compares_physical_design_without_selecting_it(
         "normalization_assessment": "No model change.",
         "denormalization_assessment": None,
         "physical_design_assessment": None,
+        "covered_surfaces": ["index"],
+        "surface_assessments": {"index": "Maintain the current index design."},
         "read_write_cost": "Measure the production-shaped workload.",
         "operational_risks": [],
         "transition_risks": [],
@@ -1569,6 +1574,8 @@ def test_index_surface_compares_physical_design_without_selecting_it(
         "normalization_assessment": "No model change.",
         "denormalization_assessment": None,
         "physical_design_assessment": None,
+        "covered_surfaces": ["index"],
+        "surface_assessments": {"index": "Reject a new index after comparison."},
         "read_write_cost": "Measure latency on production-shaped data.",
         "operational_risks": [],
         "transition_risks": [],
@@ -1591,6 +1598,8 @@ def test_index_surface_compares_physical_design_without_selecting_it(
             "build_or_lock": "Use the engine's online build path.",
             "rollback": "Drop the index.",
         },
+        "covered_surfaces": ["index"],
+        "surface_assessments": {"index": "Add a covering index."},
         "read_write_cost": "Measure read and write cost.",
         "operational_risks": [],
         "transition_risks": [],
@@ -1614,8 +1623,7 @@ def test_index_surface_compares_physical_design_without_selecting_it(
 
     payload["candidates"] = [baseline, query]
     decision_path.write_text(json.dumps(payload), encoding="utf-8")
-    with pytest.raises(DatabaseValidationError):
-        load_database_decision(tmp_path)
+    assert load_database_decision(tmp_path).selected_option_id == "rewrite-query"
 
 
 def test_database_risk_routing_requires_a_selected_decision() -> None:

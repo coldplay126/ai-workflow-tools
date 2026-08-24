@@ -40,11 +40,16 @@ candidate를 가리키고, recommended/selected candidate는 `applicable: true`�
 
 모든 candidate의 exact field는 `id`, `kind`, `applicable`, `unavailable_reason`,
 `summary`, `equivalence_plan`, `integrity_plan`, `normalization_assessment`,
-`denormalization_assessment`, `physical_design_assessment`, `read_write_cost`,
-`operational_risks`, `transition_risks`, `rollback_or_exit`다. `kind`는 `maintain`,
-`query_change`, `physical_design`, `normalize`, `denormalize` 중 하나다.
-`applicable`이면 `unavailable_reason`은 null이고, 아니면 구체적 사유가 필요하다.
+`denormalization_assessment`, `physical_design_assessment`, `covered_surfaces`,
+`surface_assessments`, `read_write_cost`, `operational_risks`,
+`transition_risks`, `rollback_or_exit`다. Every candidate covers every decision surface. `covered_surfaces`는 `change_surfaces` 전체와 같고,
+`surface_assessments`는 정확히 같은 key와 nonempty value를 가진다.
 
+`kind`는 `maintain`, `query_change`, `physical_design`, `normalize`,
+`denormalize` 중 하나인 dominant strategy다. surface마다 별도 kind를 강제하지
+않는다. index surface에서는 모든 holistic option이 add, reject, 또는 maintain을
+평가하며 index를 자동으로 선택하지 않는다. `applicable`이면
+`unavailable_reason`은 null이고, 아니면 구체적 사유가 필요하다.
 `normalization_assessment`는 null 또는 설명 string이며 column, constraint, ERD
 surface에서는 selected candidate가 비워 둘 수 없다. `denormalize` candidate는
 `denormalization_assessment`에 `source_of_truth`, `consistency_window`,
@@ -58,10 +63,8 @@ null or omitted다. `test_command`가 없고 waiver를 선택할 때만 nonempty
 `reason`, `approver`, `timestamp`를 가진 object를 기록한다. `timestamp`는 UTC ISO 8601 형식이어야 하며,
 waiver는 local data test만 면제한다.
 
-An index surface requires an applicable `physical_design` candidate. Its exact
-assessment makes the index a comparison option; the selected option may be any
-applicable candidate. AskUserQuestion is allowed only when requirements and
-project conventions cannot distinguish materially different candidates.
+AskUserQuestion is allowed only when requirements and project conventions
+cannot distinguish materially different holistic candidates.
 
 Signal-to-surface binding is mandatory: `text:ddl`, `path:migration:`,
 `path:schema:`, and `path:prisma:` require a structural surface;

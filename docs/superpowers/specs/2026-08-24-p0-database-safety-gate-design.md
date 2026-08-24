@@ -98,6 +98,13 @@ Plan creates `.workflow/artifacts/database-decision.json` before `db-check --sta
       "normalization_assessment": "No model change",
       "denormalization_assessment": null,
       "physical_design_assessment": null,
+      "covered_surfaces": ["column", "erd", "index", "query"],
+      "surface_assessments": {
+        "column": "Maintain the current column shape",
+        "erd": "Maintain the current relationship model",
+        "index": "Reject a new index after comparison",
+        "query": "Maintain the current query as the baseline"
+      },
       "read_write_cost": "Measure production-shaped workload",
       "operational_risks": [],
       "transition_risks": [],
@@ -112,7 +119,8 @@ Rules:
 
 - two or three materially different candidates, where canonical candidate content other than ID must differ;
 - a `maintain` baseline candidate is mandatory;
-- candidate kinds are `maintain`, `query_change`, `physical_design`, `normalize`, and `denormalize`;
+- candidate `kind` is its dominant strategy: `maintain`, `query_change`, `physical_design`, `normalize`, or `denormalize`; surface-specific kinds are not required;
+- every candidate has `covered_surfaces` equal to every decision `change_surfaces` and `surface_assessments` with exactly those non-empty keys; index assessments compare add, reject, or maintain rather than choosing an index automatically;
 - every candidate declares `unavailable_reason`, `denormalization_assessment`, and `physical_design_assessment`; non-applicable candidates require a concrete unavailable reason;
 - recommendation and selection IDs must reference applicable candidates;
 - no candidate may be selected without an equivalence and integrity plan;
