@@ -6,17 +6,21 @@ can rely on immutable, normalized records instead of untrusted JSON.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import errno
+import fcntl
 import html
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import secrets
 import stat
-from typing import Any, Optional
+import threading
+from typing import Any, Iterator, Optional
 import unicodedata
 
 
@@ -192,11 +196,16 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, ob
         payload[key] = value
     return payload
 
-
 def _canonical_repo_root(repo_root: Path) -> Path:
     try:
-        root = Path(repo_root).resolve(strict=True)
+        supplied = Path(repo_root)
+        supplied_metadata = os.lstat(supplied)
+        if stat.S_ISLNK(supplied_metadata.st_mode):
+            raise PlanningOptionsError("repo_root_invalid")
+        root = supplied.resolve(strict=True)
         metadata = os.lstat(root)
+    except PlanningOptionsError:
+        raise
     except OSError:
         raise PlanningOptionsError("repo_root_invalid") from None
     if not stat.S_ISDIR(metadata.st_mode):
@@ -699,3 +708,413 @@ def resolve_planning_options_policy(repo_root: Path) -> PlanningOptionsPolicy:
         ),
         artifact=artifact,
     )
+
+
+@dataclass(frozen=True)
+class PlanningOptionSelection:
+    """Sanitized durable selection result for CLI and state reconciliation."""
+
+    decision_id: str
+    option_id: str
+    status: str
+    changed: bool
+    previous_hash: str
+    current_hash: str
+
+
+_SELECTION_LOCKS: dict[str, threading.Lock] = {}
+_SELECTION_LOCKS_GUARD = threading.Lock()
+
+
+def _selection_thread_lock(root: Path) -> threading.Lock:
+    key = str(root / ".workflow" / "artifacts" / "planning-options.json")
+    with _SELECTION_LOCKS_GUARD:
+        lock = _SELECTION_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _SELECTION_LOCKS[key] = lock
+        return lock
+
+
+def _selection_artifact_error() -> PlanningOptionsError:
+    return PlanningOptionsError("artifact_invalid")
+
+
+def _validate_selection_file(descriptor: int) -> None:
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or metadata.st_nlink != 1
+    ):
+        raise _selection_artifact_error()
+
+
+def _open_selection_directory(parent_fd: int, name: str) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(name, flags, dir_fd=parent_fd)
+    except OSError:
+        raise _selection_artifact_error() from None
+    try:
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise _selection_artifact_error()
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+@contextmanager
+def _planning_options_transaction(root: Path) -> Iterator[int]:
+    directory_flags = (
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    )
+    root_fd: Optional[int] = None
+    workflow_fd: Optional[int] = None
+    artifacts_fd: Optional[int] = None
+    lock_fd: Optional[int] = None
+    locked = False
+    try:
+        try:
+            root_fd = os.open(root, directory_flags)
+        except OSError:
+            raise _selection_artifact_error() from None
+        workflow_fd = _open_selection_directory(root_fd, ".workflow")
+        artifacts_fd = _open_selection_directory(workflow_fd, "artifacts")
+        lock_flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            lock_fd = os.open(
+                "planning-options.json.lock", lock_flags, 0o600, dir_fd=artifacts_fd
+            )
+        except OSError:
+            raise _selection_artifact_error() from None
+        _validate_selection_file(lock_fd)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        locked = True
+        yield artifacts_fd
+    finally:
+        if lock_fd is not None:
+            try:
+                if locked:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(lock_fd)
+        if artifacts_fd is not None:
+            os.close(artifacts_fd)
+        if workflow_fd is not None:
+            os.close(workflow_fd)
+        if root_fd is not None:
+            os.close(root_fd)
+
+
+def _read_selection_artifact(directory_fd: int) -> dict[str, Any]:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor: Optional[int] = None
+    try:
+        try:
+            descriptor = os.open("planning-options.json", flags, dir_fd=directory_fd)
+        except FileNotFoundError:
+            raise PlanningOptionsError("artifact_missing") from None
+        except OSError:
+            raise _selection_artifact_error() from None
+        _validate_selection_file(descriptor)
+        raw = bytearray()
+        while len(raw) <= _MAX_ARTIFACT_BYTES:
+            try:
+                chunk = os.read(descriptor, _MAX_ARTIFACT_BYTES + 1 - len(raw))
+            except OSError as error:
+                if error.errno == errno.EINTR:
+                    continue
+                raise _selection_artifact_error() from None
+            if not chunk:
+                break
+            raw.extend(chunk)
+            if len(raw) > _MAX_ARTIFACT_BYTES:
+                raise _selection_artifact_error()
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    try:
+        payload = json.loads(
+            raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_json_keys
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError):
+        raise _selection_artifact_error() from None
+    if not isinstance(payload, dict):
+        raise _selection_artifact_error()
+    return payload
+
+
+def _write_selection_artifact(
+    directory_fd: int,
+    payload: dict[str, object],
+) -> None:
+    temporary_name = f".planning-options.json.{secrets.token_hex(16)}.tmp"
+    temporary_fd: Optional[int] = None
+    temporary_created = False
+    try:
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            temporary_fd = os.open(
+                temporary_name, flags, 0o600, dir_fd=directory_fd
+            )
+            temporary_created = True
+        except (FileExistsError, OSError):
+            raise _selection_artifact_error() from None
+        try:
+            _validate_selection_file(temporary_fd)
+            remaining = memoryview(_canonical_json_bytes(payload) + b"\n")
+            while remaining:
+                written = os.write(temporary_fd, remaining)
+                if written <= 0:
+                    raise OSError("Could not write planning options artifact")
+                remaining = remaining[written:]
+            os.fsync(temporary_fd)
+        finally:
+            os.close(temporary_fd)
+            temporary_fd = None
+        os.replace(
+            temporary_name,
+            "planning-options.json",
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        os.fsync(directory_fd)
+    finally:
+        if temporary_fd is not None:
+            os.close(temporary_fd)
+        if temporary_created:
+            try:
+                os.unlink(temporary_name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+
+
+
+
+_RECONCILIATION_MARKER = ".planning-options-reconcile"
+
+
+def _write_reconciliation_marker(directory_fd: int, journal: dict[str, object]) -> None:
+    temporary_name = f"{_RECONCILIATION_MARKER}.{secrets.token_hex(16)}.tmp"
+    descriptor: Optional[int] = None
+    created = False
+    try:
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        created = True
+        _validate_selection_file(descriptor)
+        remaining = memoryview(_canonical_json_bytes(journal))
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise OSError("Could not write reconciliation marker")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        os.replace(
+            temporary_name,
+            _RECONCILIATION_MARKER,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        os.fsync(directory_fd)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if created:
+            try:
+                os.unlink(temporary_name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+
+
+def _reconciliation_pending(
+    directory_fd: int, artifact_hash: str
+) -> Optional[dict[str, object]]:
+    descriptor: Optional[int] = None
+    try:
+        try:
+            descriptor = os.open(
+                _RECONCILIATION_MARKER,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_fd,
+            )
+        except FileNotFoundError:
+            return None
+        _validate_selection_file(descriptor)
+        try:
+            journal = json.loads(
+                os.read(descriptor, 1024).decode("utf-8"),
+                object_pairs_hook=_reject_duplicate_json_keys,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            raise _selection_artifact_error() from None
+        required = {
+            "schema_version", "current_hash", "previous_hash", "decision_id",
+            "option_id", "artifact_status", "source",
+        }
+        if (
+            not isinstance(journal, dict)
+            or set(journal) != required
+            or journal.get("schema_version") != 1
+            or journal.get("current_hash") != artifact_hash
+            or not all(isinstance(journal.get(key), str) for key in required - {"schema_version"})
+        ):
+            raise _selection_artifact_error()
+        return journal
+    except OSError:
+        raise _selection_artifact_error() from None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _clear_reconciliation_marker(directory_fd: int) -> None:
+    descriptor: Optional[int] = None
+    try:
+        try:
+            descriptor = os.open(
+                _RECONCILIATION_MARKER,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_fd,
+            )
+        except FileNotFoundError:
+            return
+        _validate_selection_file(descriptor)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    os.unlink(_RECONCILIATION_MARKER, dir_fd=directory_fd)
+    os.fsync(directory_fd)
+def _next_selection_timestamp(history: tuple[SelectionHistoryEntry, ...]) -> str:
+    now = datetime.now(timezone.utc)
+    if history:
+        latest = datetime.fromisoformat(history[-1].selected_at[:-1] + "+00:00")
+        now = max(now, latest)
+    return now.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _selection_request_values(
+    decision_id: object, option_id: object, selected_by: object
+) -> tuple[str, str, str]:
+    try:
+        return (
+            _normalize_identifier(decision_id, _DECISION_ID),
+            _normalize_identifier(option_id, _OPTION_ID),
+            _normalize_text(selected_by),
+        )
+    except PlanningOptionsError:
+        raise PlanningOptionsError("selection_invalid") from None
+
+
+def _select_planning_option_in_transaction(
+    directory_fd: int,
+    decision_id: str,
+    option_id: str,
+    selected_by: str,
+) -> PlanningOptionSelection:
+    artifact = _parse_artifact(_read_selection_artifact(directory_fd))
+    if artifact.status == "no_decision_required":
+        raise PlanningOptionsError("selection_not_required")
+    decision = next((item for item in artifact.decisions if item.id == decision_id), None)
+    if decision is None:
+        raise PlanningOptionsError("decision_not_found")
+    if option_id not in {option.id for option in decision.options}:
+        raise PlanningOptionsError("option_not_found")
+    if decision.selected_option_id == option_id:
+        os.fsync(directory_fd)
+        return PlanningOptionSelection(
+            decision_id=decision_id,
+            option_id=option_id,
+            status=artifact.status,
+            changed=False,
+            previous_hash=artifact.artifact_hash,
+            current_hash=artifact.artifact_hash,
+        )
+
+    timestamp = _next_selection_timestamp(artifact.selection_history)
+    payload = _canonical_payload(
+        schema_version=artifact.schema_version,
+        status=artifact.status,
+        no_decision_reason=artifact.no_decision_reason,
+        decisions=artifact.decisions,
+        selection_history=artifact.selection_history,
+    )
+    decision_payload = next(item for item in payload["decisions"] if item["id"] == decision_id)
+    decision_payload["selected_option_id"] = option_id
+    decision_payload["selected_by"] = selected_by
+    decision_payload["selected_at"] = timestamp
+    payload["selection_history"].append(
+        {
+            "decision_id": decision_id,
+            "previous_option_id": decision.selected_option_id,
+            "selected_option_id": option_id,
+            "selected_by": selected_by,
+            "selected_at": timestamp,
+            "source": "cli",
+        }
+    )
+    all_selected = all(item["selected_option_id"] is not None for item in payload["decisions"])
+    payload["status"] = "selected" if all_selected else "selection_required"
+    updated = _parse_artifact(payload)
+    _write_reconciliation_marker(
+        directory_fd,
+        {
+            "schema_version": 1,
+            "current_hash": updated.artifact_hash,
+            "previous_hash": artifact.artifact_hash,
+            "decision_id": decision_id,
+            "option_id": option_id,
+            "artifact_status": updated.status,
+            "source": "cli",
+        },
+    )
+    _write_selection_artifact(directory_fd, payload)
+    return PlanningOptionSelection(
+        decision_id=decision_id,
+        option_id=option_id,
+        status=updated.status,
+        changed=True,
+        previous_hash=artifact.artifact_hash,
+        current_hash=updated.artifact_hash,
+    )
+
+
+@contextmanager
+def planning_option_selection_transaction(
+    repo_root: Path, *, canonical: bool = False
+) -> Iterator[tuple[Path, int]]:
+    root = Path(repo_root) if canonical else _canonical_repo_root(Path(repo_root))
+    with _selection_thread_lock(root), _planning_options_transaction(root) as directory_fd:
+        yield root, directory_fd
+
+
+def select_planning_option(
+    repo_root: Path,
+    decision_id: object,
+    option_id: object,
+    selected_by: object,
+) -> PlanningOptionSelection:
+    """Atomically select one existing option and append its durable history."""
+
+    decision_id, option_id, selected_by = _selection_request_values(
+        decision_id, option_id, selected_by
+    )
+    with planning_option_selection_transaction(repo_root) as (_, directory_fd):
+        return _select_planning_option_in_transaction(
+            directory_fd, decision_id, option_id, selected_by
+        )

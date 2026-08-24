@@ -33,9 +33,22 @@ from awf.core.output_schemas import (
     write_temp_schema_file,
 )
 from awf.core.progress import ProgressDisplay
+from awf.core.planning_options import (
+    PlanningOptionSelection,
+    PlanningOptionsArtifact,
+    PlanningOptionsError,
+    _clear_reconciliation_marker,
+    _reconciliation_pending,
+    _select_planning_option_in_transaction,
+    _selection_request_values,
+    load_planning_options,
+    planning_option_selection_transaction,
+)
 from awf.core.readiness import maybe_doctor_hint
 from awf.core.state_updater import WorkflowStateUpdater
 from awf.core.state import (
+    PHASE_ORDER,
+    apply_planning_option_selection,
     abort_workflow,
     apply_gate_result,
     initialize_workflow,
@@ -566,6 +579,111 @@ def run_wf_reset(args: argparse.Namespace) -> int:
     print(f"repo: {state.get('repo')}")
     print(f"branch: {state.get('branch')}")
     print(f"current_phase: {state.get('currentPhase')}")
+    return 0
+
+
+
+
+
+
+
+
+def _selection_state_is_blocked(state: dict) -> bool:
+    phases = state.get("phases")
+    current = state.get("currentPhase")
+    allowed = {"pending", "deciding", "in_progress", "completed", "failed", "escaped", "aborted", "skipped"}
+    if not isinstance(phases, dict) or current not in PHASE_ORDER:
+        return True
+    plan = phases.get("plan")
+    phase = phases.get(current)
+    return (
+        not isinstance(plan, dict)
+        or not isinstance(phase, dict)
+        or plan.get("status") not in allowed
+        or phase.get("status") not in allowed
+        or plan.get("status") == "aborted"
+        or phase.get("status") == "aborted"
+    )
+
+
+def _selection_result_payload(
+    selection: PlanningOptionSelection, workflow_action: str
+) -> dict[str, object]:
+    return {
+        "decision_id": selection.decision_id,
+        "option_id": selection.option_id,
+        "status": selection.status,
+        "selection_action": "selected" if selection.changed else "reuse",
+        "workflow_action": workflow_action,
+        "previous_hash": selection.previous_hash,
+        "current_hash": selection.current_hash,
+    }
+
+
+def _print_selection_result(payload: dict[str, object], *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(payload, sort_keys=True))
+        return
+    for key, value in payload.items():
+        print(f"{key}: {value}")
+
+
+def run_wf_select_option(args: argparse.Namespace) -> int:
+    """Persist one option, then atomically reconcile its sanitized state marker."""
+
+    try:
+        supplied_root = getattr(args, "repo_root", None)
+        if supplied_root and Path(supplied_root).expanduser().is_symlink():
+            raise ValueError("unsafe root")
+        root = Path(resolve_repo_root(supplied_root))
+    except Exception:
+        print("error: planning option selection is unavailable", file=sys.stderr)
+        return 2
+    try:
+        requested = _selection_request_values(
+            args.decision_id,
+            args.option_id,
+            args.actor,
+        )
+        with planning_option_selection_transaction(root, canonical=True) as (_, directory_fd):
+            state = load_workflow_state(root)
+            if _selection_state_is_blocked(state):
+                raise ValueError("selection state is blocked")
+            selection = _select_planning_option_in_transaction(
+                directory_fd,
+                *requested,
+            )
+            pending = _reconciliation_pending(directory_fd, selection.current_hash)
+            if pending:
+                _, action = apply_planning_option_selection(
+                    root,
+                    current_hash=str(pending["current_hash"]),
+                    previous_hash=str(pending["previous_hash"]),
+                    decision_id=str(pending["decision_id"]),
+                    option_id=str(pending["option_id"]),
+                    artifact_status=str(pending["artifact_status"]),
+                    source=str(pending["source"]),
+                )
+                _clear_reconciliation_marker(directory_fd)
+            else:
+                action = "reuse"
+    except PlanningOptionsError as error:
+        if error.code == "repo_root_invalid":
+            print("error: planning option selection is unavailable", file=sys.stderr)
+            return 2
+        print("selection rejected", file=sys.stderr)
+        return 1
+    except ValueError:
+        print("selection rejected", file=sys.stderr)
+        return 1
+    except Exception:
+        print("error: planning option selection is unavailable", file=sys.stderr)
+        return 2
+
+    _print_selection_result(
+        _selection_result_payload(selection, action),
+        as_json=bool(getattr(args, "json", False)),
+    )
     return 0
 
 

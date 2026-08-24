@@ -41,6 +41,7 @@ def _state_deps():
         PHASE_GATE,
         PHASE_ORDER,
         _clear_phase_runtime_markers,
+        _initial_skipped_gate_state,
         _now_iso,
         _save_workflow_state,
         load_workflow_state,
@@ -50,10 +51,53 @@ def _state_deps():
         "PHASE_GATE": PHASE_GATE,
         "PHASE_ORDER": PHASE_ORDER,
         "clear_runtime": _clear_phase_runtime_markers,
+        "initial_gate_state": _initial_skipped_gate_state,
         "now_iso": _now_iso,
         "save_state": _save_workflow_state,
         "load_state": load_workflow_state,
     }
+
+
+def _record_planning_options_marker(
+    state: dict,
+    deps: dict,
+    *,
+    artifact_hash: str,
+    decision_id: str,
+    option_id: str,
+    action: str,
+) -> None:
+    state["planningOptions"] = {
+        "artifactHash": artifact_hash,
+        "decision": decision_id,
+        "option": option_id,
+        "appliedAt": deps["now_iso"](),
+        "action": action,
+    }
+
+
+def record_planning_option_selection(
+    explicit_root: Optional[str],
+    *,
+    artifact_hash: str,
+    decision_id: str,
+    option_id: str,
+    action: str,
+) -> dict:
+    """Persist a sanitized selection marker when Plan remains deciding."""
+
+    deps = _state_deps()
+    state = deps["load_state"](explicit_root)
+    _record_planning_options_marker(
+        state,
+        deps,
+        artifact_hash=artifact_hash,
+        decision_id=decision_id,
+        option_id=option_id,
+        action=action,
+    )
+    deps["save_state"](explicit_root, state)
+    return state
 
 
 def record_phase_escape(
@@ -149,7 +193,12 @@ def record_orchestrator_decision(
     return state
 
 
-def continue_workflow(explicit_root: Optional[str], phase: str) -> dict:
+def continue_workflow(
+    explicit_root: Optional[str],
+    phase: str,
+    *,
+    planning_options: Optional[tuple[str, str, str]] = None,
+) -> dict:
     deps = _state_deps()
     state = deps["load_state"](explicit_root)
     phases = state.setdefault("phases", {})
@@ -185,6 +234,16 @@ def continue_workflow(explicit_root: Optional[str], phase: str) -> dict:
             "details": "workflow resumed from deciding state",
         }
     )
+    if planning_options is not None:
+        artifact_hash, decision_id, option_id = planning_options
+        _record_planning_options_marker(
+            state,
+            deps,
+            artifact_hash=artifact_hash,
+            decision_id=decision_id,
+            option_id=option_id,
+            action="continued",
+        )
     deps["save_state"](explicit_root, state)
     return state
 
@@ -228,7 +287,13 @@ def abort_workflow(explicit_root: Optional[str], phase: str) -> dict:
     return state
 
 
-def replan_workflow(explicit_root: Optional[str], phase: str, target_phase: str) -> dict:
+def replan_workflow(
+    explicit_root: Optional[str],
+    phase: str,
+    target_phase: str,
+    *,
+    planning_options: Optional[tuple[str, str, str]] = None,
+) -> dict:
     deps = _state_deps()
     phase_order = deps["PHASE_ORDER"]
     phase_gate = deps["PHASE_GATE"]
@@ -254,7 +319,7 @@ def replan_workflow(explicit_root: Optional[str], phase: str, target_phase: str)
         for gate_phase, gate_id in phase_gate.items():
             if gate_phase == phase_name:
                 gates = state.setdefault("gates", {})
-                gates[gate_id] = {"passed": None, "provider": None, "provider_status": None}
+                gates[gate_id] = deps["initial_gate_state"](gate_id)
     state["currentPhase"] = target_phase
 
     loop = state.setdefault("loop", {})
@@ -283,6 +348,16 @@ def replan_workflow(explicit_root: Optional[str], phase: str, target_phase: str)
             "details": f"workflow rolled back to {target_phase}",
         }
     )
+    if planning_options is not None:
+        artifact_hash, decision_id, option_id = planning_options
+        _record_planning_options_marker(
+            state,
+            deps,
+            artifact_hash=artifact_hash,
+            decision_id=decision_id,
+            option_id=option_id,
+            action="replanned",
+        )
     deps["save_state"](explicit_root, state)
     return state
 

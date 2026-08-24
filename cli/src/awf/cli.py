@@ -42,6 +42,7 @@ from awf.commands.wf import (
     run_wf_next,
     run_wf_reset,
     run_wf_scope_check,
+    run_wf_select_option,
     run_wf_status,
 )
 from awf.commands.wiki import (
@@ -226,6 +227,36 @@ def build_parser() -> argparse.ArgumentParser:
              "'any' bypasses the status check entirely. The phase + status are written to history with action='force_decide'.",
     )
     wf_decide_parser.set_defaults(handler=run_wf_decide)
+
+    wf_select_option_parser = wf_subparsers.add_parser(
+        "select-option",
+        help="Select a validated planning option and reconcile workflow state.",
+    )
+    wf_select_option_parser.add_argument(
+        "--decision-id",
+        required=True,
+        help="Planning decision identifier, for example D-001.",
+    )
+    wf_select_option_parser.add_argument(
+        "--option-id",
+        required=True,
+        help="Option identifier within the decision, for example O-001.",
+    )
+    wf_select_option_parser.add_argument(
+        "--actor",
+        required=True,
+        help="Sanitized non-empty operator label recorded with the selection.",
+    )
+    wf_select_option_parser.add_argument(
+        "--repo-root",
+        help="Repository root containing .workflow/. Defaults to current or parent directories.",
+    )
+    wf_select_option_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print only the sanitized selection result as JSON.",
+    )
+    wf_select_option_parser.set_defaults(handler=run_wf_select_option)
 
     wf_apply_parser = wf_subparsers.add_parser(
         "apply-result",

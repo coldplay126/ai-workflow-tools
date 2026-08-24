@@ -863,6 +863,131 @@ def _save_workflow_state(explicit_root: Optional[str], state: dict) -> Path:
         return _write_workflow_state_unlocked(root, state, directory_fd)
 
 
+
+def apply_planning_option_selection(
+    explicit_root: Optional[str],
+    *,
+    current_hash: str,
+    previous_hash: str,
+    decision_id: str,
+    option_id: str,
+    artifact_status: str,
+    source: str,
+) -> tuple[dict, str]:
+    """Apply a durable selection while holding the workflow state transaction.
+
+    Callers retain the planning-artifact lock.  This function takes the latest
+    state under its own lock, so a concurrent abort or gate update cannot be
+    overwritten by a stale selection snapshot.
+    """
+
+    root = explicit_root if isinstance(explicit_root, Path) else find_repo_root(explicit_root)
+    state_path = root / ".workflow" / "state.json"
+    with _workflow_state_lock(state_path), _workflow_state_transaction(root) as directory_fd:
+        state = _read_workflow_state_from_directory(directory_fd)
+        marker = state.get("planningOptions")
+        if isinstance(marker, dict) and marker.get("artifactHash") == current_hash:
+            return state, "reuse"
+        phases = state.get("phases")
+        current_phase = state.get("currentPhase")
+        allowed_statuses = {
+            "pending", "deciding", "in_progress", "completed",
+            "failed", "escaped", "aborted", "skipped",
+        }
+        if (
+            not isinstance(phases, dict)
+            or current_phase not in PHASE_ORDER
+            or not isinstance(phases.get("plan"), dict)
+            or not isinstance(phases.get(current_phase), dict)
+            or phases["plan"].get("status") not in allowed_statuses
+            or phases[current_phase].get("status") not in allowed_statuses
+            or phases["plan"].get("status") == "aborted"
+            or phases[current_phase].get("status") == "aborted"
+        ):
+            raise ValueError("selection state is blocked")
+
+        marker_payload = {
+            "artifactHash": current_hash,
+            "previousHash": previous_hash,
+            "decision": decision_id,
+            "option": option_id,
+            "artifactStatus": artifact_status,
+            "source": source,
+            "appliedAt": _now_iso(),
+        }
+        plan_state = phases["plan"]
+        if artifact_status == "selection_required":
+            if current_phase != "plan" or plan_state.get("status") != "deciding":
+                raise ValueError("selection state is blocked")
+            marker_payload["action"] = "selected_pending"
+            state["planningOptions"] = marker_payload
+            _write_workflow_state_unlocked(root, state, directory_fd)
+            return state, "selected_pending"
+
+        if current_phase == "plan" and plan_state.get("status") == "deciding":
+            _clear_phase_runtime_markers(plan_state)
+            plan_state["status"] = "in_progress"
+            plan_state["startedAt"] = _now_iso()
+            marker_payload["action"] = "continued"
+            state["planningOptions"] = marker_payload
+            state.setdefault("history", []).append(
+                {
+                    "phase": "plan",
+                    "action": "continued",
+                    "timestamp": _now_iso(),
+                    "details": "workflow resumed from planning option selection",
+                }
+            )
+            loop = state.setdefault("loop", {})
+            pending = loop.get("pendingDecision")
+            decision_reason = ""
+            if isinstance(pending, dict) and pending.get("phase") == "plan":
+                decision_reason = str(pending.get("reason", "") or "")
+                loop.pop("pendingDecision", None)
+            loop.setdefault("history", []).append(
+                {"fromPhase": "plan", "toPhase": None, "decision": "continue", "reason": decision_reason, "at": _now_iso()}
+            )
+            _write_workflow_state_unlocked(root, state, directory_fd)
+            return state, "continued"
+
+        start = PHASE_ORDER.index("plan")
+        for phase_name in PHASE_ORDER[start:]:
+            phase_state = phases.setdefault(phase_name, {})
+            _clear_phase_runtime_markers(phase_state)
+            for key in ("startedAt", "skippedAt", "skipReason"):
+                phase_state.pop(key, None)
+            phase_state["status"] = "pending"
+            phase_state["retries"] = 0
+            phase_state["executions"] = 0
+        gates = state.setdefault("gates", {})
+        for gate_id in PHASE_GATE.values():
+            gates[gate_id] = _initial_skipped_gate_state(gate_id)
+        state["currentPhase"] = "plan"
+        loop = state.setdefault("loop", {})
+        loop["replanCount"] = int(loop.get("replanCount", 0) or 0) + 1
+        loop.setdefault("maxReplans", 3)
+        pending = loop.get("pendingDecision")
+        if isinstance(pending, dict) and pending.get("phase") == current_phase:
+            loop.pop("pendingDecision", None)
+        replan_reason = str(
+            ((loop.get("lastEscape") or {}) if isinstance(loop.get("lastEscape"), dict) else {}).get("reason", "") or ""
+        )
+        loop.setdefault("history", []).append(
+            {"fromPhase": current_phase, "toPhase": "plan", "decision": "replan", "reason": replan_reason, "at": _now_iso()}
+        )
+        marker_payload["action"] = "replanned"
+        state["planningOptions"] = marker_payload
+        state.setdefault("history", []).append(
+            {
+                "phase": current_phase,
+                "action": "replanned",
+                "timestamp": _now_iso(),
+                "details": "workflow rolled back to plan after planning option selection",
+            }
+        )
+        _write_workflow_state_unlocked(root, state, directory_fd)
+        return state, "replanned"
+
 def promote_database_change_to_high_risk(
     explicit_root: Optional[str],
     reasons: tuple[str, ...],

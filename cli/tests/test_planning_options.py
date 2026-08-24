@@ -5,17 +5,20 @@ import hashlib
 import json
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+import awf.core.planning_options as planning_options
 
 from awf.core.gates import evaluate_planning_options_gate
 from awf.core.planning_options import (
     PlanningOptionsError,
     load_planning_options,
     resolve_planning_options_policy,
+    select_planning_option,
 )
 
 
@@ -878,3 +881,179 @@ def test_planning_options_gate_uses_fixed_sanitized_detail_for_malformed_artifac
     conditions = [item["condition"] for item in evaluations]
     assert conditions == _PLANNING_OPTIONS_GATE_CONDITIONS
     assert {item["detail"] for item in evaluations} == {"artifact_invalid"}
+
+def test_select_option_appends_one_history_entry_and_reuses_an_existing_selection(
+    tmp_path: Path,
+):
+    _write_artifact(tmp_path, _artifact())
+
+    selected = select_planning_option(tmp_path, "D-001", "O-002", "operator")
+    reused = select_planning_option(tmp_path, "D-001", "O-002", "another-operator")
+
+    assert set(selected.__dataclass_fields__) == {
+        "decision_id",
+        "option_id",
+        "status",
+        "changed",
+        "previous_hash",
+        "current_hash",
+    }
+    assert selected.decision_id == "D-001"
+    assert selected.option_id == "O-002"
+    assert selected.status == "selected"
+    assert selected.changed is True
+    assert selected.previous_hash != selected.current_hash
+    assert reused.changed is False
+    assert reused.previous_hash == reused.current_hash
+    loaded = load_planning_options(tmp_path)
+    assert loaded.status == "selected"
+    assert loaded.decisions[0].selected_option_id == "O-002"
+    assert len(loaded.selection_history) == 1
+    assert loaded.selection_history[0].previous_option_id is None
+    assert loaded.selection_history[0].selected_by == "operator"
+
+
+@pytest.mark.parametrize("unsafe_path", ["artifact_symlink", "artifact_hardlink", "lock_hardlink"])
+def test_select_option_rejects_unsafe_artifact_and_lock_links(
+    tmp_path: Path, unsafe_path: str
+):
+    artifact_path = _write_artifact(tmp_path, _artifact())
+    outside = tmp_path / "outside.json"
+    original = artifact_path.read_text(encoding="utf-8")
+    outside.write_text(original, encoding="utf-8")
+
+    if unsafe_path == "artifact_symlink":
+        artifact_path.unlink()
+        artifact_path.symlink_to(outside)
+    elif unsafe_path == "artifact_hardlink":
+        artifact_path.unlink()
+        os.link(outside, artifact_path)
+    else:
+        os.link(
+            outside,
+            artifact_path.with_name("planning-options.json.lock"),
+        )
+
+    with pytest.raises(PlanningOptionsError) as exc:
+        select_planning_option(tmp_path, "D-001", "O-002", "operator")
+
+    _assert_code(exc, "artifact_invalid")
+    assert outside.read_text(encoding="utf-8") == original
+
+
+def test_select_option_serializes_concurrent_reuse_without_duplicate_history(
+    tmp_path: Path,
+):
+    _write_artifact(tmp_path, _artifact())
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(
+            executor.map(
+                lambda _: select_planning_option(tmp_path, "D-001", "O-002", "operator"),
+                range(2),
+            )
+        )
+
+    loaded = load_planning_options(tmp_path)
+    assert sum(result.changed for result in results) == 1
+    assert len(loaded.selection_history) == 1
+
+
+def test_select_option_rejects_a_symlinked_repository_root(tmp_path: Path):
+    _write_artifact(tmp_path, _artifact())
+    root_link = tmp_path.parent / f"{tmp_path.name}-selection-root"
+    root_link.symlink_to(tmp_path, target_is_directory=True)
+
+    with pytest.raises(PlanningOptionsError) as exc:
+        select_planning_option(root_link, "D-001", "O-002", "operator")
+
+    _assert_code(exc, "repo_root_invalid")
+
+
+def test_select_option_rejects_owner_mismatch_without_mutating_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    artifact_path = _write_artifact(tmp_path, _artifact())
+    original = artifact_path.read_text(encoding="utf-8")
+    current_uid = os.getuid()
+    monkeypatch.setattr(planning_options.os, "getuid", lambda: current_uid + 1)
+
+    with pytest.raises(PlanningOptionsError) as exc:
+        select_planning_option(tmp_path, "D-001", "O-002", "operator")
+
+    _assert_code(exc, "artifact_invalid")
+    assert artifact_path.read_text(encoding="utf-8") == original
+
+
+def test_select_option_rejects_preexisting_random_temporary_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    artifact_path = _write_artifact(tmp_path, _artifact())
+    outside = tmp_path / "outside.json"
+    outside.write_text("outside remains intact", encoding="utf-8")
+    monkeypatch.setattr(planning_options.secrets, "token_hex", lambda _: "fixed")
+    temporary = artifact_path.with_name(".planning-options.json.fixed.tmp")
+    os.link(outside, temporary)
+
+    with pytest.raises(PlanningOptionsError) as exc:
+        select_planning_option(tmp_path, "D-001", "O-002", "operator")
+
+    _assert_code(exc, "artifact_invalid")
+    assert outside.read_text(encoding="utf-8") == "outside remains intact"
+
+
+@pytest.mark.parametrize("failure", ["fsync", "replace"])
+def test_select_option_cleans_its_temporary_after_atomic_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+):
+    artifact_path = _write_artifact(tmp_path, _artifact())
+    original = artifact_path.read_text(encoding="utf-8")
+
+    def fail(*_args, **_kwargs):
+        raise OSError("injected")
+
+    monkeypatch.setattr(planning_options.os, failure, fail)
+    with pytest.raises(OSError):
+        select_planning_option(tmp_path, "D-001", "O-002", "operator")
+
+    assert artifact_path.read_text(encoding="utf-8") == original
+    assert not list(artifact_path.parent.glob(".planning-options.json.*.tmp"))
+
+
+def test_select_option_cleans_temporary_after_directory_fsync_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    artifact_path = _write_artifact(tmp_path, _artifact())
+    original_fsync = planning_options.os.fsync
+    calls = 0
+
+    def fail_directory_fsync(descriptor: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 4:
+            raise OSError("injected artifact directory fsync failure")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(planning_options.os, "fsync", fail_directory_fsync)
+    with pytest.raises(OSError):
+        select_planning_option(tmp_path, "D-001", "O-002", "operator")
+
+    assert load_planning_options(tmp_path).status == "selected"
+    assert not list(artifact_path.parent.glob(".planning-options.json.*.tmp"))
+
+
+def test_reconciliation_journal_failure_leaves_the_prior_artifact_intact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    artifact_path = _write_artifact(tmp_path, _artifact())
+    original = artifact_path.read_text(encoding="utf-8")
+    monkeypatch.setattr(
+        planning_options,
+        "_write_reconciliation_marker",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("injected")),
+    )
+
+    with pytest.raises(OSError):
+        select_planning_option(tmp_path, "D-001", "O-002", "operator")
+
+    assert artifact_path.read_text(encoding="utf-8") == original

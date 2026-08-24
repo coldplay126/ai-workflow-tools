@@ -1,0 +1,532 @@
+"""Durable CLI selection and workflow-reconciliation tests."""
+from __future__ import annotations
+
+import json
+from argparse import Namespace
+from pathlib import Path
+
+import pytest
+
+from awf.cli import build_parser
+from awf.commands import wf as wf_commands
+from awf.commands.wf import run_wf_select_option
+from awf.core.planning_options import load_planning_options
+
+
+_PHASES = ("plan", "review", "approve", "impl", "verify", "test", "done")
+
+
+def _option(option_id: str, summary: str) -> dict[str, object]:
+    return {
+        "id": option_id,
+        "summary": summary,
+        "affected_work": ["service", "tests"],
+        "acceptance_delta": "Acceptance evidence changes with the rollout.",
+        "work_risks": ["Implementation work differs."],
+        "transition_risks": ["Transition behavior differs."],
+        "rollback_or_exit": "Restore the prior release before reopening traffic.",
+    }
+
+
+def _decision(
+    decision_id: str,
+    *,
+    selected_option_id: str | None = None,
+    selected_by: str | None = None,
+    selected_at: str | None = None,
+) -> dict[str, object]:
+    return {
+        "id": decision_id,
+        "question": f"Which rollout should apply for {decision_id}?",
+        "materiality_axes": ["compatibility_migration", "security_slo"],
+        "options": [
+            _option("O-001", "Use the guarded rollout."),
+            _option("O-002", "Use the direct cutover."),
+        ],
+        "recommended_option_id": "O-001",
+        "recommendation_rationale": "The guarded rollout preserves an explicit exit path.",
+        "selected_option_id": selected_option_id,
+        "selected_by": selected_by,
+        "selected_at": selected_at,
+    }
+
+
+def _artifact(*, decision_count: int = 1, selected: bool = False) -> dict[str, object]:
+    selected_at = "2026-08-24T10:00:00Z" if selected else None
+    decisions = [
+        _decision(
+            f"D-{index:03d}",
+            selected_option_id="O-001" if selected else None,
+            selected_by="prior-operator" if selected else None,
+            selected_at=selected_at,
+        )
+        for index in range(1, decision_count + 1)
+    ]
+    history = [
+        {
+            "decision_id": decision["id"],
+            "previous_option_id": None,
+            "selected_option_id": "O-001",
+            "selected_by": "prior-operator",
+            "selected_at": selected_at,
+            "source": "cli",
+        }
+        for decision in decisions
+    ] if selected else []
+    return {
+        "schema_version": 1,
+        "status": "selected" if selected else "selection_required",
+        "no_decision_reason": None,
+        "decisions": decisions,
+        "selection_history": history,
+    }
+
+
+def _write_artifact(root: Path, artifact: dict[str, object]) -> None:
+    path = root / ".workflow" / "artifacts" / "planning-options.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+
+
+def _state(*, current_phase: str, plan_status: str, g1_passed: bool | None) -> dict:
+    phases = {phase: {"status": "pending", "retries": 0} for phase in _PHASES}
+    phases["plan"]["status"] = plan_status
+    if current_phase != "plan":
+        for phase in _PHASES[1:_PHASES.index(current_phase)]:
+            phases[phase]["status"] = "completed"
+    return {
+        "id": "planning-option-selection",
+        "repo": "selection-repo",
+        "branch": "main",
+        "currentPhase": current_phase,
+        "phases": phases,
+        "gates": {
+            "G1": {"passed": g1_passed},
+            "G2": {"passed": True, "provider": "fixture", "provider_status": "PASS"},
+            "G3": {"passed": True, "scope_hash": "prior-scope"},
+            "G4": {"passed": True},
+            "G5": {"passed": True, "provider": "fixture", "provider_status": "PASS"},
+            "G6": {"passed": True},
+        },
+        "totalExecutions": 0,
+        "loop": {"replanCount": 0, "maxReplans": 3},
+        "history": [],
+    }
+
+
+def _write_state(root: Path, state: dict) -> None:
+    path = root / ".workflow" / "state.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+
+def _load_state(root: Path) -> dict:
+    return json.loads((root / ".workflow" / "state.json").read_text(encoding="utf-8"))
+
+
+def _args(
+    root: Path,
+    decision_id: str,
+    option_id: str,
+    actor: str = "operator",
+    *,
+    json_output: bool = False,
+) -> Namespace:
+    return Namespace(
+        repo_root=str(root),
+        decision_id=decision_id,
+        option_id=option_id,
+        actor=actor,
+        json=json_output,
+    )
+
+
+def test_select_option_parser_requires_exact_flags_and_supports_json() -> None:
+    parsed = build_parser().parse_args(
+        [
+            "wf",
+            "select-option",
+            "--decision-id",
+            "D-001",
+            "--option-id",
+            "O-002",
+            "--actor",
+            "operator",
+            "--json",
+        ]
+    )
+
+    assert parsed.decision_id == "D-001"
+    assert parsed.option_id == "O-002"
+    assert parsed.actor == "operator"
+    assert parsed.json is True
+    assert parsed.handler is run_wf_select_option
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["wf", "select-option", "--decision-id", "D-001"])
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            ["wf", "select-option", "D-001", "O-002", "--selected-by", "operator"]
+        )
+
+
+def test_initial_deciding_phase_waits_for_every_selection_before_continuing(tmp_path: Path) -> None:
+    _write_artifact(tmp_path, _artifact(decision_count=2))
+    _write_state(tmp_path, _state(current_phase="plan", plan_status="deciding", g1_passed=None))
+
+    first = run_wf_select_option(_args(tmp_path, "D-001", "O-002"))
+    partial_state = _load_state(tmp_path)
+    second = run_wf_select_option(_args(tmp_path, "D-002", "O-002"))
+    completed_state = _load_state(tmp_path)
+
+    assert first == 0
+    assert partial_state["currentPhase"] == "plan"
+    assert partial_state["phases"]["plan"]["status"] == "deciding"
+    assert partial_state["planningOptions"]["action"] == "selected_pending"
+    assert second == 0
+    assert completed_state["phases"]["plan"]["status"] == "in_progress"
+    assert completed_state["planningOptions"]["action"] == "continued"
+    assert [item["action"] for item in completed_state["history"]] == ["continued"]
+
+
+def test_post_g1_selection_replans_and_resets_every_downstream_gate(tmp_path: Path) -> None:
+    _write_artifact(tmp_path, _artifact(selected=True))
+    _write_state(tmp_path, _state(current_phase="impl", plan_status="completed", g1_passed=True))
+
+    rc = run_wf_select_option(_args(tmp_path, "D-001", "O-002"))
+    state = _load_state(tmp_path)
+
+    assert rc == 0
+    assert state["currentPhase"] == "plan"
+    assert {phase["status"] for phase in state["phases"].values()} == {"pending"}
+    assert state["gates"] == {
+        "G1": {"passed": None},
+        "G2": {"passed": None, "provider": None, "provider_status": None},
+        "G3": {"passed": None, "scope_hash": None},
+        "G4": {"passed": None},
+        "G5": {"passed": None, "provider": None, "provider_status": None},
+        "G6": {"passed": None},
+    }
+    assert state["loop"]["replanCount"] == 1
+    assert [entry["action"] for entry in state["history"]].count("replanned") == 1
+
+
+def test_post_g1_same_option_reuse_preserves_gates_and_replan_count(tmp_path: Path) -> None:
+    _write_artifact(tmp_path, _artifact(selected=True))
+    state = _state(current_phase="review", plan_status="completed", g1_passed=True)
+    state["planningOptions"] = {
+        "artifactHash": load_planning_options(tmp_path).artifact_hash,
+        "decision": "D-001",
+        "option": "O-001",
+        "appliedAt": "2026-08-24T10:00:00Z",
+        "action": "replanned",
+    }
+    _write_state(tmp_path, state)
+
+    before = _load_state(tmp_path)
+    assert run_wf_select_option(_args(tmp_path, "D-001", "O-001")) == 0
+    after_reuse = _load_state(tmp_path)
+
+    assert after_reuse["gates"] == before["gates"]
+    assert after_reuse["loop"]["replanCount"] == 0
+    assert after_reuse["history"] == before["history"]
+
+
+def test_marker_absent_same_option_reuse_preserves_post_g1_state(tmp_path: Path) -> None:
+    _write_artifact(tmp_path, _artifact(selected=True))
+    _write_state(tmp_path, _state(current_phase="review", plan_status="completed", g1_passed=True))
+
+    assert run_wf_select_option(_args(tmp_path, "D-001", "O-001")) == 0
+    reused = _load_state(tmp_path)
+
+    assert reused["loop"]["replanCount"] == 0
+    assert reused["gates"]["G3"]["scope_hash"] == "prior-scope"
+
+
+
+
+def test_empty_reconciliation_journal_blocks_retry_without_state_transition(
+    tmp_path: Path
+) -> None:
+    _write_artifact(tmp_path, _artifact(selected=True))
+    _write_state(tmp_path, _state(current_phase="review", plan_status="completed", g1_passed=True))
+    marker = tmp_path / ".workflow" / "artifacts" / ".planning-options-reconcile"
+    marker.write_text("", encoding="utf-8")
+
+    assert run_wf_select_option(_args(tmp_path, "D-001", "O-001")) == 1
+
+    assert _load_state(tmp_path)["loop"]["replanCount"] == 0
+def test_retry_after_state_failure_reconciles_without_duplicate_replan_history(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    _write_artifact(tmp_path, _artifact(selected=True))
+    _write_state(tmp_path, _state(current_phase="review", plan_status="completed", g1_passed=True))
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            wf_commands,
+            "apply_planning_option_selection",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("state blocked")),
+        )
+        assert run_wf_select_option(_args(tmp_path, "D-001", "O-002")) == 1
+
+    failed_output = capsys.readouterr().err
+    persisted_artifact = json.loads(
+        (tmp_path / ".workflow" / "artifacts" / "planning-options.json").read_text(encoding="utf-8")
+    )
+    assert "top-secret" not in failed_output
+    assert persisted_artifact["decisions"][0]["selected_option_id"] == "O-002"
+    assert len(persisted_artifact["selection_history"]) == 2
+
+    assert run_wf_select_option(_args(tmp_path, "D-001", "O-002")) == 0
+    reconciled = _load_state(tmp_path)
+    assert reconciled["loop"]["replanCount"] == 1
+    assert [entry["action"] for entry in reconciled["history"]].count("replanned") == 1
+
+
+def test_select_option_rejects_invalid_input_without_echoing_sensitive_values(
+    tmp_path: Path, capsys
+) -> None:
+    _write_artifact(tmp_path, _artifact())
+    _write_state(tmp_path, _state(current_phase="plan", plan_status="deciding", g1_passed=None))
+
+    rc = run_wf_select_option(_args(tmp_path, "D-001", "O-099", "password=top-secret"))
+
+    assert rc == 1
+    assert "top-secret" not in capsys.readouterr().err
+
+
+def test_plan_in_progress_selection_change_replans_instead_of_leaving_stale_plan(
+    tmp_path: Path,
+) -> None:
+    _write_artifact(tmp_path, _artifact(selected=True))
+    _write_state(tmp_path, _state(current_phase="plan", plan_status="in_progress", g1_passed=None))
+
+    assert run_wf_select_option(_args(tmp_path, "D-001", "O-002")) == 0
+    state = _load_state(tmp_path)
+
+    assert state["currentPhase"] == "plan"
+    assert state["phases"]["plan"]["status"] == "pending"
+    assert state["loop"]["replanCount"] == 1
+
+
+def test_select_option_json_exposes_only_ids_status_actions_and_hashes(
+    tmp_path: Path, capsys
+) -> None:
+    _write_artifact(tmp_path, _artifact())
+    _write_state(tmp_path, _state(current_phase="plan", plan_status="deciding", g1_passed=None))
+
+    assert run_wf_select_option(
+        _args(tmp_path, "D-001", "O-002", json_output=True)
+    ) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert set(payload) == {
+        "decision_id",
+        "option_id",
+        "status",
+        "selection_action",
+        "workflow_action",
+        "previous_hash",
+        "current_hash",
+    }
+    assert payload["decision_id"] == "D-001"
+    assert payload["option_id"] == "O-002"
+    assert payload["status"] == "selected"
+    assert payload["selection_action"] == "selected"
+    assert payload["workflow_action"] == "continued"
+    assert "guarded rollout" not in json.dumps(payload)
+
+
+def test_state_marker_makes_reconciliation_idempotent_after_a_success(tmp_path: Path) -> None:
+    _write_artifact(tmp_path, _artifact(selected=True))
+    _write_state(tmp_path, _state(current_phase="review", plan_status="completed", g1_passed=True))
+
+    assert run_wf_select_option(_args(tmp_path, "D-001", "O-002")) == 0
+    state = _load_state(tmp_path)
+
+    assert state["planningOptions"]["artifactHash"]
+    assert state["planningOptions"]["decision"] == "D-001"
+    assert state["planningOptions"]["option"] == "O-002"
+    assert state["planningOptions"]["action"] == "replanned"
+
+
+def test_aborted_state_rejects_a_change_before_artifact_publication(
+    tmp_path: Path, capsys
+) -> None:
+    _write_artifact(tmp_path, _artifact(selected=True))
+    state = _state(current_phase="plan", plan_status="completed", g1_passed=True)
+    state["currentPhase"] = "aborted"
+    _write_state(tmp_path, state)
+    original = (
+        tmp_path / ".workflow" / "artifacts" / "planning-options.json"
+    ).read_text(encoding="utf-8")
+
+    assert run_wf_select_option(_args(tmp_path, "D-001", "O-002")) == 1
+
+    assert "rejected" in capsys.readouterr().err
+    assert (
+        tmp_path / ".workflow" / "artifacts" / "planning-options.json"
+    ).read_text(encoding="utf-8") == original
+
+
+def test_select_option_returns_operational_exit_without_exposing_a_bad_root(
+    tmp_path: Path, capsys
+) -> None:
+    missing_root = tmp_path / "missing-root"
+
+    assert run_wf_select_option(_args(missing_root, "D-001", "O-002")) == 2
+
+    output = capsys.readouterr().err
+    assert "unavailable" in output
+    assert str(missing_root) not in output
+
+
+def test_select_option_rejects_a_symlinked_root_before_artifact_publication(
+    tmp_path: Path, capsys
+) -> None:
+    _write_artifact(tmp_path, _artifact())
+    _write_state(tmp_path, _state(current_phase="plan", plan_status="deciding", g1_passed=None))
+    root_link = tmp_path.parent / f"{tmp_path.name}-root-link"
+    root_link.symlink_to(tmp_path, target_is_directory=True)
+
+    assert run_wf_select_option(_args(root_link, "D-001", "O-002")) == 2
+
+    assert "unavailable" in capsys.readouterr().err
+    artifact = json.loads(
+        (tmp_path / ".workflow" / "artifacts" / "planning-options.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert artifact["decisions"][0]["selected_option_id"] is None
+
+
+def test_marker_hash_reuses_a_multi_decision_artifact_for_each_decision(
+    tmp_path: Path,
+) -> None:
+    artifact = _artifact(decision_count=2, selected=True)
+    artifact["decisions"][0]["selected_option_id"] = "O-002"
+    artifact["decisions"][0]["selected_by"] = "prior-operator"
+    artifact["decisions"][0]["selected_at"] = "2026-08-24T10:01:00Z"
+    artifact["selection_history"].append(
+        {
+            "decision_id": "D-001",
+            "previous_option_id": "O-001",
+            "selected_option_id": "O-002",
+            "selected_by": "prior-operator",
+            "selected_at": "2026-08-24T10:01:00Z",
+            "source": "cli",
+        }
+    )
+    _write_artifact(tmp_path, artifact)
+    state = _state(current_phase="review", plan_status="completed", g1_passed=True)
+    state["planningOptions"] = {
+        "artifactHash": load_planning_options(tmp_path).artifact_hash,
+        "decision": "D-002",
+        "option": "O-001",
+        "appliedAt": "2026-08-24T10:02:00Z",
+        "action": "replanned",
+    }
+    _write_state(tmp_path, state)
+
+    assert run_wf_select_option(_args(tmp_path, "D-001", "O-002")) == 0
+    reused = _load_state(tmp_path)
+
+    assert reused["loop"]["replanCount"] == 0
+    assert reused["gates"]["G3"]["scope_hash"] == "prior-scope"
+
+
+def test_retry_confirms_directory_fsync_before_reconciling_visible_artifact(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import awf.core.planning_options as planning_options
+
+    _write_artifact(tmp_path, _artifact(selected=True))
+    _write_state(tmp_path, _state(current_phase="review", plan_status="completed", g1_passed=True))
+    original_fsync = planning_options.os.fsync
+    fsync_calls = 0
+
+    def fail_first_directory_fsync(descriptor: int) -> None:
+        nonlocal fsync_calls
+        fsync_calls += 1
+        if fsync_calls == 4:
+            raise OSError("artifact directory sync failed")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(planning_options.os, "fsync", fail_first_directory_fsync)
+    assert run_wf_select_option(_args(tmp_path, "D-001", "O-002")) == 2
+    assert _load_state(tmp_path)["loop"]["replanCount"] == 0
+
+    original_replan = wf_commands.replan_workflow
+
+    def assert_retry_was_synced(*args, **kwargs):
+        assert fsync_calls >= 5
+        return original_replan(*args, **kwargs)
+
+    monkeypatch.setattr(wf_commands, "replan_workflow", assert_retry_was_synced)
+    assert run_wf_select_option(_args(tmp_path, "D-001", "O-002")) == 0
+    assert _load_state(tmp_path)["loop"]["replanCount"] == 1
+
+
+def test_corrupt_current_phase_rejects_a_change_before_artifact_publication(
+    tmp_path: Path, capsys
+) -> None:
+    _write_artifact(tmp_path, _artifact(selected=True))
+    state = _state(current_phase="plan", plan_status="completed", g1_passed=True)
+    state["currentPhase"] = "corrupt"
+    _write_state(tmp_path, state)
+    artifact_path = tmp_path / ".workflow" / "artifacts" / "planning-options.json"
+    original = artifact_path.read_text(encoding="utf-8")
+
+    assert run_wf_select_option(_args(tmp_path, "D-001", "O-002")) == 1
+
+    assert "rejected" in capsys.readouterr().err
+    assert artifact_path.read_text(encoding="utf-8") == original
+
+
+def test_aborted_current_phase_status_rejects_a_change_before_publication(
+    tmp_path: Path
+) -> None:
+    _write_artifact(tmp_path, _artifact(selected=True))
+    state = _state(current_phase="plan", plan_status="aborted", g1_passed=True)
+    _write_state(tmp_path, state)
+    artifact_path = tmp_path / ".workflow" / "artifacts" / "planning-options.json"
+    original = artifact_path.read_text(encoding="utf-8")
+
+    assert run_wf_select_option(_args(tmp_path, "D-001", "O-002")) == 1
+
+    assert artifact_path.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize(
+    "invalid_plan_state",
+    [None, "corrupt", {"status": "aborted", "retries": 0}],
+)
+def test_invalid_plan_state_rejects_before_artifact_publication(
+    tmp_path: Path, invalid_plan_state: object
+) -> None:
+    _write_artifact(tmp_path, _artifact(selected=True))
+    state = _state(current_phase="review", plan_status="completed", g1_passed=True)
+    if invalid_plan_state is None:
+        state["phases"].pop("plan")
+    else:
+        state["phases"]["plan"] = invalid_plan_state
+    _write_state(tmp_path, state)
+    artifact_path = tmp_path / ".workflow" / "artifacts" / "planning-options.json"
+    original = artifact_path.read_text(encoding="utf-8")
+
+    assert run_wf_select_option(_args(tmp_path, "D-001", "O-002")) == 1
+
+    assert artifact_path.read_text(encoding="utf-8") == original
+
+
+def test_aborted_later_phase_rejects_before_artifact_publication(tmp_path: Path) -> None:
+    _write_artifact(tmp_path, _artifact(selected=True))
+    state = _state(current_phase="review", plan_status="completed", g1_passed=True)
+    state["phases"]["review"]["status"] = "aborted"
+    _write_state(tmp_path, state)
+    artifact_path = tmp_path / ".workflow" / "artifacts" / "planning-options.json"
+    original = artifact_path.read_text(encoding="utf-8")
+
+    assert run_wf_select_option(_args(tmp_path, "D-001", "O-002")) == 1
+
+    assert artifact_path.read_text(encoding="utf-8") == original

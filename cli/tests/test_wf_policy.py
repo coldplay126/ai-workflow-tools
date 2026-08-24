@@ -35,6 +35,7 @@ from awf.core.state import (
     resolve_next_phase,
 )
 from awf.core.workflow_prompt import _validate_preconditions, is_hil_phase
+from awf.core.workflow_loop import replan_workflow
 
 
 # ---------------------------------------------------------------------------
@@ -1026,6 +1027,29 @@ def test_database_risk_rejects_preexisting_temporary_links(
         )
 
     assert external_temp.read_text(encoding="utf-8") == original
+
+
+def test_replan_resets_all_gate_shapes_including_g3_scope_hash(tmp_path: Path):
+    state = _make_state(current_phase="impl")
+    state["phases"]["plan"]["status"] = "completed"
+    state["phases"]["review"]["status"] = "completed"
+    state["phases"]["approve"]["status"] = "completed"
+    for gate_id, gate in state["gates"].items():
+        gate["passed"] = True
+        gate["stale"] = gate_id
+    state["gates"]["G3"]["scope_hash"] = "stale-scope"
+    _write_workflow_state(tmp_path, state)
+
+    replanned = replan_workflow(str(tmp_path), "impl", "plan")
+
+    assert replanned["gates"] == {
+        "G1": {"passed": None},
+        "G2": {"passed": None, "provider": None, "provider_status": None},
+        "G3": {"passed": None, "scope_hash": None},
+        "G4": {"passed": None},
+        "G5": {"passed": None, "provider": None, "provider_status": None},
+        "G6": {"passed": None},
+    }
 
 
 # ===========================================================================
