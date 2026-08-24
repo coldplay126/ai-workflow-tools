@@ -89,10 +89,11 @@ After a selected/no-decision rerun writes exactly `constitution.md`, `spec.md`,
 host—not this worker—runs `awf wf seal-plan --repo-root . --json`. Its
 `planning-provenance.json` is exactly `schema_version: 1`,
 `planning_options_hash`, and `artifacts` with those six lowercase SHA-256 hashes.
-Do not write, reuse, or hand-edit this seal. `selection_required` cannot seal;
-selection or any six-artifact change archives active outputs/provenance as
+Do not write or hand-edit this seal. `selection_required` cannot seal; selection
+or any six-artifact change archives active outputs/provenance as
 `.stale.<previous_hash[:12]>.<name>` and makes the old seal stale until the
-parent reruns and reseals.
+parent reruns and reseals. Same-hash `reuse` creates no archive. A present legacy
+artifact also requires a current seal; only absent legacy artifacts are exempt.
 
 ## 데이터베이스 변경 결정
 

@@ -142,7 +142,8 @@ G1–G6 initial gate shape(`G3.scope_hash: null`)를 reset하고 replan/history
 semantics를 보존한다. unchanged selection hash는 `reuse`다. Missing
 manifest/profile plus absent artifact is `legacy_not_required`. Only explicit
 `planning_options.required: false` plus absent artifact is `not_required`. Every
-present artifact is strictly validated regardless of profile.
+present artifact is strictly validated regardless of profile. A present artifact
+requires a current seal; same-hash `reuse` creates no archive.
 
 
 ### Phase별 Agent Card 비교

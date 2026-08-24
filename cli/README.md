@@ -48,7 +48,8 @@ plan~done phases, retries/executions, runtime/skip marker, G1–G6 initial gate 
 (`G3.scope_hash: null`)를 reset하면서 replan/history semantics를 보존한다. Missing
 manifest/profile plus absent artifact is `legacy_not_required`. Only explicit
 `planning_options.required: false` plus absent artifact is `not_required`. Every
-present artifact is strictly validated regardless of profile.
+present artifact is strictly validated regardless of profile. A present artifact
+requires a current seal; only absent legacy artifacts are seal-exempt.
 
 After a selected/no-decision plan rerun writes `constitution.md`, `spec.md`,
 `plan.md`, `tasks.md`, `test-criteria.md`, and `allowed-files.json`, the host
@@ -56,6 +57,7 @@ seals their exact hashes with the current Planning Options hash before G1.
 `selection_required` cannot seal; changed selections archive all six outputs and
 active provenance as `.stale.<previous_hash[:12]>.<name>`, while regenerated
 outputs on retry are archived again before the new seal.
+Same-hash `reuse` creates no archive.
 
 ```bash
 awf wf seal-plan --repo-root . --json

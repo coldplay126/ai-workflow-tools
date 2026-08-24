@@ -454,8 +454,9 @@ reports `provenance_invalid`; a changed option or any of the six regenerated
 artifacts reports `provenance_changed`. On selection change, the host archives
 the six active outputs and active provenance as
 `.stale.<previous_hash[:12]>.<name>`; retries archive recreated outputs again
-instead of reusing or overwriting stale evidence. Regenerate the six artifacts
-and seal again after every changed selection; an old seal is deliberately stale.
+instead of overwriting stale evidence. Same-hash `reuse` creates no archive.
+Regenerate the six artifacts and seal again after every changed selection; an
+old seal is deliberately stale.
 
 #### Canonical provenance fixture
 
@@ -497,9 +498,9 @@ runtime/skip marker, G1–G6 initial shape(`G3.scope_hash: null` 포함)를 초�
 
 manifest가 없거나 `planning_options` profile이 없고 artifact도 없으면
 `legacy_not_required`로 계속한다. `required: false`와 artifact 부재도
-`not_required`다. artifact가 존재하면 profile과 무관하게 strict validation한다:
-malformed profile 또는 artifact는 fail closed이며 G1 detail은
-`profile_invalid` 또는 sanitized `artifact_invalid`이다.
+`not_required`다. Artifact가 present인 legacy workflow도 current seal이 필요하며,
+profile과 무관하게 strict validation한다. malformed profile 또는 artifact는 fail
+closed이며 G1 detail은 `profile_invalid` 또는 sanitized `artifact_invalid`이다.
 
 ### 7. Gate G1 검증
 
