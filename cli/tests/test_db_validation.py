@@ -33,7 +33,9 @@ def write_workflow_artifacts(
         "test-criteria.md": test_criteria,
     }.items():
         (artifacts_dir / name).write_text(content, encoding="utf-8")
-    allowed_payload = {"planned_files": allowed_files or []}
+    allowed_payload = {}
+    if allowed_files is not None:
+        allowed_payload["planned_files"] = allowed_files
     if legacy_files is not None:
         allowed_payload["files"] = legacy_files
     if expanded_files is not None:
@@ -75,7 +77,9 @@ def test_database_signal_detects_db_with_relational_context(tmp_path: Path) -> N
     assert "text:database" in detect_database_signal(tmp_path).reasons
 
 
-def test_database_signal_unions_expanded_and_legacy_allowed_files(tmp_path: Path) -> None:
+def test_database_signal_uses_expanded_files_with_canonical_planned_files(
+    tmp_path: Path,
+) -> None:
     write_workflow_artifacts(
         tmp_path,
         allowed_files=["src/index.ts"],
@@ -88,10 +92,32 @@ def test_database_signal_unions_expanded_and_legacy_allowed_files(tmp_path: Path
 
     assert detect_database_signal(tmp_path) == DatabaseSignal(
         detected=True,
-        reasons=(
-            "path:src/database/migrations/001_add_index.sql",
-            "path:src/models/fan_log.py",
-        ),
+        reasons=("path:src/database/migrations/001_add_index.sql",),
+    )
+
+
+def test_database_signal_ignores_stale_legacy_files_when_planned_exist(
+    tmp_path: Path,
+) -> None:
+    write_workflow_artifacts(
+        tmp_path,
+        allowed_files=["src/index.ts"],
+        legacy_files=["src/database/stale_schema.sql"],
+    )
+
+    assert detect_database_signal(tmp_path).detected is False
+
+
+def test_database_signal_falls_back_to_legacy_files_when_planned_absent(
+    tmp_path: Path,
+) -> None:
+    write_workflow_artifacts(
+        tmp_path,
+        legacy_files=["src/database/migrations/001_add_index.sql"],
+    )
+
+    assert detect_database_signal(tmp_path).reasons == (
+        "path:src/database/migrations/001_add_index.sql",
     )
 
 

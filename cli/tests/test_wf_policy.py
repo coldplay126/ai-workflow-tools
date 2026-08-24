@@ -68,41 +68,30 @@ def _write_workflow_state(repo_root: Path, state: dict) -> None:
     )
 
 
-def _write_concurrent_phase_update(
+def _apply_gate_result_after_stale_read(
     repo_root: str,
     snapshot_ready: Any,
     release_snapshot: Any,
 ) -> None:
-    from awf.core.state import (
-        _workflow_state_file_lock,
-        load_workflow_state,
-        save_workflow_state_snapshot,
-    )
+    import awf.core.state as workflow_state
 
-    root = Path(repo_root)
-    state_path = root / ".workflow" / "state.json"
-    with _workflow_state_file_lock(state_path):
-        state = load_workflow_state(repo_root)
+    original_save = workflow_state._save_workflow_state
+
+    def delayed_save(explicit_root: str, state: dict) -> Path:
         snapshot_ready.set()
         if not release_snapshot.wait(timeout=10):
             raise TimeoutError("timed out waiting to save concurrent state update")
-        state["phases"]["impl"] = {"status": "in_progress", "retries": 0}
-        state["history"].append(
-            {
-                "phase": "impl",
-                "action": "concurrent_started",
-                "timestamp": "2026-08-24T00:00:00+00:00",
-            }
-        )
-        save_workflow_state_snapshot(repo_root, state)
+        return original_save(explicit_root, state)
+
+    workflow_state._save_workflow_state = delayed_save
+    try:
+        workflow_state.apply_gate_result(repo_root, "impl", True)
+    finally:
+        workflow_state._save_workflow_state = original_save
 
 
-def _promote_database_risk(
-    repo_root: str,
-    completed: Any,
-) -> None:
+def _promote_database_risk(repo_root: str) -> None:
     promote_database_change_to_high_risk(repo_root, ("text:query",))
-    completed.set()
 
 
 # ===========================================================================
@@ -703,8 +692,8 @@ def test_database_risk_manifest_default_is_additive_and_disabled():
     }
 
 
-def test_database_risk_serializes_concurrent_state_updates(tmp_path: Path):
-    """A DB escalation cannot overwrite an update holding the state file lock."""
+def test_database_risk_preserves_stale_production_state_update(tmp_path: Path):
+    """A stale apply result cannot erase database high-risk facts."""
     state = _make_state("small")
     _apply_policy_skips(state)
     _write_workflow_state(tmp_path, state)
@@ -712,37 +701,42 @@ def test_database_risk_serializes_concurrent_state_updates(tmp_path: Path):
     context = multiprocessing.get_context("spawn")
     snapshot_ready = context.Event()
     release_snapshot = context.Event()
-    promotion_completed = context.Event()
     updater = context.Process(
-        target=_write_concurrent_phase_update,
+        target=_apply_gate_result_after_stale_read,
         args=(str(tmp_path), snapshot_ready, release_snapshot),
     )
-    promoter = context.Process(
-        target=_promote_database_risk,
-        args=(str(tmp_path), promotion_completed),
-    )
+    promoter = context.Process(target=_promote_database_risk, args=(str(tmp_path),))
     updater.start()
-    promotion_started = False
     try:
         assert snapshot_ready.wait(timeout=5)
         promoter.start()
-        promotion_started = True
-        assert not promotion_completed.wait(timeout=1)
+        promoter.join(timeout=10)
+        assert promoter.exitcode == 0
     finally:
         release_snapshot.set()
         updater.join(timeout=10)
-        if promotion_started:
-            promoter.join(timeout=10)
 
     assert updater.exitcode == 0
-    assert promoter.exitcode == 0
     persisted = json.loads(
         (tmp_path / ".workflow" / "state.json").read_text(encoding="utf-8")
     )
     assert persisted["changeClass"] == "high_risk"
-    assert persisted["phases"]["impl"] == {"status": "in_progress", "retries": 0}
+    assert persisted["phases"]["impl"]["status"] == "completed"
+    for phase in ("review", "approve", "verify"):
+        assert persisted["phases"][phase] == {"status": "pending", "retries": 0}
+    assert persisted["gates"]["G2"] == {
+        "passed": None,
+        "provider": None,
+        "provider_status": None,
+    }
+    assert persisted["gates"]["G3"] == {"passed": None, "scope_hash": None}
+    assert persisted["gates"]["G5"] == {
+        "passed": None,
+        "provider": None,
+        "provider_status": None,
+    }
     actions = {event["action"] for event in persisted["history"]}
-    assert {"concurrent_started", "database_risk_escalated"} <= actions
+    assert {"completed", "database_risk_escalated"} <= actions
 
 
 # ===========================================================================

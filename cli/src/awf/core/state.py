@@ -102,6 +102,98 @@ def _normalized_database_reasons(reasons: tuple[str, ...]) -> tuple[str, ...]:
         if str(reason).strip()
     }))
 
+
+def _is_small_policy_skipped_phase(phase_state: object) -> bool:
+    return (
+        isinstance(phase_state, dict)
+        and phase_state.get("status") == "skipped"
+        and isinstance(phase_state.get("skipReason"), str)
+        and phase_state["skipReason"].startswith("policy:change_class=small")
+    )
+
+
+def _is_small_policy_auto_pass_gate(gate_state: object) -> bool:
+    return (
+        isinstance(gate_state, dict)
+        and gate_state.get("auto_pass") is True
+        and gate_state.get("provider") == "policy"
+        and isinstance(gate_state.get("skip_reason"), str)
+        and gate_state["skip_reason"].startswith("policy:change_class=small")
+    )
+
+
+def _database_risk_events(state: dict) -> list[dict]:
+    history = state.get("history")
+    if not isinstance(history, list):
+        return []
+    return [
+        event
+        for event in history
+        if isinstance(event, dict) and event.get("action") == "database_risk_escalated"
+    ]
+
+
+def _same_database_risk_event(left: dict, right: dict) -> bool:
+    left_reasons = left.get("reasons")
+    right_reasons = right.get("reasons")
+    return (
+        isinstance(left_reasons, list)
+        and isinstance(right_reasons, list)
+        and _normalized_database_reasons(tuple(left_reasons))
+        == _normalized_database_reasons(tuple(right_reasons))
+    )
+
+
+def _merge_database_risk_facts(state: dict, current_state: dict) -> None:
+    """Keep DB escalation facts when saving a state loaded before promotion."""
+    current_events = _database_risk_events(current_state)
+    if not current_events:
+        return
+
+    state["changeClass"] = "high_risk"
+    phases = state.setdefault("phases", {})
+    current_phases = current_state.get("phases", {})
+    gates = state.setdefault("gates", {})
+    current_gates = current_state.get("gates", {})
+    for phase in ("review", "approve", "verify"):
+        stale_phase = phases.get(phase)
+        if not _is_small_policy_skipped_phase(stale_phase):
+            continue
+        current_phase = (
+            current_phases.get(phase)
+            if isinstance(current_phases, dict)
+            else None
+        )
+        phases[phase] = (
+            deepcopy(current_phase)
+            if isinstance(current_phase, dict)
+            else {"status": "pending", "retries": 0}
+        )
+        gate_id = PHASE_GATE[phase]
+        stale_gate = gates.get(gate_id)
+        if _is_small_policy_auto_pass_gate(stale_gate):
+            current_gate = (
+                current_gates.get(gate_id)
+                if isinstance(current_gates, dict)
+                else None
+            )
+            gates[gate_id] = (
+                deepcopy(current_gate)
+                if isinstance(current_gate, dict)
+                else _initial_skipped_gate_state(gate_id)
+            )
+
+    history = state.setdefault("history", [])
+    if not isinstance(history, list):
+        history = []
+        state["history"] = history
+    for event in current_events:
+        if not any(
+            isinstance(existing, dict) and _same_database_risk_event(existing, event)
+            for existing in history
+        ):
+            history.append(deepcopy(event))
+
 # Phase skip policy per change class (I3)
 CHANGE_CLASS_SKIP_PHASES: dict[str, set[str]] = {
     "small": {"review", "approve", "verify"},
@@ -561,8 +653,7 @@ def resolve_next_phase(state: dict, explicit_phase: Optional[str] = None) -> str
     raise ValueError("No pending workflow phase found. Pass --phase to force a delegated prompt.")
 
 
-def _save_workflow_state(explicit_root: Optional[str], state: dict) -> Path:
-    root = find_repo_root(explicit_root)
+def _write_workflow_state_unlocked(root: Path, state: dict) -> Path:
     state_path = root / ".workflow" / "state.json"
     tmp_path = state_path.with_name(
         f"{state_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
@@ -570,6 +661,17 @@ def _save_workflow_state(explicit_root: Optional[str], state: dict) -> Path:
     tmp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tmp_path.replace(state_path)
     return state_path
+
+
+def _save_workflow_state(explicit_root: Optional[str], state: dict) -> Path:
+    root = find_repo_root(explicit_root)
+    state_path = root / ".workflow" / "state.json"
+    with _workflow_state_lock(state_path), _workflow_state_file_lock(state_path):
+        if state_path.exists():
+            current_state = load_workflow_state(str(root))
+            if isinstance(current_state, dict):
+                _merge_database_risk_facts(state, current_state)
+        return _write_workflow_state_unlocked(root, state)
 
 
 def promote_database_change_to_high_risk(
@@ -650,7 +752,7 @@ def promote_database_change_to_high_risk(
             changed = True
 
         if changed:
-            _save_workflow_state(str(root), state)
+            _write_workflow_state_unlocked(root, state)
         return state
 
 

@@ -99,9 +99,12 @@ def _normalized_allowed_paths(root: Path) -> Iterable[str]:
         return ()
     if not isinstance(payload, dict):
         return ()
+    canonical_paths = payload.get("planned_files")
+    if not isinstance(canonical_paths, list):
+        canonical_paths = payload.get("files")
+    expanded_paths = payload.get("expanded_files")
     normalized_paths = set()
-    for key in ("planned_files", "files", "expanded_files"):
-        paths = payload.get(key)
+    for paths in (canonical_paths, expanded_paths):
         if not isinstance(paths, list):
             continue
         normalized_paths.update(
