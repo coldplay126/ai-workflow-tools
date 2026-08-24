@@ -128,6 +128,28 @@ def _write_valid_database_workflow(repo_root: Path) -> None:
         "denormalization_assessment": None,
         "physical_design_assessment": None,
     }
+    physical_design = {
+        "id": "add-query-index",
+        "kind": "physical_design",
+        "applicable": True,
+        "summary": "Add a targeted index for the query path",
+        "equivalence_plan": "Compare result sets with the baseline",
+        "integrity_plan": "Verify constraints before and after the build",
+        "normalization_assessment": "No model change",
+        "read_write_cost": "Measure read benefit and write amplification",
+        "operational_risks": [],
+        "transition_risks": [],
+        "rollback_or_exit": "Drop the index online",
+        "unavailable_reason": None,
+        "denormalization_assessment": None,
+        "physical_design_assessment": {
+            "read_benefit": "The index narrows lookup work.",
+            "write_amplification": "Each write updates one index.",
+            "storage": "Storage is bounded by projected keys.",
+            "build_or_lock": "Build online with a bounded metadata lock.",
+            "rollback": "Drop the index online.",
+        },
+    }
     (artifacts_dir / "database-decision.json").write_text(
         json.dumps(
             {
@@ -137,7 +159,7 @@ def _write_valid_database_workflow(repo_root: Path) -> None:
                 "baseline_option_id": "maintain-current",
                 "recommended_option_id": "rewrite-query",
                 "selected_option_id": "rewrite-query",
-                "candidates": [baseline, query_change],
+                "candidates": [baseline, query_change, physical_design],
                 "recommendation_rationale": "It preserves correctness at the lowest cost.",
             }
         ),
@@ -360,7 +382,9 @@ def test_db_check_cli_smoke_completes_database_lifecycle_gates(tmp_path: Path) -
     assert [candidate["kind"] for candidate in decision["candidates"]] == [
         "maintain",
         "query_change",
+        "physical_design",
     ]
+    assert decision["selected_option_id"] == "rewrite-query"
 
     g1_code, g1_stdout, g1_stderr = capture_main(
         ["wf", "gate", "plan", "--repo-root", str(tmp_path)]
