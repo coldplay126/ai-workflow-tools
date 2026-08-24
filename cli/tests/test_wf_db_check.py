@@ -1,9 +1,11 @@
 """Focused CLI contract tests for ``awf wf db-check``."""
 from __future__ import annotations
 
+import io
 import json
 import os
 import sys
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,6 +17,22 @@ import awf.commands.wf as wf_commands
 from awf.cli import build_parser, main
 from awf.core.db_validation import DatabaseCheckResult
 
+
+def capture_main(argv: list[str]) -> tuple[int, str, str]:
+    """Run the public CLI entry point while capturing its process streams."""
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with redirect_stdout(stdout), redirect_stderr(stderr):
+        return_code = main(argv)
+    return return_code, stdout.getvalue(), stderr.getvalue()
+
+
+def _python_json_command(payload: dict[str, object]) -> list[str]:
+    return [
+        sys.executable,
+        "-c",
+        f"import json; print(json.dumps({payload!r}, sort_keys=True))",
+    ]
 
 def _write_state(repo_root: Path) -> None:
     workflow_dir = repo_root / ".workflow"
@@ -125,6 +143,323 @@ def _write_valid_database_workflow(repo_root: Path) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def _write_database_lifecycle_smoke_fixture(repo_root: Path) -> tuple[Path, Path]:
+    """Create a hermetic database workflow that can traverse G1, G5, and G6."""
+    _write_valid_database_workflow(repo_root)
+    workflow_dir = repo_root / ".workflow"
+    artifacts_dir = workflow_dir / "artifacts"
+    schema_hash = "a" * 64
+    schema = {
+        "schema_version": 1,
+        "kind": "production_schema",
+        "target_class": "production_metadata",
+        "read_only": True,
+        "schema_only": True,
+        "engine": "mysql",
+        "engine_version": "8.0",
+        "captured_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "schema_hash": schema_hash,
+        "object_counts": {"tables": 1, "columns": 8, "indexes": 2, "constraints": 3},
+    }
+    verify = {
+        "schema_version": 1,
+        "kind": "database_verify",
+        "production_schema_hash": schema_hash,
+        "selected_option_id": "rewrite-query",
+        "equivalence": "pass",
+        "integrity": "pass",
+        "query_plan": "pass",
+        "migration": "not_applicable",
+        "rollback": "not_applicable",
+    }
+    test = {
+        "schema_version": 1,
+        "kind": "database_test",
+        "production_schema_hash": schema_hash,
+        "selected_option_id": "rewrite-query",
+        "local_target": "sanitized_snapshot",
+        "masked": True,
+        "raw_production_rows": False,
+        "equivalence": "pass",
+        "integrity": "pass",
+        "performance": "pass",
+    }
+    manifest_path = workflow_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    profile = manifest["database_validation"]
+    profile["schema_command"] = _python_json_command(schema)
+    profile["verify_command"] = _python_json_command(verify)
+    profile["test_command"] = _python_json_command(test)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    for filename, content in {
+        "spec.md": "# Spec\n\nFR-001: Validate the database query workflow.\n",
+        "plan.md": "# Plan\n\nRun the database validation sequence. [FR-001]\n",
+        "tasks.md": "- [ ] T001 Run the database lifecycle smoke. [FR-001]\n",
+        "test-criteria.md": "# Criteria\n\nThe gate path succeeds. [FR-001]\n",
+    }.items():
+        (artifacts_dir / filename).write_text(content, encoding="utf-8")
+
+    agent_cards = workflow_dir / "agent-cards"
+    agent_cards.mkdir()
+    (agent_cards / "verify.json").write_text(
+        json.dumps(
+            {
+                "gate": {
+                    "pass_conditions": [
+                        "scope.violations == 0",
+                        "compliance.fail == 0",
+                        "compliance.percentage >= 90",
+                        "quality.critical == 0",
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (agent_cards / "test.json").write_text(
+        json.dumps(
+            {
+                "gate": {
+                    "pass_conditions": [
+                        "suites.failed == 0",
+                        "regressions.count == 0",
+                        "acceptance.passed == acceptance.total",
+                        "coverage.percentage >= 70",
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    verify_result = artifacts_dir / "verify-gate-result.json"
+    verify_result.write_text(
+        json.dumps(
+            {
+                "scope": {"violations": 0},
+                "compliance": {"fail": 0, "percentage": 100},
+                "quality": {"critical": 0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    test_result = artifacts_dir / "test-gate-result.json"
+    test_result.write_text(
+        json.dumps(
+            {
+                "suites": [{"failed": 0}],
+                "regressions": [],
+                "acceptance": {"passed": 1, "total": 1},
+                "coverage": {"percentage": 100},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    small_policy = "policy:change_class=small"
+    state_path = workflow_dir / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state.update(
+        {
+            "currentPhase": "plan",
+            "phases": {
+                "plan": {"status": "pending", "retries": 0},
+                **{
+                    phase: {
+                        "status": "skipped",
+                        "retries": 0,
+                        "skipReason": small_policy,
+                    }
+                    for phase in ("review", "approve", "verify")
+                },
+                "impl": {"status": "pending", "retries": 0},
+                "test": {"status": "pending", "retries": 0},
+                "done": {"status": "pending", "retries": 0},
+            },
+            "gates": {
+                "G1": {"passed": None},
+                **{
+                    gate: {
+                        "passed": True,
+                        "auto_pass": True,
+                        "provider": "policy",
+                        "provider_status": "skipped",
+                        "skip_reason": small_policy,
+                    }
+                    for gate in ("G2", "G3", "G5")
+                },
+                "G4": {"passed": None},
+                "G6": {"passed": None},
+            },
+            "history": [],
+        }
+    )
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    return verify_result, test_result
+
+
+def test_db_check_cli_smoke_completes_database_lifecycle_gates(tmp_path: Path) -> None:
+    verify_result, test_result = _write_database_lifecycle_smoke_fixture(tmp_path)
+    state_path = tmp_path / ".workflow" / "state.json"
+    initial_state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert all(
+        initial_state["phases"][phase]["status"] == "skipped"
+        for phase in ("review", "approve", "verify")
+    )
+    assert all(
+        initial_state["gates"][gate]["auto_pass"] is True
+        for gate in ("G2", "G3", "G5")
+    )
+
+    plan_code, plan_stdout, plan_stderr = capture_main(
+        ["wf", "db-check", "--stage", "plan", "--repo-root", str(tmp_path), "--json"]
+    )
+
+    assert plan_code == 0
+    assert plan_stderr == ""
+    plan_check = json.loads(plan_stdout)
+    assert plan_check["stage"] == "plan"
+    assert plan_check["status"] == "pass"
+    assert plan_check["evidence_path"] == _DATABASE_EVIDENCE_PATH
+    assert isinstance(plan_check["evidence_hash"], str)
+    assert plan_check["blockers"] == []
+    assert plan_check["signal_reasons"]
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["changeClass"] == "high_risk"
+    assert all(
+        state["phases"][phase] == {"status": "pending", "retries": 0}
+        for phase in ("review", "approve", "verify")
+    )
+    assert state["gates"]["G2"] == {
+        "passed": None,
+        "provider": None,
+        "provider_status": None,
+    }
+    assert state["gates"]["G3"] == {"passed": None, "scope_hash": None}
+    assert state["gates"]["G5"] == {
+        "passed": None,
+        "provider": None,
+        "provider_status": None,
+    }
+    escalation_events = [
+        event
+        for event in state["history"]
+        if event.get("action") == "database_risk_escalated"
+    ]
+    assert len(escalation_events) == 1
+    assert escalation_events[0]["reasons"] == plan_check["signal_reasons"]
+
+    decision = json.loads(
+        (tmp_path / ".workflow" / "artifacts" / "database-decision.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert [candidate["kind"] for candidate in decision["candidates"]] == [
+        "maintain",
+        "query_change",
+    ]
+
+    g1_code, g1_stdout, g1_stderr = capture_main(
+        ["wf", "gate", "plan", "--repo-root", str(tmp_path)]
+    )
+
+    assert g1_code == 0
+    assert g1_stderr == ""
+    assert "database.risk_class" in g1_stdout
+    assert "G-plan: PASS" in g1_stdout
+
+    verify_code, verify_stdout, verify_stderr = capture_main(
+        ["wf", "db-check", "--stage", "verify", "--repo-root", str(tmp_path), "--json"]
+    )
+
+    assert verify_code == 0
+    assert verify_stderr == ""
+    verify_check = json.loads(verify_stdout)
+    assert verify_check["stage"] == "verify"
+    assert verify_check["status"] == "pass"
+    assert verify_check["evidence_path"] == _DATABASE_EVIDENCE_PATH
+    assert verify_check["blockers"] == []
+
+    g5_code, g5_stdout, g5_stderr = capture_main(
+        [
+            "wf",
+            "gate",
+            "verify",
+            "--repo-root",
+            str(tmp_path),
+            "--result-file",
+            str(verify_result),
+        ]
+    )
+
+    assert g5_code == 0
+    assert g5_stderr == ""
+    assert "database.equivalence" in g5_stdout
+    assert "database.query_plan" in g5_stdout
+    assert "G-verify: PASS" in g5_stdout
+
+    test_code, test_stdout, test_stderr = capture_main(
+        ["wf", "db-check", "--stage", "test", "--repo-root", str(tmp_path), "--json"]
+    )
+
+    assert test_code == 0
+    assert test_stderr == ""
+    test_check = json.loads(test_stdout)
+    assert test_check["stage"] == "test"
+    assert test_check["status"] == "pass"
+    assert test_check["evidence_path"] == _DATABASE_EVIDENCE_PATH
+    assert test_check["blockers"] == []
+
+    g6_code, g6_stdout, g6_stderr = capture_main(
+        [
+            "wf",
+            "gate",
+            "test",
+            "--repo-root",
+            str(tmp_path),
+            "--result-file",
+            str(test_result),
+        ]
+    )
+
+    assert g6_code == 0
+    assert g6_stderr == ""
+    assert "database.local_test" in g6_stdout
+    assert "G-test: PASS" in g6_stdout
+
+    evidence_path = tmp_path / _DATABASE_EVIDENCE_PATH
+    evidence_text = evidence_path.read_text(encoding="utf-8")
+    evidence = json.loads(evidence_text)
+    assert evidence["schema_version"] == 1
+    assert evidence["database_signal"] is True
+    assert evidence["change_class"] == "high_risk"
+    assert set(evidence["stages"]) == {"plan", "verify", "test"}
+    assert evidence["stages"]["plan"]["status"] == "pass"
+    assert evidence["stages"]["plan"]["schema"]["schema_hash"] == "a" * 64
+    assert evidence["stages"]["verify"]["verify"] == {
+        "production_schema_hash": "a" * 64,
+        "selected_option_id": "rewrite-query",
+        "equivalence": "pass",
+        "integrity": "pass",
+        "query_plan": "pass",
+        "migration": "not_applicable",
+        "rollback": "not_applicable",
+    }
+    assert evidence["stages"]["test"]["test"] == {
+        "status": "pass",
+        "production_schema_hash": "a" * 64,
+        "selected_option_id": "rewrite-query",
+        "local_target": "sanitized_snapshot",
+        "masked": True,
+        "equivalence": "pass",
+        "integrity": "pass",
+        "performance": "pass",
+    }
+    assert "raw_production_rows" not in evidence_text
+    assert "secret" not in evidence_text.casefold()
 
 
 @pytest.mark.parametrize("stage", ["plan", "verify", "test"])
