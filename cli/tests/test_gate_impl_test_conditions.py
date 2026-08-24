@@ -473,3 +473,31 @@ def test_database_check_rejects_signal_inputs_changed_by_schema_command(
         assert result.status == "fail"
         assert result.blockers == ("database_signal_changed",)
         assert not (artifacts / "database-validation-evidence.json").exists()
+
+
+def test_impl_and_test_gate_conditions_reject_malformed_worker_types(
+    tmp_path: Path,
+) -> None:
+    cases = (
+        ("impl", "tasks.pending == 0", {"tasks_pending": "none"}, "G4"),
+        ("impl", "commits.count > 0", {"commits": ("commit",)}, "G4"),
+        ("impl", "lint_clean == true", {"lint_clean": "yes"}, "G4"),
+        ("impl", "build_passed == true", {"build_passed": 1}, "G4"),
+        ("test", "suites.failed == 0", {"suites": "none"}, "G6"),
+        ("test", "suites.failed == 0", {"suites": [{"failed": False}]}, "G6"),
+        ("test", "suites.failed == 0", {"suites": [{"failed": "0"}]}, "G6"),
+        ("test", "suites.failed == 0", {"suites": ["not-a-suite"]}, "G6"),
+        ("test", "regressions.count == 0", {"regressions": "none"}, "G6"),
+    )
+    for index, (phase, condition, data, gate_id) in enumerate(cases):
+        repo = _scaffold(
+            tmp_path / str(index),
+            phase,
+            conditions=[condition],
+            gate_id=gate_id,
+        )
+
+        passed, checks = evaluate_gate(str(repo), phase, data)
+
+        assert not passed
+        assert checks[0]["passed"] is False

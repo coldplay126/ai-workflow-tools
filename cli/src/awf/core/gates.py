@@ -13,6 +13,10 @@ def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def _is_strict_nonnegative_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
 # --- Plan G1 artifact-based evaluation ---
 
 _FR_PATTERN = re.compile(r"FR-\d+")
@@ -353,31 +357,49 @@ def evaluate_gate(explicit_root: Optional[str], phase: str, result_data: dict[st
             detail = "multi_llm_conflicts=0 (not yet modeled)"
         # --- §1.1 impl gate (G4) conditions ---
         elif condition == "tasks.pending == 0":
-            pending = len(_as_list(result_data.get("tasks_pending")))
-            passed = pending == 0
-            detail = f"tasks_pending={pending}"
+            pending = result_data.get("tasks_pending")
+            passed = isinstance(pending, list) and not pending
+            detail = (
+                f"tasks_pending={len(pending)}"
+                if isinstance(pending, list)
+                else "tasks_pending=invalid"
+            )
         elif condition == "lint_clean == true":
-            lint_clean = bool(result_data.get("lint_clean", False))
-            passed = lint_clean is True
-            detail = f"lint_clean={lint_clean}"
+            passed = result_data.get("lint_clean") is True
+            detail = "lint_clean=true" if passed else "lint_clean=invalid_or_false"
         elif condition == "build_passed == true":
-            build_passed = bool(result_data.get("build_passed", False))
-            passed = build_passed is True
-            detail = f"build_passed={build_passed}"
+            passed = result_data.get("build_passed") is True
+            detail = "build_passed=true" if passed else "build_passed=invalid_or_false"
         elif condition == "commits.count > 0":
-            commit_count = len(_as_list(result_data.get("commits")))
-            passed = commit_count > 0
-            detail = f"commit_count={commit_count}"
+            commits = result_data.get("commits")
+            passed = isinstance(commits, list) and bool(commits)
+            detail = (
+                f"commit_count={len(commits)}"
+                if isinstance(commits, list)
+                else "commit_count=invalid"
+            )
         # --- §1.1 test gate (G6) conditions ---
         elif condition == "suites.failed == 0":
-            suites = _as_list(result_data.get("suites"))
-            total_failed = sum(int(s.get("failed", 0) or 0) for s in suites if isinstance(s, dict))
-            passed = total_failed == 0
-            detail = f"suites_failed={total_failed}"
+            suites = result_data.get("suites")
+            if not isinstance(suites, list) or not all(
+                isinstance(suite, dict)
+                and _is_strict_nonnegative_int(suite.get("failed"))
+                for suite in suites
+            ):
+                passed = False
+                detail = "suites_failed=invalid"
+            else:
+                total_failed = sum(suite["failed"] for suite in suites)
+                passed = total_failed == 0
+                detail = f"suites_failed={total_failed}"
         elif condition == "regressions.count == 0":
-            reg_count = len(_as_list(result_data.get("regressions")))
-            passed = reg_count == 0
-            detail = f"regression_count={reg_count}"
+            regressions = result_data.get("regressions")
+            passed = isinstance(regressions, list) and not regressions
+            detail = (
+                f"regression_count={len(regressions)}"
+                if isinstance(regressions, list)
+                else "regression_count=invalid"
+            )
         elif condition == "acceptance.passed == acceptance.total":
             acceptance = result_data.get("acceptance") or {}
             if not isinstance(acceptance, dict):

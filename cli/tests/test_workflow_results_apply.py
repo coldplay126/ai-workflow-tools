@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
 
+import awf.core.workflow_results as workflow_results
 from awf.core.judge import _finding_signature, synthesize_workflow_multi_provider_results
 from awf.core.workflow_results import (
+    _read_result_input,
     apply_workflow_result,
     render_impl_report,
     render_test_report,
@@ -259,6 +262,36 @@ def test_verify_and_test_reports_redact_worker_controlled_content() -> None:
 
 
 
+
+
+def test_reports_redact_sensitive_assignments_and_command_flags() -> None:
+    for secret in (
+        "password=secret",
+        "token=secret",
+        "secret=secret",
+        "dsn=postgres://user:password@db",
+        "url=https://user:password@service",
+        "key=secret",
+        "credential=secret",
+        "--password secret",
+        "--token=secret",
+        "--dsn secret",
+        "--secret=secret",
+        "--credential secret",
+        "-psecret",
+        "-t secret",
+    ):
+        data = {
+            "scope": {"changed_files": 0, "planned_files": 0, "violations": 0},
+            "compliance": {"pass": 1, "fail": 0, "total_requirements": 1, "percentage": 100},
+            "quality": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+            "evidence": [{"id": "command", "detail": secret}],
+        }
+
+        markdown, _ = render_verify_report(data, True, [])
+
+        assert "[REDACTED]" in markdown
+        assert secret not in markdown
 def test_apply_invalid_result_inputs_fail_closed_with_stable_reason(
     tmp_path: Path,
 ) -> None:
@@ -318,17 +351,17 @@ def test_apply_result_input_io_failure_is_stable_and_single_read(
     repo = _make_workflow_root(tmp_path)
     result_path = tmp_path / "result.json"
     result_path.write_text('{"status":"completed","result":{}}', encoding="utf-8")
-    original_open = Path.open
+    original_open = os.open
     read_attempts = 0
 
-    def fail_result_open(path: Path, *args: object, **kwargs: object) -> object:
+    def fail_result_open(path: str, *args: object, **kwargs: object) -> int:
         nonlocal read_attempts
-        if path == result_path:
+        if path == str(result_path):
             read_attempts += 1
             raise OSError("read failure")
         return original_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "open", fail_result_open)
+    monkeypatch.setattr(workflow_results.os, "open", fail_result_open)
 
     output_path, passed = apply_workflow_result(str(repo), "impl", str(result_path))
 
@@ -337,12 +370,51 @@ def test_apply_result_input_io_failure_is_stable_and_single_read(
     report = output_path.read_text(encoding="utf-8")
     assert "result_input_io" in report
     assert "read failure" not in report
+
+
+def test_result_reader_rejects_symlinks_and_reads_opened_file_after_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _make_workflow_root(tmp_path)
+    outside = tmp_path / "outside.json"
+    outside.write_text(
+        "DATABASE_URL=postgres://user:password@db DROP TABLE customer",
+        encoding="utf-8",
+    )
+    symlink = tmp_path / "result-link.json"
+    symlink.symlink_to(outside)
+
+    output_path, passed = apply_workflow_result(str(repo), "impl", str(symlink))
+
+    assert not passed
+    report = output_path.read_text(encoding="utf-8")
+    assert "result_input_io" in report
+    assert "DATABASE_URL" not in report
+
+    result_path = tmp_path / "result.json"
+    original = '{"status":"failed","result":{}}'
+    result_path.write_text(original, encoding="utf-8")
+    backup = tmp_path / "result-before-swap.json"
+    original_open = os.open
+
+    def swap_after_open(path: str, *args: object, **kwargs: object) -> int:
+        descriptor = original_open(path, *args, **kwargs)
+        if path == str(result_path):
+            os.replace(result_path, backup)
+            result_path.symlink_to(outside)
+        return descriptor
+
+    monkeypatch.setattr(workflow_results.os, "open", swap_after_open)
+
+    assert _read_result_input(str(result_path)) == original
 def test_apply_workflow_result_impl_writes_artifact(tmp_path: Path) -> None:
     repo = _make_workflow_root(tmp_path)
     result_payload = {
         "status": "completed",
         "result": {
             "tasks_completed": ["T001"],
+            "tasks_pending": [],
             "commits": ["abc123"],
             "lint_clean": True,
             "build_passed": True,
@@ -382,6 +454,7 @@ def test_apply_workflow_result_test_writes_artifact(tmp_path: Path) -> None:
         "status": "completed",
         "result": {
             "suites": [{"name": "unit", "passed": 100, "failed": 0}],
+            "regressions": [],
             "acceptance": {"passed": 5, "total": 5},
             "coverage": {"percentage": 90},
             "conclusion": "PASS",

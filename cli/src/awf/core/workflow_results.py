@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import errno
 import html
 import json
+import os
 import re
 import stat
 from pathlib import Path
@@ -28,7 +30,10 @@ _MAX_REPORT_TEXT_CHARS = 512
 _REPORT_SENSITIVE_TEXT = re.compile(
     r"(?:"
     r"[a-z][a-z0-9+.-]*://"
-    r"|(?:^|[^A-Za-z0-9_])[A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASS|DSN|URL|KEY|CREDENTIAL)[A-Z0-9_]*\s*="
+    r"|(?:^|[^a-z0-9_])(?:[a-z_][a-z0-9_]*_)?"
+    r"(?:password|token|secret|dsn|url|key|credential)\s*[:=]"
+    r"|(?:^|[\s;])--(?:password|token|dsn|secret|credential)(?:=|\s+\S+|$)"
+    r"|(?:^|[\s;])-[pt](?:\S+|\s+\S+|$)"
     r"|\b(?:create|alter|drop|truncate|insert|update|delete)\s+(?:table|index|database|schema|into|from)\b"
     r"|\b(?:ddl|sample|samples|row|rows|record|records|raw[ _-]?data)\b"
     r"|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
@@ -131,26 +136,50 @@ def _unwrap_stream_result_payload(result_text: str) -> dict[str, Any] | None:
 def _read_result_input(path: str) -> str:
     """Read one bounded, regular UTF-8 worker result exactly once."""
 
-    candidate = Path(path)
+    descriptor: Optional[int] = None
+    raw_bytes = bytearray()
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        metadata = candidate.stat()
-    except FileNotFoundError:
-        raise ResultInputError("result_input_missing") from None
-    except OSError:
-        raise ResultInputError("result_input_io") from None
-    if not stat.S_ISREG(metadata.st_mode):
-        raise ResultInputError("result_input_directory")
-    if metadata.st_size > _MAX_RESULT_INPUT_BYTES:
-        raise ResultInputError("result_input_oversize")
+        try:
+            descriptor = os.open(path, flags)
+        except FileNotFoundError:
+            raise ResultInputError("result_input_missing") from None
+        except OSError:
+            raise ResultInputError("result_input_io") from None
+
+        try:
+            metadata = os.fstat(descriptor)
+        except OSError:
+            raise ResultInputError("result_input_io") from None
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ResultInputError("result_input_directory")
+        if metadata.st_size > _MAX_RESULT_INPUT_BYTES:
+            raise ResultInputError("result_input_oversize")
+
+        while len(raw_bytes) <= _MAX_RESULT_INPUT_BYTES:
+            try:
+                chunk = os.read(
+                    descriptor,
+                    _MAX_RESULT_INPUT_BYTES + 1 - len(raw_bytes),
+                )
+            except OSError as error:
+                if error.errno == errno.EINTR:
+                    continue
+                raise ResultInputError("result_input_io") from None
+            if not chunk:
+                break
+            raw_bytes.extend(chunk)
+            if len(raw_bytes) > _MAX_RESULT_INPUT_BYTES:
+                raise ResultInputError("result_input_oversize")
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
     try:
-        with candidate.open("rb") as result_file:
-            raw_bytes = result_file.read(_MAX_RESULT_INPUT_BYTES + 1)
-    except OSError:
-        raise ResultInputError("result_input_io") from None
-    if len(raw_bytes) > _MAX_RESULT_INPUT_BYTES:
-        raise ResultInputError("result_input_oversize")
-    try:
-        return raw_bytes.decode("utf-8")
+        return bytes(raw_bytes).decode("utf-8")
     except UnicodeDecodeError:
         raise ResultInputError("result_input_invalid_utf8") from None
 
