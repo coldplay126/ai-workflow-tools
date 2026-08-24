@@ -205,6 +205,19 @@ Each candidate can assess query, index, schema, normalization, and
 denormalization together. For an index surface, every option records whether it
 would add, reject, or maintain the index. No option is selected automatically.
 
+| emitted signal | required surface |
+|---|---|
+| `text:table_ddl` / `text:column_ddl` / `text:index_ddl` / `text:constraint_ddl` | `erd` / `column` / `index` / `constraint` |
+| schema/type/sequence/trigger/procedure/function DDL | `schema_object` |
+| `text:view_ddl` | `schema_object`, `query` |
+| migration | any structural surface |
+| normalization, denormalization, ERD, keys, partition | matching surface |
+| SQL syntax, order by | `query` |
+
+Generic model/models paths are non-DB; database/models is DB. `artifact_error:`
+blocks the decision. Signal-derived `requires_query_plan` and
+`requires_migration_rollback` are hard gates independent of declared surfaces.
+
 Verify evidence includes `engine`, `execution_target`,
 `production_primary_queries`: false, and `raw_production_rows`: false.
 `execution_target` is `local_same_engine` or `approved_read_replica`. Index and

@@ -66,10 +66,15 @@ waiver는 local data test만 면제한다.
 AskUserQuestion is allowed only when requirements and project conventions
 cannot distinguish materially different holistic candidates.
 
-Signal-to-surface binding is mandatory: `text:ddl`, `path:migration:`,
-`path:schema:`, and `path:prisma:` require a structural surface;
-`text:index`, `text:column`, and `text:query` require their matching surface.
-Any `artifact_error:` reason blocks the decision until its artifact is fixed.
+Use the phase-plan emitted-signal table exactly: table/column/index/constraint
+DDL map to `erd`/`column`/`index`/`constraint`; schema/type/sequence/trigger/
+procedure/function map to `schema_object`; view maps to `schema_object` plus
+`query`; migration is structural; normalization, denormalization, ERD, keys,
+and `partition` map to their exact surfaces. SQL syntax and order by map to
+`query`. Generic model/models paths are non-DB, but database/models is DB.
+`artifact_error:` blocks planning. `requires_query_plan` and
+`requires_migration_rollback` remain hard gates even when a declared surface
+would not otherwise require them.
 
 DB signal이 있으면 production schema evidence가 mandatory다.
 `.workflow/artifacts/database-validation-evidence.json`은 `awf wf db-check`가

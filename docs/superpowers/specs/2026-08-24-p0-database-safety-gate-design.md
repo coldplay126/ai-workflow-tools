@@ -82,7 +82,7 @@ Plan creates `.workflow/artifacts/database-decision.json` before `db-check --sta
 {
   "schema_version": 1,
   "status": "selected",
-  "change_surfaces": ["query", "index", "column", "erd"],
+  "change_surfaces": ["column", "erd", "index", "query", "schema_object"],
   "baseline_option_id": "maintain-current",
   "recommended_option_id": "rewrite-query",
   "selected_option_id": "rewrite-query",
@@ -98,12 +98,13 @@ Plan creates `.workflow/artifacts/database-decision.json` before `db-check --sta
       "normalization_assessment": "No model change",
       "denormalization_assessment": null,
       "physical_design_assessment": null,
-      "covered_surfaces": ["column", "erd", "index", "query"],
+      "covered_surfaces": ["column", "erd", "index", "query", "schema_object"],
       "surface_assessments": {
         "column": "Maintain the current column shape",
         "erd": "Maintain the current relationship model",
         "index": "Reject a new index after comparison",
-        "query": "Maintain the current query as the baseline"
+        "query": "Maintain the current query as the baseline",
+        "schema_object": "Maintain the current schema objects"
       },
       "read_write_cost": "Measure production-shaped workload",
       "operational_risks": [],
@@ -128,6 +129,15 @@ Rules:
 - `denormalize` candidates require a structured `denormalization_assessment` with `source_of_truth`, `consistency_window`, `reconciliation`, and `rollback`; other kinds set it to null;
 - `physical_design` candidates require a structured `physical_design_assessment` with `read_benefit`, `write_amplification`, `storage`, `build_or_lock`, and `rollback`; other kinds set it to null.
 
+
+Signal mapping is exact: table DDL→`erd`; column/index/constraint DDL→their
+matching surface; schema/type/sequence/trigger/procedure/function→`schema_object`;
+view DDL→`schema_object` plus `query`; migration→structural surface;
+normalization/denormalization/ERD/keys/partition→matching surface; SQL
+syntax/order by→`query`. Generic model/models paths are non-DB, while
+database/models is DB. `artifact_error:` blocks planning. Signal-derived
+`requires_query_plan` and `requires_migration_rollback` are hard gates
+independent of declared surfaces.
 The validator does not assign a winning score. Correctness and integrity are hard gates; the planner records comparative lifecycle evidence and the user's selected option.
 
 ## External command contracts

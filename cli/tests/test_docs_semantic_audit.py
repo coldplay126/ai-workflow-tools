@@ -1407,6 +1407,8 @@ def test_database_planning_contract_compares_options_without_index_default() -> 
         "`erd`",
         "`normalize`",
         "`denormalize`",
+        "`partition`",
+        "`schema_object`",
         "hard gate",
         "Every candidate covers every decision surface.",
     )
@@ -1703,22 +1705,43 @@ def test_database_verify_and_signal_contracts_match_the_core_policy() -> None:
         assert "`raw_production_rows`: false" in prose
         assert "profile.test_command" in prose
 
-    planner_paths = (
-        REPO_ROOT / "claude" / "skills" / "phase-plan" / "SKILL.md",
+    phase_plan = REPO_ROOT / "claude" / "skills" / "phase-plan" / "SKILL.md"
+    exact_signal_rules = (
+        "`text:table_ddl`",
+        "`text:column_ddl`",
+        "`text:index_ddl`",
+        "`text:constraint_ddl`",
+        "`text:schema_ddl`",
+        "`text:view_ddl`",
+        "`text:migration`",
+        "`path:migration:`",
+        "`path:prisma:`",
+        "`text:normalization`",
+        "`text:denormalization`",
+        "`text:erd`",
+        "`text:partition`",
+        "`text:sql syntax`",
+        "`text:order by`",
+        "`artifact_error:`",
+        "`requires_query_plan`",
+        "`requires_migration_rollback`",
+    )
+    plan_prose = phase_plan.read_text(encoding="utf-8")
+    for rule in exact_signal_rules:
+        assert rule in plan_prose, f"{phase_plan}: missing signal rule {rule}"
+
+    source_signal_contract = (
+        "`schema_object`",
+        "`partition`",
+        "`query`",
+        "`artifact_error:`",
+        "`requires_query_plan`",
+        "`requires_migration_rollback`",
+    )
+    for path in (
         REPO_ROOT / "claude" / "agents" / "spec-writer.md",
         REPO_ROOT / "claude" / "skills" / "multi-agent" / "protocols" / "spec_writer.md",
-    )
-    signal_rules = (
-        "`text:ddl`",
-        "`path:migration:`",
-        "`path:schema:`",
-        "`path:prisma:`",
-        "`text:index`",
-        "`text:column`",
-        "`text:query`",
-        "`artifact_error:`",
-    )
-    for path in planner_paths:
+    ):
         prose = path.read_text(encoding="utf-8")
-        for rule in signal_rules:
+        for rule in source_signal_contract:
             assert rule in prose, f"{path}: missing signal rule {rule}"

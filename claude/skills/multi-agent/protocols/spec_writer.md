@@ -47,10 +47,15 @@ denormalize 중 실제 변경 surface만 기록한다.
 null or omitted다. `test_command`가 없고 waiver를 선택할 때만 nonempty
 `reason`, `approver`, `timestamp`를 가진 object를 기록한다. `timestamp`는 UTC ISO 8601 형식이어야 하며,
 waiver는 local data test만 면제한다.
-Signal-to-surface binding is mandatory: `text:ddl`, `path:migration:`,
-`path:schema:`, and `path:prisma:` require a structural surface;
-`text:index`, `text:column`, and `text:query` require their matching surface.
-Any `artifact_error:` reason blocks the decision until its artifact is fixed.
+Use the phase-plan emitted-signal table exactly: table/column/index/constraint
+DDL map to `erd`/`column`/`index`/`constraint`; schema/type/sequence/trigger/
+procedure/function map to `schema_object`; view maps to `schema_object` plus
+`query`; migration is structural; normalization, denormalization, ERD, keys,
+and `partition` map to their exact surfaces. SQL syntax and order by map to
+`query`. Generic model/models paths are non-DB, but database/models is DB.
+`artifact_error:` blocks planning. `requires_query_plan` and
+`requires_migration_rollback` remain hard gates even when a declared surface
+would not otherwise require them.
 
 production schema는 DB signal에서 mandatory이며
 `.workflow/artifacts/database-validation-evidence.json`은 `awf wf db-check`가

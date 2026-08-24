@@ -243,12 +243,24 @@ tasks.md, plan.md, allowed-files.json에 DB 변경 신호가 있으면
   `physical_design_assessment`는 `read_benefit`, `write_amplification`, `storage`,
   `build_or_lock`, `rollback`을 가진 object이고 다른 kind에서는 null이다.
 - `change_surfaces`는 필요한 것만 `query`, `index`, `column`, `constraint`,
-  `erd`, `normalize`, `denormalize`로 기록한다.
+  `erd`, `normalize`, `denormalize`, `partition`, `schema_object`로 기록한다.
 
-Signal-to-surface binding is mandatory: `text:ddl`, `path:migration:`,
-`path:schema:`, and `path:prisma:` require a structural surface;
-`text:index`, `text:column`, and `text:query` require their matching surface.
-Any `artifact_error:` reason blocks the decision until its artifact is fixed.
+| emitted signal | required surface |
+|---|---|
+| `text:table_ddl` | `erd` |
+| `text:column_ddl` | `column` |
+| `text:index_ddl` | `index` |
+| `text:constraint_ddl` | `constraint` |
+| `text:schema_ddl`, `text:database_ddl`, `text:type_ddl`, `text:sequence_ddl`, `text:trigger_ddl`, `text:routine_ddl` | `schema_object` |
+| `text:view_ddl` | `schema_object`, `query` |
+| `text:migration`, `path:migration:`, `path:prisma:` | any structural surface |
+| `text:normalization`, `text:denormalization`, `text:erd`, key signals, `text:partition` | their matching `normalize`, `denormalize`, `erd`, `constraint`, `partition` surface |
+| `text:sql syntax`, `text:order by` | `query` |
+
+`path:models:`와 generic model/model paths는 DB signal이 아니지만
+`path:database/models:`는 DB signal이다. `artifact_error:`는 artifact를 고칠 때까지
+결정을 차단한다. Signal-derived `requires_query_plan`과
+`requires_migration_rollback`은 declared surface와 독립적인 hard gate다.
 
 `local_data_test_waiver`는 decision의 optional top-level field다. 기본값은
 null or omitted다. `test_command`가 없고 waiver를 선택할 때만 nonempty
