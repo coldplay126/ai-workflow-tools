@@ -30,6 +30,37 @@ def _make_workflow_root(tmp_path: Path) -> Path:
         "totalExecutions": 0,
     }
     (wf / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    cards = {
+        "review": [
+            "findings.count(severity=CRITICAL) == 0",
+            "coverage.percentage >= 80",
+        ],
+        "verify": [
+            "scope.violations == 0",
+            "compliance.fail == 0",
+            "compliance.percentage >= 90",
+            "quality.critical == 0",
+        ],
+        "impl": [
+            "tasks.pending == 0",
+            "lint_clean == true",
+            "build_passed == true",
+            "commits.count > 0",
+        ],
+        "test": [
+            "suites.failed == 0",
+            "regressions.count == 0",
+            "acceptance.passed == acceptance.total",
+            "coverage.percentage >= 70",
+        ],
+    }
+    agent_cards = wf / "agent-cards"
+    agent_cards.mkdir()
+    for phase, conditions in cards.items():
+        (agent_cards / f"{phase}.json").write_text(
+            json.dumps({"gate": {"pass_conditions": conditions}}),
+            encoding="utf-8",
+        )
     return tmp_path
 
 
@@ -156,6 +187,156 @@ def test_database_gate_reports_render_only_sanitized_fields() -> None:
         assert "customer-row" not in rendered
 
 
+
+def test_verify_and_test_reports_redact_worker_controlled_content() -> None:
+    malicious = (
+        "DATABASE_URL=postgres://user:password@db.internal/service "
+        "<script>alert(1)</script> DROP TABLE customer sample=[alice@example.com]"
+    )
+    verify_data = {
+        "conclusion": malicious,
+        "scope": {
+            "changed_files": malicious,
+            "planned_files": malicious,
+            "violations": malicious,
+            "violation_files": [malicious],
+        },
+        "compliance": {
+            "pass": malicious,
+            "warn": malicious,
+            "fail": malicious,
+            "total_requirements": malicious,
+            "percentage": malicious,
+            "failed_requirements": [malicious],
+        },
+        "quality": {
+            "critical": malicious,
+            "high": malicious,
+            "medium": malicious,
+            "low": malicious,
+            "issues": [{"id": malicious, "severity": malicious, "file": malicious, "summary": malicious}],
+        },
+        "evidence": [{"id": malicious, "detail": malicious}],
+        "risks": [{"id": malicious, "severity": malicious, "detail": malicious}],
+        "action_items": [{"id": malicious, "action": malicious}],
+    }
+    test_data = {
+        "conclusion": malicious,
+        "suites": [
+            {
+                "name": malicious,
+                "passed": malicious,
+                "failed": malicious,
+                "duration_sec": malicious,
+            }
+        ],
+        "regressions": [{"id": malicious, "detail": malicious}],
+        "acceptance": {"passed": malicious, "total": malicious},
+        "coverage": {"percentage": malicious},
+    }
+
+    verify_markdown, _ = render_verify_report(verify_data, False, [])
+    test_markdown, _ = render_test_report(test_data, False, [])
+    rendered = verify_markdown + test_markdown
+
+    assert "[REDACTED]" in rendered
+    assert "DATABASE_URL" not in rendered
+    assert "postgres://" not in rendered
+    assert "<script>" not in rendered
+    assert "DROP TABLE" not in rendered
+    assert "alice@example.com" not in rendered
+
+    markup_data = {
+        "scope": {"changed_files": 0, "planned_files": 0, "violations": 0},
+        "compliance": {"pass": 1, "fail": 0, "total_requirements": 1, "percentage": 100},
+        "quality": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+        "evidence": [{"id": "note", "detail": "<b>markup</b> [link](https-example)"}],
+    }
+    escaped_markdown, _ = render_verify_report(markup_data, True, [])
+    assert "<b>markup</b>" not in escaped_markdown
+    assert "&lt;b&gt;markup&lt;/b&gt;" in escaped_markdown
+    assert "[link](https-example)" not in escaped_markdown
+
+
+
+def test_apply_invalid_result_inputs_fail_closed_with_stable_reason(
+    tmp_path: Path,
+) -> None:
+    for name, payload, reason in (
+        ("missing", None, "result_input_missing"),
+        ("directory", "directory", "result_input_directory"),
+        ("oversize", "x" * (128 * 1024 + 1), "result_input_oversize"),
+        ("invalid_utf8", b"\xff", "result_input_invalid_utf8"),
+    ):
+        repo = _make_workflow_root(tmp_path / name)
+        result_path = tmp_path / name / "result.json"
+        if payload == "directory":
+            result_path.mkdir()
+        elif isinstance(payload, bytes):
+            result_path.write_bytes(payload)
+        elif isinstance(payload, str):
+            result_path.write_text(payload, encoding="utf-8")
+
+        output_path, passed = apply_workflow_result(
+            str(repo),
+            "impl",
+            str(result_path),
+        )
+
+        assert not passed
+        report = output_path.read_text(encoding="utf-8")
+        assert reason in report
+        assert "Raw Result Excerpt" not in report
+        state = json.loads((repo / ".workflow" / "state.json").read_text(encoding="utf-8"))
+        assert state["totalExecutions"] == 1
+        assert state["gates"]["G4"]["passed"] is False
+
+
+def test_malformed_worker_payload_is_never_rendered(tmp_path: Path) -> None:
+    repo = _make_workflow_root(tmp_path)
+    result_path = tmp_path / "malformed.json"
+    result_path.write_text(
+        "DATABASE_URL=postgres://user:password@db DROP TABLE customer sample=[alice]",
+        encoding="utf-8",
+    )
+
+    output_path, passed = apply_workflow_result(str(repo), "impl", str(result_path))
+
+    assert not passed
+    report = output_path.read_text(encoding="utf-8")
+    assert "result_json_invalid" in report
+    assert "Raw Result Excerpt" not in report
+    assert "DATABASE_URL" not in report
+    assert "postgres://" not in report
+    assert "DROP TABLE" not in report
+
+
+def test_apply_result_input_io_failure_is_stable_and_single_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _make_workflow_root(tmp_path)
+    result_path = tmp_path / "result.json"
+    result_path.write_text('{"status":"completed","result":{}}', encoding="utf-8")
+    original_open = Path.open
+    read_attempts = 0
+
+    def fail_result_open(path: Path, *args: object, **kwargs: object) -> object:
+        nonlocal read_attempts
+        if path == result_path:
+            read_attempts += 1
+            raise OSError("read failure")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", fail_result_open)
+
+    output_path, passed = apply_workflow_result(str(repo), "impl", str(result_path))
+
+    assert not passed
+    assert read_attempts == 1
+    report = output_path.read_text(encoding="utf-8")
+    assert "result_input_io" in report
+    assert "read failure" not in report
 def test_apply_workflow_result_impl_writes_artifact(tmp_path: Path) -> None:
     repo = _make_workflow_root(tmp_path)
     result_payload = {
@@ -285,6 +466,126 @@ def test_apply_escaped_result_accepts_scalar_evidence(tmp_path: Path) -> None:
     assert "- [note] provider unavailable" in content
 
 
+
+
+def test_apply_escaped_result_redacts_raw_worker_payload(tmp_path: Path) -> None:
+    repo = _make_workflow_root(tmp_path)
+    malicious = "DATABASE_URL=postgres://user:password@db <script>DROP TABLE customer</script>"
+    result_file = tmp_path / "escaped-malicious.json"
+    result_file.write_text(
+        json.dumps(
+            {
+                "status": "escaped",
+                "provider": malicious,
+                "result": {},
+                "escape": {
+                    "reason": malicious,
+                    "severity": malicious,
+                    "summary": malicious,
+                    "recommended_action": malicious,
+                    "affected_files": [malicious],
+                    "evidence": [{"kind": malicious, "detail": malicious}],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    output_path, passed = apply_workflow_result(
+        str(repo),
+        "impl",
+        str(result_file),
+        skip_gate_apply=True,
+    )
+
+    assert not passed
+    report = output_path.read_text(encoding="utf-8")
+    state = (repo / ".workflow" / "state.json").read_text(encoding="utf-8")
+    assert "[REDACTED]" in report
+    assert "Raw Result Excerpt" not in report
+    assert "DATABASE_URL" not in report + state
+    assert "postgres://" not in report + state
+    assert "DROP TABLE" not in report + state
+
+
+def test_early_result_statuses_honor_skip_gate_apply(tmp_path: Path) -> None:
+    for status in ("failed", "escaped"):
+        repo = _make_workflow_root(tmp_path / status)
+        payload: dict[str, object] = {"status": status, "result": {}}
+        if status == "escaped":
+            payload["escape"] = {"reason": "provider_unavailable"}
+        result_file = tmp_path / status / "result.json"
+        result_file.write_text(json.dumps(payload), encoding="utf-8")
+
+        _, passed = apply_workflow_result(
+            str(repo),
+            "impl",
+            str(result_file),
+            skip_gate_apply=True,
+        )
+
+        assert not passed
+        state = json.loads((repo / ".workflow" / "state.json").read_text(encoding="utf-8"))
+        assert state["totalExecutions"] == 0
+        assert state["gates"] == {}
+        assert state["phases"]["impl"]["retries"] == 0
+
+
+def test_early_result_statuses_apply_gate_once(tmp_path: Path) -> None:
+    for status in ("failed", "escaped"):
+        repo = _make_workflow_root(tmp_path / status)
+        payload: dict[str, object] = {"status": status, "result": {}}
+        if status == "escaped":
+            payload["escape"] = {"reason": "provider_unavailable"}
+        result_file = tmp_path / status / "result.json"
+        result_file.write_text(json.dumps(payload), encoding="utf-8")
+
+        _, passed = apply_workflow_result(str(repo), "impl", str(result_file))
+
+        assert not passed
+        state = json.loads((repo / ".workflow" / "state.json").read_text(encoding="utf-8"))
+        assert state["totalExecutions"] == 1
+        assert state["gates"]["G4"]["passed"] is False
+        assert state["phases"]["impl"]["retries"] == 1
+
+
+def test_completed_result_with_synthesis_applies_gate_once(tmp_path: Path) -> None:
+    repo = _make_workflow_root(tmp_path)
+    result_file = tmp_path / "completed.json"
+    result_file.write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "result": {
+                    "conclusion": "PASS",
+                    "tasks_completed": ["T001"],
+                    "tasks_pending": [],
+                    "commits": ["abc123"],
+                    "lint_clean": True,
+                    "build_passed": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    output_path, passed = apply_workflow_result(
+        str(repo),
+        "impl",
+        str(result_file),
+        synthesis_summary={
+            "selected_provider": "primary",
+            "judge_passed": True,
+            "synthesis_passed": True,
+        },
+    )
+
+    assert passed
+    assert "Selected Provider: primary" in output_path.read_text(encoding="utf-8")
+    state = json.loads((repo / ".workflow" / "state.json").read_text(encoding="utf-8"))
+    assert state["totalExecutions"] == 1
+    assert state["gates"]["G4"]["passed"] is True
+    assert state["phases"]["impl"]["retries"] == 0
 def test_synthesis_normalizes_nested_phase_metrics_before_judging(
     tmp_path: Path,
 ) -> None:

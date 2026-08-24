@@ -18,7 +18,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from awf.core.db_validation import run_database_check
+from awf.core.db_validation import detect_database_signal, run_database_check
 from awf.core.gates import _extract_fr_ids, _extract_fr_tags, evaluate_plan_gate
 
 
@@ -402,8 +402,10 @@ def test_database_g1_valid_plan_evidence_passes() -> None:
         root, _ = _database_plan_project(Path(tmp))
 
         passed, evaluations = evaluate_plan_gate(root)
-
         assert passed, evaluations
+        evidence = json.loads((root / ".workflow" / "artifacts" / "database-validation-evidence.json").read_text(encoding="utf-8"))
+        assert evidence["signal_hash"] == detect_database_signal(root).snapshot_hash
+        assert len(evidence["signal_hash"]) == 64
         checks = _evaluation_by_condition(evaluations)
         assert checks["database.signal"]["passed"] is True
         assert checks["database.risk_class"]["passed"] is True
@@ -488,6 +490,20 @@ def test_database_g1_no_signal_remains_not_applicable() -> None:
         signal = _evaluation_by_condition(evaluations)["database.signal"]
         assert signal["passed"] is True
         assert signal["detail"] == "status=not_applicable"
+
+
+def test_database_g1_signal_snapshot_mismatch_fails() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root, _ = _database_plan_project(Path(tmp))
+        (root / ".workflow" / "artifacts" / "spec.md").write_text(
+            "Database query change with different production workload",
+            encoding="utf-8",
+        )
+
+        passed, evaluations = evaluate_plan_gate(root)
+
+        assert not passed
+        assert _evaluation_by_condition(evaluations)["database.signal"]["passed"] is False
 # ---------------------------------------------------------------------------
 # Utility function tests
 # ---------------------------------------------------------------------------

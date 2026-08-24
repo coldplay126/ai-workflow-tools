@@ -357,3 +357,119 @@ def test_database_local_test_valid_waiver_passes_g6(tmp_path: Path) -> None:
     summary = _checks_by_condition(checks)["database.local_test"]["database_summary"]
     assert summary["waiver_present"] == "true"
     assert "waiver_reason" not in summary
+
+
+def test_missing_agent_card_is_a_stable_gate_configuration_failure(tmp_path: Path) -> None:
+    repo = _scaffold(
+        tmp_path,
+        "impl",
+        conditions=["tasks.pending == 0"],
+        gate_id="G4",
+    )
+    (repo / ".workflow" / "agent-cards" / "impl.json").unlink()
+
+    passed, checks = evaluate_gate(str(repo), "impl", {})
+
+    assert not passed
+    assert checks == [
+        {
+            "condition": "gate_configuration",
+            "passed": False,
+            "detail": "agent_card_missing",
+        }
+    ]
+
+
+def test_empty_agent_card_conditions_fail_even_for_empty_impl_result(tmp_path: Path) -> None:
+    repo = _scaffold(tmp_path, "impl", conditions=[], gate_id="G4")
+
+    passed, checks = evaluate_gate(str(repo), "impl", {})
+
+    assert not passed
+    assert checks == [
+        {
+            "condition": "gate_configuration",
+            "passed": False,
+            "detail": "pass_conditions_empty",
+        }
+    ]
+
+
+def test_unknown_agent_card_condition_is_a_stable_configuration_failure(
+    tmp_path: Path,
+) -> None:
+    repo = _scaffold(
+        tmp_path,
+        "impl",
+        conditions=["worker.can_override_database_gate == true"],
+        gate_id="G4",
+    )
+
+    passed, checks = evaluate_gate(str(repo), "impl", {})
+
+    assert not passed
+    assert checks == [
+        {
+            "condition": "gate_configuration",
+            "passed": False,
+            "detail": "pass_conditions_unsupported",
+        }
+    ]
+
+
+def test_database_check_rejects_signal_inputs_changed_by_schema_command(
+    tmp_path: Path,
+) -> None:
+    for name, relative_path, replacement in (
+        (
+            "spec",
+            ".workflow/artifacts/spec.md",
+            "Database query changed while schema check ran",
+        ),
+        (
+            "allowed_files",
+            ".workflow/artifacts/allowed-files.json",
+            json.dumps({"planned_files": ["db/schema.sql"]}),
+        ),
+    ):
+        repo = _scaffold(
+            tmp_path / name,
+            "impl",
+            conditions=["tasks.pending == 0"],
+            gate_id="G4",
+        )
+        artifacts = repo / ".workflow" / "artifacts"
+        artifacts.mkdir(parents=True, exist_ok=True)
+        (artifacts / "spec.md").write_text("Database query change", encoding="utf-8")
+        (artifacts / "database-decision.json").write_text(
+            json.dumps(_database_decision()),
+            encoding="utf-8",
+        )
+        target = repo / relative_path
+        script = (
+            "from pathlib import Path; "
+            f"Path({str(target)!r}).write_text({replacement!r}, encoding='utf-8'); "
+            f"print({json.dumps(_database_schema())!r})"
+        )
+        (repo / ".workflow" / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "database_validation": {
+                        "enabled": True,
+                        "schema_command": [sys.executable, "-c", script],
+                        "verify_command": [],
+                        "test_command": [],
+                        "command_timeout_seconds": 5,
+                        "max_schema_age_hours": 24,
+                        "allow_production_replica_sample": False,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = run_database_check(repo, "plan")
+
+        assert result.status == "fail"
+        assert result.blockers == ("database_signal_changed",)
+        assert not (artifacts / "database-validation-evidence.json").exists()

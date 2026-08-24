@@ -170,6 +170,7 @@ class DatabaseSignal:
 
     detected: bool
     reasons: tuple[str, ...]
+    snapshot_hash: str
 
 
 def _artifact_error(relative_path: str, code: str) -> str:
@@ -227,6 +228,17 @@ def _bounded_database_signal_reasons(reasons: set[str]) -> tuple[str, ...]:
             ]
         )
     )
+
+
+def _database_signal_snapshot_hash(inputs: list[dict[str, object]]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            inputs,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
 
 def is_database_check_evidence_hash(value: object) -> bool:
     """Return whether an evidence hash has the canonical SHA-256 form."""
@@ -413,32 +425,53 @@ def _is_database_path(path: str) -> bool:
 
 
 def detect_database_signal(repo_root: Path) -> DatabaseSignal:
-    """Return DB signals or conservative artifact errors from known artifacts."""
+    """Return DB signals and a canonical snapshot of every known input."""
     try:
         root = _canonical_repo_root(repo_root)
     except DatabaseValidationError:
+        inputs = [{"path": ".workflow", "error": "unsafe_path"}]
         return DatabaseSignal(
             detected=True,
             reasons=(_artifact_error(".workflow", "unsafe_path"),),
+            snapshot_hash=_database_signal_snapshot_hash(inputs),
         )
+
     reasons = set()
+    inputs: list[dict[str, object]] = []
     for relative_path in _TEXT_ARTIFACTS:
         text, error = _read_bounded_utf8(root, relative_path)
         if error:
             reasons.add(_artifact_error(relative_path, error))
-        elif text is not None:
+            inputs.append({"path": relative_path, "error": error})
+        elif text is None:
+            inputs.append({"path": relative_path, "error": "missing"})
+        else:
+            inputs.append(
+                {
+                    "path": relative_path,
+                    "content_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                }
+            )
             reasons.update(_text_reasons(text))
 
     paths, error = _normalized_allowed_paths(root)
+    allowed_input: dict[str, object] = {"path": _ALLOWED_FILES_ARTIFACT}
     if error:
         reasons.add(_artifact_error(_ALLOWED_FILES_ARTIFACT, error))
+        allowed_input["error"] = error
     else:
+        allowed_input["paths"] = list(paths)
         for path in paths:
             if _is_database_path(path):
                 reasons.add(_database_path_reason(path))
+    inputs.append(allowed_input)
 
     normalized_reasons = _bounded_database_signal_reasons(reasons)
-    return DatabaseSignal(detected=bool(normalized_reasons), reasons=normalized_reasons)
+    return DatabaseSignal(
+        detected=bool(normalized_reasons),
+        reasons=normalized_reasons,
+        snapshot_hash=_database_signal_snapshot_hash(inputs),
+    )
 
 
 _PROFILE_ARTIFACT = ".workflow/manifest.json"
@@ -576,6 +609,7 @@ _EVIDENCE_FIELDS = {
     "schema_version",
     "database_signal",
     "signal_reasons",
+    "signal_hash",
     "change_class",
     "profile_hash",
     "decision_hash",
@@ -1302,6 +1336,8 @@ def _load_existing_evidence(root: Path) -> Optional[dict[str, Any]]:
         or evidence["change_class"] != "high_risk"
         or not isinstance(evidence["signal_reasons"], list)
         or not all(isinstance(reason, str) for reason in evidence["signal_reasons"])
+        or not isinstance(evidence["signal_hash"], str)
+        or _SHA256_PATTERN.fullmatch(evidence["signal_hash"]) is None
         or not isinstance(evidence["profile_hash"], str)
         or _SHA256_PATTERN.fullmatch(evidence["profile_hash"]) is None
         or not isinstance(evidence["decision_hash"], str)
@@ -1583,6 +1619,7 @@ def _build_evidence(
         "schema_version": 1,
         "database_signal": True,
         "signal_reasons": list(signal.reasons),
+        "signal_hash": signal.snapshot_hash,
         "change_class": "high_risk",
         "profile_hash": profile.profile_hash,
         "decision_hash": decision.decision_hash,
@@ -1618,11 +1655,21 @@ def run_database_check(
     except DatabaseValidationError as error:
         return _failed_check(
             stage,
-            DatabaseSignal(True, (_artifact_error(".workflow", "unsafe_path"),)),
+            DatabaseSignal(
+                True,
+                (_artifact_error(".workflow", "unsafe_path"),),
+                _database_signal_snapshot_hash(
+                    [{"path": ".workflow", "error": "unsafe_path"}]
+                ),
+            ),
             error.code,
         )
     if stage not in {"plan", "verify", "test"}:
-        return _failed_check(stage, DatabaseSignal(False, ()), "stage_invalid")
+        return _failed_check(
+            stage,
+            DatabaseSignal(False, (), _database_signal_snapshot_hash([])),
+            "stage_invalid",
+        )
 
     signal = detect_database_signal(root)
     if not signal.detected:
@@ -1652,6 +1699,14 @@ def run_database_check(
                 raise DatabaseValidationError("profile_changed")
             if existing["decision_hash"] != decision.decision_hash:
                 raise DatabaseValidationError("decision_changed")
+            if (
+                stage in {"verify", "test"}
+                and (
+                    existing["signal_hash"] != signal.snapshot_hash
+                    or tuple(existing["signal_reasons"]) != signal.reasons
+                )
+            ):
+                raise DatabaseValidationError("database_signal_changed")
             _validated_existing_stages(existing, profile, decision)
         elif stage in {"verify", "test"}:
             raise DatabaseValidationError("plan_evidence_missing")
@@ -1697,6 +1752,13 @@ def run_database_check(
 
         directory_fd, lock_fd = _acquire_evidence_lock(root)
         try:
+            locked_signal = detect_database_signal(root)
+            if (
+                not locked_signal.detected
+                or locked_signal.snapshot_hash != signal.snapshot_hash
+                or locked_signal.reasons != signal.reasons
+            ):
+                raise DatabaseValidationError("database_signal_changed")
             locked_profile = load_database_profile(root)
             locked_decision = load_database_decision(root)
             if locked_profile.profile_hash != pre_run_profile_hash:
@@ -1851,7 +1913,13 @@ def evaluate_database_gate(repo_root: Path, stage: str) -> list[dict[str, Any]]:
         root = _canonical_repo_root(repo_root)
         signal = detect_database_signal(root)
     except DatabaseValidationError:
-        signal = DatabaseSignal(True, ())
+        signal = DatabaseSignal(
+            True,
+            (),
+            _database_signal_snapshot_hash(
+                [{"path": ".workflow", "error": "unsafe_path"}]
+            ),
+        )
         root = repo_root
 
     if not signal.detected:
@@ -1872,6 +1940,7 @@ def evaluate_database_gate(repo_root: Path, stage: str) -> list[dict[str, Any]]:
     evidence: Optional[dict[str, Any]] = None
     schema: Optional[dict[str, Any]] = None
     evidence_is_high_risk = False
+    signal_is_current = False
     decision_is_current = False
     stage_is_current = False
 
@@ -1885,7 +1954,12 @@ def evaluate_database_gate(repo_root: Path, stage: str) -> list[dict[str, Any]]:
         pass
     try:
         evidence = _load_existing_evidence(root)
-        evidence_is_high_risk = evidence is not None
+        if evidence is not None:
+            signal_is_current = (
+                evidence["signal_hash"] == signal.snapshot_hash
+                and tuple(evidence["signal_reasons"]) == signal.reasons
+            )
+            evidence_is_high_risk = signal_is_current
     except DatabaseValidationError:
         pass
 
@@ -1896,6 +1970,7 @@ def evaluate_database_gate(repo_root: Path, stage: str) -> list[dict[str, Any]]:
         evidence is not None
         and profile is not None
         and decision is not None
+        and signal_is_current
         and evidence["profile_hash"] == profile.profile_hash
         and decision_is_current
     ):
@@ -1915,7 +1990,11 @@ def evaluate_database_gate(repo_root: Path, stage: str) -> list[dict[str, Any]]:
 
     if stage == "plan":
         return [
-            _database_gate_evaluation("database.signal", True, status="detected"),
+            _database_gate_evaluation(
+                "database.signal",
+                signal_is_current,
+                status="pass" if signal_is_current else "fail",
+            ),
             _database_gate_evaluation(
                 "database.risk_class",
                 evidence_is_high_risk,

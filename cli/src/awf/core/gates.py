@@ -16,6 +16,28 @@ def _as_list(value: Any) -> list[Any]:
 # --- Plan G1 artifact-based evaluation ---
 
 _FR_PATTERN = re.compile(r"FR-\d+")
+
+_SUPPORTED_GATE_CONDITIONS = frozenset(
+    {
+        "findings.count(severity=CRITICAL) == 0",
+        "HIGH issues all have resolution or user acknowledgment",
+        "coverage.percentage >= 80",
+        "REVIEW_CONFLICT count(severity>=HIGH) == 0 (when multi-LLM)",
+        "scope.violations == 0",
+        "compliance.fail == 0",
+        "compliance.percentage >= 90",
+        "quality.critical == 0",
+        "REVIEW_CONFLICT count == 0 (when multi-LLM)",
+        "tasks.pending == 0",
+        "lint_clean == true",
+        "build_passed == true",
+        "commits.count > 0",
+        "suites.failed == 0",
+        "regressions.count == 0",
+        "acceptance.passed == acceptance.total",
+        "coverage.percentage >= 70",
+    }
+)
 _TASK_PATTERN = re.compile(r"^- \[ \] T\d+", re.MULTILINE)
 
 
@@ -198,35 +220,68 @@ def evaluate_gate(explicit_root: Optional[str], phase: str, result_data: dict[st
 
     agent_card_path = root / ".workflow" / "agent-cards" / f"{phase}.json"
 
-    if not agent_card_path.exists():
-        # Fallback: validate shape only, no agent-card-specific conditions
-        import sys
-        print(
-            f"warning: agent card missing for {phase}, using shape-only gate evaluation",
-            file=sys.stderr,
-        )
-        shape_errors = _validate_required_shape(phase, result_data)
-        if shape_errors:
-            return False, [
-                {
-                    "condition": "structured_result_shape",
-                    "passed": False,
-                    "detail": "malformed_response:" + ",".join(shape_errors),
-                },
-                *database_evaluations,
-            ]
-        evaluations = [
+    if not agent_card_path.is_file():
+        return False, [
             {
-                "condition": "shape_only_fallback",
-                "passed": True,
+                "condition": "gate_configuration",
+                "passed": False,
                 "detail": "agent_card_missing",
             },
             *database_evaluations,
         ]
-        return all(item["passed"] for item in evaluations), evaluations
 
-    agent_card = json.loads(agent_card_path.read_text(encoding="utf-8"))
-    conditions = agent_card.get("gate", {}).get("pass_conditions", [])
+    try:
+        agent_card = json.loads(agent_card_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False, [
+            {
+                "condition": "gate_configuration",
+                "passed": False,
+                "detail": "agent_card_invalid",
+            },
+            *database_evaluations,
+        ]
+    if not isinstance(agent_card, dict) or not isinstance(agent_card.get("gate"), dict):
+        return False, [
+            {
+                "condition": "gate_configuration",
+                "passed": False,
+                "detail": "agent_card_invalid",
+            },
+            *database_evaluations,
+        ]
+    conditions = agent_card["gate"].get("pass_conditions")
+    if not isinstance(conditions, list):
+        return False, [
+            {
+                "condition": "gate_configuration",
+                "passed": False,
+                "detail": "pass_conditions_invalid",
+            },
+            *database_evaluations,
+        ]
+    if not conditions:
+        return False, [
+            {
+                "condition": "gate_configuration",
+                "passed": False,
+                "detail": "pass_conditions_empty",
+            },
+            *database_evaluations,
+        ]
+    if any(
+        not isinstance(condition, str)
+        or condition not in _SUPPORTED_GATE_CONDITIONS
+        for condition in conditions
+    ):
+        return False, [
+            {
+                "condition": "gate_configuration",
+                "passed": False,
+                "detail": "pass_conditions_unsupported",
+            },
+            *database_evaluations,
+        ]
     evaluations: list[dict[str, Any]] = []
     shape_errors = _validate_required_shape(phase, result_data)
 
