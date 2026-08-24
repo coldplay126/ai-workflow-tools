@@ -712,7 +712,7 @@ def test_legacy_manifest_without_profile_validates_present_artifact(tmp_path: Pa
 
     policy = resolve_planning_options_policy(tmp_path)
 
-    assert policy.required is False
+    assert policy.required is True
     assert policy.status == "no_decision_required"
     assert policy.artifact is not None
 
@@ -1069,32 +1069,37 @@ def _write_plan_artifacts(root: Path) -> dict[str, str]:
         "plan.md": "# Plan\n",
         "tasks.md": "- [ ] T01 Work\n",
         "test-criteria.md": "# Criteria\n",
+        "allowed-files.json": "{\"allowed_files\":[]}\n",
     }
     for name, content in contents.items():
         (artifacts / name).write_text(content, encoding="utf-8")
     return contents
 
 
-def test_seal_binds_selected_options_and_exactly_five_plan_artifacts(
+def test_selection_archives_six_plan_outputs_and_prior_seal(
     tmp_path: Path,
 ):
     _write_planning_options_manifest(tmp_path, True)
     _write_artifact(tmp_path, _artifact())
     contents = _write_plan_artifacts(tmp_path)
+    artifacts = tmp_path / ".workflow" / "artifacts"
 
+    first = select_planning_option(tmp_path, "D-001", "O-001", "operator")
+
+    assert first.changed
+    for name, content in contents.items():
+        assert not (artifacts / name).exists()
+        assert (
+            artifacts / f".stale.{first.previous_hash[:12]}.{name}"
+        ).read_text(encoding="utf-8") == content
     with pytest.raises(PlanningOptionsError) as exc:
         seal_planning_options(tmp_path)
-    _assert_code(exc, "selection_required")
+    _assert_code(exc, "provenance_invalid")
 
-    select_planning_option(tmp_path, "D-001", "O-001", "operator")
+    _write_plan_artifacts(tmp_path)
     sealed = seal_planning_options(tmp_path)
-    marker = json.loads(
-        (tmp_path / ".workflow" / "artifacts" / "planning-provenance.json").read_text(
-            encoding="utf-8"
-        )
-    )
-
-    assert sealed.planning_options_hash == load_planning_options(tmp_path).artifact_hash
+    marker_path = artifacts / "planning-provenance.json"
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
     assert marker == {
         "schema_version": 1,
         "planning_options_hash": sealed.planning_options_hash,
@@ -1103,36 +1108,64 @@ def test_seal_binds_selected_options_and_exactly_five_plan_artifacts(
             for name, content in contents.items()
         },
     }
-    assert len(marker["artifacts"]) == 5
-
+    assert len(marker["artifacts"]) == 6
     passed, evaluations = evaluate_planning_options_gate(tmp_path)
-    assert passed
-    assert next(
-        item
-        for item in evaluations
-        if item["condition"] == "planning_options.provenance"
-    )["passed"]
+    assert passed, evaluations
 
-    select_planning_option(tmp_path, "D-001", "O-002", "operator")
-    passed, evaluations = evaluate_planning_options_gate(tmp_path)
-    assert not passed
-    assert next(
-        item
-        for item in evaluations
-        if item["condition"] == "planning_options.provenance"
-    )["detail"] == "provenance_changed"
+    snapshot = {
+        name: (artifacts / name).read_bytes()
+        for name in (*contents, "planning-provenance.json")
+    }
+    reused = select_planning_option(tmp_path, "D-001", "O-001", "another-operator")
+    assert not reused.changed
+    assert {
+        name: (artifacts / name).read_bytes()
+        for name in (*contents, "planning-provenance.json")
+    } == snapshot
 
-    seal_planning_options(tmp_path)
-    (tmp_path / ".workflow" / "artifacts" / "plan.md").write_text(
-        "# Regenerated plan\n", encoding="utf-8"
-    )
-    passed, evaluations = evaluate_planning_options_gate(tmp_path)
-    assert not passed
-    assert next(
-        item
-        for item in evaluations
-        if item["condition"] == "planning_options.provenance"
-    )["detail"] == "provenance_changed"
+    second = select_planning_option(tmp_path, "D-001", "O-002", "operator")
+    assert second.changed
+    for name, content in contents.items():
+        assert not (artifacts / name).exists()
+        assert (
+            artifacts / f".stale.{second.previous_hash[:12]}.{name}"
+        ).read_text(encoding="utf-8") == content
+    assert not marker_path.exists()
+    assert (
+        artifacts / f".stale.{second.previous_hash[:12]}.planning-provenance.json"
+    ).read_bytes() == snapshot["planning-provenance.json"]
+    with pytest.raises(PlanningOptionsError) as exc:
+        seal_planning_options(tmp_path)
+    _assert_code(exc, "provenance_invalid")
+
+
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "directory"])
+def test_selection_rejects_unsafe_plan_output_without_mutating_decision(
+    tmp_path: Path, unsafe_kind: str
+):
+    _write_artifact(tmp_path, _artifact())
+    _write_plan_artifacts(tmp_path)
+    artifacts = tmp_path / ".workflow" / "artifacts"
+    unsafe_path = artifacts / "allowed-files.json"
+    unsafe_path.unlink()
+    outside = tmp_path / "outside.json"
+    if unsafe_kind == "symlink":
+        outside.write_text("outside", encoding="utf-8")
+        unsafe_path.symlink_to(outside)
+    else:
+        unsafe_path.mkdir()
+    original = (artifacts / "planning-options.json").read_bytes()
+
+    with pytest.raises(PlanningOptionsError) as exc:
+        select_planning_option(tmp_path, "D-001", "O-001", "operator")
+
+    _assert_code(exc, "artifact_invalid")
+    assert (artifacts / "planning-options.json").read_bytes() == original
+    assert not (artifacts / ".planning-options-reconcile").exists()
+    if unsafe_kind == "symlink":
+        assert outside.read_text(encoding="utf-8") == "outside"
+    else:
+        assert unsafe_path.is_dir()
 
 
 def test_next_selection_timestamp_uses_canonical_strictly_monotonic_microseconds(
@@ -1171,3 +1204,92 @@ def test_next_selection_timestamp_uses_canonical_strictly_monotonic_microseconds
     )
 
     assert timestamp == "2026-08-24T10:00:00.123457Z"
+
+
+def test_selection_rejects_canonical_payload_overflow_before_journaling(
+    tmp_path: Path,
+):
+    def artifact_with_summary_size(size: int) -> dict[str, object]:
+        return _artifact(
+            decisions=[
+                _decision(
+                    f"D-{index:03d}",
+                    options=[
+                        _option(
+                            "O-001",
+                            summary=f"recommended-{index}-" + "a" * size,
+                        ),
+                        _option(
+                            "O-002",
+                            summary=f"alternate-{index}-" + "b" * size,
+                        ),
+                    ],
+                )
+                for index in range(1, 17)
+            ]
+        )
+
+    lower, upper = 1, 4000
+    payload = artifact_with_summary_size(lower)
+    while lower <= upper:
+        candidate_size = (lower + upper) // 2
+        candidate = artifact_with_summary_size(candidate_size)
+        if len(planning_options._canonical_json_bytes(candidate)) < (
+            planning_options._MAX_ARTIFACT_BYTES
+        ):
+            payload = candidate
+            lower = candidate_size + 1
+        else:
+            upper = candidate_size - 1
+
+    artifact_path = _artifact_path(tmp_path)
+    artifact_path.write_bytes(planning_options._canonical_json_bytes(payload))
+    original = artifact_path.read_bytes()
+    assert load_planning_options(tmp_path).status == "selection_required"
+    journal_path = artifact_path.parent / ".planning-options-reconcile"
+    journal_path.write_text("prior journal", encoding="utf-8")
+    original_journal = journal_path.read_bytes()
+
+    with pytest.raises(PlanningOptionsError) as exc:
+        select_planning_option(tmp_path, "D-001", "O-002", "operator")
+
+    _assert_code(exc, "selection_invalid")
+    assert artifact_path.read_bytes() == original
+    assert journal_path.read_bytes() == original_journal
+
+
+def test_selection_timestamp_overflow_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(9999, 12, 31, 23, 59, 59, 999999, tzinfo=timezone.utc)
+
+    artifact = _artifact(
+        status="selected",
+        decisions=[
+            _decision(
+                selected_option_id="O-001",
+                selected_by="operator",
+                selected_at="9999-12-31T23:59:59.999999Z",
+            )
+        ],
+        selection_history=[
+            {
+                "decision_id": "D-001",
+                "previous_option_id": None,
+                "selected_option_id": "O-001",
+                "selected_by": "operator",
+                "selected_at": "9999-12-31T23:59:59.999999Z",
+                "source": "cli",
+            }
+        ],
+    )
+    _write_artifact(tmp_path, artifact)
+    monkeypatch.setattr(planning_options, "datetime", FrozenDatetime)
+
+    with pytest.raises(PlanningOptionsError) as exc:
+        select_planning_option(tmp_path, "D-001", "O-002", "operator")
+
+    _assert_code(exc, "selection_invalid")

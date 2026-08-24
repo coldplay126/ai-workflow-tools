@@ -35,6 +35,7 @@ _PLAN_ARTIFACT_NAMES = (
     "plan.md",
     "tasks.md",
     "test-criteria.md",
+    "allowed-files.json",
 )
 
 _ARTIFACT_FIELDS = frozenset(
@@ -731,7 +732,7 @@ def resolve_planning_options_policy(repo_root: Path) -> PlanningOptionsPolicy:
                 required=False, status="legacy_not_required", artifact=None
             )
         return PlanningOptionsPolicy(
-            required=False, status=artifact.status, artifact=artifact
+            required=True, status=artifact.status, artifact=artifact
         )
 
     profile = manifest["planning_options"]
@@ -1073,7 +1074,10 @@ def _next_selection_timestamp(history: tuple[SelectionHistoryEntry, ...]) -> str
     if history:
         latest = datetime.fromisoformat(history[-1].selected_at[:-1] + "+00:00")
         if now <= latest:
-            now = latest + timedelta(microseconds=1)
+            try:
+                now = latest + timedelta(microseconds=1)
+            except OverflowError:
+                raise PlanningOptionsError("selection_invalid") from None
     return now.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
@@ -1088,6 +1092,65 @@ def _selection_request_values(
         )
     except PlanningOptionsError:
         raise PlanningOptionsError("selection_invalid") from None
+
+
+_STALE_SELECTION_ARTIFACT_NAMES = (
+    *_PLAN_ARTIFACT_NAMES,
+    "planning-provenance.json",
+)
+
+
+def _stale_selection_artifact_name(previous_hash: str, name: str) -> str:
+    if _SHA256.fullmatch(previous_hash) is None:
+        raise _selection_artifact_error()
+    return f".stale.{previous_hash[:12]}.{name}"
+
+
+def _safe_stale_selection_source(directory_fd: int, name: str) -> bool:
+    descriptor: Optional[int] = None
+    try:
+        try:
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_fd,
+            )
+        except FileNotFoundError:
+            return False
+        except OSError:
+            raise _selection_artifact_error() from None
+        _validate_selection_file(descriptor)
+        return True
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _stale_planning_outputs(directory_fd: int, previous_hash: str) -> None:
+    """Archive active plan outputs under the selection lock without following links."""
+
+    available = tuple(
+        name
+        for name in _STALE_SELECTION_ARTIFACT_NAMES
+        if _safe_stale_selection_source(directory_fd, name)
+    )
+    for name in available:
+        try:
+            os.replace(
+                name,
+                _stale_selection_artifact_name(previous_hash, name),
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+        except FileNotFoundError:
+            continue
+        except OSError:
+            raise _selection_artifact_error() from None
+    if available:
+        try:
+            os.fsync(directory_fd)
+        except OSError:
+            raise _selection_artifact_error() from None
 
 
 def _select_planning_option_in_transaction(
@@ -1140,6 +1203,10 @@ def _select_planning_option_in_transaction(
     all_selected = all(item["selected_option_id"] is not None for item in payload["decisions"])
     payload["status"] = "selected" if all_selected else "selection_required"
     updated = _parse_artifact(payload)
+    if len(_canonical_json_bytes(payload) + b"\n") > _MAX_ARTIFACT_BYTES:
+        raise PlanningOptionsError("selection_invalid")
+    for name in _STALE_SELECTION_ARTIFACT_NAMES:
+        _safe_stale_selection_source(directory_fd, name)
     _write_reconciliation_marker(
         directory_fd,
         {
@@ -1153,6 +1220,7 @@ def _select_planning_option_in_transaction(
         },
     )
     _write_selection_artifact(directory_fd, payload)
+    _stale_planning_outputs(directory_fd, artifact.artifact_hash)
     return PlanningOptionSelection(
         decision_id=decision_id,
         option_id=option_id,
@@ -1351,7 +1419,7 @@ def _write_provenance_to_directory(
 
 
 def seal_planning_options(repo_root: Path) -> PlanningOptionsProvenance:
-    """Atomically bind a resolved planning decision to the five plan artifacts."""
+    """Atomically bind a resolved planning decision to the six plan artifacts."""
 
     root = _canonical_repo_root(Path(repo_root))
     with planning_option_selection_transaction(root, canonical=True) as (

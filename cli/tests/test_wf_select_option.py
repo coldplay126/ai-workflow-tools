@@ -98,6 +98,7 @@ def _write_derived_plan_artifacts(root: Path) -> None:
         "plan.md": "# Plan\n\n- [FR-001] Persist the chosen rollout.\n",
         "tasks.md": "# Tasks\n\n- [ ] T001 [FR-001] Exercise the selection lifecycle.\n",
         "test-criteria.md": "# Test Criteria\n\n- [FR-001] Selection resumes planning.\n",
+        "allowed-files.json": "{\"allowed_files\":[]}\n",
     }
     for name, text in contents.items():
         (artifacts / name).write_text(text, encoding="utf-8")
@@ -431,6 +432,8 @@ def test_retry_after_state_failure_reconciles_without_duplicate_replan_history(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
     _write_artifact(tmp_path, _artifact(selected=True))
+    _write_derived_plan_artifacts(tmp_path)
+    before_selection = load_planning_options(tmp_path)
     _write_state(tmp_path, _state(current_phase="review", plan_status="completed", g1_passed=True))
 
     with monkeypatch.context() as patch:
@@ -448,8 +451,34 @@ def test_retry_after_state_failure_reconciles_without_duplicate_replan_history(
     assert "top-secret" not in failed_output
     assert persisted_artifact["decisions"][0]["selected_option_id"] == "O-002"
     assert len(persisted_artifact["selection_history"]) == 2
+    artifacts = tmp_path / ".workflow" / "artifacts"
+    for name in (
+        "constitution.md",
+        "spec.md",
+        "plan.md",
+        "tasks.md",
+        "test-criteria.md",
+        "allowed-files.json",
+    ):
+        assert not (artifacts / name).exists()
+        assert (
+            artifacts / f".stale.{before_selection.artifact_hash[:12]}.{name}"
+        ).exists()
+    _write_derived_plan_artifacts(tmp_path)
+
 
     assert run_wf_select_option(_args(tmp_path, "D-001", "O-002")) == 0
+    assert not any(
+        (artifacts / name).exists()
+        for name in (
+            "constitution.md",
+            "spec.md",
+            "plan.md",
+            "tasks.md",
+            "test-criteria.md",
+            "allowed-files.json",
+        )
+    )
     reconciled = _load_state(tmp_path)
     assert reconciled["loop"]["replanCount"] == 1
     assert [entry["action"] for entry in reconciled["history"]].count("replanned") == 1
@@ -843,12 +872,23 @@ def test_planning_option_lifecycle_smoke_uses_cli_and_state_apis(
     assert "pendingDecision" not in resumed["loop"]
     assert [entry["action"] for entry in resumed["history"]] == ["deciding", "continued"]
 
+    assert main(["wf", "gate", "plan", "--repo-root", str(selected_root)]) == 1
+    stale_gate = capsys.readouterr()
+    assert stale_gate.out.endswith("\nG-plan: FAIL\n")
+    assert main(
+        ["wf", "seal-plan", "--repo-root", str(selected_root), "--json"]
+    ) == 2
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "failed",
+        "reason": "seal_unavailable",
+    }
+
+    _write_derived_plan_artifacts(selected_root)
     assert main(
         ["wf", "seal-plan", "--repo-root", str(selected_root), "--json"]
     ) == 0
     sealed_selection = json.loads(capsys.readouterr().out)
     assert sealed_selection["status"] == "sealed"
-
     assert main(["wf", "gate", "plan", "--repo-root", str(selected_root)]) == 0
     passed_gate = capsys.readouterr()
     assert passed_gate.out.endswith("\nG-plan: PASS\n")

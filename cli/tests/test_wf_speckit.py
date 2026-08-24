@@ -365,6 +365,9 @@ def test_004_required_planning_options_need_a_current_host_seal() -> None:
         (artifacts / "constitution.md").write_text(
             "# Constitution", encoding="utf-8"
         )
+        (artifacts / "allowed-files.json").write_text(
+            "{\"allowed_files\":[]}", encoding="utf-8"
+        )
 
         passed, evaluations = evaluate_plan_gate(root)
         assert not passed
@@ -385,6 +388,46 @@ def test_004_required_planning_options_need_a_current_host_seal() -> None:
         assert _evaluation_by_condition(evaluations)["planning_options.provenance"][
             "detail"
         ] == "provenance_changed"
+
+
+def test_004_legacy_present_options_also_need_a_current_host_seal() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = _make_project(
+            Path(tmp),
+            spec="# Spec",
+            plan="# Plan",
+            tasks="- [ ] T01 Deliver",
+            test_criteria="# Criteria",
+        )
+        artifacts = root / ".workflow" / "artifacts"
+        (artifacts / "constitution.md").write_text(
+            "# Constitution", encoding="utf-8"
+        )
+        (artifacts / "allowed-files.json").write_text(
+            "{\"allowed_files\":[]}", encoding="utf-8"
+        )
+        (artifacts / "planning-options.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "status": "no_decision_required",
+                    "no_decision_reason": "One safe delivery path is determined.",
+                    "decisions": [],
+                    "selection_history": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        passed, evaluations = evaluate_plan_gate(root)
+        assert not passed
+        assert _evaluation_by_condition(evaluations)["planning_options.provenance"][
+            "detail"
+        ] == "provenance_missing"
+
+        seal_planning_options(root)
+        passed, evaluations = evaluate_plan_gate(root)
+        assert passed, evaluations
 
 # ---------------------------------------------------------------------------
 # P0 database evidence: G1 mandatory conditions

@@ -43,6 +43,7 @@ from awf.core.planning_options import (
     _reconciliation_pending,
     _select_planning_option_in_transaction,
     _selection_request_values,
+    _stale_planning_outputs,
     load_planning_options,
     planning_option_selection_transaction,
     seal_planning_options,
@@ -701,6 +702,9 @@ def run_wf_select_option(args: argparse.Namespace) -> int:
             validated_artifact = load_planning_options(root)
             pending = _reconciliation_pending(directory_fd, validated_artifact)
             if pending:
+                _stale_planning_outputs(
+                    directory_fd, str(pending["previous_hash"])
+                )
                 _, action = apply_planning_option_selection(
                     root,
                     current_hash=str(pending["current_hash"]),

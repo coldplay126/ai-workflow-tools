@@ -13,6 +13,7 @@ _PLAN_ARTIFACTS = {
     "plan.md": "# Plan\n",
     "tasks.md": "- [ ] T01 Deliver\n",
     "test-criteria.md": "# Test criteria\n",
+    "allowed-files.json": "{\"allowed_files\":[]}\n",
 }
 
 
@@ -81,9 +82,9 @@ def _selection_required_options() -> dict[str, object]:
     }
 
 
-def test_seal_plan_writes_strict_five_artifact_marker_as_json(
+def test_seal_plan_writes_strict_six_artifact_marker_as_json(
     tmp_path: Path, capsys
-) -> None:
+):
     _write_plan_root(tmp_path, _no_decision_options())
 
     rc = main(["wf", "seal-plan", "--repo-root", str(tmp_path), "--json"])
