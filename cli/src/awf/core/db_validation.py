@@ -1349,13 +1349,14 @@ def _run_json_command(
         time.sleep(0.01)
 
     reader.join(timeout=_PROCESS_GROUP_GRACE_SECONDS)
+    reader_was_alive = reader.is_alive()
     leader_returncode = process.poll()
     cleanup_required = (
         timed_out
         or output_oversize.is_set()
         or leader_returncode not in (None, 0)
         or reader_error.is_set()
-        or reader.is_alive()
+        or reader_was_alive
         or _process_group_exists(pgid)
     )
     if cleanup_required:
@@ -1373,7 +1374,7 @@ def _run_json_command(
         raise DatabaseValidationError("command_output_oversize")
     if process.returncode not in (None, 0):
         raise DatabaseValidationError("command_nonzero")
-    if reader_error.is_set() or reader.is_alive():
+    if reader_error.is_set() or reader_was_alive or reader.is_alive():
         raise DatabaseValidationError("command_output_invalid")
     try:
         parsed = json.loads(

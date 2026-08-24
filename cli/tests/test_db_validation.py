@@ -1688,6 +1688,7 @@ def pid_is_reaped(pid: int) -> bool:
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+@pytest.mark.parametrize("attempt", range(5))
 @pytest.mark.parametrize(
     ("mode", "expected_blocker"),
     [
@@ -1701,8 +1702,9 @@ def test_command_failure_reaps_ignored_process_group_children(
     tmp_path: Path,
     mode: str,
     expected_blocker: str,
+    attempt: int,
 ) -> None:
-    pid_path = tmp_path / f"{mode}.pid"
+    pid_path = tmp_path / f"{mode}-{attempt}.pid"
     prepare_database_workflow(
         tmp_path,
         schema_command=leaking_process_group_command(mode, pid_path),
