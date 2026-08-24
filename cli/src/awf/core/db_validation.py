@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import fcntl
 import hashlib
 import json
 import os
@@ -10,9 +11,10 @@ from pathlib import Path
 import re
 import signal
 import subprocess
-import tempfile
 import threading
+import stat
 import time
+import unicodedata
 from typing import Any, Iterable, Optional, Sequence
 
 
@@ -98,16 +100,59 @@ def _artifact_error(relative_path: str, code: str) -> str:
     return f"artifact_error:{relative_path}:{code}"
 
 
-def _read_bounded_utf8(path: Path) -> tuple[Optional[str], Optional[str]]:
-    if not path.exists():
-        return None, None
-    if not path.is_file():
-        return None, "unreadable"
+def _canonical_repo_root(repo_root: Path) -> Path:
     try:
-        with path.open("rb") as artifact:
-            raw = artifact.read(_MAX_ARTIFACT_BYTES + 1)
+        root = Path(repo_root).resolve(strict=True)
+        metadata = os.lstat(root)
+    except OSError:
+        raise DatabaseValidationError("repo_root_invalid") from None
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise DatabaseValidationError("repo_root_invalid")
+    return root
+
+
+def _read_bounded_utf8(
+    root: Path,
+    relative_path: str,
+) -> tuple[Optional[str], Optional[str]]:
+    parts = tuple(Path(relative_path).parts)
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        return None, "unsafe_path"
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    directory_fd: Optional[int] = None
+    file_fd: Optional[int] = None
+    try:
+        directory_fd = os.open(root, directory_flags)
+        for part in parts[:-1]:
+            try:
+                metadata = os.lstat(part, dir_fd=directory_fd)
+            except FileNotFoundError:
+                return None, None
+            if stat.S_ISLNK(metadata.st_mode):
+                return None, "unsafe_path"
+            if not stat.S_ISDIR(metadata.st_mode):
+                return None, "unreadable"
+            next_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        try:
+            metadata = os.lstat(parts[-1], dir_fd=directory_fd)
+        except FileNotFoundError:
+            return None, None
+        if stat.S_ISLNK(metadata.st_mode):
+            return None, "unsafe_path"
+        if not stat.S_ISREG(metadata.st_mode):
+            return None, "unreadable"
+        file_fd = os.open(parts[-1], file_flags, dir_fd=directory_fd)
+        raw = os.read(file_fd, _MAX_ARTIFACT_BYTES + 1)
     except OSError:
         return None, "unreadable"
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        if directory_fd is not None:
+            os.close(directory_fd)
     if len(raw) > _MAX_ARTIFACT_BYTES:
         return None, "oversize"
     try:
@@ -170,8 +215,7 @@ def _canonicalize_allowed_path(value: str) -> tuple[Optional[str], Optional[str]
 def _normalized_allowed_paths(
     root: Path,
 ) -> tuple[tuple[str, ...], Optional[str]]:
-    path = root / _ALLOWED_FILES_ARTIFACT
-    raw, error = _read_bounded_utf8(path)
+    raw, error = _read_bounded_utf8(root, _ALLOWED_FILES_ARTIFACT)
     if error:
         return (), error
     if raw is None:
@@ -213,10 +257,16 @@ def _is_database_path(path: str) -> bool:
 
 def detect_database_signal(repo_root: Path) -> DatabaseSignal:
     """Return DB signals or conservative artifact errors from known artifacts."""
-    root = Path(repo_root)
+    try:
+        root = _canonical_repo_root(repo_root)
+    except DatabaseValidationError:
+        return DatabaseSignal(
+            detected=True,
+            reasons=(_artifact_error(".workflow", "unsafe_path"),),
+        )
     reasons = set()
     for relative_path in _TEXT_ARTIFACTS:
-        text, error = _read_bounded_utf8(root / relative_path)
+        text, error = _read_bounded_utf8(root, relative_path)
         if error:
             reasons.add(_artifact_error(relative_path, error))
         elif text is not None:
@@ -241,10 +291,19 @@ _MAX_COMMAND_OUTPUT_BYTES = 128 * 1024
 _MAX_COMMAND_TIMEOUT_SECONDS = 300
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _SECRET_COMMAND_OPTION = re.compile(
-    r"^--(?:password|token|dsn|secret|credential)(?:=.*)?$",
+    r"(?:^|[\s;])--(?:password|token|dsn|secret|credential)(?:=|\s|$)",
     re.IGNORECASE,
 )
-_URI_VALUE = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
+_SHORT_SECRET_COMMAND_OPTION = re.compile(
+    r"(?:^|[\s;])-[pt](?:\S*)?(?=$|[\s;])",
+    re.IGNORECASE,
+)
+_SENSITIVE_ASSIGNMENT = re.compile(
+    r"\b[A-Za-z_][A-Za-z0-9_]*(?:password|token|dsn|secret|credential|url)"
+    r"[A-Za-z0-9_]*\s*=",
+    re.IGNORECASE,
+)
+_URI_VALUE = re.compile(r"[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 _SHELL_EXECUTABLES = {"sh", "bash", "zsh", "dash", "fish", "ksh"}
 _DECISION_KINDS = {
     "maintain",
@@ -491,7 +550,7 @@ def _load_json_object(
     missing_code: str,
     invalid_code: str,
 ) -> dict[str, Any]:
-    raw, error = _read_bounded_utf8(root / relative_path)
+    raw, error = _read_bounded_utf8(root, relative_path)
     if raw is None:
         if error is None:
             raise DatabaseValidationError(missing_code)
@@ -506,7 +565,15 @@ def _load_json_object(
 
 
 def _contains_literal_profile_secret(argument: str) -> bool:
-    return _SECRET_COMMAND_OPTION.fullmatch(argument) is not None or _URI_VALUE.match(argument) is not None
+    return any(
+        pattern.search(argument) is not None
+        for pattern in (
+            _SECRET_COMMAND_OPTION,
+            _SHORT_SECRET_COMMAND_OPTION,
+            _SENSITIVE_ASSIGNMENT,
+            _URI_VALUE,
+        )
+    )
 
 
 def _validate_command(value: object, *, required: bool) -> tuple[str, ...]:
@@ -549,7 +616,7 @@ def _parse_timestamp(value: object) -> Optional[datetime]:
 def load_database_profile(repo_root: Path) -> DatabaseProfile:
     """Load the strictly bounded database-validation profile from manifest.json."""
 
-    root = Path(repo_root)
+    root = _canonical_repo_root(repo_root)
     manifest = _load_json_object(
         root,
         _PROFILE_ARTIFACT,
@@ -640,6 +707,8 @@ def _validate_candidate(candidate: object) -> dict[str, Any]:
         or not _validate_string_list(candidate["operational_risks"])
         or not _validate_string_list(candidate["transition_risks"])
     ):
+
+
         raise DatabaseValidationError("decision_invalid")
 
     unavailable_reason = candidate["unavailable_reason"]
@@ -669,6 +738,33 @@ def _validate_candidate(candidate: object) -> dict[str, Any]:
     elif denormalization is not None or physical_design is not None:
         raise DatabaseValidationError("decision_invalid")
     return candidate
+def _normalize_material_value(value: object) -> object:
+    if isinstance(value, str):
+        normalized = unicodedata.normalize("NFKC", value).casefold()
+        return "".join(
+            character
+            for character in normalized
+            if not unicodedata.category(character).startswith("P")
+            and not character.isspace()
+        )
+    if isinstance(value, list):
+        return [_normalize_material_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _normalize_material_value(entry)
+            for key, entry in sorted(value.items())
+        }
+    return value
+
+
+def _candidate_material_fingerprint(candidate: dict[str, Any]) -> str:
+    fingerprint = {
+        field: _normalize_material_value(candidate[field])
+        for field in sorted(_CANDIDATE_FIELDS - {"id", "summary"})
+    }
+    for field in ("operational_risks", "transition_risks"):
+        fingerprint[field] = sorted(fingerprint[field])
+    return _canonical_hash(fingerprint)
 
 
 def _validate_waiver(value: object) -> Optional[dict[str, str]]:
@@ -682,15 +778,20 @@ def _validate_waiver(value: object) -> Optional[dict[str, str]]:
     reason = _nonempty_string(value["reason"])
     approver = _nonempty_string(value["approver"])
     timestamp = _nonempty_string(value["timestamp"])
-    if not reason or not approver or not timestamp or _parse_timestamp(timestamp) is None:
+    parsed_timestamp = _parse_timestamp(timestamp) if timestamp else None
+    if not reason or not approver or parsed_timestamp is None:
         raise DatabaseValidationError("decision_invalid")
-    return {"reason": reason, "approver": approver, "timestamp": timestamp}
+    return {
+        "reason": reason,
+        "approver": approver,
+        "timestamp": _utc_timestamp(parsed_timestamp),
+    }
 
 
 def load_database_decision(repo_root: Path) -> DatabaseDecision:
     """Load the selected, comparable database design decision artifact."""
 
-    root = Path(repo_root)
+    root = _canonical_repo_root(repo_root)
     decision = _load_json_object(
         root,
         _DECISION_ARTIFACT,
@@ -702,7 +803,7 @@ def load_database_decision(repo_root: Path) -> DatabaseDecision:
         _DECISION_FIELDS | _DECISION_OPTIONAL_FIELDS
     ):
         raise DatabaseValidationError("decision_invalid")
-    if decision["schema_version"] != 1 or decision["status"] != "selected":
+    if not _is_strict_int(decision["schema_version"]) or decision["schema_version"] != 1 or decision["status"] != "selected":
         raise DatabaseValidationError("decision_invalid")
 
     surfaces = decision["change_surfaces"]
@@ -724,12 +825,7 @@ def load_database_decision(repo_root: Path) -> DatabaseDecision:
     if len(set(candidate_ids)) != len(candidate_ids):
         raise DatabaseValidationError("decision_invalid")
     candidate_fingerprints = {
-        _canonical_hash(
-            {
-                field: candidate[field]
-                for field in sorted(_CANDIDATE_FIELDS - {"id"})
-            }
-        )
+        _candidate_material_fingerprint(candidate)
         for candidate in parsed_candidates
     }
     if len(candidate_fingerprints) != len(parsed_candidates):
@@ -756,36 +852,57 @@ def load_database_decision(repo_root: Path) -> DatabaseDecision:
         raise DatabaseValidationError("decision_invalid")
 
     waiver = _validate_waiver(decision.get("local_data_test_waiver"))
+    canonical_decision = dict(decision)
+    if waiver is not None:
+        canonical_decision["local_data_test_waiver"] = waiver
     return DatabaseDecision(
         selected_option_id=selected_id,
         recommended_option_id=recommended_id,
         baseline_option_id=baseline_id,
         change_surfaces=normalized_surfaces,
-        decision_hash=_canonical_hash(decision),
+        decision_hash=_canonical_hash(canonical_decision),
         local_data_test_waiver=waiver,
     )
 
 
-def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is not None:
-        return
+_PROCESS_GROUP_GRACE_SECONDS = 0.2
+
+
+def _process_group_exists(pgid: int) -> bool:
     try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except (AttributeError, OSError):
-        process.terminate()
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _terminate_process_group(process: subprocess.Popen[bytes], pgid: int) -> None:
+    if _process_group_exists(pgid):
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except OSError:
+            pass
+        deadline = time.monotonic() + _PROCESS_GROUP_GRACE_SECONDS
+        while _process_group_exists(pgid) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if _process_group_exists(pgid):
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except OSError:
+                pass
     try:
-        process.wait(timeout=1)
-        return
+        process.wait(timeout=_PROCESS_GROUP_GRACE_SECONDS)
     except subprocess.TimeoutExpired:
-        pass
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except (AttributeError, OSError):
-        process.kill()
-    try:
-        process.wait(timeout=1)
-    except subprocess.TimeoutExpired:
-        pass
+        try:
+            process.kill()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=_PROCESS_GROUP_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def _run_json_command(
@@ -807,6 +924,7 @@ def _run_json_command(
         )
     except (OSError, ValueError):
         raise DatabaseValidationError("command_start_failed") from None
+    pgid = process.pid
 
     output = bytearray()
     output_oversize = threading.Event()
@@ -824,33 +942,45 @@ def _run_json_command(
                     output.extend(chunk[:remaining])
                 if len(output) > _MAX_COMMAND_OUTPUT_BYTES:
                     output_oversize.set()
-        except OSError:
+        except (OSError, ValueError):
             reader_error.set()
 
     reader = threading.Thread(target=read_stdout, daemon=True)
     reader.start()
-    timeout = False
     deadline = time.monotonic() + timeout_seconds
-    while process.poll() is None:
-        if output_oversize.is_set():
-            _terminate_process_group(process)
-            break
+    timed_out = False
+    while process.poll() is None and not output_oversize.is_set():
         if time.monotonic() >= deadline:
-            timeout = True
-            _terminate_process_group(process)
+            timed_out = True
             break
         time.sleep(0.01)
-    if process.poll() is None:
-        _terminate_process_group(process)
-    reader.join(timeout=1)
 
-    if timeout:
+    reader.join(timeout=_PROCESS_GROUP_GRACE_SECONDS)
+    leader_returncode = process.poll()
+    cleanup_required = (
+        timed_out
+        or output_oversize.is_set()
+        or leader_returncode not in (None, 0)
+        or reader_error.is_set()
+        or reader.is_alive()
+        or _process_group_exists(pgid)
+    )
+    if cleanup_required:
+        _terminate_process_group(process, pgid)
+    if process.stdout is not None:
+        try:
+            process.stdout.close()
+        except OSError:
+            pass
+    reader.join()
+
+    if timed_out:
         raise DatabaseValidationError("command_timeout")
     if output_oversize.is_set():
         raise DatabaseValidationError("command_output_oversize")
-    if reader_error.is_set() or reader.is_alive() or process.returncode != 0:
-        if process.returncode not in (None, 0):
-            raise DatabaseValidationError("command_nonzero")
+    if process.returncode not in (None, 0):
+        raise DatabaseValidationError("command_nonzero")
+    if reader_error.is_set() or reader.is_alive():
         raise DatabaseValidationError("command_output_invalid")
     try:
         parsed = json.loads(
@@ -883,7 +1013,8 @@ def _validate_schema_evidence(
     profile: DatabaseProfile,
 ) -> dict[str, Any]:
     if (
-        payload["schema_version"] != 1
+        not _is_strict_int(payload["schema_version"])
+        or payload["schema_version"] != 1
         or payload["kind"] != "production_schema"
         or payload["target_class"] != "production_metadata"
         or payload["read_only"] is not True
@@ -928,7 +1059,8 @@ def _validate_verify_evidence(
 ) -> dict[str, str]:
     statuses = ("equivalence", "integrity", "query_plan", "migration", "rollback")
     if (
-        payload["schema_version"] != 1
+        not _is_strict_int(payload["schema_version"])
+        or payload["schema_version"] != 1
         or payload["kind"] != "database_verify"
         or payload["production_schema_hash"] != schema_hash
         or payload["selected_option_id"] != decision.selected_option_id
@@ -966,7 +1098,8 @@ def _validate_test_evidence(
     schema_hash: str,
 ) -> dict[str, object]:
     if (
-        payload["schema_version"] != 1
+        not _is_strict_int(payload["schema_version"])
+        or payload["schema_version"] != 1
         or payload["kind"] != "database_test"
         or payload["production_schema_hash"] != schema_hash
         or payload["selected_option_id"] != decision.selected_option_id
@@ -993,8 +1126,7 @@ def _validate_test_evidence(
 
 
 def _load_existing_evidence(root: Path) -> Optional[dict[str, Any]]:
-    path = root / _EVIDENCE_ARTIFACT
-    raw, error = _read_bounded_utf8(path)
+    raw, error = _read_bounded_utf8(root, _EVIDENCE_ARTIFACT)
     if raw is None:
         if error is None:
             return None
@@ -1007,6 +1139,7 @@ def _load_existing_evidence(root: Path) -> Optional[dict[str, Any]]:
     if (
         not isinstance(evidence, dict)
         or set(evidence) != _EVIDENCE_FIELDS
+        or not _is_strict_int(evidence["schema_version"])
         or evidence["schema_version"] != 1
         or evidence["database_signal"] is not True
         or evidence["change_class"] != "high_risk"
@@ -1073,11 +1206,13 @@ def _validate_existing_stage_record(
         "verify": {"status", "checked_at", "schema", "verify"},
         "test": {"status", "checked_at", "schema", "test"},
     }[stage]
+    checked_at = _parse_utc_timestamp(record["checked_at"]) if isinstance(record, dict) else None
     if (
         not isinstance(record, dict)
         or set(record) != expected_fields
         or record["status"] != "pass"
-        or _parse_utc_timestamp(record["checked_at"]) is None
+        or checked_at is None
+        or checked_at > _utc_now()
     ):
         raise DatabaseValidationError("evidence_invalid")
     schema = _validated_stored_schema(record["schema"], profile)
@@ -1159,30 +1294,125 @@ def _validated_existing_stages(
     return schemas["plan"]
 
 
-def _atomic_write_evidence(path: Path, payload: dict[str, Any]) -> str:
+_EVIDENCE_LOCK_FILENAME = ".database-validation-evidence.lock"
+
+
+def _open_artifacts_directory(root: Path) -> int:
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    directory_fd: Optional[int] = None
+    try:
+        directory_fd = os.open(root, directory_flags)
+        for component in (".workflow", "artifacts"):
+            try:
+                metadata = os.lstat(component, dir_fd=directory_fd)
+            except FileNotFoundError:
+                os.mkdir(component, mode=0o700, dir_fd=directory_fd)
+                metadata = os.lstat(component, dir_fd=directory_fd)
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                raise DatabaseValidationError("evidence_write_failed")
+            next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        result = directory_fd
+        directory_fd = None
+        return result
+    except (OSError, DatabaseValidationError):
+        raise DatabaseValidationError("evidence_write_failed") from None
+    finally:
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+
+def _acquire_evidence_lock(root: Path) -> tuple[int, int]:
+    directory_fd = _open_artifacts_directory(root)
+    lock_flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        try:
+            metadata = os.lstat(_EVIDENCE_LOCK_FILENAME, dir_fd=directory_fd)
+        except FileNotFoundError:
+            metadata = None
+        if metadata is not None and (
+            stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode)
+        ):
+            raise DatabaseValidationError("evidence_invalid")
+        lock_fd = os.open(
+            _EVIDENCE_LOCK_FILENAME,
+            lock_flags,
+            0o600,
+            dir_fd=directory_fd,
+        )
+        os.fchmod(lock_fd, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    except (OSError, DatabaseValidationError):
+        os.close(directory_fd)
+        raise DatabaseValidationError("evidence_invalid") from None
+    return directory_fd, lock_fd
+
+
+def _release_evidence_lock(directory_fd: int, lock_fd: int) -> None:
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(lock_fd)
+        os.close(directory_fd)
+
+
+def _atomic_write_evidence(directory_fd: int, payload: dict[str, Any]) -> str:
     encoded = _canonical_json_bytes(payload)
     temporary_name: Optional[str] = None
+    temporary_fd: Optional[int] = None
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            mode="wb",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as temporary:
-            temporary_name = temporary.name
-            temporary.write(encoded)
-            temporary.flush()
-            os.fsync(temporary.fileno())
-        os.replace(temporary_name, path)
-    except OSError:
-        if temporary_name:
+        try:
+            metadata = os.lstat(_EVIDENCE_ARTIFACT.rsplit("/", 1)[-1], dir_fd=directory_fd)
+        except FileNotFoundError:
+            metadata = None
+        if metadata is not None and (
+            stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode)
+        ):
+            raise DatabaseValidationError("evidence_invalid")
+        for attempt in range(16):
+            candidate = (
+                f".database-validation-evidence.{os.getpid()}."
+                f"{threading.get_ident()}.{attempt}.tmp"
+            )
             try:
-                os.unlink(temporary_name)
+                temporary_fd = os.open(
+                    candidate,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=directory_fd,
+                )
+                temporary_name = candidate
+                break
+            except FileExistsError:
+                continue
+        if temporary_fd is None or temporary_name is None:
+            raise DatabaseValidationError("evidence_write_failed")
+        os.fchmod(temporary_fd, 0o600)
+        written = 0
+        while written < len(encoded):
+            written += os.write(temporary_fd, encoded[written:])
+        os.fsync(temporary_fd)
+        os.close(temporary_fd)
+        temporary_fd = None
+        os.replace(
+            temporary_name,
+            _EVIDENCE_ARTIFACT.rsplit("/", 1)[-1],
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        temporary_name = None
+        os.fsync(directory_fd)
+    except (OSError, DatabaseValidationError):
+        raise DatabaseValidationError("evidence_write_failed") from None
+    finally:
+        if temporary_fd is not None:
+            os.close(temporary_fd)
+        if temporary_name is not None:
+            try:
+                os.unlink(temporary_name, dir_fd=directory_fd)
             except OSError:
                 pass
-        raise DatabaseValidationError("evidence_write_failed") from None
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -1221,7 +1451,14 @@ def _failed_check(
 def run_database_check(repo_root: Path, stage: str) -> DatabaseCheckResult:
     """Run one DB-evidence stage and atomically merge only validated metadata."""
 
-    root = Path(repo_root)
+    try:
+        root = _canonical_repo_root(repo_root)
+    except DatabaseValidationError as error:
+        return _failed_check(
+            stage,
+            DatabaseSignal(True, (_artifact_error(".workflow", "unsafe_path"),)),
+            error.code,
+        )
     if stage not in {"plan", "verify", "test"}:
         return _failed_check(stage, DatabaseSignal(False, ()), "stage_invalid")
 
@@ -1239,21 +1476,17 @@ def run_database_check(repo_root: Path, stage: str) -> DatabaseCheckResult:
     try:
         profile = load_database_profile(root)
         decision = load_database_decision(root)
+        pre_run_profile_hash = profile.profile_hash
+        pre_run_decision_hash = decision.decision_hash
         existing = _load_existing_evidence(root)
         if existing is not None:
             if existing["profile_hash"] != profile.profile_hash:
                 raise DatabaseValidationError("profile_changed")
             if existing["decision_hash"] != decision.decision_hash:
                 raise DatabaseValidationError("decision_changed")
-
-        if existing is None:
-            if stage in {"verify", "test"}:
-                raise DatabaseValidationError("plan_evidence_missing")
-            stages: dict[str, Any] = {}
-            plan_schema = None
-        else:
-            plan_schema = _validated_existing_stages(existing, profile, decision)
-            stages = dict(existing["stages"])
+            _validated_existing_stages(existing, profile, decision)
+        elif stage in {"verify", "test"}:
+            raise DatabaseValidationError("plan_evidence_missing")
 
         schema_payload = _run_json_command(
             profile.schema_command,
@@ -1262,23 +1495,9 @@ def run_database_check(repo_root: Path, stage: str) -> DatabaseCheckResult:
             allowed_fields=_SCHEMA_FIELDS,
         )
         schema = _validate_schema_evidence(schema_payload, profile)
-
-        if stage in {"verify", "test"}:
-            assert plan_schema is not None
-            if schema["schema_hash"] != plan_schema["schema_hash"]:
-                raise DatabaseValidationError("production_schema_changed")
-
-        checked_at = _utc_timestamp(_utc_now())
-        if stage == "plan":
-            if stages.get("plan", {}).get("schema", {}).get("schema_hash") != schema["schema_hash"]:
-                stages.pop("verify", None)
-                stages.pop("test", None)
-            stages["plan"] = {
-                "status": "pass",
-                "checked_at": checked_at,
-                "schema": schema,
-            }
-        elif stage == "verify":
+        verify: Optional[dict[str, str]] = None
+        test: Optional[dict[str, object]] = None
+        if stage == "verify":
             if not profile.verify_command:
                 raise DatabaseValidationError("profile_incomplete")
             verify_payload = _run_json_command(
@@ -1292,13 +1511,7 @@ def run_database_check(repo_root: Path, stage: str) -> DatabaseCheckResult:
                 decision,
                 schema["schema_hash"],
             )
-            stages["verify"] = {
-                "status": "pass",
-                "checked_at": checked_at,
-                "schema": schema,
-                "verify": verify,
-            }
-        elif profile.test_command:
+        elif stage == "test" and profile.test_command:
             test_payload = _run_json_command(
                 profile.test_command,
                 cwd=root,
@@ -1311,27 +1524,82 @@ def run_database_check(repo_root: Path, stage: str) -> DatabaseCheckResult:
                 profile,
                 schema["schema_hash"],
             )
-            stages["test"] = {
-                "status": "pass",
-                "checked_at": checked_at,
-                "schema": schema,
-                "test": test,
-            }
-        else:
-            if decision.local_data_test_waiver is None:
-                raise DatabaseValidationError("test_waiver_missing")
-            stages["test"] = {
-                "status": "pass",
-                "checked_at": checked_at,
-                "schema": schema,
-                "test": {
-                    "status": "waived",
-                    "waiver": decision.local_data_test_waiver,
-                },
-            }
+        elif stage == "test" and decision.local_data_test_waiver is None:
+            raise DatabaseValidationError("test_waiver_missing")
 
-        evidence = _build_evidence(signal, profile, decision, stages)
-        evidence_hash = _atomic_write_evidence(root / _EVIDENCE_ARTIFACT, evidence)
+        directory_fd, lock_fd = _acquire_evidence_lock(root)
+        try:
+            locked_profile = load_database_profile(root)
+            locked_decision = load_database_decision(root)
+            if locked_profile.profile_hash != pre_run_profile_hash:
+                raise DatabaseValidationError("profile_changed")
+            if locked_decision.decision_hash != pre_run_decision_hash:
+                raise DatabaseValidationError("decision_changed")
+            current = _load_existing_evidence(root)
+            if current is None:
+                if stage in {"verify", "test"}:
+                    raise DatabaseValidationError("plan_evidence_missing")
+                stages: dict[str, Any] = {}
+                locked_plan_schema = None
+            else:
+                if current["profile_hash"] != locked_profile.profile_hash:
+                    raise DatabaseValidationError("profile_changed")
+                if current["decision_hash"] != locked_decision.decision_hash:
+                    raise DatabaseValidationError("decision_changed")
+                locked_plan_schema = _validated_existing_stages(
+                    current,
+                    locked_profile,
+                    locked_decision,
+                )
+                stages = dict(current["stages"])
+
+            if stage in {"verify", "test"}:
+                assert locked_plan_schema is not None
+                if schema["schema_hash"] != locked_plan_schema["schema_hash"]:
+                    raise DatabaseValidationError("production_schema_changed")
+
+            checked_at = _utc_timestamp(_utc_now())
+            if stage == "plan":
+                if (
+                    stages.get("plan", {}).get("schema", {}).get("schema_hash")
+                    != schema["schema_hash"]
+                ):
+                    stages.pop("verify", None)
+                    stages.pop("test", None)
+                stages["plan"] = {
+                    "status": "pass",
+                    "checked_at": checked_at,
+                    "schema": schema,
+                }
+            elif stage == "verify":
+                assert verify is not None
+                stages["verify"] = {
+                    "status": "pass",
+                    "checked_at": checked_at,
+                    "schema": schema,
+                    "verify": verify,
+                }
+            elif test is not None:
+                stages["test"] = {
+                    "status": "pass",
+                    "checked_at": checked_at,
+                    "schema": schema,
+                    "test": test,
+                }
+            else:
+                stages["test"] = {
+                    "status": "pass",
+                    "checked_at": checked_at,
+                    "schema": schema,
+                    "test": {
+                        "status": "waived",
+                        "waiver": locked_decision.local_data_test_waiver,
+                    },
+                }
+            evidence = _build_evidence(signal, locked_profile, locked_decision, stages)
+            evidence_hash = _atomic_write_evidence(directory_fd, evidence)
+        finally:
+            _release_evidence_lock(directory_fd, lock_fd)
     except DatabaseValidationError as error:
         return _failed_check(stage, signal, error.code)
 

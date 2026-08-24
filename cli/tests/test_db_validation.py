@@ -3,8 +3,13 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
+import errno
+import os
 import sys
 from pathlib import Path
+import shutil
+import time
+import threading
 
 import pytest
 
@@ -557,6 +562,34 @@ def test_profile_rejects_split_and_equals_secret_options(
         load_database_profile(tmp_path)
 
 
+@pytest.mark.parametrize(
+    "argument",
+    [
+        "inspect postgresql://user:password@db.internal/service",
+        "DATABASE_PASSWORD=$DATABASE_PASSWORD",
+        "DATABASE_TOKEN=literal-token",
+        "--connection=postgresql://user:password@db.internal/service",
+        "-p",
+        "-psecret",
+        "-t",
+        "-ttoken",
+        "inspect --credential=$DATABASE_CREDENTIAL",
+    ],
+)
+def test_profile_rejects_sensitive_values_anywhere_in_argv(
+    tmp_path: Path,
+    argument: str,
+) -> None:
+    write_workflow_artifacts(tmp_path, concept="Update the database query")
+    write_database_manifest(
+        tmp_path,
+        schema_command=["database-inspector", argument],
+    )
+
+    with pytest.raises(DatabaseValidationError):
+        load_database_profile(tmp_path)
+
+
 @pytest.mark.parametrize("shell", ["sh", "bash", "zsh"])
 def test_profile_rejects_shell_interpreter_commands(tmp_path: Path, shell: str) -> None:
     write_workflow_artifacts(tmp_path, concept="Update the database query")
@@ -740,6 +773,36 @@ def test_decision_rejects_candidate_that_only_changes_its_id(tmp_path: Path) -> 
         load_database_decision(tmp_path)
 
 
+def test_decision_rejects_summary_format_and_risk_order_only_clone(
+    tmp_path: Path,
+) -> None:
+    write_workflow_artifacts(tmp_path, concept="Update the database query")
+    baseline = {
+        **database_decision()["candidates"][0],
+        "summary": "Keep the baseline current.",
+        "equivalence_plan": "Compare the current result-set.",
+        "operational_risks": ["Write amplification.", "Lock wait"],
+    }
+    formatted_copy = {
+        **baseline,
+        "id": "maintain-copy",
+        "summary": "A different label.",
+        "equivalence_plan": "  compare the CURRENT result set!!! ",
+        "operational_risks": [" lock wait ", "write-amplification"],
+    }
+    write_database_decision(
+        tmp_path,
+        database_decision(
+            candidates=[baseline, formatted_copy],
+            recommended_option_id="maintain-copy",
+            selected_option_id="maintain-copy",
+        ),
+    )
+
+    with pytest.raises(DatabaseValidationError):
+        load_database_decision(tmp_path)
+
+
 @pytest.mark.parametrize(
     ("kind", "assessment_field", "assessment", "change_surfaces"),
     [
@@ -854,6 +917,65 @@ def test_decision_returns_selected_id_and_normalized_surfaces(tmp_path: Path) ->
     assert decision.selected_option_id == "rewrite-query"
     assert decision.change_surfaces == ("index", "query")
     assert len(decision.decision_hash) == 64
+@pytest.mark.parametrize("schema_version", [True, 1.0, "1"])
+def test_schema_version_requires_integer_one_everywhere(
+    tmp_path: Path,
+    schema_version: object,
+) -> None:
+    decision_root = tmp_path / "decision"
+    write_workflow_artifacts(decision_root, concept="Update the database query")
+    write_database_decision(
+        decision_root,
+        database_decision(schema_version=schema_version),
+    )
+    with pytest.raises(DatabaseValidationError):
+        load_database_decision(decision_root)
+
+    schema_root = tmp_path / "schema"
+    prepare_database_workflow(
+        schema_root,
+        schema_command=database_command(schema_evidence(schema_version=schema_version)),
+    )
+    assert run_database_check(schema_root, "plan").blockers == (
+        "schema_evidence_invalid",
+    )
+
+    verify_root = tmp_path / "verify"
+    prepare_database_workflow(
+        verify_root,
+        verify_command=database_command(verify_evidence(schema_version=schema_version)),
+    )
+    assert run_database_check(verify_root, "plan").status == "pass"
+    assert run_database_check(verify_root, "verify").blockers == (
+        "verify_evidence_invalid",
+    )
+
+    test_root = tmp_path / "test"
+    prepare_database_workflow(
+        test_root,
+        verify_command=database_command(verify_evidence()),
+        test_command=database_command(
+            database_test_payload(schema_version=schema_version)
+        ),
+    )
+    assert run_database_check(test_root, "plan").status == "pass"
+    assert run_database_check(test_root, "verify").status == "pass"
+    assert run_database_check(test_root, "test").blockers == (
+        "test_evidence_invalid",
+    )
+
+    evidence_root = tmp_path / "evidence"
+    prepare_database_workflow(evidence_root)
+    assert run_database_check(evidence_root, "plan").status == "pass"
+    path = evidence_path(evidence_root)
+    evidence = json.loads(path.read_text(encoding="utf-8"))
+    evidence["schema_version"] = schema_version
+    path.write_text(json.dumps(evidence), encoding="utf-8")
+    assert run_database_check(evidence_root, "plan").blockers == (
+        "evidence_invalid",
+    )
+
+
 
 
 @pytest.mark.parametrize(
@@ -905,6 +1027,93 @@ def test_command_rejections_fail_closed_without_persisting_evidence(
     assert result.blockers == (expected_blocker,)
     assert not evidence_path(tmp_path).exists()
     assert "RAW_SECRET" not in "\n".join(result.blockers)
+
+
+def leaking_process_group_command(mode: str, pid_path: Path) -> list[str]:
+    payload = schema_evidence()
+    script = f"""
+import json
+import os
+from pathlib import Path
+import signal
+import sys
+import time
+
+child = os.fork()
+if child == 0:
+    Path({str(pid_path)!r}).write_text(str(os.getpid()), encoding="utf-8")
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    while True:
+        time.sleep(0.01)
+
+if {mode!r} == "reader":
+    sys.stdout.write(json.dumps({payload!r}))
+    sys.stdout.flush()
+    os._exit(0)
+if {mode!r} == "nonzero":
+    sys.stdout.write(json.dumps({payload!r}))
+    sys.stdout.flush()
+    os._exit(7)
+if {mode!r} == "oversize":
+    sys.stdout.write("x" * (128 * 1024 + 1))
+    sys.stdout.flush()
+    os._exit(0)
+time.sleep(3)
+"""
+    return [sys.executable, "-c", script]
+
+
+def pid_is_reaped(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError as error:
+        return error.errno == errno.ESRCH
+    return False
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+@pytest.mark.parametrize(
+    ("mode", "expected_blocker"),
+    [
+        ("reader", "command_output_invalid"),
+        ("nonzero", "command_nonzero"),
+        ("oversize", "command_output_oversize"),
+        ("timeout", "command_timeout"),
+    ],
+)
+def test_command_failure_reaps_ignored_process_group_children(
+    tmp_path: Path,
+    mode: str,
+    expected_blocker: str,
+) -> None:
+    pid_path = tmp_path / f"{mode}.pid"
+    prepare_database_workflow(
+        tmp_path,
+        schema_command=leaking_process_group_command(mode, pid_path),
+    )
+    write_database_manifest(
+        tmp_path,
+        schema_command=leaking_process_group_command(mode, pid_path),
+        timeout_seconds=1,
+    )
+    try:
+        result = run_database_check(tmp_path, "plan")
+
+        assert result.blockers == (expected_blocker,)
+        deadline = time.monotonic() + 2
+        while not pid_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert pid_path.exists()
+        child_pid = int(pid_path.read_text(encoding="utf-8"))
+        while not pid_is_reaped(child_pid) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert pid_is_reaped(child_pid)
+    finally:
+        if pid_path.exists():
+            try:
+                os.kill(int(pid_path.read_text(encoding="utf-8")), 9)
+            except OSError:
+                pass
 
 
 @pytest.mark.parametrize(
@@ -1051,6 +1260,45 @@ def test_verify_merges_sanitized_evidence_without_replacing_plan(tmp_path: Path)
     assert result.status == "pass"
     assert persisted["stages"]["plan"] == plan_record
     assert persisted["stages"]["verify"]["verify"]["equivalence"] == "pass"
+
+
+def delayed_database_command(payload: dict[str, object]) -> list[str]:
+    return [
+        sys.executable,
+        "-c",
+        f"import json, time; time.sleep(0.2); print(json.dumps({payload!r}))",
+    ]
+
+
+def test_concurrent_verify_and_test_preserve_all_valid_stage_records(
+    tmp_path: Path,
+) -> None:
+    prepare_database_workflow(
+        tmp_path,
+        schema_command=delayed_database_command(schema_evidence()),
+        verify_command=delayed_database_command(verify_evidence()),
+        test_command=delayed_database_command(database_test_payload()),
+    )
+    assert run_database_check(tmp_path, "plan").status == "pass"
+    start = threading.Barrier(3)
+    results: dict[str, object] = {}
+
+    def check(stage: str) -> None:
+        start.wait()
+        results[stage] = run_database_check(tmp_path, stage)
+
+    verify_thread = threading.Thread(target=check, args=("verify",))
+    test_thread = threading.Thread(target=check, args=("test",))
+    verify_thread.start()
+    test_thread.start()
+    start.wait()
+    verify_thread.join()
+    test_thread.join()
+
+    assert results["verify"].status == "pass"
+    assert results["test"].status == "pass"
+    persisted = json.loads(evidence_path(tmp_path).read_text(encoding="utf-8"))
+    assert set(persisted["stages"]) == {"plan", "verify", "test"}
 
 
 def test_test_evidence_requires_masked_safe_local_target_and_all_passes(tmp_path: Path) -> None:
@@ -1207,6 +1455,53 @@ def test_test_stage_accepts_explicit_valid_local_data_waiver(tmp_path: Path) -> 
     assert persisted["stages"]["test"]["test"]["waiver"]["approver"] == "database-owner"
 
 
+def test_waiver_timestamp_is_canonical_utc_in_hash_and_evidence(tmp_path: Path) -> None:
+    instant = datetime.now(timezone.utc).replace(microsecond=0)
+    decision = database_decision(
+        local_data_test_waiver={
+            "reason": "No approved masked production-shaped fixture is available.",
+            "approver": "database-owner",
+            "timestamp": instant.astimezone(timezone(timedelta(hours=9))).isoformat(),
+        }
+    )
+    prepare_database_workflow(
+        tmp_path,
+        verify_command=database_command(verify_evidence()),
+        decision=decision,
+    )
+    assert load_database_decision(tmp_path).local_data_test_waiver == {
+        "reason": "No approved masked production-shaped fixture is available.",
+        "approver": "database-owner",
+        "timestamp": instant.isoformat().replace("+00:00", "Z"),
+    }
+    assert run_database_check(tmp_path, "plan").status == "pass"
+    assert run_database_check(tmp_path, "verify").status == "pass"
+    assert run_database_check(tmp_path, "test").status == "pass"
+
+    persisted = json.loads(evidence_path(tmp_path).read_text(encoding="utf-8"))
+    assert persisted["stages"]["test"]["test"]["waiver"]["timestamp"] == (
+        instant.isoformat().replace("+00:00", "Z")
+    )
+
+
+def test_future_stage_checked_at_blocks_evidence_merge(tmp_path: Path) -> None:
+    prepare_database_workflow(tmp_path)
+    assert run_database_check(tmp_path, "plan").status == "pass"
+    path = evidence_path(tmp_path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted["stages"]["plan"]["checked_at"] = (
+        datetime.now(timezone.utc) + timedelta(minutes=1)
+    ).isoformat().replace("+00:00", "Z")
+    path.write_text(json.dumps(persisted), encoding="utf-8")
+    before = path.read_bytes()
+
+    result = run_database_check(tmp_path, "plan")
+
+    assert result.status == "fail"
+    assert result.blockers == ("evidence_invalid",)
+    assert path.read_bytes() == before
+
+
 @pytest.mark.parametrize("changed_artifact", ["profile", "decision"])
 def test_changed_profile_or_decision_does_not_overwrite_valid_plan_evidence(
     tmp_path: Path,
@@ -1347,6 +1642,67 @@ def test_malformed_prior_stage_evidence_blocks_atomic_merge(
     assert result.status == "fail"
     assert result.blockers == ("evidence_invalid",)
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("escaped_path", "expected_blocker"),
+    [
+        ("workflow", "profile_invalid"),
+        ("manifest", "profile_invalid"),
+        ("decision", "decision_invalid"),
+        ("artifacts", "decision_invalid"),
+        ("evidence", "evidence_invalid"),
+    ],
+)
+def test_workflow_artifacts_reject_symlink_escape(
+    tmp_path: Path,
+    escaped_path: str,
+    expected_blocker: str,
+) -> None:
+    prepare_database_workflow(tmp_path)
+    workflow = tmp_path / ".workflow"
+    artifacts = workflow / "artifacts"
+    outside = tmp_path.parent / f"{tmp_path.name}-{escaped_path}-outside"
+    outside.mkdir()
+    outside_evidence = outside / "database-validation-evidence.json"
+    outside_evidence_before: bytes | None = None
+    if escaped_path == "workflow":
+        shutil.copytree(workflow, outside / "workflow")
+        shutil.rmtree(workflow)
+        workflow.symlink_to(outside / "workflow", target_is_directory=True)
+    elif escaped_path == "manifest":
+        source = workflow / "manifest.json"
+        target = outside / "manifest.json"
+        target.write_bytes(source.read_bytes())
+        source.unlink()
+        source.symlink_to(target)
+    elif escaped_path == "decision":
+        source = artifacts / "database-decision.json"
+        target = outside / "database-decision.json"
+        target.write_bytes(source.read_bytes())
+        source.unlink()
+        source.symlink_to(target)
+    elif escaped_path == "artifacts":
+        shutil.copytree(artifacts, outside / "artifacts")
+        shutil.rmtree(artifacts)
+        artifacts.symlink_to(outside / "artifacts", target_is_directory=True)
+    else:
+        assert run_database_check(tmp_path, "plan").status == "pass"
+        source = evidence_path(tmp_path)
+        target = outside / "database-validation-evidence.json"
+        target.write_bytes(source.read_bytes())
+        outside_evidence_before = target.read_bytes()
+        source.unlink()
+        source.symlink_to(target)
+
+    result = run_database_check(tmp_path, "plan")
+
+    assert result.status == "fail"
+    assert result.blockers == (expected_blocker,)
+    if outside_evidence_before is None:
+        assert not outside_evidence.exists()
+    else:
+        assert outside_evidence.read_bytes() == outside_evidence_before
 
 
 def test_no_database_signal_is_not_applicable_without_profile_or_evidence(
