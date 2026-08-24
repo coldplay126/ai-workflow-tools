@@ -855,6 +855,58 @@ def test_db_check_cli_plan_refresh_on_schema_identity_drift_blocks_g5_and_g6(
     assert "G-test: FAIL" in g6_stdout
 
 
+@pytest.mark.parametrize(
+    "concept",
+    [
+        "CREATE OR REPLACE GLOBAL TEMPORARY TABLE audit_log (id bigint)",
+        "RENAME TABLE audit_log TO archived_audit_log, actor TO archived_actor",
+    ],
+    ids=["temporary-table", "standalone-rename-table"],
+)
+def test_db_check_table_grammar_promotes_high_risk_and_activates_g1(
+    tmp_path: Path,
+    concept: str,
+) -> None:
+    _write_database_lifecycle_smoke_fixture(tmp_path)
+    workflow_dir = tmp_path / ".workflow"
+    (workflow_dir / "concept.md").write_text(concept, encoding="utf-8")
+    for filename in ("spec.md", "plan.md", "tasks.md", "test-criteria.md"):
+        (workflow_dir / "artifacts" / filename).write_text(
+            "- [ ] T001 Review workflow scope.\n"
+            if filename == "tasks.md"
+            else "No additional workflow scope.\n",
+            encoding="utf-8",
+        )
+    decision_path = workflow_dir / "artifacts" / "database-decision.json"
+    decision = json.loads(decision_path.read_text(encoding="utf-8"))
+    decision["change_surfaces"] = ["erd"]
+    for candidate in decision["candidates"]:
+        candidate["covered_surfaces"] = ["erd"]
+        candidate["surface_assessments"] = {
+            "erd": "Assess the entity relationship change surface."
+        }
+    decision_path.write_text(json.dumps(decision), encoding="utf-8")
+
+    plan_code, plan_stdout, plan_stderr = capture_main(
+        ["wf", "db-check", "--stage", "plan", "--repo-root", str(tmp_path), "--json"]
+    )
+
+    assert plan_code == 0
+    assert plan_stderr == ""
+    assert json.loads(plan_stdout)["signal_reasons"] == ["text:table_ddl"]
+    state = json.loads((workflow_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["changeClass"] == "high_risk"
+
+    g1_code, g1_stdout, g1_stderr = capture_main(
+        ["wf", "gate", "plan", "--repo-root", str(tmp_path)]
+    )
+
+    assert g1_code == 0
+    assert g1_stderr == ""
+    assert "database.signal" in g1_stdout
+    assert "G-plan: PASS" in g1_stdout
+
+
 @pytest.mark.parametrize("stage", ["plan", "verify", "test"])
 def test_db_check_parser_accepts_stage_root_and_json(stage: str, tmp_path: Path) -> None:
     args = build_parser().parse_args(

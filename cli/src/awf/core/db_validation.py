@@ -80,6 +80,11 @@ _SQL_IDENTIFIER = (
 )
 _SQL_OBJECT = rf"{_SQL_IDENTIFIER}(?:\s*\.\s*{_SQL_IDENTIFIER})*"
 _ALTER_TABLE_TARGET = rf"\balter\s+table\s+{_SQL_OBJECT}"
+_CREATE_TABLE_MODIFIERS = (
+    r"(?:or\s+replace\s+)?"
+    r"(?:(?:global|local)\s+)?"
+    r"(?:(?:temp(?:orary)?|unlogged)\s+)?"
+)
 _STRONG_SQL_SIGNAL_PATTERNS = (
     (
         "sql syntax",
@@ -102,9 +107,10 @@ _STRONG_SQL_SIGNAL_PATTERNS = (
         "table_ddl",
         re.compile(
             rf"(?:"
-            rf"\b(?:create(?:\s+or\s+replace)?|drop)\s+"
-            rf"(?:temporary\s+)?table\b"
+            rf"\bcreate\s+{_CREATE_TABLE_MODIFIERS}table\b"
+            rf"|\bdrop\s+(?:temporary\s+)?table\b"
             rf"|\btruncate(?:\s+table)?\s+{_SQL_OBJECT}"
+            rf"|\brename\s+table\s+{_SQL_OBJECT}\s+to\s+{_SQL_OBJECT}"
             rf"|{_ALTER_TABLE_TARGET}\s+"
             rf"(?!(?:(?:add|alter|drop)\s+|rename\s+column\b))"
             rf")"

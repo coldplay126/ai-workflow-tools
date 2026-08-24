@@ -177,6 +177,20 @@ def test_database_signal_detects_strong_ddl_and_warehouse_terms(
             "SELECT audit.id\nFROM audit_log audit\nJOIN actor ON actor.id = audit.actor_id",
             "text:sql syntax",
         ),
+        (
+            "CREATE OR REPLACE GLOBAL TEMPORARY TABLE audit_log (id bigint)",
+            "text:table_ddl",
+        ),
+        ("CREATE TEMP TABLE audit_log (id bigint)", "text:table_ddl"),
+        ("CREATE LOCAL TEMP TABLE audit_log (id bigint)", "text:table_ddl"),
+        (
+            "CREATE OR REPLACE LOCAL UNLOGGED TABLE audit_log (id bigint)",
+            "text:table_ddl",
+        ),
+        (
+            "RENAME TABLE audit_log TO archived_audit_log, actor TO archived_actor",
+            "text:table_ddl",
+        ),
     ],
     ids=[
         "create-or-replace-table",
@@ -200,6 +214,11 @@ def test_database_signal_detects_strong_ddl_and_warehouse_terms(
         "multiline-delete",
         "multiline-order-by",
         "multiline-join",
+        "create-global-temporary-table",
+        "create-temp-table",
+        "create-local-temp-table",
+        "create-local-unlogged-table",
+        "standalone-rename-table",
     ],
 )
 def test_database_signal_detects_normalized_multiline_sql_grammar(
@@ -224,6 +243,7 @@ def test_database_signal_keeps_openapi_and_frontend_controls_non_database(
                 "Join the design review on Thursday.",
                 "Insert the panel into the responsive page.",
                 "Delete the selected row from the client cache.",
+                "Create a temporary table card in the HTML settings panel.",
             ]
         ),
     )
