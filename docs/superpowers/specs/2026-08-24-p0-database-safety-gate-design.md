@@ -46,11 +46,11 @@ Projects own engine access and masking scripts. AWF owns command safety, normali
 
 A change is database-affecting when any strong signal is present in `concept.md`, `spec.md`, `plan.md`, `tasks.md`, `test-criteria.md`, or `allowed-files.json`.
 
-Strong text terms include database, schema, table, column, query, SQL, index, migration, normalization, denormalization, ERD, foreign key, primary key, unique constraint, partition, warehouse, DuckDB, and their Korean equivalents.
+Standalone strong text signals include SQL syntax, migrations, ERD, normalization/denormalization, database engines, warehouses, DuckDB, and their Korean equivalents. Ambiguous terms such as schema, table, column, query, index, and model require a relational anchor on the same line so OpenAPI schemas, URL query strings, HTML tables, ML models, and frontend `index.ts` remain non-DB work.
 
-Strong paths include SQL/Prisma schema files and migration, model, entity, repository, query, database, and schema directories. Generic filenames such as `index.ts` are not DB signals by themselves.
+Strong paths include SQL/Prisma schema files and migration, entity, repository, database, and schema directories. Generic filenames such as `index.ts` are not DB signals by themselves.
 
-The detector returns normalized reasons. When a signal is present, `db-check --stage plan` atomically changes workflow `changeClass` to `high_risk` and records a history event containing the reasons. G1 independently requires plan DB evidence, so omitting the command cannot silently preserve a small workflow.
+The detector returns bounded semantic reasons with raw paths replaced by category and hash, plus a canonical `snapshot_hash` over all classification inputs. When a signal is present, `db-check --stage plan` atomically changes workflow `changeClass` to `high_risk` before running project commands and records a history event containing the sanitized reasons. The same core detection invokes the promotion callback, so classification cannot change between CLI preflight and evidence publication. G1 independently requires plan DB evidence, so omitting the command cannot silently preserve a small workflow.
 
 ## Project manifest
 
@@ -206,6 +206,7 @@ A configured test command may use an approved warehouse, sanitized snapshot, or 
   "schema_version": 1,
   "database_signal": true,
   "signal_reasons": [],
+  "signal_hash": "<sha256>",
   "change_class": "high_risk",
   "profile_hash": "<sha256>",
   "decision_hash": "<sha256>",
@@ -219,7 +220,7 @@ A configured test command may use an approved warehouse, sanitized snapshot, or 
 }
 ```
 
-Later stages preserve prior stage records and add their own sanitized command result and hashes. A stage is valid only when profile and decision hashes still match current files and the production schema evidence is fresh.
+Later stages preserve prior stage records and add their own sanitized command result and hashes. A stage is valid only when signal, profile, and decision hashes still match the current workflow inputs and the production schema evidence is fresh. `db-check` re-detects the signal under the evidence lock before publication and fails without writing if the snapshot changed during a command.
 
 When no DB signal exists, `db-check` returns `not_applicable` and does not promote risk. G1/G5/G6 record a passing not-applicable condition without requiring profile commands.
 

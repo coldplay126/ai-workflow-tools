@@ -86,7 +86,7 @@ Expected: imports or assertions fail because the detector/escalator do not exist
 
 - [ ] **Step 4: Implement signal detection**
 
-Add immutable `DatabaseSignal(detected: bool, reasons: tuple[str, ...])`. Scan only the known workflow files with bounded UTF-8 reads. Normalize reasons, use contextual DB terms, and use strong extension/directory patterns. Do not scan the entire repository.
+Add immutable `DatabaseSignal(detected: bool, reasons: tuple[str, ...], snapshot_hash: str)`. Scan only the known workflow files with bounded UTF-8 reads. Normalize reasons, replace raw paths with semantic category plus hash, cap the reason set deterministically, use contextual DB terms, and use strong extension/directory patterns. Hash all classification inputs so evidence can be bound to the exact signal snapshot. Do not scan the entire repository.
 
 - [ ] **Step 5: Implement audited escalation**
 
@@ -148,9 +148,9 @@ Use duplicate-key rejecting `json.loads(..., object_pairs_hook=...)`, recursive 
 
 - [ ] **Step 6: Implement atomic evidence merge**
 
-`run_database_check(root, stage)` executes the required commands, validates the current decision/profile hashes, merges one sanitized stage record into `database-validation-evidence.json`, and atomically replaces the file. Verify/test must preserve a valid plan record. A schema-hash change after plan returns `production_schema_changed` and does not overwrite the last valid evidence.
+`run_database_check(root, stage)` executes the required commands, invokes the optional plan risk-promotion callback immediately after its single signal detection and before any command, then acquires the evidence lock. Under that lock it re-detects the signal, validates the current signal/profile/decision hashes, merges one sanitized stage record into `database-validation-evidence.json`, and atomically replaces the file. Verify/test must preserve a valid plan record. Signal drift or a schema-hash change after plan fails without overwriting the last valid evidence.
 
-No-signal returns `not_applicable` without command execution or risk promotion.
+No-signal returns `not_applicable` without callback, command execution, evidence, or risk promotion.
 
 - [ ] **Step 7: Run GREEN and commit**
 
@@ -245,7 +245,7 @@ database.local_test
 
 - [ ] **Step 5: Render sanitized summaries**
 
-Verify/test reports may show schema hash prefix, engine/version, selected option, stage status, local target, and only the fixed flag `waiver_present=true`. They must never render waiver reason text, command argv, raw stdout, environment, data samples, or DDL.
+Verify/test reports may show schema hash prefix, engine/version, selected option, stage status, local target, and only the fixed flag `waiver_present=true`. Every worker-controlled field must pass bounded single-line Markdown/HTML escaping and secret/URI/environment/SQL-DDL/sample redaction. Malformed or escaped envelopes record fixed reason codes without raw payloads. They must never render waiver reason text, command argv, raw stdout, environment, data samples, DDL, or unbounded result files.
 
 - [ ] **Step 6: Run GREEN and commit**
 
