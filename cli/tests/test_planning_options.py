@@ -6,6 +6,7 @@ import json
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,7 @@ from awf.core.planning_options import (
     PlanningOptionsError,
     load_planning_options,
     resolve_planning_options_policy,
+    seal_planning_options,
     select_planning_option,
 )
 
@@ -120,6 +122,7 @@ _PLANNING_OPTIONS_GATE_CONDITIONS = [
     "planning_options.selection",
     "planning_options.recommendation",
     "planning_options.materiality",
+    "planning_options.provenance",
 ]
 
 
@@ -842,12 +845,12 @@ def test_planning_options_gate_covers_required_legacy_and_selection_states(
         ("legacy", None, None, True, "status=legacy_not_required"),
         ("required_missing", True, None, False, "artifact_missing"),
         ("selection_required", True, _artifact(), False, "decision_selection_required"),
-        ("selected", True, selected, True, "status=selected"),
+        ("selected", True, selected, False, "status=selected"),
         (
             "no_decision_required",
             True,
             _artifact(status="no_decision_required"),
-            True,
+            False,
             "status=no_decision_required",
         ),
     ]
@@ -1057,3 +1060,114 @@ def test_reconciliation_journal_failure_leaves_the_prior_artifact_intact(
         select_planning_option(tmp_path, "D-001", "O-002", "operator")
 
     assert artifact_path.read_text(encoding="utf-8") == original
+
+def _write_plan_artifacts(root: Path) -> dict[str, str]:
+    artifacts = root / ".workflow" / "artifacts"
+    contents = {
+        "constitution.md": "# Constitution\n",
+        "spec.md": "# Spec\n",
+        "plan.md": "# Plan\n",
+        "tasks.md": "- [ ] T01 Work\n",
+        "test-criteria.md": "# Criteria\n",
+    }
+    for name, content in contents.items():
+        (artifacts / name).write_text(content, encoding="utf-8")
+    return contents
+
+
+def test_seal_binds_selected_options_and_exactly_five_plan_artifacts(
+    tmp_path: Path,
+):
+    _write_planning_options_manifest(tmp_path, True)
+    _write_artifact(tmp_path, _artifact())
+    contents = _write_plan_artifacts(tmp_path)
+
+    with pytest.raises(PlanningOptionsError) as exc:
+        seal_planning_options(tmp_path)
+    _assert_code(exc, "selection_required")
+
+    select_planning_option(tmp_path, "D-001", "O-001", "operator")
+    sealed = seal_planning_options(tmp_path)
+    marker = json.loads(
+        (tmp_path / ".workflow" / "artifacts" / "planning-provenance.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert sealed.planning_options_hash == load_planning_options(tmp_path).artifact_hash
+    assert marker == {
+        "schema_version": 1,
+        "planning_options_hash": sealed.planning_options_hash,
+        "artifacts": {
+            name: hashlib.sha256(content.encode("utf-8")).hexdigest()
+            for name, content in contents.items()
+        },
+    }
+    assert len(marker["artifacts"]) == 5
+
+    passed, evaluations = evaluate_planning_options_gate(tmp_path)
+    assert passed
+    assert next(
+        item
+        for item in evaluations
+        if item["condition"] == "planning_options.provenance"
+    )["passed"]
+
+    select_planning_option(tmp_path, "D-001", "O-002", "operator")
+    passed, evaluations = evaluate_planning_options_gate(tmp_path)
+    assert not passed
+    assert next(
+        item
+        for item in evaluations
+        if item["condition"] == "planning_options.provenance"
+    )["detail"] == "provenance_changed"
+
+    seal_planning_options(tmp_path)
+    (tmp_path / ".workflow" / "artifacts" / "plan.md").write_text(
+        "# Regenerated plan\n", encoding="utf-8"
+    )
+    passed, evaluations = evaluate_planning_options_gate(tmp_path)
+    assert not passed
+    assert next(
+        item
+        for item in evaluations
+        if item["condition"] == "planning_options.provenance"
+    )["detail"] == "provenance_changed"
+
+
+def test_next_selection_timestamp_uses_canonical_strictly_monotonic_microseconds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 8, 24, 10, 0, 0, 123456, tzinfo=timezone.utc)
+
+    artifact = _artifact(
+        status="selected",
+        decisions=[
+            _decision(
+                selected_option_id="O-001",
+                selected_by="operator",
+                selected_at="2026-08-24T10:00:00.123456Z",
+            )
+        ],
+        selection_history=[
+            {
+                "decision_id": "D-001",
+                "previous_option_id": None,
+                "selected_option_id": "O-001",
+                "selected_by": "operator",
+                "selected_at": "2026-08-24T10:00:00.123456Z",
+                "source": "cli",
+            }
+        ],
+    )
+    _write_artifact(tmp_path, artifact)
+    monkeypatch.setattr(planning_options, "datetime", FrozenDatetime)
+
+    timestamp = planning_options._next_selection_timestamp(
+        load_planning_options(tmp_path).selection_history
+    )
+
+    assert timestamp == "2026-08-24T10:00:00.123457Z"

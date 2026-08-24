@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import errno
 import fcntl
 import html
@@ -27,7 +27,15 @@ import unicodedata
 _MAX_ARTIFACT_BYTES = 128 * 1024
 _MAX_TEXT_BYTES = 4 * 1024
 _ARTIFACT_PATH = (".workflow", "artifacts", "planning-options.json")
+_PROVENANCE_PATH = (".workflow", "artifacts", "planning-provenance.json")
 _MANIFEST_PATH = (".workflow", "manifest.json")
+_PLAN_ARTIFACT_NAMES = (
+    "constitution.md",
+    "spec.md",
+    "plan.md",
+    "tasks.md",
+    "test-criteria.md",
+)
 
 _ARTIFACT_FIELDS = frozenset(
     {
@@ -173,6 +181,21 @@ class PlanningOptionsPolicy:
     required: bool
     status: str
     artifact: Optional[PlanningOptionsArtifact]
+
+
+@dataclass(frozen=True)
+class PlanningOptionsProvenance:
+    """A host-sealed binding of planning choices to plan artifacts."""
+
+    schema_version: int
+    planning_options_hash: str
+    artifacts: tuple[tuple[str, str], ...]
+
+
+_PROVENANCE_FIELDS = frozenset(
+    {"schema_version", "planning_options_hash", "artifacts"}
+)
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
 def _canonical_json_bytes(payload: object) -> bytes:
@@ -366,8 +389,13 @@ def _parse_utc_timestamp(value: object) -> str:
         raise PlanningOptionsError("artifact_invalid") from None
     if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
         raise PlanningOptionsError("artifact_invalid")
-    canonical = parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-    if canonical != value:
+    canonical_seconds = parsed.astimezone(timezone.utc).isoformat(
+        timespec="seconds"
+    ).replace("+00:00", "Z")
+    canonical_microseconds = parsed.astimezone(timezone.utc).isoformat(
+        timespec="microseconds"
+    ).replace("+00:00", "Z")
+    if value not in {canonical_seconds, canonical_microseconds}:
         raise PlanningOptionsError("artifact_invalid")
     return value
 
@@ -643,6 +671,19 @@ def load_planning_options(repo_root: Path) -> PlanningOptionsArtifact:
         invalid_code="artifact_invalid",
     )
     return _parse_artifact(payload)
+
+
+def canonical_planning_options_json(artifact: PlanningOptionsArtifact) -> str:
+    """Render validated planning options in the canonical prompt-safe form."""
+
+    payload = _canonical_payload(
+        schema_version=artifact.schema_version,
+        status=artifact.status,
+        no_decision_reason=artifact.no_decision_reason,
+        decisions=artifact.decisions,
+        selection_history=artifact.selection_history,
+    )
+    return _canonical_json_bytes(payload).decode("utf-8")
 
 
 def _load_manifest(root: Path) -> Optional[dict[str, Any]]:
@@ -1028,11 +1069,12 @@ def _clear_reconciliation_marker(directory_fd: int) -> None:
     os.unlink(_RECONCILIATION_MARKER, dir_fd=directory_fd)
     os.fsync(directory_fd)
 def _next_selection_timestamp(history: tuple[SelectionHistoryEntry, ...]) -> str:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc).astimezone(timezone.utc)
     if history:
         latest = datetime.fromisoformat(history[-1].selected_at[:-1] + "+00:00")
-        now = max(now, latest)
-    return now.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        if now <= latest:
+            now = latest + timedelta(microseconds=1)
+    return now.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _selection_request_values(
@@ -1128,6 +1170,225 @@ def planning_option_selection_transaction(
     root = Path(repo_root) if canonical else _canonical_repo_root(Path(repo_root))
     with _selection_thread_lock(root), _planning_options_transaction(root) as directory_fd:
         yield root, directory_fd
+
+
+def _provenance_payload(
+    provenance: PlanningOptionsProvenance,
+) -> dict[str, object]:
+    return {
+        "schema_version": provenance.schema_version,
+        "planning_options_hash": provenance.planning_options_hash,
+        "artifacts": dict(provenance.artifacts),
+    }
+
+
+def _parse_planning_options_provenance(payload: object) -> PlanningOptionsProvenance:
+    if not isinstance(payload, dict) or set(payload) != _PROVENANCE_FIELDS:
+        raise PlanningOptionsError("provenance_invalid")
+    schema_version = payload["schema_version"]
+    planning_options_hash = payload["planning_options_hash"]
+    artifacts = payload["artifacts"]
+    if (
+        not isinstance(schema_version, int)
+        or isinstance(schema_version, bool)
+        or schema_version != 1
+        or not isinstance(planning_options_hash, str)
+        or _SHA256.fullmatch(planning_options_hash) is None
+        or not isinstance(artifacts, dict)
+        or set(artifacts) != set(_PLAN_ARTIFACT_NAMES)
+        or any(
+            not isinstance(value, str) or _SHA256.fullmatch(value) is None
+            for value in artifacts.values()
+        )
+    ):
+        raise PlanningOptionsError("provenance_invalid")
+    return PlanningOptionsProvenance(
+        schema_version=schema_version,
+        planning_options_hash=planning_options_hash,
+        artifacts=tuple((name, artifacts[name]) for name in _PLAN_ARTIFACT_NAMES),
+    )
+
+
+def load_planning_options_provenance(repo_root: Path) -> PlanningOptionsProvenance:
+    """Load a sealed provenance marker through the safe repository boundary."""
+
+    root = _canonical_repo_root(repo_root)
+    payload = _read_json_object(
+        root,
+        _PROVENANCE_PATH,
+        missing_code="provenance_missing",
+        invalid_code="provenance_invalid",
+    )
+    return _parse_planning_options_provenance(payload)
+
+
+def _validate_provenance_file(descriptor: int) -> None:
+    try:
+        _validate_selection_file(descriptor)
+    except PlanningOptionsError:
+        raise PlanningOptionsError("provenance_invalid") from None
+
+
+def _read_bounded_provenance_bytes(
+    directory_fd: int, name: str, *, missing_code: str
+) -> bytes:
+    descriptor: Optional[int] = None
+    try:
+        try:
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_fd,
+            )
+        except FileNotFoundError:
+            raise PlanningOptionsError(missing_code) from None
+        except OSError:
+            raise PlanningOptionsError("provenance_invalid") from None
+        _validate_provenance_file(descriptor)
+        raw = bytearray()
+        while len(raw) <= _MAX_ARTIFACT_BYTES:
+            try:
+                chunk = os.read(descriptor, _MAX_ARTIFACT_BYTES + 1 - len(raw))
+            except OSError as error:
+                if error.errno == errno.EINTR:
+                    continue
+                raise PlanningOptionsError("provenance_invalid") from None
+            if not chunk:
+                break
+            raw.extend(chunk)
+            if len(raw) > _MAX_ARTIFACT_BYTES:
+                raise PlanningOptionsError("provenance_invalid")
+        return bytes(raw)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _plan_artifact_hashes(directory_fd: int) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (
+            name,
+            hashlib.sha256(
+                _read_bounded_provenance_bytes(
+                    directory_fd, name, missing_code="provenance_invalid"
+                )
+            ).hexdigest(),
+        )
+        for name in _PLAN_ARTIFACT_NAMES
+    )
+
+
+def _read_provenance_from_directory(
+    directory_fd: int,
+) -> PlanningOptionsProvenance:
+    raw = _read_bounded_provenance_bytes(
+        directory_fd,
+        "planning-provenance.json",
+        missing_code="provenance_missing",
+    )
+    try:
+        payload = json.loads(
+            raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_json_keys
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError):
+        raise PlanningOptionsError("provenance_invalid") from None
+    return _parse_planning_options_provenance(payload)
+
+
+def _write_provenance_to_directory(
+    directory_fd: int, provenance: PlanningOptionsProvenance
+) -> None:
+    temporary_name = f".planning-provenance.json.{secrets.token_hex(16)}.tmp"
+    descriptor: Optional[int] = None
+    created = False
+    try:
+        try:
+            descriptor = os.open(
+                temporary_name,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=directory_fd,
+            )
+            created = True
+        except OSError:
+            raise PlanningOptionsError("provenance_write_failed") from None
+        _validate_provenance_file(descriptor)
+        remaining = memoryview(_canonical_json_bytes(_provenance_payload(provenance)) + b"\n")
+        while remaining:
+            try:
+                written = os.write(descriptor, remaining)
+            except OSError:
+                raise PlanningOptionsError("provenance_write_failed") from None
+            if written <= 0:
+                raise PlanningOptionsError("provenance_write_failed")
+            remaining = remaining[written:]
+        try:
+            os.fsync(descriptor)
+            os.close(descriptor)
+            descriptor = None
+            os.replace(
+                temporary_name,
+                "planning-provenance.json",
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+            os.fsync(directory_fd)
+        except OSError:
+            raise PlanningOptionsError("provenance_write_failed") from None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if created:
+            try:
+                os.unlink(temporary_name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+
+
+def seal_planning_options(repo_root: Path) -> PlanningOptionsProvenance:
+    """Atomically bind a resolved planning decision to the five plan artifacts."""
+
+    root = _canonical_repo_root(Path(repo_root))
+    with planning_option_selection_transaction(root, canonical=True) as (
+        _,
+        directory_fd,
+    ):
+        artifact = _parse_artifact(_read_selection_artifact(directory_fd))
+        if artifact.status == "selection_required":
+            raise PlanningOptionsError("selection_required")
+        provenance = PlanningOptionsProvenance(
+            schema_version=1,
+            planning_options_hash=artifact.artifact_hash,
+            artifacts=_plan_artifact_hashes(directory_fd),
+        )
+        _write_provenance_to_directory(directory_fd, provenance)
+        return provenance
+
+
+def validate_planning_options_provenance(
+    repo_root: Path, planning_options_hash: str
+) -> tuple[bool, str]:
+    """Confirm a seal binds the current option and plan artifact snapshots."""
+
+    root = _canonical_repo_root(Path(repo_root))
+    with planning_option_selection_transaction(root, canonical=True) as (
+        _,
+        directory_fd,
+    ):
+        current = _parse_artifact(_read_selection_artifact(directory_fd))
+        if current.artifact_hash != planning_options_hash:
+            return False, "provenance_changed"
+        provenance = _read_provenance_from_directory(directory_fd)
+        if provenance.planning_options_hash != current.artifact_hash:
+            return False, "provenance_changed"
+        if provenance.artifacts != _plan_artifact_hashes(directory_fd):
+            return False, "provenance_changed"
+    return True, "provenance_sealed"
 
 
 def select_planning_option(

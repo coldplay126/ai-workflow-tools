@@ -20,6 +20,7 @@ from pathlib import Path
 
 from awf.core.db_validation import detect_database_signal, run_database_check
 from awf.core.gates import _extract_fr_ids, _extract_fr_tags, evaluate_plan_gate
+from awf.core.planning_options import seal_planning_options
 from awf.core.state import promote_database_change_to_high_risk
 
 
@@ -131,6 +132,7 @@ def test_004_required_planning_options_are_checked_after_early_artifact_failure(
             "planning_options.selection",
             "planning_options.recommendation",
             "planning_options.materiality",
+            "planning_options.provenance",
         }
         assert planning_checks["planning_options.artifact"]["passed"] is False
         assert planning_checks["planning_options.artifact"]["detail"] == "artifact_missing"
@@ -330,9 +332,59 @@ def test_004_no_manifest_skips_constitution_check():
             "planning_options.selection",
             "planning_options.recommendation",
             "planning_options.materiality",
+            "planning_options.provenance",
         ]
         assert all(item["passed"] for item in planning_checks)
 
+
+
+def test_004_required_planning_options_need_a_current_host_seal() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = _make_project(
+            Path(tmp),
+            spec="# Spec",
+            plan="# Plan",
+            tasks="- [ ] T01 Deliver",
+            test_criteria="# Criteria",
+            constitution="# Constitution",
+            manifest={"planning_options": {"required": True}},
+        )
+        artifacts = root / ".workflow" / "artifacts"
+        (artifacts / "planning-options.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "status": "no_decision_required",
+                    "no_decision_reason": "One safe delivery path is determined.",
+                    "decisions": [],
+                    "selection_history": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        (artifacts / "constitution.md").write_text(
+            "# Constitution", encoding="utf-8"
+        )
+
+        passed, evaluations = evaluate_plan_gate(root)
+        assert not passed
+        provenance = _evaluation_by_condition(evaluations)["planning_options.provenance"]
+        assert provenance == {
+            "condition": "planning_options.provenance",
+            "passed": False,
+            "detail": "provenance_missing",
+        }
+
+        seal_planning_options(root)
+        passed, evaluations = evaluate_plan_gate(root)
+        assert passed, evaluations
+
+        (artifacts / "plan.md").write_text("# Regenerated plan", encoding="utf-8")
+        passed, evaluations = evaluate_plan_gate(root)
+        assert not passed
+        assert _evaluation_by_condition(evaluations)["planning_options.provenance"][
+            "detail"
+        ] == "provenance_changed"
 
 # ---------------------------------------------------------------------------
 # P0 database evidence: G1 mandatory conditions

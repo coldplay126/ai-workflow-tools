@@ -45,6 +45,7 @@ from awf.core.planning_options import (
     _selection_request_values,
     load_planning_options,
     planning_option_selection_transaction,
+    seal_planning_options,
 )
 from awf.core.readiness import maybe_doctor_hint
 from awf.core.state_updater import WorkflowStateUpdater
@@ -728,6 +729,52 @@ def run_wf_select_option(args: argparse.Namespace) -> int:
     _print_selection_result(
         _selection_result_payload(selection, action),
         as_json=bool(getattr(args, "json", False)),
+    )
+    return 0
+
+
+def _print_seal_plan_result(payload: dict[str, object], *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(payload, sort_keys=True))
+        return
+    for key, value in payload.items():
+        print(f"{key}: {value}")
+
+
+def run_wf_seal_plan(args: argparse.Namespace) -> int:
+    """Host-seal a resolved Planning Options artifact to plan outputs."""
+
+    as_json = bool(getattr(args, "json", False))
+    try:
+        supplied_root = getattr(args, "repo_root", None)
+        if supplied_root and Path(supplied_root).expanduser().is_symlink():
+            raise ValueError("unsafe root")
+        root = Path(resolve_repo_root(supplied_root))
+        provenance = seal_planning_options(root)
+    except PlanningOptionsError as error:
+        if error.code == "selection_required":
+            _print_seal_plan_result(
+                {"status": "blocked", "reason": "selection_required"},
+                as_json=as_json,
+            )
+            return 1
+        _print_seal_plan_result(
+            {"status": "failed", "reason": "seal_unavailable"}, as_json=as_json
+        )
+        return 2
+    except Exception:
+        _print_seal_plan_result(
+            {"status": "failed", "reason": "seal_unavailable"}, as_json=as_json
+        )
+        return 2
+
+    _print_seal_plan_result(
+        {
+            "status": "sealed",
+            "planning_options_hash": provenance.planning_options_hash,
+            "artifacts": dict(provenance.artifacts),
+        },
+        as_json=as_json,
     )
     return 0
 

@@ -93,6 +93,7 @@ def _write_derived_plan_artifacts(root: Path) -> None:
     artifacts = root / ".workflow" / "artifacts"
     artifacts.mkdir(parents=True, exist_ok=True)
     contents = {
+        "constitution.md": "# Constitution\n",
         "spec.md": "# Spec\n\n- FR-001: Persist the chosen rollout.\n",
         "plan.md": "# Plan\n\n- [FR-001] Persist the chosen rollout.\n",
         "tasks.md": "# Tasks\n\n- [ ] T001 [FR-001] Exercise the selection lifecycle.\n",
@@ -842,6 +843,12 @@ def test_planning_option_lifecycle_smoke_uses_cli_and_state_apis(
     assert "pendingDecision" not in resumed["loop"]
     assert [entry["action"] for entry in resumed["history"]] == ["deciding", "continued"]
 
+    assert main(
+        ["wf", "seal-plan", "--repo-root", str(selected_root), "--json"]
+    ) == 0
+    sealed_selection = json.loads(capsys.readouterr().out)
+    assert sealed_selection["status"] == "sealed"
+
     assert main(["wf", "gate", "plan", "--repo-root", str(selected_root)]) == 0
     passed_gate = capsys.readouterr()
     assert passed_gate.out.endswith("\nG-plan: PASS\n")
@@ -964,6 +971,12 @@ def test_planning_option_lifecycle_smoke_uses_cli_and_state_apis(
             "selection_history": [],
         },
     )
+
+    assert main(
+        ["wf", "seal-plan", "--repo-root", str(no_decision_root), "--json"]
+    ) == 0
+    sealed_no_decision = json.loads(capsys.readouterr().out)
+    assert sealed_no_decision["status"] == "sealed"
 
     assert main(["wf", "gate", "plan", "--repo-root", str(no_decision_root)]) == 0
     no_decision_gate = capsys.readouterr()

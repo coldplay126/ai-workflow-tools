@@ -42,6 +42,7 @@ from awf.commands.wf import (
     run_wf_next,
     run_wf_reset,
     run_wf_scope_check,
+    run_wf_seal_plan,
     run_wf_select_option,
     run_wf_status,
 )
@@ -257,6 +258,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print only the sanitized selection result as JSON.",
     )
     wf_select_option_parser.set_defaults(handler=run_wf_select_option)
+
+    wf_seal_plan_parser = wf_subparsers.add_parser(
+        "seal-plan",
+        help="Host-seal selected Planning Options to the regenerated plan artifacts.",
+    )
+    wf_seal_plan_parser.add_argument(
+        "--repo-root",
+        help="Repository root containing .workflow/. Defaults to current or parent directories.",
+    )
+    wf_seal_plan_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the sealed provenance marker or blocked status as JSON.",
+    )
+    wf_seal_plan_parser.set_defaults(handler=run_wf_seal_plan)
 
     wf_apply_parser = wf_subparsers.add_parser(
         "apply-result",

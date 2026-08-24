@@ -10,6 +10,7 @@ from awf.core.paths import find_repo_root
 from awf.core.planning_options import (
     PlanningOptionsError,
     resolve_planning_options_policy,
+    validate_planning_options_provenance,
 )
 
 
@@ -54,9 +55,16 @@ _PLANNING_OPTIONS_CONDITIONS = (
     "planning_options.selection",
     "planning_options.recommendation",
     "planning_options.materiality",
+    "planning_options.provenance",
 )
 _PLANNING_OPTIONS_ERROR_DETAILS = frozenset(
-    {"artifact_invalid", "artifact_missing", "profile_invalid"}
+    {
+        "artifact_invalid",
+        "artifact_missing",
+        "profile_invalid",
+        "provenance_invalid",
+        "provenance_missing",
+    }
 )
 
 
@@ -92,7 +100,32 @@ def evaluate_planning_options_gate(root: Path) -> Tuple[bool, list[dict[str, Any
             "passed": False,
             "detail": "decision_selection_required",
         }
+        evaluations[5] = {
+            "condition": "planning_options.provenance",
+            "passed": False,
+            "detail": "selection_required",
+        }
         return False, evaluations
+
+    if policy.required:
+        try:
+            assert policy.artifact is not None
+            provenance_passed, provenance_detail = validate_planning_options_provenance(
+                root, policy.artifact.artifact_hash
+            )
+        except PlanningOptionsError as exc:
+            provenance_passed = False
+            provenance_detail = (
+                exc.code
+                if exc.code in _PLANNING_OPTIONS_ERROR_DETAILS
+                else "planning_options_invalid"
+            )
+        evaluations[5] = {
+            "condition": "planning_options.provenance",
+            "passed": provenance_passed,
+            "detail": provenance_detail,
+        }
+        return provenance_passed, evaluations
     return True, evaluations
 
 
