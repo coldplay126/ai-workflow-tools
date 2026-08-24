@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
+from awf.core.db_validation import evaluate_database_gate
 from awf.core.paths import find_repo_root
 
 
@@ -12,9 +13,35 @@ def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def _is_strict_nonnegative_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
 # --- Plan G1 artifact-based evaluation ---
 
 _FR_PATTERN = re.compile(r"FR-\d+")
+
+_SUPPORTED_GATE_CONDITIONS = frozenset(
+    {
+        "findings.count(severity=CRITICAL) == 0",
+        "HIGH issues all have resolution or user acknowledgment",
+        "coverage.percentage >= 80",
+        "REVIEW_CONFLICT count(severity>=HIGH) == 0 (when multi-LLM)",
+        "scope.violations == 0",
+        "compliance.fail == 0",
+        "compliance.percentage >= 90",
+        "quality.critical == 0",
+        "REVIEW_CONFLICT count == 0 (when multi-LLM)",
+        "tasks.pending == 0",
+        "lint_clean == true",
+        "build_passed == true",
+        "commits.count > 0",
+        "suites.failed == 0",
+        "regressions.count == 0",
+        "acceptance.passed == acceptance.total",
+        "coverage.percentage >= 70",
+    }
+)
 _TASK_PATTERN = re.compile(r"^- \[ \] T\d+", re.MULTILINE)
 
 
@@ -51,8 +78,8 @@ def evaluate_plan_gate(root: Path) -> Tuple[bool, list[dict[str, Any]]]:
             "detail": f"exists={exists}",
         })
 
-    # If any required file missing, fail early
     if not all(e["passed"] for e in evaluations):
+        evaluations.extend(evaluate_database_gate(root, "plan"))
         return False, evaluations
 
     try:
@@ -66,6 +93,7 @@ def evaluate_plan_gate(root: Path) -> Tuple[bool, list[dict[str, Any]]]:
             "passed": False,
             "detail": f"read_error:{exc}",
         })
+        evaluations.extend(evaluate_database_gate(root, "plan"))
         return False, evaluations
 
     # 2. No [NEEDS CLARIFICATION] markers
@@ -130,6 +158,8 @@ def evaluate_plan_gate(root: Path) -> Tuple[bool, list[dict[str, Any]]]:
                 "detail": f"path={constitution_path},exists={const_ok}",
             })
 
+    evaluations.extend(evaluate_database_gate(root, "plan"))
+
     overall = all(e["passed"] for e in evaluations)
     return overall, evaluations
 
@@ -181,6 +211,12 @@ def _validate_required_shape(phase: str, result_data: dict[str, Any]) -> list[st
 
 def evaluate_gate(explicit_root: Optional[str], phase: str, result_data: dict[str, Any], change_class: str = "standard") -> Tuple[bool, list[dict[str, Any]]]:
     root = find_repo_root(explicit_root)
+    database_evaluations = (
+        evaluate_database_gate(root, phase)
+        if phase in {"verify", "test"}
+        else []
+    )
+
 
     # Plan phase uses artifact-based evaluation, not result-based
     if phase == "plan":
@@ -188,29 +224,71 @@ def evaluate_gate(explicit_root: Optional[str], phase: str, result_data: dict[st
 
     agent_card_path = root / ".workflow" / "agent-cards" / f"{phase}.json"
 
-    if not agent_card_path.exists():
-        # Fallback: validate shape only, no agent-card-specific conditions
-        import sys
-        print(
-            f"warning: agent card missing for {phase}, using shape-only gate evaluation",
-            file=sys.stderr,
-        )
-        shape_errors = _validate_required_shape(phase, result_data)
-        if shape_errors:
-            return False, [
-                {
-                    "condition": "structured_result_shape",
-                    "passed": False,
-                    "detail": "malformed_response:" + ",".join(shape_errors),
-                }
-            ]
-        return True, [{"condition": "shape_only_fallback", "passed": True, "detail": "agent_card_missing"}]
+    if not agent_card_path.is_file():
+        return False, [
+            {
+                "condition": "gate_configuration",
+                "passed": False,
+                "detail": "agent_card_missing",
+            },
+            *database_evaluations,
+        ]
 
-    agent_card = json.loads(agent_card_path.read_text(encoding="utf-8"))
-    conditions = agent_card.get("gate", {}).get("pass_conditions", [])
+    try:
+        agent_card = json.loads(agent_card_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False, [
+            {
+                "condition": "gate_configuration",
+                "passed": False,
+                "detail": "agent_card_invalid",
+            },
+            *database_evaluations,
+        ]
+    if not isinstance(agent_card, dict) or not isinstance(agent_card.get("gate"), dict):
+        return False, [
+            {
+                "condition": "gate_configuration",
+                "passed": False,
+                "detail": "agent_card_invalid",
+            },
+            *database_evaluations,
+        ]
+    conditions = agent_card["gate"].get("pass_conditions")
+    if not isinstance(conditions, list):
+        return False, [
+            {
+                "condition": "gate_configuration",
+                "passed": False,
+                "detail": "pass_conditions_invalid",
+            },
+            *database_evaluations,
+        ]
+    if not conditions:
+        return False, [
+            {
+                "condition": "gate_configuration",
+                "passed": False,
+                "detail": "pass_conditions_empty",
+            },
+            *database_evaluations,
+        ]
+    if any(
+        not isinstance(condition, str)
+        or condition not in _SUPPORTED_GATE_CONDITIONS
+        for condition in conditions
+    ):
+        return False, [
+            {
+                "condition": "gate_configuration",
+                "passed": False,
+                "detail": "pass_conditions_unsupported",
+            },
+            *database_evaluations,
+        ]
     evaluations: list[dict[str, Any]] = []
-
     shape_errors = _validate_required_shape(phase, result_data)
+
     if shape_errors:
         evaluations.append(
             {
@@ -219,6 +297,7 @@ def evaluate_gate(explicit_root: Optional[str], phase: str, result_data: dict[st
                 "detail": "malformed_response:" + ",".join(shape_errors),
             }
         )
+        evaluations.extend(database_evaluations)
         return False, evaluations
 
     findings = _as_list(result_data.get("findings"))
@@ -278,31 +357,49 @@ def evaluate_gate(explicit_root: Optional[str], phase: str, result_data: dict[st
             detail = "multi_llm_conflicts=0 (not yet modeled)"
         # --- §1.1 impl gate (G4) conditions ---
         elif condition == "tasks.pending == 0":
-            pending = len(_as_list(result_data.get("tasks_pending")))
-            passed = pending == 0
-            detail = f"tasks_pending={pending}"
+            pending = result_data.get("tasks_pending")
+            passed = isinstance(pending, list) and not pending
+            detail = (
+                f"tasks_pending={len(pending)}"
+                if isinstance(pending, list)
+                else "tasks_pending=invalid"
+            )
         elif condition == "lint_clean == true":
-            lint_clean = bool(result_data.get("lint_clean", False))
-            passed = lint_clean is True
-            detail = f"lint_clean={lint_clean}"
+            passed = result_data.get("lint_clean") is True
+            detail = "lint_clean=true" if passed else "lint_clean=invalid_or_false"
         elif condition == "build_passed == true":
-            build_passed = bool(result_data.get("build_passed", False))
-            passed = build_passed is True
-            detail = f"build_passed={build_passed}"
+            passed = result_data.get("build_passed") is True
+            detail = "build_passed=true" if passed else "build_passed=invalid_or_false"
         elif condition == "commits.count > 0":
-            commit_count = len(_as_list(result_data.get("commits")))
-            passed = commit_count > 0
-            detail = f"commit_count={commit_count}"
+            commits = result_data.get("commits")
+            passed = isinstance(commits, list) and bool(commits)
+            detail = (
+                f"commit_count={len(commits)}"
+                if isinstance(commits, list)
+                else "commit_count=invalid"
+            )
         # --- §1.1 test gate (G6) conditions ---
         elif condition == "suites.failed == 0":
-            suites = _as_list(result_data.get("suites"))
-            total_failed = sum(int(s.get("failed", 0) or 0) for s in suites if isinstance(s, dict))
-            passed = total_failed == 0
-            detail = f"suites_failed={total_failed}"
+            suites = result_data.get("suites")
+            if not isinstance(suites, list) or not all(
+                isinstance(suite, dict)
+                and _is_strict_nonnegative_int(suite.get("failed"))
+                for suite in suites
+            ):
+                passed = False
+                detail = "suites_failed=invalid"
+            else:
+                total_failed = sum(suite["failed"] for suite in suites)
+                passed = total_failed == 0
+                detail = f"suites_failed={total_failed}"
         elif condition == "regressions.count == 0":
-            reg_count = len(_as_list(result_data.get("regressions")))
-            passed = reg_count == 0
-            detail = f"regression_count={reg_count}"
+            regressions = result_data.get("regressions")
+            passed = isinstance(regressions, list) and not regressions
+            detail = (
+                f"regression_count={len(regressions)}"
+                if isinstance(regressions, list)
+                else "regression_count=invalid"
+            )
         elif condition == "acceptance.passed == acceptance.total":
             acceptance = result_data.get("acceptance") or {}
             if not isinstance(acceptance, dict):
@@ -320,6 +417,7 @@ def evaluate_gate(explicit_root: Optional[str], phase: str, result_data: dict[st
             detail = "unsupported_condition_requires_evaluator_update"
 
         evaluations.append({"condition": condition, "passed": passed, "detail": detail})
+    evaluations.extend(database_evaluations)
 
     if not evaluations:
         # No conditions defined — pass with warning

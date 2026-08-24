@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import errno
+import html
 import json
+import os
+import re
+import stat
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
@@ -21,8 +26,78 @@ def _int_value(value: Any) -> int:
         return 0
 
 
+_MAX_REPORT_TEXT_CHARS = 512
+_REPORT_SENSITIVE_TEXT = re.compile(
+    r"(?:"
+    r"[a-z][a-z0-9+.-]*://"
+    r"|(?:^|[^a-z0-9_])(?:[a-z_][a-z0-9_]*_)?"
+    r"(?:password|token|secret|dsn|url|key|credential)\s*[:=]"
+    r"|(?:^|[\s;])--(?:password|token|dsn|secret|credential)(?:=|\s+\S+|$)"
+    r"|(?:^|[\s;])-[pt](?:\S+|\s+\S+|$)"
+    r"|\b(?:create|alter|drop|truncate|insert|update|delete)\s+(?:table|index|database|schema|into|from)\b"
+    r"|\b(?:ddl|sample|samples|row|rows|record|records|raw[ _-]?data)\b"
+    r"|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+    r")",
+    re.IGNORECASE,
+)
+_MARKDOWN_ESCAPE = re.compile(r"([\\`*_{}\[\]()|#!])")
+
+
+def _safe_report_text(value: object) -> str:
+    if not isinstance(value, str):
+        value = str(value)
+    normalized = " ".join(value.split())
+    if normalized == "[REDACTED]":
+        return normalized
+    if _REPORT_SENSITIVE_TEXT.search(normalized):
+        return "[REDACTED]"
+    bounded = normalized[:_MAX_REPORT_TEXT_CHARS]
+    escaped = html.escape(bounded, quote=True)
+    return _MARKDOWN_ESCAPE.sub(r"\\\1", escaped)
+
+
+def _sanitize_report_payload(value: Any) -> Any:
+    if isinstance(value, str):
+        return _safe_report_text(value)
+    if isinstance(value, list):
+        return [_sanitize_report_payload(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_report_payload(item)
+            for key, item in value.items()
+            if isinstance(key, str)
+        }
+    return value
+
+
+_MAX_RESULT_INPUT_BYTES = 128 * 1024
+_STABLE_RESULT_FAILURE_REASONS = frozenset(
+    {
+        "malformed_response",
+        "result_input_directory",
+        "result_input_invalid_utf8",
+        "result_input_io",
+        "result_input_missing",
+        "result_input_oversize",
+        "result_json_invalid",
+        "worker_returned_failed",
+    }
+)
+
+
+
+class ResultInputError(ValueError):
+    """Stable failure produced before parsing an untrusted worker result."""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
 def _recommendation_text(finding: dict[str, Any]) -> str:
-    return str(finding.get("recommendation", "") or finding.get("suggestion", "") or "-")
+    return _safe_report_text(
+        finding.get("recommendation", "") or finding.get("suggestion", "") or "-"
+    )
 
 
 def _is_stream_result_event(payload: Any) -> bool:
@@ -58,26 +133,61 @@ def _unwrap_stream_result_payload(result_text: str) -> dict[str, Any] | None:
     return None
 
 
-def _parse_result_json(path: str) -> dict[str, Any]:
-    """Parse a worker result file into a single dict envelope.
+def _read_result_input(path: str) -> str:
+    """Read one bounded, regular UTF-8 worker result exactly once."""
 
-    Supports three formats:
-    1. A single JSON document (legacy path).
-    2. Claude Code stream-json output (one JSON event per line, ending with
-       a `{"type": "result", "result": "<text>", ...}` envelope). When the
-       worker ran with `--json-schema`, the `result` field is itself a JSON
-       document — we unwrap one level. The same unwrapping applies when the
-       whole file happens to be a single result-event JSON document.
-    3. JSON object embedded in surrounding prose (extract by first `{` /
-       last `}`); kept as a last-resort fallback.
+    descriptor: Optional[int] = None
+    raw_bytes = bytearray()
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        try:
+            descriptor = os.open(path, flags)
+        except FileNotFoundError:
+            raise ResultInputError("result_input_missing") from None
+        except OSError:
+            raise ResultInputError("result_input_io") from None
 
-    §1.3 fix: the verify executor runs claude with
-    `--output-format stream-json --include-partial-messages`, so the result
-    file is multi-line line-delimited JSON. Previously json.loads on the
-    whole file raised `Extra data` and the substring fallback merged events
-    into invalid JSON; the gate evaluator then marked PASS results as FAIL.
-    """
-    raw = Path(path).read_text(encoding="utf-8").strip()
+        try:
+            metadata = os.fstat(descriptor)
+        except OSError:
+            raise ResultInputError("result_input_io") from None
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ResultInputError("result_input_directory")
+        if metadata.st_size > _MAX_RESULT_INPUT_BYTES:
+            raise ResultInputError("result_input_oversize")
+
+        while len(raw_bytes) <= _MAX_RESULT_INPUT_BYTES:
+            try:
+                chunk = os.read(
+                    descriptor,
+                    _MAX_RESULT_INPUT_BYTES + 1 - len(raw_bytes),
+                )
+            except OSError as error:
+                if error.errno == errno.EINTR:
+                    continue
+                raise ResultInputError("result_input_io") from None
+            if not chunk:
+                break
+            raw_bytes.extend(chunk)
+            if len(raw_bytes) > _MAX_RESULT_INPUT_BYTES:
+                raise ResultInputError("result_input_oversize")
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+    try:
+        return bytes(raw_bytes).decode("utf-8")
+    except UnicodeDecodeError:
+        raise ResultInputError("result_input_invalid_utf8") from None
+
+
+def _parse_result_text(raw: str) -> dict[str, Any]:
+    """Parse a bounded worker result using the supported envelope formats."""
+
+    raw = raw.strip()
     try:
         outer = json.loads(raw)
         if _is_stream_result_event(outer):
@@ -108,8 +218,12 @@ def _parse_result_json(path: str) -> dict[str, Any]:
     start = raw.find("{")
     end = raw.rfind("}")
     if start == -1 or end == -1 or end <= start:
-        raise ValueError(f"Unable to locate JSON object in {path}")
+        raise ValueError("result_json_invalid")
     return json.loads(raw[start : end + 1])
+
+
+def _parse_result_json(path: str) -> dict[str, Any]:
+    return _parse_result_text(_read_result_input(path))
 
 
 def load_result_envelope(path: str, *, phase: str, provider: str) -> dict[str, Any]:
@@ -142,18 +256,14 @@ def load_result_json(path: str) -> dict[str, Any]:
     return normalize_phase_result(payload)
 
 
-def _raw_result_text(path: str) -> str:
-    return Path(path).read_text(encoding="utf-8")
-
-
 def _render_escape_report(
     phase: str,
     reason: str,
     severity: str,
     recommended_action: str,
-    escape_data: dict,
-    raw_text: str,
+    escape_data: dict[str, Any],
 ) -> str:
+    escape_data = _sanitize_report_payload(escape_data)
     summary = str(escape_data.get("summary", "") or "No summary provided")
     evidence = _as_list(escape_data.get("evidence"))
     affected = _as_list(escape_data.get("affected_files"))
@@ -161,48 +271,45 @@ def _render_escape_report(
         f"# {'Review' if phase == 'review' else 'Verification'} Report — Worker Escaped",
         "",
         "## Summary",
-        f"- Status: ESCAPED",
-        f"- Severity: {severity}",
-        f"- Reason: {reason}",
-        f"- Recommended Action: {recommended_action or 'none'}",
+        "- Status: ESCAPED",
+        f"- Severity: {_safe_report_text(severity)}",
+        f"- Reason: {_safe_report_text(reason)}",
+        f"- Recommended Action: {_safe_report_text(recommended_action or 'none')}",
         f"- Description: {summary}",
         "",
     ]
     if affected:
-        lines.extend(["## Affected Files"] + [f"- {f}" for f in affected] + [""])
+        lines.extend(["## Affected Files"] + [f"- {item}" for item in affected] + [""])
     if evidence:
         lines.extend(["## Evidence"])
         for item in evidence:
             if isinstance(item, dict):
                 lines.append(
                     f"- [{item.get('kind', 'note')}] "
-                    f"{item.get('value', item.get('detail', str(item)))}"
+                    f"{item.get('value', item.get('detail', '[REDACTED]'))}"
                 )
             else:
                 lines.append(f"- [note] {item}")
         lines.append("")
-    raw_excerpt = raw_text[:8000]
-    lines.extend(["## Raw Result Excerpt", "```text", raw_excerpt.rstrip(), "```", ""])
     return "\n".join(lines)
 
 
-def _render_malformed_report(phase: str, reason: str, raw_text: str) -> str:
-    raw_excerpt = raw_text[:12000]
+def _render_malformed_report(phase: str, reason: str) -> str:
+    safe_reason = (
+        reason
+        if reason in _STABLE_RESULT_FAILURE_REASONS
+        else _safe_report_text(reason)
+    )
     return "\n".join(
         [
             f"# {'Review' if phase == 'review' else 'Verification'} Report",
             "",
             "## Summary",
-            f"- Conclusion: FAIL",
-            f"- Reason: {reason}",
+            "- Conclusion: FAIL",
+            f"- Reason: {safe_reason}",
             "",
             "## Gate Checks",
-            f"- FAIL: structured_result_shape ({reason})",
-            "",
-            "## Raw Result Excerpt",
-            "```text",
-            raw_excerpt.rstrip(),
-            "```",
+            f"- FAIL: structured_result_shape ({safe_reason})",
             "",
         ]
     )
@@ -211,6 +318,7 @@ def _render_malformed_report(phase: str, reason: str, raw_text: str) -> str:
 def _render_synthesis_summary(synthesis_summary: Optional[dict[str, Any]]) -> list[str]:
     if not synthesis_summary:
         return []
+    synthesis_summary = _sanitize_report_payload(synthesis_summary)
     return [
         "",
         "## Synthesis",
@@ -230,6 +338,7 @@ def render_review_report(
     gate_checks: list[dict[str, Any]],
     synthesis_summary: Optional[dict[str, Any]] = None,
 ) -> tuple[str, bool]:
+    data = _sanitize_report_payload(data)
     findings = _as_list(data.get("findings"))
     coverage = data.get("coverage", {})
     critical = len([item for item in findings if item.get("severity") == "CRITICAL"])
@@ -321,12 +430,63 @@ def render_review_report(
     return "\n".join(lines), gate_passed
 
 
+_SAFE_DATABASE_REPORT_VALUE = re.compile(r"^[A-Za-z0-9._:+-]{1,128}$")
+
+
+def _database_gate_report_detail(check: dict[str, Any]) -> str:
+    summary = check.get("database_summary")
+    if not isinstance(summary, dict):
+        return "status=unavailable"
+
+    detail: list[str] = []
+    stage = summary.get("stage")
+    if stage in {"plan", "verify", "test"}:
+        detail.append(f"stage={stage}")
+    status = summary.get("status")
+    if status in {"detected", "fail", "not_applicable", "pass", "waived"}:
+        detail.append(f"status={status}")
+
+    for key in (
+        "schema_hash_prefix",
+        "engine",
+        "engine_version",
+        "selected_option",
+        "local_target",
+    ):
+        value = summary.get(key)
+        if isinstance(value, str) and _SAFE_DATABASE_REPORT_VALUE.fullmatch(value):
+            detail.append(f"{key}={value}")
+
+    if (
+        summary.get("waiver_present") in {True, "true"}
+        or isinstance(summary.get("waiver_reason"), str)
+    ):
+        detail.append("waiver_present=true")
+    return ",".join(detail) or "status=unavailable"
+
+
+def _render_gate_checks(gate_checks: list[dict[str, Any]]) -> list[str]:
+    rendered: list[str] = []
+    for check in gate_checks:
+        condition = str(check.get("condition", "unknown_condition"))
+        detail = (
+            _database_gate_report_detail(check)
+            if condition.startswith("database.")
+            else str(check.get("detail", ""))
+        )
+        rendered.append(
+            f"- {'PASS' if check.get('passed') else 'FAIL'}: {condition} ({detail})"
+        )
+    return rendered
+
+
 def render_verify_report(
     data: dict[str, Any],
     gate_passed: bool,
     gate_checks: list[dict[str, Any]],
     synthesis_summary: Optional[dict[str, Any]] = None,
 ) -> tuple[str, bool]:
+    data = _sanitize_report_payload(data)
     scope = data.get("scope", {})
     compliance = data.get("compliance", {})
     quality = data.get("quality", {})
@@ -360,7 +520,7 @@ def render_verify_report(
         "## Quality Issues",
     ])
 
-    issues = _as_list(quality.get("issues"))
+    issues = [item for item in _as_list(quality.get("issues")) if isinstance(item, dict)]
     if not issues:
         lines.extend(["", "No quality issues reported."])
     else:
@@ -372,13 +532,13 @@ def render_verify_report(
             )
 
     lines.extend(["", "## Gate Checks"])
-    lines.extend([f"- {'PASS' if item['passed'] else 'FAIL'}: {item['condition']} ({item['detail']})" for item in gate_checks] or ["- None"])
+    lines.extend(_render_gate_checks(gate_checks) or ["- None"])
 
     lines.extend(["", "## Evidence"])
     evidence = _as_list(data.get("evidence"))
     lines.append(
         "\n".join(
-            f"- {item.get('id', 'evidence')}: {item.get('detail', item)}"
+            f"- {item.get('id', 'evidence')}: {item.get('detail', '[REDACTED]')}"
             if isinstance(item, dict)
             else f"- evidence: {item}"
             for item in evidence
@@ -390,7 +550,7 @@ def render_verify_report(
     risks = _as_list(data.get("risks"))
     lines.append(
         "\n".join(
-            f"- {item.get('id', 'risk')} [{item.get('severity', 'N/A')}]: {item.get('detail', item)}"
+            f"- {item.get('id', 'risk')} [{item.get('severity', 'N/A')}]: {item.get('detail', '[REDACTED]')}"
             if isinstance(item, dict)
             else f"- risk: {item}"
             for item in risks
@@ -402,7 +562,7 @@ def render_verify_report(
     actions = _as_list(data.get("action_items"))
     lines.append(
         "\n".join(
-            f"- {item.get('id', 'action')}: {item.get('action', item)}"
+            f"- {item.get('id', 'action')}: {item.get('action', '[REDACTED]')}"
             if isinstance(item, dict)
             else f"- action: {item}"
             for item in actions
@@ -425,6 +585,7 @@ def render_impl_report(
     `gate.pass_conditions`. Defaults reflect the §1.1 baseline criteria
     (lint clean / build PASS / tasks complete / commits exist).
     """
+    data = _sanitize_report_payload(data)
     tasks_completed = _as_list(data.get("tasks_completed"))
     tasks_pending = _as_list(data.get("tasks_pending"))
     commits = _as_list(data.get("commits"))
@@ -469,8 +630,9 @@ def render_test_report(
     synthesis_summary: Optional[dict[str, Any]] = None,
 ) -> tuple[str, bool]:
     """Render the test phase markdown report."""
-    suites = _as_list(data.get("suites"))
-    regressions = _as_list(data.get("regressions"))
+    data = _sanitize_report_payload(data)
+    suites = [item for item in _as_list(data.get("suites")) if isinstance(item, dict)]
+    regressions = [item for item in _as_list(data.get("regressions")) if isinstance(item, dict)]
     acceptance = data.get("acceptance", {}) if isinstance(data.get("acceptance"), dict) else {}
     coverage = data.get("coverage", {}) if isinstance(data.get("coverage"), dict) else {}
 
@@ -497,9 +659,12 @@ def render_test_report(
                 f"{s.get('failed', '-')} | {s.get('duration_sec', '-')} |"
             )
     if regressions:
-        lines.extend(["", "## Regressions"] + [f"- {r.get('id', '-')}: {r.get('detail', r)}" for r in regressions])
+        lines.extend(
+            ["", "## Regressions"]
+            + [f"- {item.get('id', '-')}: {item.get('detail', '[REDACTED]')}" for item in regressions]
+        )
     lines.extend(["", "## Gate Checks"])
-    lines.extend([f"- {'PASS' if item['passed'] else 'FAIL'}: {item['condition']} ({item['detail']})" for item in gate_checks] or ["- None"])
+    lines.extend(_render_gate_checks(gate_checks) or ["- None"])
     lines.append("")
     return "\n".join(lines), gate_passed
 
@@ -555,68 +720,106 @@ def apply_workflow_result(
         )
     output_path = wf_dir / "artifacts" / artifact_names[phase]
 
+    failure_context = None
     try:
-        envelope = load_result_envelope(result_path, phase=phase, provider="unknown")
+        raw = _read_result_input(result_path)
+        envelope = normalize_worker_result(
+            _parse_result_text(raw),
+            phase=phase,
+            provider="unknown",
+        )
         status = envelope.get("status")
-
-        # --- Handle escaped/failed envelopes properly ---
         if status == "escaped":
-            escape_data = envelope.get("escape") or {}
+            raw_escape = envelope.get("escape")
+            escape_data = (
+                _sanitize_report_payload(raw_escape)
+                if isinstance(raw_escape, dict)
+                else {}
+            )
+            provider = _safe_report_text(
+                envelope.get("provider", "unknown") or "unknown"
+            )
             record_phase_escape(
                 explicit_root,
                 phase,
-                provider=str(envelope.get("provider", "unknown") or "unknown"),
+                provider=provider,
                 escape=escape_data,
             )
-            recommended = str(escape_data.get("recommended_action", "") or "")
-            reason = str(escape_data.get("reason", "") or "unknown")
-            severity = str(escape_data.get("severity", "") or "unknown")
-            markdown = _render_escape_report(phase, reason, severity, recommended, escape_data, _raw_result_text(result_path))
-            output_path.write_text(markdown, encoding="utf-8")
-            return output_path, False
-
-        if status == "failed":
-            markdown = _render_malformed_report(phase, f"worker_returned_failed", _raw_result_text(result_path))
-            output_path.write_text(markdown, encoding="utf-8")
-            apply_gate_result(explicit_root, phase, False)
-            return output_path, False
-
-        if status != "completed":
-            raise ValueError(f"worker_result_status:{status}")
-
-        data = normalize_phase_result(dict(envelope.get("result", {})))
-        gate_passed, gate_checks = evaluate_gate(explicit_root, phase, data, change_class=change_class)
-
-        # --- Build failure context for on_fail routing ---
-        failure_context = None
-        if not gate_passed:
-            failure_context = _failure_context_for_result(phase, data)
-
-        malformed = any(
-            (item.get("condition") == "structured_result_shape" and not item.get("passed", False))
-            for item in gate_checks
-        )
-        if malformed:
-            markdown = _render_malformed_report(
+            markdown = _render_escape_report(
                 phase,
-                next((str(item.get("detail", "malformed_response")) for item in gate_checks if item.get("condition") == "structured_result_shape"), "malformed_response"),
-                _raw_result_text(result_path),
+                str(escape_data.get("reason", "") or "unknown"),
+                str(escape_data.get("severity", "") or "unknown"),
+                str(escape_data.get("recommended_action", "") or ""),
+                escape_data,
             )
             passed = False
-        elif phase == "review":
-            markdown, passed = render_review_report(data, gate_passed, gate_checks, synthesis_summary=synthesis_summary)
-        elif phase == "verify":
-            markdown, passed = render_verify_report(data, gate_passed, gate_checks, synthesis_summary=synthesis_summary)
-        elif phase == "impl":
-            markdown, passed = render_impl_report(data, gate_passed, gate_checks, synthesis_summary=synthesis_summary)
+        elif status == "failed":
+            markdown = _render_malformed_report(phase, "worker_returned_failed")
+            passed = False
+        elif status != "completed":
+            raise ValueError("worker_result_status_invalid")
         else:
-            markdown, passed = render_test_report(data, gate_passed, gate_checks, synthesis_summary=synthesis_summary)
-    except Exception as exc:
-        markdown = _render_malformed_report(phase, f"invalid_json:{exc}", _raw_result_text(result_path))
+            data = _sanitize_report_payload(
+                normalize_phase_result(dict(envelope.get("result", {})))
+            )
+            gate_passed, gate_checks = evaluate_gate(
+                explicit_root,
+                phase,
+                data,
+                change_class=change_class,
+            )
+            if not gate_passed:
+                failure_context = _failure_context_for_result(phase, data)
+
+            malformed = any(
+                item.get("condition") == "structured_result_shape"
+                and not item.get("passed", False)
+                for item in gate_checks
+            )
+            if malformed:
+                markdown = _render_malformed_report(phase, "malformed_response")
+                passed = False
+            elif phase == "review":
+                markdown, passed = render_review_report(
+                    data,
+                    gate_passed,
+                    gate_checks,
+                    synthesis_summary=synthesis_summary,
+                )
+            elif phase == "verify":
+                markdown, passed = render_verify_report(
+                    data,
+                    gate_passed,
+                    gate_checks,
+                    synthesis_summary=synthesis_summary,
+                )
+            elif phase == "impl":
+                markdown, passed = render_impl_report(
+                    data,
+                    gate_passed,
+                    gate_checks,
+                    synthesis_summary=synthesis_summary,
+                )
+            else:
+                markdown, passed = render_test_report(
+                    data,
+                    gate_passed,
+                    gate_checks,
+                    synthesis_summary=synthesis_summary,
+                )
+    except ResultInputError as error:
+        markdown = _render_malformed_report(phase, error.code)
         passed = False
-        failure_context = None
+    except Exception:
+        markdown = _render_malformed_report(phase, "result_json_invalid")
+        passed = False
 
     output_path.write_text(markdown, encoding="utf-8")
     if not skip_gate_apply:
-        apply_gate_result(explicit_root, phase, passed, failure_context=failure_context)
+        apply_gate_result(
+            explicit_root,
+            phase,
+            passed,
+            failure_context=failure_context,
+        )
     return output_path, passed

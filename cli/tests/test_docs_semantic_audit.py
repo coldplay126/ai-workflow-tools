@@ -10,6 +10,7 @@ import pytest
 
 from awf.cli import KNOWN_COMMANDS, build_parser
 from awf.core.config import AwfConfig
+from awf.core.db_validation import load_database_decision
 from awf.core.state import PHASE_GATE, PHASE_ORDER
 
 
@@ -1256,3 +1257,491 @@ def test_protected_index_entry_docs_define_supported_stage_zero_modes() -> None:
         prose = " ".join(path.read_text(encoding="utf-8").lower().split())
         for requirement in required_prose:
             assert requirement in prose
+
+
+DATABASE_GATE_COMMANDS = {
+    "plan": (
+        "awf wf db-check --stage plan --repo-root . --json",
+        "awf wf gate plan --repo-root . --json",
+    ),
+    "verify": (
+        ': "${VERIFY_RESULT:?set from the result path emitted by awf wf next}"',
+        "awf wf db-check --stage verify --repo-root . --json",
+        'awf wf gate verify --repo-root . --result-file "$VERIFY_RESULT" --json',
+    ),
+    "test": (
+        ': "${TEST_RESULT:?set from the result path emitted by awf wf next}"',
+        "awf wf db-check --stage test --repo-root . --json",
+        'awf wf gate test --repo-root . --result-file "$TEST_RESULT" --json',
+    ),
+}
+
+
+def test_database_workflow_docs_define_evidence_and_safety_policy() -> None:
+    parser = build_parser()
+    phase_skills = {
+        "plan": REPO_ROOT / "claude" / "skills" / "phase-plan" / "SKILL.md",
+        "verify": REPO_ROOT / "claude" / "skills" / "phase-verify" / "SKILL.md",
+        "test": REPO_ROOT / "claude" / "skills" / "phase-test" / "SKILL.md",
+    }
+    for stage, path in phase_skills.items():
+        commands = DATABASE_GATE_COMMANDS[stage]
+        assert f"```bash\n{chr(10).join(commands)}\n```" in path.read_text(
+            encoding="utf-8"
+        )
+        result_variable = {
+            "verify": "VERIFY_RESULT",
+            "test": "TEST_RESULT",
+        }.get(stage)
+        result_path = (
+            f".workflow/tmp/{stage}-result-from-next.json"
+            if result_variable is not None
+            else None
+        )
+        for command in commands:
+            assert not any(marker in command for marker in ("<", ">", "|", ";"))
+            if command.startswith(": "):
+                assert command == (
+                    f': "${{{result_variable}:?set from the result path emitted by awf wf next}}"'
+                )
+                continue
+            expanded = (
+                command.replace(f"${result_variable}", result_path)
+                if result_variable is not None and result_path is not None
+                else command
+            )
+            parsed = parser.parse_args(_argv_from_displayed_command(expanded))
+            if result_path is not None and "gate" in command:
+                assert parsed.result_file == result_path
+
+    reference_path = REPO_ROOT / "docs" / "reference" / "workflow-pipeline.md"
+    reference_block = "```bash\n" + "\n\n".join(
+        "\n".join(DATABASE_GATE_COMMANDS[stage])
+        for stage in ("plan", "verify", "test")
+    ) + "\n```"
+    assert reference_block in reference_path.read_text(encoding="utf-8")
+
+    readme = CLI_README.read_text(encoding="utf-8")
+    assert "result: /actual/result/path" in readme
+    assert "`VERIFY_RESULT`" in readme
+    assert "`TEST_RESULT`" in readme
+
+    policy_paths = (
+        reference_path,
+        CLI_README,
+        REPO_ROOT / "CHANGELOG.md",
+    )
+    required_policy = (
+        "production schema",
+        "same-engine local",
+        "DuckDB",
+        "project-specific replica",
+        "raw primary rows",
+        "waiver",
+    )
+    for path in policy_paths:
+        prose = path.read_text(encoding="utf-8")
+        for requirement in required_policy:
+            assert requirement in prose, f"{path}: missing {requirement}"
+
+    reference = policy_paths[0].read_text(encoding="utf-8")
+    required_schema_fields = (
+        '"schema_version": 1',
+        '"kind": "production_schema"',
+        '"target_class": "production_metadata"',
+        '"read_only": true',
+        '"schema_only": true',
+        '"engine"',
+        '"engine_version"',
+        '"captured_at"',
+        '"schema_hash"',
+        '"object_counts"',
+        '"tables"',
+        '"columns"',
+        '"indexes"',
+        '"constraints"',
+    )
+    for field in required_schema_fields:
+        assert field in reference, f"missing production-schema field: {field}"
+
+    primary_policy_paths = (*phase_skills.values(), reference_path, CLI_README)
+    primary_policy = (
+        "Production primary is never a verify/test benchmark or executable-query target.",
+        "read-only schema metadata",
+        "explicitly approved replica",
+        "warehouse",
+        "sanitized local",
+    )
+    for path in primary_policy_paths:
+        prose = path.read_text(encoding="utf-8")
+        for requirement in primary_policy:
+            assert requirement in prose, f"{path}: missing {requirement}"
+
+    operator_waiver_contract = (
+        "`local_data_test_waiver`",
+        "null or omitted",
+        "`reason`",
+        "`approver`",
+        "`timestamp`",
+        "UTC ISO 8601",
+    )
+    for path in (reference_path, CLI_README):
+        prose = path.read_text(encoding="utf-8")
+        for requirement in operator_waiver_contract:
+            assert requirement in prose, f"{path}: missing {requirement}"
+
+
+def test_database_planning_contract_compares_options_without_index_default() -> None:
+    plan_skill = (
+        REPO_ROOT / "claude" / "skills" / "phase-plan" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    required_contract = (
+        "정확히 2개 또는 3개",
+        "`maintain` baseline",
+        "equivalence_plan",
+        "integrity_plan",
+        "`query`",
+        "`index`",
+        "`column`",
+        "`constraint`",
+        "`erd`",
+        "`normalize`",
+        "`denormalize`",
+        "`partition`",
+        "`schema_object`",
+        "hard gate",
+        "Every candidate covers every decision surface.",
+    )
+    for requirement in required_contract:
+        assert requirement in plan_skill, f"missing planning requirement: {requirement}"
+
+    candidate_fields = (
+        "`id`",
+        "`kind`",
+        "`applicable`",
+        "`unavailable_reason`",
+        "`summary`",
+        "`equivalence_plan`",
+        "`integrity_plan`",
+        "`normalization_assessment`",
+        "`denormalization_assessment`",
+        "`physical_design_assessment`",
+        "`covered_surfaces`",
+        "`surface_assessments`",
+        "`read_write_cost`",
+        "`operational_risks`",
+        "`transition_risks`",
+        "`rollback_or_exit`",
+        "`source_of_truth`",
+        "`consistency_window`",
+        "`reconciliation`",
+        "`read_benefit`",
+        "`write_amplification`",
+        "`storage`",
+        "`build_or_lock`",
+        "`rollback`",
+    )
+    contract_paths = (
+        REPO_ROOT / "claude" / "skills" / "phase-plan" / "SKILL.md",
+        REPO_ROOT / "claude" / "agents" / "spec-writer.md",
+        REPO_ROOT / "claude" / "skills" / "multi-agent" / "protocols" / "spec_writer.md",
+    )
+    for path in contract_paths:
+        prose = path.read_text(encoding="utf-8")
+        for field in candidate_fields:
+            assert field in prose, f"{path}: missing candidate field {field}"
+        assert "Every candidate covers every decision surface." in prose
+
+    writer = (REPO_ROOT / "claude" / "agents" / "spec-writer.md").read_text(
+        encoding="utf-8"
+    )
+    assert "tools: Read, Grep, Glob, Edit, Write, Bash, AskUserQuestion" in writer
+    assert "material" in writer
+
+    waiver_contract = (
+        "`local_data_test_waiver`",
+        "null or omitted",
+        "`reason`",
+        "`approver`",
+        "`timestamp`",
+        "UTC ISO 8601",
+    )
+    for path in contract_paths:
+        prose = path.read_text(encoding="utf-8")
+        for field in waiver_contract:
+            assert field in prose, f"{path}: missing waiver field {field}"
+
+    test_skill = (
+        REPO_ROOT / "claude" / "skills" / "phase-test" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    for field in waiver_contract:
+        assert field in test_skill, f"phase-test: missing waiver field {field}"
+
+
+
+def test_documented_local_data_waiver_loads_through_canonical_decision_parser(
+    tmp_path: Path,
+) -> None:
+    candidates = [
+        {
+            "id": "maintain-current",
+            "kind": "maintain",
+            "applicable": True,
+            "unavailable_reason": None,
+            "summary": "Keep the current query and schema.",
+            "equivalence_plan": "Use the current result set as a baseline.",
+            "integrity_plan": "Verify current constraints.",
+            "normalization_assessment": "No model change.",
+            "denormalization_assessment": None,
+            "physical_design_assessment": None,
+            "covered_surfaces": ["query"],
+            "surface_assessments": {"query": "Maintain the current query."},
+            "read_write_cost": "Measure the production-shaped workload.",
+            "operational_risks": [],
+            "transition_risks": [],
+            "rollback_or_exit": "No change.",
+        },
+        {
+            "id": "rewrite-query",
+            "kind": "query_change",
+            "applicable": True,
+            "unavailable_reason": None,
+            "summary": "Rewrite the aggregation query.",
+            "equivalence_plan": "Compare result sets with the baseline.",
+            "integrity_plan": "Verify constraints before and after the query.",
+            "normalization_assessment": "No model change.",
+            "denormalization_assessment": None,
+            "physical_design_assessment": None,
+            "covered_surfaces": ["query"],
+            "surface_assessments": {"query": "Rewrite the aggregation query."},
+            "read_write_cost": "Measure latency on production-shaped data.",
+            "operational_risks": [],
+            "transition_risks": [],
+            "rollback_or_exit": "Restore the current query.",
+        },
+    ]
+    payload = {
+        "schema_version": 1,
+        "status": "selected",
+        "change_surfaces": ["query"],
+        "baseline_option_id": "maintain-current",
+        "recommended_option_id": "rewrite-query",
+        "selected_option_id": "rewrite-query",
+        "candidates": candidates,
+        "recommendation_rationale": "The rewrite preserves correctness at lower cost.",
+        "local_data_test_waiver": {
+            "reason": "No approved masked fixture is available.",
+            "approver": "database-owner",
+            "timestamp": "2026-08-24T00:00:00Z",
+        },
+    }
+    decision_path = tmp_path / ".workflow" / "artifacts" / "database-decision.json"
+    decision_path.parent.mkdir(parents=True)
+    decision_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    decision = load_database_decision(tmp_path)
+
+    assert decision.local_data_test_waiver == payload["local_data_test_waiver"]
+
+
+def test_index_surface_compares_holistic_options_without_forcing_physical_kind(
+    tmp_path: Path,
+) -> None:
+    baseline = {
+        "id": "maintain-current",
+        "kind": "maintain",
+        "applicable": True,
+        "unavailable_reason": None,
+        "summary": "Keep the current query and schema.",
+        "equivalence_plan": "Use the current result set as a baseline.",
+        "integrity_plan": "Verify current constraints.",
+        "normalization_assessment": "No model change.",
+        "denormalization_assessment": None,
+        "physical_design_assessment": None,
+        "covered_surfaces": ["index"],
+        "surface_assessments": {"index": "Maintain the current index design."},
+        "read_write_cost": "Measure the production-shaped workload.",
+        "operational_risks": [],
+        "transition_risks": [],
+        "rollback_or_exit": "No change.",
+    }
+    query = {
+        "id": "rewrite-query",
+        "kind": "query_change",
+        "applicable": True,
+        "unavailable_reason": None,
+        "summary": "Rewrite the aggregation query.",
+        "equivalence_plan": "Compare result sets with the baseline.",
+        "integrity_plan": "Verify constraints before and after the query.",
+        "normalization_assessment": "No model change.",
+        "denormalization_assessment": None,
+        "physical_design_assessment": None,
+        "covered_surfaces": ["index"],
+        "surface_assessments": {"index": "Reject a new index after comparison."},
+        "read_write_cost": "Measure latency on production-shaped data.",
+        "operational_risks": [],
+        "transition_risks": [],
+        "rollback_or_exit": "Restore the current query.",
+    }
+    physical_design = {
+        "id": "add-covering-index",
+        "kind": "physical_design",
+        "applicable": True,
+        "unavailable_reason": None,
+        "summary": "Add a covering index for the current query.",
+        "equivalence_plan": "Compare result sets with the baseline.",
+        "integrity_plan": "Verify constraints before and after the index build.",
+        "normalization_assessment": "No model change.",
+        "denormalization_assessment": None,
+        "physical_design_assessment": {
+            "read_benefit": "Avoid a full scan.",
+            "write_amplification": "Measure insert overhead.",
+            "storage": "Measure index size.",
+            "build_or_lock": "Use the engine's online build path.",
+            "rollback": "Drop the index.",
+        },
+        "covered_surfaces": ["index"],
+        "surface_assessments": {"index": "Add a covering index."},
+        "read_write_cost": "Measure read and write cost.",
+        "operational_risks": [],
+        "transition_risks": [],
+        "rollback_or_exit": "Drop the index.",
+    }
+    payload = {
+        "schema_version": 1,
+        "status": "selected",
+        "change_surfaces": ["index"],
+        "baseline_option_id": "maintain-current",
+        "recommended_option_id": "rewrite-query",
+        "selected_option_id": "rewrite-query",
+        "candidates": [baseline, query, physical_design],
+        "recommendation_rationale": "The query rewrite meets the workload budget.",
+    }
+    decision_path = tmp_path / ".workflow" / "artifacts" / "database-decision.json"
+    decision_path.parent.mkdir(parents=True)
+    decision_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert load_database_decision(tmp_path).selected_option_id == "rewrite-query"
+
+    payload["candidates"] = [baseline, query]
+    decision_path.write_text(json.dumps(payload), encoding="utf-8")
+    assert load_database_decision(tmp_path).selected_option_id == "rewrite-query"
+
+
+def test_database_risk_routing_requires_a_selected_decision() -> None:
+    routing = (
+        REPO_ROOT
+        / "docs"
+        / "patterns"
+        / "workflow-pipeline"
+        / "03-risk-routing.md"
+    ).read_text(encoding="utf-8")
+
+    assert "take the `high_risk` route" in routing
+    assert "A missing index is not a recommendation." in routing
+
+
+def test_database_agents_require_machine_validated_evidence() -> None:
+    agent_paths = (
+        REPO_ROOT / "claude" / "agents" / "spec-writer.md",
+        REPO_ROOT / "claude" / "agents" / "spec-verifier.md",
+        REPO_ROOT / "claude" / "agents" / "happy-path-tester.md",
+        REPO_ROOT / "claude" / "skills" / "multi-agent" / "protocols" / "spec_writer.md",
+    )
+    for path in agent_paths:
+        prose = path.read_text(encoding="utf-8")
+        assert "database-validation-evidence.json" in prose
+        assert "prose is not a substitute" in prose.lower()
+
+
+def test_database_verifier_and_tester_prohibit_primary_execution() -> None:
+    primary_policy = (
+        "Production primary is never a verify/test benchmark or executable-query target.",
+        "read-only schema metadata",
+        "explicitly approved replica",
+        "warehouse",
+        "sanitized local",
+    )
+    for name in ("spec-verifier.md", "happy-path-tester.md"):
+        source = (REPO_ROOT / "claude" / "agents" / name).read_text(encoding="utf-8")
+        for requirement in primary_policy:
+            assert requirement in source, f"{name}: missing {requirement}"
+
+
+def test_database_verify_and_signal_contracts_match_the_core_policy() -> None:
+    verify_paths = (
+        REPO_ROOT / "claude" / "skills" / "phase-verify" / "SKILL.md",
+        REPO_ROOT / "claude" / "agents" / "spec-verifier.md",
+        REPO_ROOT / "docs" / "reference" / "workflow-pipeline.md",
+        CLI_README,
+        REPO_ROOT
+        / "docs"
+        / "superpowers"
+        / "specs"
+        / "2026-08-24-p0-database-safety-gate-design.md",
+    )
+    verify_contract = (
+        "`engine`",
+        "`execution_target`",
+        "`production_primary_queries`: false",
+        "`raw_production_rows`: false",
+        "`local_same_engine`",
+        "`approved_read_replica`",
+        "DuckDB",
+        "cross-engine",
+        "production primary",
+    )
+    for path in verify_paths:
+        prose = path.read_text(encoding="utf-8")
+        for requirement in verify_contract:
+            assert requirement in prose, f"{path}: missing {requirement}"
+
+    test_evidence_paths = (
+        REPO_ROOT / "claude" / "skills" / "phase-test" / "SKILL.md",
+        REPO_ROOT / "docs" / "reference" / "workflow-pipeline.md",
+    )
+    for path in test_evidence_paths:
+        prose = path.read_text(encoding="utf-8")
+        assert "`raw_production_rows`: false" in prose
+        assert "profile.test_command" in prose
+
+    phase_plan = REPO_ROOT / "claude" / "skills" / "phase-plan" / "SKILL.md"
+    exact_signal_rules = (
+        "`text:table_ddl`",
+        "`text:column_ddl`",
+        "`text:index_ddl`",
+        "`text:constraint_ddl`",
+        "`text:schema_ddl`",
+        "`text:view_ddl`",
+        "`text:migration`",
+        "`path:migration:`",
+        "`path:prisma:`",
+        "`text:normalization`",
+        "`text:denormalization`",
+        "`text:erd`",
+        "`text:partition`",
+        "`text:sql syntax`",
+        "`text:order by`",
+        "`artifact_error:`",
+        "`requires_query_plan`",
+        "`requires_migration_rollback`",
+    )
+    plan_prose = phase_plan.read_text(encoding="utf-8")
+    for rule in exact_signal_rules:
+        assert rule in plan_prose, f"{phase_plan}: missing signal rule {rule}"
+
+    source_signal_contract = (
+        "`schema_object`",
+        "`partition`",
+        "`query`",
+        "`artifact_error:`",
+        "`requires_query_plan`",
+        "`requires_migration_rollback`",
+    )
+    for path in (
+        REPO_ROOT / "claude" / "agents" / "spec-writer.md",
+        REPO_ROOT / "claude" / "skills" / "multi-agent" / "protocols" / "spec_writer.md",
+    ):
+        prose = path.read_text(encoding="utf-8")
+        for rule in source_signal_contract:
+            assert rule in prose, f"{path}: missing signal rule {rule}"

@@ -22,7 +22,7 @@
     },
     {
       "name": "happy-path-tester.md",
-      "sha256": "e8fbc6cedee865b03ab8fc16528368b77186d0b9cecd08a0b73206ec9ab0ef4c",
+      "sha256": "489fbfbb16e48a9320eaa418ff7ee46aaa37f0751c1e156c1ec08f253d191746",
       "source": "claude/agents/happy-path-tester.md"
     },
     {
@@ -47,12 +47,12 @@
     },
     {
       "name": "spec-verifier.md",
-      "sha256": "4bd6652037bef541e5c029fec36995f06bfd437a47fff939c0ea56d441070d14",
+      "sha256": "185def6005c2b9d6946de2ea21c4064ddf08e3af4302bec970b41faf72302513",
       "source": "claude/agents/spec-verifier.md"
     },
     {
       "name": "spec-writer.md",
-      "sha256": "b15f9691cc4d40ad097e7dbe3bccd943c960cde3a0b7098fbcb355c7a3586d72",
+      "sha256": "a70d42634909a6526f69f3aed21c204f8a0ae936008f110c99598351707ce381",
       "source": "claude/agents/spec-writer.md"
     }
   ],

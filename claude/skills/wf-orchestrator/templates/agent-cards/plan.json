@@ -1,6 +1,6 @@
 {
   "name": "phase-plan",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Spec-kit routine: generates constitution, spec, plan, tasks, test-criteria from concept. Cross-referenced via FR-NNN ID tags.",
 
   "agent": {
@@ -15,9 +15,9 @@
 
   "capabilities": {
     "file_access": true,
-    "file_write": false,
+    "file_write": true,
     "git_access": false,
-    "sandbox_modes": ["read-only"],
+    "sandbox_modes": ["workspace-write"],
     "execution_modes": ["inline", "delegated"],
     "dual_strategy": "generate_then_validate",
     "protocol_hint": { "recommended_mode": "critical", "reason": "설계 심층 분석에 최적" }
@@ -42,7 +42,14 @@
       { "key": "constitution", "path": "artifacts/constitution.md", "description": "Project invariant rules. Loaded by SKILL.md from manifest.constitution_path. Severity: absent=info, explicit-missing=error" },
       { "key": "claude_md", "path": "../CLAUDE.md", "description": "Project conventions" },
       { "key": "agents_md", "path": "../AGENTS.md", "description": "Agent-specific instructions" }
-    ]
+    ],
+    "database": {
+      "stage": "plan",
+      "profile_artifact": "manifest.json",
+      "decision_artifact": "artifacts/database-decision.json",
+      "evidence_artifact": "artifacts/database-validation-evidence.json",
+      "production_schema_required": true
+    }
   },
 
   "output": {
@@ -52,7 +59,9 @@
       { "key": "plan", "path": "artifacts/plan.md", "format": "markdown", "required": true },
       { "key": "tasks", "path": "artifacts/tasks.md", "format": "markdown", "required": true },
       { "key": "test_criteria", "path": "artifacts/test-criteria.md", "format": "markdown", "required": true },
-      { "key": "allowed_files", "path": "artifacts/allowed-files.json", "format": "json", "required": true }
+      { "key": "allowed_files", "path": "artifacts/allowed-files.json", "format": "json", "required": true },
+      { "key": "database_decision", "path": "artifacts/database-decision.json", "format": "json", "required": false, "required_when_database_signal": true },
+      { "key": "database_validation_evidence", "path": "artifacts/database-validation-evidence.json", "format": "json", "required": false, "required_when_database_signal": true }
     ],
     "structured_result": {
       "conclusion": "PASS|FAIL",
@@ -83,6 +92,12 @@
       "all FR-NNN in spec.md have [FR-NNN] tag in tasks.md",
       "all FR-NNN in spec.md have [FR-NNN] tag in test-criteria.md",
       "constitution loaded if manifest.constitution_path is set"
+    ],
+    "database_conditions": [
+      "database.signal",
+      "database.risk_class",
+      "database.decision",
+      "database.production_schema"
     ],
     "on_pass": { "next_phase": "review" },
     "on_fail": {

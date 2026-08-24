@@ -26,6 +26,14 @@
   staging squash commit은 promotion input이
   아니며 direct staging squash cherry-pick은 금지합니다.
 
+- plan/verify/test에 `awf wf db-check --stage ... --json`을 일반 gate 직전에
+  연결했습니다. database signal이 있으면 production schema가 mandatory이고
+  same-engine local은 DDL/planner evidence에, DuckDB는 profiling/equivalence
+  분석에 사용합니다. project-specific replica sample은 opt-in만 허용하며 raw primary rows는 금지합니다.
+  local test command가 없을 때만 reason/approver/timestamp
+  waiver를 사용합니다. CLI는 database driver, masking, replica provisioning을
+  제공하지 않고 project-owned sanitized JSON evidence를 검증합니다.
+
 ## [0.1.6] - 2026-08-13
 
 ### Fixed

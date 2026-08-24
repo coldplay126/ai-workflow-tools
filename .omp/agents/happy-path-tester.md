@@ -31,6 +31,17 @@ adversarial-tester와 쌍으로 동작합니다.
 - 테스트 코드가 있으면 실행하여 결과 확인
 - `docs/tests/`에 구조화된 시나리오가 있으면 해당 시나리오의 Preconditions → Test Scenario → Expected Result 순서로 검증
 
+## 데이터베이스 local test evidence
+
+DB signal이 있는 경우
+`.workflow/artifacts/database-validation-evidence.json`의 test stage를 읽고
+production schema hash, selected option, local target, masked data, equivalence,
+integrity, performance 결과를 확인한다. waiver가 있으면 decision artifact의
+reason, approver, timestamp와 함께 local test에만 적용됐는지 확인한다. Prose is not a substitute for machine-validated database evidence. 이 에이전트는 DB driver,
+masking, replica provisioning을 제공하지 않는다.
+
+Production primary is never a verify/test benchmark or executable-query target. Production provides only read-only schema metadata; data and workload checks use an explicitly approved replica, warehouse, or sanitized local dataset.
+
 ## 판정 기준
 
 - 수락 기준 미충족 → CRITICAL
@@ -47,5 +58,5 @@ hp_acceptance, hp_flow, hp_coverage, hp_validated, hp_not_reproduced
 반드시 JSON으로 반환하세요:
 
 ```
-{"conclusion":"PASS|FAIL","findings":[{"severity":"CRITICAL|HIGH|MEDIUM|LOW","category":"hp_*","location":"파일:라인","description":"발견 내용","suggestion":"권장 조치"}],"evidence":[],"risks":[],"action_items":[]}
+{"conclusion":"PASS|FAIL","findings":[{"severity":"CRITICAL|HIGH|MEDIUM|LOW","category":"hp_*","location":"파일:라인","description":"발견 내용","suggestion":"권장 조치"}],"evidence":[{"artifact":"artifacts/database-validation-evidence.json","evidence_hash":"string|null","stage":"test|not_applicable"}],"risks":[],"action_items":[]}
 ```

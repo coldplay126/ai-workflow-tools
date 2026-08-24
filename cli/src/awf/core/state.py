@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
+import secrets
 import shutil
+import stat
 import subprocess
+import uuid
 import threading
+from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 from json import JSONDecodeError
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 from awf.core.paths import find_repo_root
 from awf.core.workflow_loop import (
@@ -66,6 +71,254 @@ PHASE_GATE = {
     "test": "G6",
 }
 MAX_TOTAL_EXECUTIONS = 30
+
+_WORKFLOW_STATE_LOCKS: dict[str, threading.Lock] = {}
+_WORKFLOW_STATE_LOCKS_GUARD = threading.Lock()
+
+
+def _workflow_state_lock(path: Path) -> threading.Lock:
+    key = str(path.resolve())
+    with _WORKFLOW_STATE_LOCKS_GUARD:
+        lock = _WORKFLOW_STATE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _WORKFLOW_STATE_LOCKS[key] = lock
+        return lock
+
+
+def _unsafe_workflow_state(path: str) -> ValueError:
+    return ValueError(f"Unsafe workflow state: {path}")
+
+
+def _open_workflow_state_directory(root: Path) -> int:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        root_fd = os.open(root, flags)
+    except OSError as error:
+        raise _unsafe_workflow_state("repository root") from error
+    try:
+        return os.open(".workflow", flags, dir_fd=root_fd)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Missing workflow state: {root / '.workflow' / 'state.json'}")
+    except OSError as error:
+        raise _unsafe_workflow_state(".workflow") from error
+    finally:
+        os.close(root_fd)
+
+
+def _validate_workflow_state_file(descriptor: int, name: str) -> None:
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or metadata.st_nlink != 1
+    ):
+        raise _unsafe_workflow_state(name)
+
+
+def _open_workflow_state_file(
+    directory_fd: int,
+    name: str,
+    *,
+    missing_ok: bool = False,
+) -> Optional[int]:
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        descriptor = os.open(name, flags, dir_fd=directory_fd)
+    except FileNotFoundError:
+        if missing_ok:
+            return None
+        raise
+    except OSError as error:
+        raise _unsafe_workflow_state(name) from error
+    try:
+        _validate_workflow_state_file(descriptor, name)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _read_workflow_state_from_directory(directory_fd: int) -> dict:
+    descriptor = _open_workflow_state_file(directory_fd, "state.json")
+    if descriptor is None:
+        raise FileNotFoundError("Missing workflow state")
+    try:
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 64 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(descriptor)
+    raw = b"".join(chunks).decode("utf-8")
+    try:
+        return json.loads(raw)
+    except JSONDecodeError:
+        return json.loads(
+            _read_workflow_state_from_directory_bytes(directory_fd).decode("utf-8")
+        )
+
+
+def _read_workflow_state_from_directory_bytes(directory_fd: int) -> bytes:
+    descriptor = _open_workflow_state_file(directory_fd, "state.json")
+    if descriptor is None:
+        raise FileNotFoundError("Missing workflow state")
+    try:
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 64 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+@contextmanager
+def _workflow_state_transaction(root: Path) -> Iterator[int]:
+    directory_fd = _open_workflow_state_directory(root)
+    lock_fd: Optional[int] = None
+    locked = False
+    try:
+        flags = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
+        try:
+            lock_fd = os.open("state.json.lock", flags, 0o600, dir_fd=directory_fd)
+        except OSError as error:
+            raise _unsafe_workflow_state("state.json.lock") from error
+        _validate_workflow_state_file(lock_fd, "state.json.lock")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        locked = True
+        yield directory_fd
+    finally:
+        if lock_fd is not None:
+            try:
+                if locked:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(lock_fd)
+        os.close(directory_fd)
+
+
+def _initial_skipped_gate_state(gate_id: str) -> dict:
+    if gate_id in {"G2", "G5"}:
+        return {"passed": None, "provider": None, "provider_status": None}
+    if gate_id == "G3":
+        return {"passed": None, "scope_hash": None}
+    return {"passed": None}
+
+
+def _normalized_database_reasons(reasons: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(sorted({
+        str(reason).strip().casefold()
+        for reason in reasons
+        if str(reason).strip()
+    }))
+
+
+def _is_small_policy_skipped_phase(phase_state: object) -> bool:
+    return (
+        isinstance(phase_state, dict)
+        and phase_state.get("status") == "skipped"
+        and isinstance(phase_state.get("skipReason"), str)
+        and phase_state["skipReason"].startswith("policy:change_class=small")
+    )
+
+
+def _is_small_policy_auto_pass_gate(gate_state: object) -> bool:
+    return (
+        isinstance(gate_state, dict)
+        and gate_state.get("auto_pass") is True
+        and gate_state.get("provider") == "policy"
+        and isinstance(gate_state.get("skip_reason"), str)
+        and gate_state["skip_reason"].startswith("policy:change_class=small")
+    )
+
+
+def _database_risk_events(state: dict) -> list[dict]:
+    history = state.get("history")
+    if not isinstance(history, list):
+        return []
+    return [
+        event
+        for event in history
+        if isinstance(event, dict) and event.get("action") == "database_risk_escalated"
+    ]
+
+
+def _same_database_risk_event(left: dict, right: dict) -> bool:
+    left_reasons = left.get("reasons")
+    right_reasons = right.get("reasons")
+    return (
+        isinstance(left_reasons, list)
+        and isinstance(right_reasons, list)
+        and _normalized_database_reasons(tuple(left_reasons))
+        == _normalized_database_reasons(tuple(right_reasons))
+    )
+
+
+def _same_workflow_generation(state: dict, current_state: dict) -> bool:
+    generation = state.get("generation")
+    current_generation = current_state.get("generation")
+    if isinstance(generation, str) and generation and isinstance(current_generation, str) and current_generation:
+        return generation == current_generation
+    if generation is not None or current_generation is not None:
+        return False
+    workflow_id = state.get("id")
+    return isinstance(workflow_id, str) and workflow_id == current_state.get("id")
+
+
+def _merge_database_risk_facts(state: dict, current_state: dict) -> None:
+    """Keep DB escalation facts when saving a state loaded before promotion."""
+    current_events = _database_risk_events(current_state)
+    if not current_events or not _same_workflow_generation(state, current_state):
+        return
+
+    state["changeClass"] = "high_risk"
+    phases = state.setdefault("phases", {})
+    current_phases = current_state.get("phases", {})
+    gates = state.setdefault("gates", {})
+    current_gates = current_state.get("gates", {})
+    for phase in ("review", "approve", "verify"):
+        stale_phase = phases.get(phase)
+        if not _is_small_policy_skipped_phase(stale_phase):
+            continue
+        current_phase = (
+            current_phases.get(phase)
+            if isinstance(current_phases, dict)
+            else None
+        )
+        phases[phase] = (
+            deepcopy(current_phase)
+            if isinstance(current_phase, dict)
+            else {"status": "pending", "retries": 0}
+        )
+        gate_id = PHASE_GATE[phase]
+        stale_gate = gates.get(gate_id)
+        if _is_small_policy_auto_pass_gate(stale_gate):
+            current_gate = (
+                current_gates.get(gate_id)
+                if isinstance(current_gates, dict)
+                else None
+            )
+            gates[gate_id] = (
+                deepcopy(current_gate)
+                if isinstance(current_gate, dict)
+                else _initial_skipped_gate_state(gate_id)
+            )
+
+    history = state.setdefault("history", [])
+    if not isinstance(history, list):
+        history = []
+        state["history"] = history
+    for event in current_events:
+        if not any(
+            isinstance(existing, dict) and _same_database_risk_event(existing, event)
+            for existing in history
+        ):
+            history.append(deepcopy(event))
 
 # Phase skip policy per change class (I3)
 CHANGE_CLASS_SKIP_PHASES: dict[str, set[str]] = {
@@ -217,6 +470,15 @@ DEFAULT_MANIFEST = {
         "integration": None,
         "e2e": None,
     },
+    "database_validation": {
+        "enabled": False,
+        "schema_command": [],
+        "verify_command": [],
+        "test_command": [],
+        "command_timeout_seconds": 30,
+        "max_schema_age_hours": 24,
+        "allow_production_replica_sample": False,
+    },
     "sibling_repos": [],
 }
 
@@ -280,6 +542,7 @@ def _initial_workflow_state(root: Path, concept: str) -> dict:
     workflow_id = f"{datetime.now().strftime('%Y-%m-%d')}-{_slugify_concept(concept)}"
     return {
         "id": workflow_id,
+        "generation": uuid.uuid4().hex,
         "repo": root.name,
         "branch": _detect_current_branch(root),
         "currentPhase": "plan",
@@ -425,16 +688,15 @@ def reset_workflow(explicit_root: Optional[str], concept: Optional[str] = None) 
 
 def load_workflow_state(explicit_root: Optional[str] = None) -> dict:
     root = find_repo_root(explicit_root)
-    state_path = root / ".workflow" / "state.json"
-    if not state_path.exists():
-        raise FileNotFoundError(f"Missing workflow state: {state_path}")
-    raw = state_path.read_text(encoding="utf-8")
+    directory_fd = _open_workflow_state_directory(root)
     try:
-        return json.loads(raw)
-    except JSONDecodeError:
-        # Event handlers may observe the file while another process is replacing it.
-        retry_raw = state_path.read_text(encoding="utf-8")
-        return json.loads(retry_raw)
+        return _read_workflow_state_from_directory(directory_fd)
+    except FileNotFoundError as error:
+        raise FileNotFoundError(
+            f"Missing workflow state: {root / '.workflow' / 'state.json'}"
+        ) from error
+    finally:
+        os.close(directory_fd)
 
 
 def record_phase_telemetry(
@@ -517,15 +779,167 @@ def resolve_next_phase(state: dict, explicit_phase: Optional[str] = None) -> str
     raise ValueError("No pending workflow phase found. Pass --phase to force a delegated prompt.")
 
 
+def _write_all(descriptor: int, payload: bytes) -> None:
+    remaining = memoryview(payload)
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written <= 0:
+            raise OSError("Could not write workflow state")
+        remaining = remaining[written:]
+
+
+def _write_workflow_state_unlocked(
+    root: Path,
+    state: dict,
+    directory_fd: int,
+) -> Path:
+    existing_state = _open_workflow_state_file(
+        directory_fd,
+        "state.json",
+        missing_ok=True,
+    )
+    if existing_state is not None:
+        os.close(existing_state)
+
+    payload = (json.dumps(state, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    temporary_name = f".state.json.{secrets.token_hex(16)}.tmp"
+    temporary_fd: Optional[int] = None
+    temporary_created = False
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+        try:
+            temporary_fd = os.open(
+                temporary_name,
+                flags,
+                0o600,
+                dir_fd=directory_fd,
+            )
+            temporary_created = True
+        except FileExistsError as error:
+            raise _unsafe_workflow_state(temporary_name) from error
+        except OSError as error:
+            raise _unsafe_workflow_state(temporary_name) from error
+        try:
+            _validate_workflow_state_file(temporary_fd, temporary_name)
+            _write_all(temporary_fd, payload)
+            os.fsync(temporary_fd)
+        finally:
+            os.close(temporary_fd)
+            temporary_fd = None
+
+        os.replace(
+            temporary_name,
+            "state.json",
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        os.fsync(directory_fd)
+    finally:
+        if temporary_fd is not None:
+            os.close(temporary_fd)
+        if temporary_created:
+            try:
+                os.unlink(temporary_name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+    return root / ".workflow" / "state.json"
+
+
 def _save_workflow_state(explicit_root: Optional[str], state: dict) -> Path:
     root = find_repo_root(explicit_root)
     state_path = root / ".workflow" / "state.json"
-    tmp_path = state_path.with_name(
-        f"{state_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-    )
-    tmp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp_path.replace(state_path)
-    return state_path
+    with _workflow_state_lock(state_path), _workflow_state_transaction(root) as directory_fd:
+        try:
+            current_state = _read_workflow_state_from_directory(directory_fd)
+        except FileNotFoundError:
+            current_state = None
+        if isinstance(current_state, dict):
+            _merge_database_risk_facts(state, current_state)
+        return _write_workflow_state_unlocked(root, state, directory_fd)
+
+
+def promote_database_change_to_high_risk(
+    explicit_root: Optional[str],
+    reasons: tuple[str, ...],
+) -> dict:
+    """Promote DB work and restore only phases skipped by the small policy."""
+    root = find_repo_root(explicit_root)
+    state_path = root / ".workflow" / "state.json"
+    normalized_reasons = _normalized_database_reasons(reasons)
+
+    with _workflow_state_lock(state_path), _workflow_state_transaction(root) as directory_fd:
+        state = _read_workflow_state_from_directory(directory_fd)
+        changed = False
+        previous_change_class = state.get("changeClass", "standard")
+        if previous_change_class != "high_risk":
+            state["changeClass"] = "high_risk"
+            changed = True
+
+        phases = state.setdefault("phases", {})
+        gates = state.setdefault("gates", {})
+        for phase in ("review", "approve", "verify"):
+            phase_state = phases.get(phase)
+            skip_reason = (
+                phase_state.get("skipReason")
+                if isinstance(phase_state, dict)
+                else None
+            )
+            if (
+                not isinstance(phase_state, dict)
+                or phase_state.get("status") != "skipped"
+                or not isinstance(skip_reason, str)
+                or not skip_reason.startswith("policy:change_class=small")
+            ):
+                continue
+
+            phases[phase] = {"status": "pending", "retries": 0}
+            changed = True
+            gate_id = PHASE_GATE[phase]
+            gate_state = gates.get(gate_id)
+            gate_skip_reason = (
+                gate_state.get("skip_reason")
+                if isinstance(gate_state, dict)
+                else None
+            )
+            if (
+                isinstance(gate_state, dict)
+                and gate_state.get("auto_pass") is True
+                and gate_state.get("provider") == "policy"
+                and isinstance(gate_skip_reason, str)
+                and gate_skip_reason.startswith("policy:change_class=small")
+            ):
+                gates[gate_id] = _initial_skipped_gate_state(gate_id)
+                changed = True
+
+        history = state.setdefault("history", [])
+        if not isinstance(history, list):
+            history = []
+            state["history"] = history
+            changed = True
+        already_audited = any(
+            isinstance(event, dict)
+            and event.get("action") == "database_risk_escalated"
+            and isinstance(event.get("reasons"), list)
+            and _normalized_database_reasons(tuple(event["reasons"])) == normalized_reasons
+            for event in history
+        )
+        if not already_audited:
+            history.append({
+                "action": "database_risk_escalated",
+                "timestamp": _now_iso(),
+                "details": (
+                    f"changeClass={previous_change_class}->high_risk "
+                    f"reasons={','.join(normalized_reasons)}"
+                ),
+                "reasons": list(normalized_reasons),
+            })
+            changed = True
+
+        if changed:
+            _write_workflow_state_unlocked(root, state, directory_fd)
+        return state
 
 
 def save_workflow_state_snapshot(explicit_root: Optional[str], state: dict) -> Path:

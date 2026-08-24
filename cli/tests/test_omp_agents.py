@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import hashlib
+
 import json
 from pathlib import Path
 
 from awf.cli import main
-from awf.core.omp_agents import sync_omp_agents
+from awf.core.omp_agents import compile_claude_agent, sync_omp_agents
 
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 def _write_claude_agent(path: Path, *, name: str = "implementer") -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -141,3 +145,44 @@ def test_agents_sync_omp_cli_supports_dry_run_json(tmp_path: Path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["created"] == ["worker.md"]
     assert not (tmp_path / ".omp").exists()
+
+
+def test_spec_writer_ask_capability_survives_omp_agent_compilation() -> None:
+    source = REPO_ROOT / "claude" / "agents" / "spec-writer.md"
+
+    name, generated = compile_claude_agent(source)
+
+    assert name == "spec-writer"
+    assert "tools: read, grep, glob, edit, write, bash, ask" in generated
+
+
+def test_checked_in_omp_agents_match_database_contract_sources() -> None:
+    generated_root = REPO_ROOT / ".omp" / "agents"
+    manifest = json.loads(
+        (generated_root / ".awf-generated-agents.json").read_text(encoding="utf-8")
+    )
+    hashes = {entry["name"]: entry["sha256"] for entry in manifest["files"]}
+
+    for name in ("spec-writer.md", "spec-verifier.md", "happy-path-tester.md"):
+        source = REPO_ROOT / "claude" / "agents" / name
+        _, expected = compile_claude_agent(source)
+        generated = (generated_root / name).read_bytes()
+
+        assert generated == expected.encode("utf-8")
+        assert hashes[name] == hashlib.sha256(generated).hexdigest()
+
+    spec_writer = (generated_root / "spec-writer.md").read_text(encoding="utf-8")
+    assert "tools: read, grep, glob, edit, write, bash, ask" in spec_writer
+    assert "database-validation-evidence.json" in spec_writer
+
+    primary_policy = (
+        "Production primary is never a verify/test benchmark or executable-query target.",
+        "read-only schema metadata",
+        "explicitly approved replica",
+        "warehouse",
+        "sanitized local",
+    )
+    for name in ("spec-verifier.md", "happy-path-tester.md"):
+        generated = (generated_root / name).read_text(encoding="utf-8")
+        for requirement in primary_policy:
+            assert requirement in generated, f"{name}: missing {requirement}"

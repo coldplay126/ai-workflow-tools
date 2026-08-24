@@ -105,6 +105,25 @@
             }
           }
         },
+        "database": {
+          "type": "object",
+          "description": "Signal-gated database validation inputs. Paths are relative to .workflow/.",
+          "required": [
+            "stage",
+            "profile_artifact",
+            "decision_artifact",
+            "evidence_artifact",
+            "production_schema_required"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "stage": { "enum": ["plan", "verify", "test"] },
+            "profile_artifact": { "type": "string" },
+            "decision_artifact": { "type": "string" },
+            "evidence_artifact": { "type": "string" },
+            "production_schema_required": { "const": true }
+          }
+        },
         "optional_context": {
           "type": "array",
           "items": {
@@ -125,13 +144,18 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["key", "path"],
+            "required": ["key", "path", "format", "required"],
             "properties": {
               "key": { "type": "string" },
               "path": { "type": "string" },
               "format": { "enum": ["markdown", "json"] },
-              "required": { "type": "boolean", "default": true }
-            }
+              "required": { "type": "boolean", "default": true },
+              "required_when_database_signal": {
+                "type": "boolean",
+                "default": false
+              }
+            },
+            "additionalProperties": false
           }
         },
         "structured_result": {
@@ -153,6 +177,25 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Human-readable conditions. All must be true for gate to pass."
+        },
+        "database_conditions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "database.signal",
+              "database.risk_class",
+              "database.decision",
+              "database.production_schema",
+              "database.equivalence",
+              "database.integrity",
+              "database.query_plan",
+              "database.migration",
+              "database.rollback",
+              "database.local_test"
+            ]
+          },
+          "description": "Mandatory machine-evaluated database conditions when a database signal is present."
         },
         "on_pass": {
           "type": "object",
@@ -185,5 +228,164 @@
       "type": "boolean",
       "description": "If true, this phase requires human-in-the-loop interaction and cannot be fully delegated"
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "name": { "const": "phase-plan" } }, "required": ["name"] },
+      "then": {
+        "properties": {
+          "input": {
+            "required": ["database"],
+            "properties": {
+              "database": {
+                "properties": { "stage": { "const": "plan" } }
+              }
+            }
+          },
+          "gate": {
+            "required": ["database_conditions"],
+            "properties": {
+              "database_conditions": {
+                "const": [
+                  "database.signal",
+                  "database.risk_class",
+                  "database.decision",
+                  "database.production_schema"
+                ]
+              }
+            }
+          },
+          "output": {
+            "required": ["artifacts"],
+            "properties": {
+              "artifacts": {
+                "allOf": [
+                  {
+                    "contains": {
+                      "type": "object",
+                      "required": ["key", "path", "format", "required", "required_when_database_signal"],
+                      "properties": {
+                        "key": { "const": "database_decision" },
+                        "path": { "const": "artifacts/database-decision.json" },
+                        "format": { "const": "json" },
+                        "required": { "const": false },
+                        "required_when_database_signal": { "const": true }
+                      }
+                    }
+                  },
+                  {
+                    "contains": {
+                      "type": "object",
+                      "required": ["key", "path", "format", "required", "required_when_database_signal"],
+                      "properties": {
+                        "key": { "const": "database_validation_evidence" },
+                        "path": { "const": "artifacts/database-validation-evidence.json" },
+                        "format": { "const": "json" },
+                        "required": { "const": false },
+                        "required_when_database_signal": { "const": true }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "name": { "const": "phase-verify" } }, "required": ["name"] },
+      "then": {
+        "properties": {
+          "input": {
+            "required": ["database"],
+            "properties": {
+              "database": {
+                "properties": { "stage": { "const": "verify" } }
+              }
+            }
+          },
+          "gate": {
+            "required": ["database_conditions"],
+            "properties": {
+              "database_conditions": {
+                "const": [
+                  "database.production_schema",
+                  "database.risk_class",
+                  "database.equivalence",
+                  "database.integrity",
+                  "database.query_plan",
+                  "database.migration",
+                  "database.rollback"
+                ]
+              }
+            }
+          },
+          "output": {
+            "required": ["artifacts"],
+            "properties": {
+              "artifacts": {
+                "contains": {
+                  "type": "object",
+                  "required": ["key", "path", "format", "required", "required_when_database_signal"],
+                  "properties": {
+                    "key": { "const": "database_validation_evidence" },
+                    "path": { "const": "artifacts/database-validation-evidence.json" },
+                    "format": { "const": "json" },
+                    "required": { "const": false },
+                    "required_when_database_signal": { "const": true }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "name": { "const": "phase-test" } }, "required": ["name"] },
+      "then": {
+        "properties": {
+          "input": {
+            "required": ["database"],
+            "properties": {
+              "database": {
+                "properties": { "stage": { "const": "test" } }
+              }
+            }
+          },
+          "gate": {
+            "required": ["database_conditions"],
+            "properties": {
+              "database_conditions": {
+                "const": [
+                  "database.production_schema",
+                  "database.risk_class",
+                  "database.local_test"
+                ]
+              }
+            }
+          },
+          "output": {
+            "required": ["artifacts"],
+            "properties": {
+              "artifacts": {
+                "contains": {
+                  "type": "object",
+                  "required": ["key", "path", "format", "required", "required_when_database_signal"],
+                  "properties": {
+                    "key": { "const": "database_validation_evidence" },
+                    "path": { "const": "artifacts/database-validation-evidence.json" },
+                    "format": { "const": "json" },
+                    "required": { "const": false },
+                    "required_when_database_signal": { "const": true }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

@@ -10,6 +10,18 @@ from pathlib import Path
 
 from awf.core.config import load_awf_config, resolve_runtime_paths
 from awf.core.artifact_manager import ArtifactManager
+from awf.core.db_validation import (
+    DATABASE_CHECK_BLOCKERS,
+    DATABASE_CHECK_EVIDENCE_PATH,
+    DATABASE_CHECK_MAX_VALUES,
+    DATABASE_CHECK_STATUSES,
+    DatabaseCheckResult,
+    DatabaseValidationError,
+    evaluate_database_gate,
+    is_database_check_evidence_hash,
+    is_database_check_reason,
+    run_database_check,
+)
 from awf.core.events import EventType
 from awf.core.event_processor import EventProcessor, run_complete_with_events
 from awf.core.event_sync_summary import summarize_event_sync
@@ -42,6 +54,7 @@ from awf.core.state import (
     save_workflow_prompt,
     record_workflow_synthesis,
     summarize_workflow_state,
+    promote_database_change_to_high_risk,
 )
 from awf.core.judge import explain_judge_reasons, synthesize_workflow_multi_provider_results
 from awf.core.task import TaskConstraints, TaskContext, TaskDefinition, TaskType, resolve_execution_mode
@@ -78,7 +91,7 @@ def _run_provider_with_heartbeat(provider, prompt: str, cwd: str, label: str, *,
     )
 
 
-_CODEX_READ_ONLY_PHASES = {"review", "verify"}
+_CODEX_READ_ONLY_PHASES = {"review"}
 
 
 def _apply_provider_permission_mode(provider, *, yolo: bool) -> None:
@@ -183,6 +196,203 @@ def run_wf_gate(args: argparse.Namespace) -> int:
         print(json.dumps({"phase": phase, "passed": passed, "evaluations": evaluations}, ensure_ascii=False, indent=2))
 
     return 0 if passed else 1
+
+_DATABASE_CHECK_STAGES = {"plan", "verify", "test"}
+_DATABASE_CHECK_SCHEMA_VERSION = 1
+_DATABASE_CHECK_OPERATIONAL_BLOCKERS = {"repo_root_invalid", "signal_callback_failed"}
+
+
+def _database_check_sequence(values: object) -> tuple[str, ...]:
+    if not isinstance(values, (list, tuple)) or len(values) > DATABASE_CHECK_MAX_VALUES:
+        raise ValueError("database_check_values_invalid")
+    if not all(isinstance(value, str) for value in values):
+        raise ValueError("database_check_values_invalid")
+    return tuple(sorted(set(values)))
+
+
+def _database_check_reasons(values: object) -> tuple[str, ...]:
+    reasons = _database_check_sequence(values)
+    if any(not is_database_check_reason(reason) for reason in reasons):
+        raise ValueError("database_check_reasons_invalid")
+    return reasons
+
+
+def _database_check_blockers(values: object) -> tuple[str, ...]:
+    blockers = _database_check_sequence(values)
+    if any(blocker not in DATABASE_CHECK_BLOCKERS for blocker in blockers):
+        raise ValueError("database_check_blockers_invalid")
+    return blockers
+
+
+def _database_check_payload(
+    *,
+    stage: str,
+    status: str,
+    evidence_path: str | None,
+    evidence_hash: str | None,
+    signal_reasons: tuple[str, ...] = (),
+    blockers: tuple[str, ...] = (),
+) -> dict[str, object]:
+    """Build the only result schema exposed by ``wf db-check``."""
+    return {
+        "schema_version": _DATABASE_CHECK_SCHEMA_VERSION,
+        "stage": stage,
+        "status": status,
+        "evidence_path": evidence_path,
+        "evidence_hash": evidence_hash,
+        "signal_reasons": list(signal_reasons),
+        "blockers": list(blockers),
+    }
+
+
+def _normalize_database_check_result(
+    result: object,
+    *,
+    stage: str,
+) -> tuple[dict[str, object], str, tuple[str, ...], tuple[str, ...]]:
+    """Validate untrusted core-boundary data before it reaches CLI output."""
+    if not isinstance(result, DatabaseCheckResult):
+        raise ValueError("database_check_result_invalid")
+    if not isinstance(result.stage, str) or result.stage != stage:
+        raise ValueError("database_check_result_invalid")
+    if not isinstance(result.status, str) or result.status not in DATABASE_CHECK_STATUSES:
+        raise ValueError("database_check_result_invalid")
+    if result.evidence_path not in {None, DATABASE_CHECK_EVIDENCE_PATH}:
+        raise ValueError("database_check_result_invalid")
+    if result.evidence_hash is not None and not is_database_check_evidence_hash(result.evidence_hash):
+        raise ValueError("database_check_result_invalid")
+
+    reasons = _database_check_reasons(result.signal_reasons)
+    blockers = _database_check_blockers(result.blockers)
+    if result.status == "pass":
+        if (
+            result.evidence_path != DATABASE_CHECK_EVIDENCE_PATH
+            or result.evidence_hash is None
+            or not reasons
+            or blockers
+        ):
+            raise ValueError("database_check_result_invalid")
+    elif result.evidence_path is not None or result.evidence_hash is not None:
+        raise ValueError("database_check_result_invalid")
+    elif result.status == "not_applicable" and (reasons or blockers):
+        raise ValueError("database_check_result_invalid")
+    elif result.status == "fail" and not blockers:
+        raise ValueError("database_check_result_invalid")
+
+    return (
+        _database_check_payload(
+            stage=stage,
+            status=result.status,
+            evidence_path=result.evidence_path,
+            evidence_hash=result.evidence_hash,
+            signal_reasons=reasons,
+            blockers=blockers,
+        ),
+        result.status,
+        reasons,
+        blockers,
+    )
+
+
+def _emit_database_check_result(payload: dict[str, object], *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False))
+        return
+
+    print(f"database check: stage={payload['stage']} status={payload['status']}")
+    if payload["evidence_path"] is not None:
+        print(f"evidence_path: {payload['evidence_path']}")
+    if payload["evidence_hash"] is not None:
+        print(f"evidence_hash: {payload['evidence_hash']}")
+    if payload["signal_reasons"]:
+        print(f"signal_reasons: {', '.join(payload['signal_reasons'])}")
+    if payload["blockers"]:
+        print(f"blockers: {', '.join(payload['blockers'])}")
+
+
+def _emit_database_check_failure(stage: str, *, as_json: bool, blocker: str) -> None:
+    """Best-effort static error output that never interpolates exception text."""
+    try:
+        _emit_database_check_result(
+            _database_check_payload(
+                stage=stage,
+                status="fail",
+                evidence_path=None,
+                evidence_hash=None,
+                blockers=(blocker,),
+            ),
+            as_json=as_json,
+        )
+    except Exception:
+        pass
+
+
+def run_wf_db_check(args: argparse.Namespace) -> int:
+    """Validate one sanitized database-evidence stage for the workflow."""
+    stage = "invalid"
+    as_json = False
+    try:
+        requested_stage = getattr(args, "stage", None)
+        stage = requested_stage if requested_stage in _DATABASE_CHECK_STAGES else "invalid"
+        as_json = bool(getattr(args, "json", False))
+        if stage == "invalid":
+            _emit_database_check_failure(stage, as_json=as_json, blocker="stage_invalid")
+            return 2
+
+        try:
+            repo_root = resolve_repo_root(getattr(args, "repo_root", None))
+        except Exception:
+            _emit_database_check_failure(stage, as_json=as_json, blocker="repo_root_invalid")
+            return 2
+
+        def on_database_signal(reasons: tuple[str, ...]) -> None:
+            normalized_reasons = _database_check_reasons(reasons)
+            if not normalized_reasons:
+                raise ValueError("database_check_signal_invalid")
+            promote_database_change_to_high_risk(str(repo_root), normalized_reasons)
+
+        result = run_database_check(
+            repo_root,
+            stage,
+            on_database_signal=on_database_signal if stage == "plan" else None,
+        )
+        payload, status, _, blockers = _normalize_database_check_result(result, stage=stage)
+        if status == "fail" and any(
+            blocker in _DATABASE_CHECK_OPERATIONAL_BLOCKERS for blocker in blockers
+        ):
+            _emit_database_check_failure(stage, as_json=as_json, blocker="operational_error")
+            return 2
+        _emit_database_check_result(payload, as_json=as_json)
+        return 0 if status in {"pass", "not_applicable"} else 1
+    except DatabaseValidationError as error:
+        if error.code in DATABASE_CHECK_BLOCKERS:
+            _emit_database_check_failure(stage, as_json=as_json, blocker=error.code)
+            return 1
+        _emit_database_check_failure(stage, as_json=as_json, blocker="operational_error")
+        return 2
+    except Exception:
+        _emit_database_check_failure(stage, as_json=as_json, blocker="operational_error")
+        return 2
+
+def _ensure_database_evidence_before_apply(root: Path, phase: str) -> None:
+    """Materialize stale verify/test evidence without blocking worker-report apply."""
+    if phase not in {"verify", "test"}:
+        return
+
+    try:
+        evaluations = evaluate_database_gate(root, phase)
+    except Exception:
+        evaluations = []
+    if evaluations and all(
+        isinstance(evaluation, dict) and evaluation.get("passed") is True
+        for evaluation in evaluations
+    ):
+        return
+
+    try:
+        run_database_check(root, phase)
+    except Exception:
+        pass
 
 
 _SKIP_PHASES = {"small": ["review", "approve", "verify"]}
@@ -1121,6 +1331,7 @@ def run_wf_next(args: argparse.Namespace) -> int:
                     "selection_summary": str(synthesis.get("selection_summary", "") or ""),
                 }
             has_synthesis = secondary_result_path is not None
+            _ensure_database_evidence_before_apply(resolve_repo_root(args.repo_root), phase)
             artifact_path, gate_passed = apply_workflow_result(
                 args.repo_root,
                 phase,

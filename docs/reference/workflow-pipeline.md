@@ -165,7 +165,109 @@ pattern 문서의 불변식/파생 규칙이 참조하는 구체적 수치와 �
 
 ---
 
-## 6. 에러 유형 상세
+## 6. Database validation route
+
+The route is signal-gated: a workflow without a detected database change reports
+`not_applicable`; a detected change must pass its stage-specific checks before
+the enclosing gate can pass. The exact operator sequence is:
+
+`awf wf next`는 stderr에 `result: /actual/result/path`를 출력한다. verify/test의
+operator 또는 runtime은 그 실제 경로를 각각 `VERIFY_RESULT` 또는 `TEST_RESULT`에
+설정한 뒤 다음 명령을 실행한다.
+
+```bash
+awf wf db-check --stage plan --repo-root . --json
+awf wf gate plan --repo-root . --json
+
+: "${VERIFY_RESULT:?set from the result path emitted by awf wf next}"
+awf wf db-check --stage verify --repo-root . --json
+awf wf gate verify --repo-root . --result-file "$VERIFY_RESULT" --json
+
+: "${TEST_RESULT:?set from the result path emitted by awf wf next}"
+awf wf db-check --stage test --repo-root . --json
+awf wf gate test --repo-root . --result-file "$TEST_RESULT" --json
+```
+
+| Stage | Required database conditions when signaled |
+|-------|--------------------------------------------|
+| plan | signal classification, high-risk route, selected comparative decision, current production schema |
+| verify | production schema, equivalence, integrity, query plan, migration, rollback |
+| test | production schema and local test, or a recorded waiver for the missing local test command |
+
+`database-decision.json` contains two or three materially different holistic
+candidates, including a `maintain` baseline. Each candidate includes
+`covered_surfaces` and `surface_assessments`. Every candidate covers every
+decision surface: the sorted `covered_surfaces` list equals `change_surfaces`,
+and `surface_assessments` has exactly those keys with nonempty assessments.
+
+`kind` is the candidate's dominant strategy, not a required kind per surface.
+Each candidate can assess query, index, schema, normalization, and
+denormalization together. For an index surface, every option records whether it
+would add, reject, or maintain the index. No option is selected automatically.
+
+| emitted signal | required surface |
+|---|---|
+| `text:table_ddl` / `text:column_ddl` / `text:index_ddl` / `text:constraint_ddl` | `erd` / `column` / `index` / `constraint` |
+| schema/type/sequence/trigger/procedure/function DDL | `schema_object` |
+| `text:view_ddl` | `schema_object`, `query` |
+| migration | any structural surface |
+| normalization, denormalization, ERD, keys, partition | matching surface |
+| SQL syntax, order by | `query` |
+
+Generic model/models paths are non-DB; database/models is DB. `artifact_error:`
+blocks the decision. Signal-derived `requires_query_plan` and
+`requires_migration_rollback` are hard gates independent of declared surfaces.
+
+Verify evidence includes `engine`, `execution_target`,
+`production_primary_queries`: false, and `raw_production_rows`: false.
+`execution_target` is `local_same_engine` or `approved_read_replica`. Index and
+other structural work require `local_same_engine` with the production schema
+engine. Only query planner work may use `approved_read_replica`; DuckDB,
+cross-engine execution, and the production primary are prohibited.
+
+Production schema evidence is mandatory. Use a same-engine local environment
+for DDL and planner work; DuckDB may support profiling or equivalence analysis
+but cannot stand in for same-engine evidence. A project-specific replica sample
+requires explicit opt-in. raw primary rows are prohibited, and the test result
+must state that its rows are masked. A waiver applies only to the absence of a
+local test command and requires a decision reason, approver, and timestamp.
+
+The decision's optional top-level `local_data_test_waiver` is null or omitted by default. Only when `profile.test_command` is absent may it be an object with nonempty `reason`, `approver`, and `timestamp`; the timestamp uses UTC ISO 8601. The waiver applies only to the local data test.
+
+The project schema command must return only current production metadata:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "production_schema",
+  "target_class": "production_metadata",
+  "read_only": true,
+  "schema_only": true,
+  "engine": "mysql",
+  "engine_version": "8.0",
+  "captured_at": "2026-08-24T00:00:00Z",
+  "schema_hash": "<sha256>",
+  "object_counts": {
+    "tables": 1,
+    "columns": 8,
+    "indexes": 2,
+    "constraints": 3
+  }
+}
+```
+
+The metadata command is read-only and schema-only. It must not access rows or
+run executable work against the production primary.
+
+Production primary is never a verify/test benchmark or executable-query target. Production provides only read-only schema metadata; data comes only from an explicitly approved replica, warehouse, or sanitized local dataset.
+
+The CLI validates sanitized JSON supplied by project commands. It does not
+implement a database driver, masking, or replica provisioning.
+
+---
+
+## 7. 에러 유형 상세
+
 
 | 에러 유형 | 복구 가능 | 복구 동작 | backoff (초) | 판별 키워드 |
 |----------|----------|----------|-------------|-----------|
@@ -180,7 +282,7 @@ pattern 문서의 불변식/파생 규칙이 참조하는 구체적 수치와 �
 
 ---
 
-## 7. 상태 디렉토리 구조
+## 8. 상태 디렉토리 구조
 
 ```
 .workflow/
@@ -205,6 +307,8 @@ pattern 문서의 불변식/파생 규칙이 참조하는 구체적 수치와 �
 │   ├── impl-log.md
 │   ├── verification-report.md
 │   ├── test-report.md
+│   ├── database-decision.json
+│   ├── database-validation-evidence.json
 │   └── confirmation.json
 └── tmp/
 ```
@@ -220,11 +324,12 @@ pattern 문서의 불변식/파생 규칙이 참조하는 구체적 수치와 �
 | `totalExecutions` | 전체 실행 횟수 | Phase 시작 및 Gate 결과마다 증가 |
 | `loop.replanCount` | 누적 replan 횟수 | replan 실행 시 증가 |
 | `changeClass` | 변경 위험 등급 | 워크플로우 초기화 |
+| `generation` | workflow generation 식별자 | reset은 새 generation을 만들며 이전 generation의 DB risk promotion을 병합하지 않음 |
 | `history` | 모든 상태 전이 이력 | 모든 상태 변경 |
 
 ---
 
-## allowed-files.json 그래프 확장 (`awf wf expand-scope`)
+## 9. allowed-files.json 그래프 확장 (`awf wf expand-scope`)
 
 `allowed-files.json`은 plan SKILL이 `tasks.md`에서 추출한 `planned_files` 목록이다. LLM이 직접 만들기 때문에 dependent / dependency 파일이 누락되어 G5 SCOPE_VIOLATION false positive가 자주 발생한다.
 
@@ -256,7 +361,7 @@ awf wf expand-scope --dry-run --json
 - `expanded_files`: 정렬·중복 제거된 추가 경로 목록
 - `graph_expansion`: 사용된 direction/depth, 항목별 사유(`dependent_of:X` / `import_of:X`), planned_files coverage 진단
 
-## G5 결정론적 스코프 검증 (`awf wf scope-check`)
+## 10. G5 결정론적 스코프 검증 (`awf wf scope-check`)
 
 verify SKILL은 `awf wf scope-check`를 호출해 결정론적으로 SCOPE_VIOLATION을 판정한다. LLM이 git diff와 allowed-files를 직접 비교하지 않는다.
 

@@ -1,6 +1,6 @@
 ---
 name: phase-plan
-version: 2.0.0
+version: 2.2.0
 description: "Phase 1: 기획. spec-kit 루틴으로 5 산출물 생성 (constitution/spec/plan/tasks/test-criteria) 및 G1 게이트."
 type: workflow-phase
 phase: plan
@@ -208,12 +208,89 @@ awf wf expand-scope --dry-run                    # 미리보기만
 
 `allowed-files.json` 누락, JSON 파싱 오류, 명령 실패는 G1 검증 전에 해결해야 합니다.
 
+### 6.2 데이터베이스 변경 결정과 계획 evidence
+
+tasks.md, plan.md, allowed-files.json에 DB 변경 신호가 있으면
+`.workflow/artifacts/database-decision.json`을 생성한다. 이 파일은 설명문이
+아니라 선택을 비교할 수 있는 구조화된 결정 artifact다. `schema_version: 1`,
+`status: "selected"`, `change_surfaces`, baseline/recommended/selected option ID,
+`candidates`, `recommendation_rationale`를 포함한다.
+
+- `candidates`는 정확히 2개 또는 3개여야 하며, `maintain` baseline은 항상
+  포함한다. ID나 문장만 바꾼 후보는 별도 선택지가 아니다. decision의
+  `baseline_option_id`, `recommended_option_id`, `selected_option_id`는 candidate
+  ID를 가리켜야 하고, baseline은 `maintain` kind여야 하며 recommendation과
+  selection은 `applicable: true` candidate만 가리킨다.
+- 모든 candidate는 다음 정확한 field를 가진다: `id`, `kind`, `applicable`,
+  `unavailable_reason`, `summary`, `equivalence_plan`, `integrity_plan`,
+  `normalization_assessment`, `denormalization_assessment`,
+  `physical_design_assessment`, `covered_surfaces`, `surface_assessments`,
+  `read_write_cost`, `operational_risks`, `transition_risks`, `rollback_or_exit`.
+- Every candidate covers every decision surface. `covered_surfaces`는 정렬된
+  `change_surfaces`와 정확히 같고, `surface_assessments`는 같은 key를 모두 가지며
+  각 value는 비어 있지 않은 평가다. index surface에서는 각 holistic option이
+  add, reject, 또는 maintain 결론을 평가한다. index를 자동으로 선택하지 않는다.
+- `kind`는 `maintain`, `query_change`, `physical_design`, `normalize`,
+  `denormalize` 중 하나이며 candidate의 dominant strategy다. surface마다 별도의
+  candidate kind를 강제하지 않는다. `applicable: true`이면 `unavailable_reason`은
+  null이고, false이면 구체적인 사유가 필요하다. `operational_risks`와
+  `transition_risks`는 string 목록이다.
+- `normalization_assessment`는 null 또는 설명 string이다. `column`, `constraint`,
+  `erd` surface가 있으면 selected candidate에서 비어 있을 수 없다.
+  `denormalize` kind의 `denormalization_assessment`는
+  `source_of_truth`, `consistency_window`, `reconciliation`, `rollback`을 가진
+  object이고 다른 kind에서는 null이다. `physical_design` kind의
+  `physical_design_assessment`는 `read_benefit`, `write_amplification`, `storage`,
+  `build_or_lock`, `rollback`을 가진 object이고 다른 kind에서는 null이다.
+- `change_surfaces`는 필요한 것만 `query`, `index`, `column`, `constraint`,
+  `erd`, `normalize`, `denormalize`, `partition`, `schema_object`로 기록한다.
+
+| emitted signal | required surface |
+|---|---|
+| `text:table_ddl` | `erd` |
+| `text:column_ddl` | `column` |
+| `text:index_ddl` | `index` |
+| `text:constraint_ddl` | `constraint` |
+| `text:schema_ddl`, `text:database_ddl`, `text:type_ddl`, `text:sequence_ddl`, `text:trigger_ddl`, `text:routine_ddl` | `schema_object` |
+| `text:view_ddl` | `schema_object`, `query` |
+| `text:migration`, `path:migration:`, `path:prisma:` | any structural surface |
+| `text:normalization`, `text:denormalization`, `text:erd`, key signals, `text:partition` | their matching `normalize`, `denormalize`, `erd`, `constraint`, `partition` surface |
+| `text:sql syntax`, `text:order by` | `query` |
+
+`path:models:`와 generic model/model paths는 DB signal이 아니지만
+`path:database/models:`는 DB signal이다. `artifact_error:`는 artifact를 고칠 때까지
+결정을 차단한다. Signal-derived `requires_query_plan`과
+`requires_migration_rollback`은 declared surface와 독립적인 hard gate다.
+
+`local_data_test_waiver`는 decision의 optional top-level field다. 기본값은
+null or omitted다. `test_command`가 없고 waiver를 선택할 때만 nonempty
+`reason`, `approver`, `timestamp`를 가진 object를 기록한다. `timestamp`는 UTC ISO 8601 형식이어야 하며,
+waiver는 local data test만 면제한다.
+
+Correctness, equivalence, and integrity are hard gates. A candidate without an
+equivalence and integrity plan cannot be recommended or selected.
+
+- 사용자에게 질문할 수 있는 경우는 선택 가능한 후보가 2개 이상이고 요구사항과
+  프로젝트 관례만으로 선택할 수 없는 **material** 차이가 있을 때뿐이다. 후보의
+  표기, 파일명, 이미 결정된 제약을 확인하려고 질문하지 않는다.
+
+DB 신호가 있으면 production schema는 mandatory다. manifest의
+`database_validation` profile은 프로젝트가 제공하는 schema/verify/test command
+계약이며, AWF가 DB driver를 제공하거나 data masking을 수행한다는 약속이 아니다.
+
+Production primary is never a verify/test benchmark or executable-query target. Production provides only read-only schema metadata; data comes only from an explicitly approved replica, warehouse, or sanitized local dataset.
+`awf wf db-check`가 검증·기록한
+`.workflow/artifacts/database-validation-evidence.json`만 gate evidence로
+사용한다. plan.md의 서술, command 출력 요약, agent finding은 그 evidence를
+대체하지 않는다.
+
 ### 7. Gate G1 검증
 
 **반드시 아래 CLI 명령으로 검증합니다** (LLM 판단이 아닌 결정론적 Python 검증기 사용):
 
 ```bash
-awf wf gate plan
+awf wf db-check --stage plan --repo-root . --json
+awf wf gate plan --repo-root . --json
 ```
 
 이 명령은 `evaluate_plan_gate()`를 호출하여 다음을 자동 검증합니다:
@@ -224,7 +301,7 @@ awf wf gate plan
 - manifest.constitution_path 설정 시 constitution 파일 존재
 
 명령 결과가 `G-plan: PASS`이면 통과, `FAIL`이면 실패.
-JSON 상세 결과가 필요하면 `awf wf gate --json plan`.
+JSON 상세 결과가 필요하면 `awf wf gate plan --json`.
 
 **주의**: 이 명령은 평가만 수행합니다. state.json 업데이트는 아래 "G1 통과 시" 절차를 직접 수행하세요.
 
@@ -237,9 +314,13 @@ JSON 상세 결과가 필요하면 `awf wf gate --json plan`.
 - history에 기록
 
 **G1 실패 시:**
-- `phases.plan.retries += 1`
+- `db-check` exit `1`이면 G1을 평가하지 않는다. profile, decision, production schema
+  blocker를 수정하고 plan에 남아 위의 두 명령을 같은 순서로 다시 실행한다.
+- exit `2`이면 사용법, repo root, command 실행 환경을 운영자가 수정할 때까지 중단한다.
+
+- `db-check`가 통과한 뒤 G1이 실패하면 `phases.plan.retries += 1`
 - CLI 출력에서 ✗ 표시된 조건을 확인하고 해당 산출물을 수정
-- 수정 후 `awf wf gate plan` 재실행
+- 수정 후 위의 두 명령을 같은 순서로 재실행
 
 ## 주의사항
 

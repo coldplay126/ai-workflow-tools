@@ -590,6 +590,184 @@ def test_phase_cards_match_state_machine_skill_metadata_and_routes() -> None:
         assert set(card["capabilities"]["execution_modes"]) == expected["modes"]
 
 
+DATABASE_STAGE_CONTRACTS = {
+    "plan": {
+        "conditions": (
+            "database.signal",
+            "database.risk_class",
+            "database.decision",
+            "database.production_schema",
+        ),
+        "decision_artifact": True,
+    },
+    "verify": {
+        "conditions": (
+            "database.production_schema",
+            "database.risk_class",
+            "database.equivalence",
+            "database.integrity",
+            "database.query_plan",
+            "database.migration",
+            "database.rollback",
+        ),
+        "decision_artifact": False,
+    },
+    "test": {
+        "conditions": (
+            "database.production_schema",
+            "database.risk_class",
+            "database.local_test",
+        ),
+        "decision_artifact": False,
+    },
+}
+
+
+def test_database_cards_declare_typed_artifacts_and_mandatory_conditions() -> None:
+    schema = json.loads((AGENT_CARD_ROOT / "agent-card.schema.json").read_text())
+    database_schema = schema["properties"]["input"]["properties"]["database"]
+    assert database_schema["required"] == [
+        "stage",
+        "profile_artifact",
+        "decision_artifact",
+        "evidence_artifact",
+        "production_schema_required",
+    ]
+    assert database_schema["properties"]["stage"]["enum"] == ["plan", "verify", "test"]
+    assert database_schema["properties"]["production_schema_required"]["const"] is True
+
+    artifact_schema = schema["properties"]["output"]["properties"]["artifacts"]["items"]
+    assert artifact_schema["properties"]["required_when_database_signal"] == {
+        "type": "boolean",
+        "default": False,
+    }
+
+    condition_schema = schema["properties"]["gate"]["properties"]["database_conditions"]
+    assert condition_schema["items"]["enum"] == [
+        "database.signal",
+        "database.risk_class",
+        "database.decision",
+        "database.production_schema",
+        "database.equivalence",
+        "database.integrity",
+        "database.query_plan",
+        "database.migration",
+        "database.rollback",
+        "database.local_test",
+    ]
+
+    for phase, expected in DATABASE_STAGE_CONTRACTS.items():
+        card = json.loads(
+            (AGENT_CARD_ROOT / "agent-cards" / f"{phase}.json").read_text()
+        )
+        database_input = card["input"]["database"]
+        assert database_input["stage"] == phase
+        assert database_input["profile_artifact"] == "manifest.json"
+        assert database_input["decision_artifact"] == "artifacts/database-decision.json"
+        assert (
+            database_input["evidence_artifact"]
+            == "artifacts/database-validation-evidence.json"
+        )
+        assert database_input["production_schema_required"] is True
+        assert tuple(card["gate"]["database_conditions"]) == expected["conditions"]
+
+        database_artifacts = {
+            artifact["key"]: artifact
+            for artifact in card["output"]["artifacts"]
+            if artifact["key"].startswith("database_")
+        }
+        assert database_artifacts["database_validation_evidence"] == {
+            "key": "database_validation_evidence",
+            "path": "artifacts/database-validation-evidence.json",
+            "format": "json",
+            "required": False,
+            "required_when_database_signal": True,
+        }
+        if expected["decision_artifact"]:
+            assert database_artifacts["database_decision"] == {
+                "key": "database_decision",
+                "path": "artifacts/database-decision.json",
+                "format": "json",
+                "required": False,
+                "required_when_database_signal": True,
+            }
+
+    plan_capabilities = json.loads(
+        (AGENT_CARD_ROOT / "agent-cards" / "plan.json").read_text()
+    )["capabilities"]
+    assert plan_capabilities["file_write"] is True
+    assert plan_capabilities["sandbox_modes"] == ["workspace-write"]
+    for phase in ("verify", "test"):
+        capabilities = json.loads(
+            (AGENT_CARD_ROOT / "agent-cards" / f"{phase}.json").read_text()
+        )["capabilities"]
+        assert capabilities["file_write"] is False
+        assert capabilities["sandbox_modes"] == ["workspace-write"]
+
+    for agent in ("spec-writer.md", "spec-verifier.md", "happy-path-tester.md"):
+        source = (REPO_ROOT / "claude" / "agents" / agent).read_text(
+            encoding="utf-8"
+        )
+        assert "codex_sandbox: workspace-write" in source
+
+    cli_readme = (REPO_ROOT / "cli" / "README.md").read_text(encoding="utf-8")
+    assert "Plan runs with `file_write: true` and `workspace-write`" in cli_readme
+    assert (
+        "verify/test keep `file_write: false` but use `workspace-write`"
+        in cli_readme
+    )
+
+
+def test_database_card_schema_rejects_phase_specific_mutations() -> None:
+    cards = _load_agent_cards()
+    _assert_agent_cards_match_declared_schema(cards)
+
+    cards = _load_agent_cards()
+    del cards["plan"]["input"]["database"]
+    with pytest.raises(AssertionError):
+        _assert_agent_cards_match_declared_schema(cards)
+
+    cards = _load_agent_cards()
+    cards["verify"]["input"]["database"]["stage"] = "plan"
+    with pytest.raises(AssertionError):
+        _assert_agent_cards_match_declared_schema(cards)
+
+    cards = _load_agent_cards()
+    cards["test"]["gate"]["database_conditions"] = ["database.signal"]
+    with pytest.raises(AssertionError):
+        _assert_agent_cards_match_declared_schema(cards)
+
+    cards = _load_agent_cards()
+    evidence = next(
+        artifact
+        for artifact in cards["verify"]["output"]["artifacts"]
+        if artifact["key"] == "database_validation_evidence"
+    )
+    del evidence["required_when_database_signal"]
+    with pytest.raises(AssertionError):
+        _assert_agent_cards_match_declared_schema(cards)
+
+    cards = _load_agent_cards()
+    cards["plan"]["output"]["artifacts"][0]["unexpected"] = True
+    with pytest.raises(AssertionError):
+        _assert_agent_cards_match_declared_schema(cards)
+
+    cards = _load_agent_cards()
+    del cards["plan"]["output"]["artifacts"][0]["format"]
+    with pytest.raises(AssertionError):
+        _assert_agent_cards_match_declared_schema(cards)
+
+    cards = _load_agent_cards()
+    cards["plan"]["output"] = {}
+    with pytest.raises(AssertionError):
+        _assert_agent_cards_match_declared_schema(cards)
+
+    cards = _load_agent_cards()
+    del cards["verify"]["output"]["artifacts"]
+    with pytest.raises(AssertionError):
+        _assert_agent_cards_match_declared_schema(cards)
+
+
 OUTCOME_TOKENS = {
     "analysis": ("allow", "dry_run_only"),
     "multi-agent": ("PASS", "FAIL", "ESCALATE"),

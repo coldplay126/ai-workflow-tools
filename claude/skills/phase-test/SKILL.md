@@ -1,6 +1,6 @@
 ---
 name: phase-test
-version: 1.1.0
+version: 1.2.0
 description: "Phase 6: 테스트. 회귀/수락 테스트 및 G6 게이트."
 type: workflow-phase
 phase: test
@@ -93,6 +93,28 @@ acceptance scenarios에서 테스트 스켈레톤 생성:
 - Given → 설정, When → 실행, Then → 어설션
 - `// TODO: implement` 주석 표시
 
+### 4.5 데이터베이스 local test evidence
+
+DB 신호가 있으면 G6 전에 `awf wf db-check --stage test --json`을 실행한다.
+production schema hash와 selected option을 유지한 local test evidence가 필요하다.
+same-engine local은 DDL과 planner 확인용이고, DuckDB는 profiling 또는
+equivalence 분석용 보조 환경이다. DuckDB 결과만으로 same-engine 검증을
+대체할 수 없다.
+
+raw primary rows는 허용하지 않는다. project-specific approved replica sample은
+`allow_production_replica_sample: true`가 있을 때만 가능하고, evidence는 masked
+data와 persisted evidence field `raw_production_rows`: false를 보여야 한다.
+`database-decision.json`의 optional top-level `local_data_test_waiver`는 null or omitted가 기본이다.
+`profile.test_command`가 없고 waiver를 선택할 때만 nonempty
+`reason`, `approver`, `timestamp`를 가진 object를 기록하며 `timestamp`는 UTC ISO 8601 형식이다.
+waiver는 local data test만 면제하고 production schema 또는 verify evidence를
+면제하지 않는다.
+test-report.md의 prose는 `.workflow/artifacts/database-validation-evidence.json`을
+대체하지 않는다. AWF는 DB driver, masking, replica provisioning을 구현하지 않고
+프로젝트 command가 만든 sanitized JSON을 검증할 뿐이다.
+
+Production primary is never a verify/test benchmark or executable-query target. Production provides only read-only schema metadata; data comes only from an explicitly approved replica, warehouse, or sanitized local dataset.
+
 ### 5. test-report.md 생성
 
 ```markdown
@@ -130,7 +152,16 @@ acceptance scenarios에서 테스트 스켈레톤 생성:
 - [ ] 회귀 테스트 통과 (failures 0) 또는 test_command null + 수동 확인 완료
 - [ ] 수락 시나리오 자동 검증 항목 모두 통과
 - [ ] 수동 항목 있으면: 사용자에게 서명 요청
+- [ ] DB 신호 시 production schema와 local test evidence 통과 또는 유효한 waiver
 
+`awf wf next`가 stderr에 출력한 `result: /actual/result/path`의 실제 경로를
+`TEST_RESULT`에 설정한 뒤 다음 block을 실행한다.
+
+```bash
+: "${TEST_RESULT:?set from the result path emitted by awf wf next}"
+awf wf db-check --stage test --repo-root . --json
+awf wf gate test --repo-root . --result-file "$TEST_RESULT" --json
+```
 **G6 — 수동 항목 처리:**
 수동 테스트 항목이 있는 경우:
 ```
@@ -146,7 +177,12 @@ acceptance scenarios에서 테스트 스켈레톤 생성:
 - state.json: `phases.test: completed`, `gates.G6.passed: true`, `currentPhase: "done"`
 - 출력: `✓ G6 게이트 통과`
 
-**G6 실패 — 회귀 테스트 실패 시:**
+`db-check` exit `1`은 G6을 평가하지 않는다. local test evidence failure는
+`regression_failure`와 같이 `impl`로 보내고, decision 또는 waiver가 없거나
+malformed이면 `plan`으로 보내 artifact를 수정한다. exit `2`는 command 또는 환경
+설정을 운영자가 고칠 때까지 test를 중단한다.
+
+**G6 실패 — `db-check`가 통과한 뒤 회귀 테스트가 실패한 경우:**
 - `phases.test.retries += 1`
 - state: `currentPhase → "impl"` (Phase 4로 회귀)
 - 출력: `✗ 회귀 테스트 실패. 구현 수정이 필요합니다.`

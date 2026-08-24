@@ -8,18 +8,30 @@ Reference: docs/tests/workflow-and-multi-agent.md
 from __future__ import annotations
 
 import json
+import multiprocessing
+import os
 import sys
+import threading
+from types import SimpleNamespace
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from awf.core.state import (
+    DEFAULT_MANIFEST,
     PHASE_GATE,
     PHASE_ORDER,
     _apply_policy_skips,
     apply_gate_result,
     detect_change_class,
     get_risk_investment,
+    initialize_workflow,
+    promote_database_change_to_high_risk,
+    reset_workflow,
+    save_workflow_state_snapshot,
     resolve_next_phase,
 )
 from awf.core.workflow_prompt import _validate_preconditions, is_hil_phase
@@ -62,6 +74,42 @@ def _write_workflow_state(repo_root: Path, state: dict) -> None:
         json.dumps(state, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def _apply_gate_result_after_stale_read(
+    repo_root: str,
+    snapshot_ready: Any,
+    release_snapshot: Any,
+) -> None:
+    import awf.core.state as workflow_state
+
+    original_save = workflow_state._save_workflow_state
+
+    def delayed_save(explicit_root: str, state: dict) -> Path:
+        snapshot_ready.set()
+        if not release_snapshot.wait(timeout=10):
+            raise TimeoutError("timed out waiting to save concurrent state update")
+        return original_save(explicit_root, state)
+
+    workflow_state._save_workflow_state = delayed_save
+    try:
+        workflow_state.apply_gate_result(repo_root, "impl", True)
+    finally:
+        workflow_state._save_workflow_state = original_save
+
+
+def _promote_database_risk(repo_root: str) -> None:
+    promote_database_change_to_high_risk(repo_root, ("text:query",))
+
+
+def _finish_process(process: Any) -> None:
+    process.join(timeout=10)
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=2)
+    if process.is_alive():
+        process.kill()
+        process.join(timeout=2)
 
 
 # ===========================================================================
@@ -565,6 +613,415 @@ def test_006_unknown_change_class_fallback():
     inv = get_risk_investment("unknown_class", "review")
     standard_inv = get_risk_investment("standard", "review")
     assert inv == standard_inv
+
+
+# ===========================================================================
+# Database risk promotion
+# ===========================================================================
+
+def test_database_risk_promotes_only_small_policy_skips(tmp_path: Path):
+    """DB work restores skipped review, approval, and verification phases."""
+    state = _make_state("small", current_phase="impl")
+    _apply_policy_skips(state)
+    _write_workflow_state(tmp_path, state)
+
+    updated = promote_database_change_to_high_risk(tmp_path, ("text:query",))
+
+    assert updated["changeClass"] == "high_risk"
+    for phase in ("review", "approve", "verify"):
+        assert updated["phases"][phase] == {"status": "pending", "retries": 0}
+    assert updated["gates"]["G2"] == {
+        "passed": None,
+        "provider": None,
+        "provider_status": None,
+    }
+    assert updated["gates"]["G3"] == {"passed": None, "scope_hash": None}
+    assert updated["gates"]["G5"] == {
+        "passed": None,
+        "provider": None,
+        "provider_status": None,
+    }
+    escalation = updated["history"][-1]
+    assert escalation["action"] == "database_risk_escalated"
+    assert escalation["reasons"] == ["text:query"]
+
+
+def test_database_risk_preserves_completed_provider_work(tmp_path: Path):
+    """Completed phases and provider gates are not reset by DB escalation."""
+    state = _make_state("small")
+    _apply_policy_skips(state)
+    state["phases"]["review"] = {"status": "completed", "retries": 0}
+    state["gates"]["G2"] = {
+        "passed": True,
+        "provider": "reviewer",
+        "provider_status": "completed",
+    }
+    _write_workflow_state(tmp_path, state)
+
+    updated = promote_database_change_to_high_risk(tmp_path, ("path:migrations/001.sql",))
+
+    assert updated["phases"]["review"] == {"status": "completed", "retries": 0}
+    assert updated["gates"]["G2"] == {
+        "passed": True,
+        "provider": "reviewer",
+        "provider_status": "completed",
+    }
+    assert updated["phases"]["approve"]["status"] == "pending"
+    assert updated["phases"]["verify"]["status"] == "pending"
+
+
+def test_database_risk_escalation_history_is_idempotent(tmp_path: Path):
+    """Repeating the same normalized reasons does not add another audit event."""
+    state = _make_state("small")
+    _apply_policy_skips(state)
+    _write_workflow_state(tmp_path, state)
+
+    first = promote_database_change_to_high_risk(
+        tmp_path,
+        ("text:query", "path:src/database/schema.sql"),
+    )
+    second = promote_database_change_to_high_risk(
+        tmp_path,
+        ("path:src/database/schema.sql", "text:query"),
+    )
+
+    first_events = [
+        event for event in first["history"]
+        if event["action"] == "database_risk_escalated"
+    ]
+    second_events = [
+        event for event in second["history"]
+        if event["action"] == "database_risk_escalated"
+    ]
+    assert len(first_events) == 1
+    assert second_events == first_events
+
+
+def _escalated_initialized_workflow(root: Path) -> dict:
+    (root / ".awf.toml").write_text("", encoding="utf-8")
+    state = initialize_workflow(str(root), "database query")
+    _apply_policy_skips(state)
+    _write_workflow_state(root, state)
+    return promote_database_change_to_high_risk(root, ("text:database",))
+
+
+def _assert_fresh_non_database_workflow(state: dict, old_generation: str) -> None:
+    assert state["generation"] != old_generation
+    assert state["changeClass"] == "small"
+    assert not [
+        event
+        for event in state["history"]
+        if event["action"] == "database_risk_escalated"
+    ]
+    for phase in ("review", "approve", "verify"):
+        assert state["phases"][phase] == {"status": "pending", "retries": 0}
+    assert state["gates"]["G2"] == {
+        "passed": None,
+        "provider": None,
+        "provider_status": None,
+    }
+    assert state["gates"]["G3"] == {"passed": None, "scope_hash": None}
+    assert state["gates"]["G5"] == {
+        "passed": None,
+        "provider": None,
+        "provider_status": None,
+    }
+
+
+def test_database_risk_initialize_force_starts_new_generation(tmp_path: Path):
+    escalated = _escalated_initialized_workflow(tmp_path)
+
+    initialized = initialize_workflow(str(tmp_path), "button color", force=True)
+
+    _assert_fresh_non_database_workflow(initialized, escalated["generation"])
+
+
+def test_database_risk_reset_starts_new_generation(tmp_path: Path):
+    escalated = _escalated_initialized_workflow(tmp_path)
+
+    reset = reset_workflow(str(tmp_path), concept="button color")
+
+    _assert_fresh_non_database_workflow(reset, escalated["generation"])
+
+
+def test_database_risk_does_not_merge_when_only_one_state_has_generation(
+    tmp_path: Path,
+):
+    escalated = _escalated_initialized_workflow(tmp_path)
+    legacy_state = _make_state("small")
+    legacy_state["id"] = escalated["id"]
+    _apply_policy_skips(legacy_state)
+
+    save_workflow_state_snapshot(str(tmp_path), legacy_state)
+    saved = json.loads(
+        (tmp_path / ".workflow" / "state.json").read_text(encoding="utf-8")
+    )
+
+    assert saved["changeClass"] == "small"
+    assert not [
+        event
+        for event in saved["history"]
+        if event["action"] == "database_risk_escalated"
+    ]
+
+
+def test_database_risk_manifest_default_is_additive_and_disabled():
+    """New repositories opt out until they configure database validation."""
+    assert DEFAULT_MANIFEST["database_validation"] == {
+        "enabled": False,
+        "schema_command": [],
+        "verify_command": [],
+        "test_command": [],
+        "command_timeout_seconds": 30,
+        "max_schema_age_hours": 24,
+        "allow_production_replica_sample": False,
+    }
+
+
+def test_database_risk_preserves_stale_production_state_update(tmp_path: Path):
+    """A stale apply result cannot erase database high-risk facts."""
+    state = _make_state("small")
+    state["generation"] = "same-generation"
+    _apply_policy_skips(state)
+    _write_workflow_state(tmp_path, state)
+
+    context = multiprocessing.get_context("spawn")
+    snapshot_ready = context.Event()
+    release_snapshot = context.Event()
+    updater = context.Process(
+        target=_apply_gate_result_after_stale_read,
+        args=(str(tmp_path), snapshot_ready, release_snapshot),
+    )
+    promoter = context.Process(target=_promote_database_risk, args=(str(tmp_path),))
+    updater.start()
+    promoter_started = False
+    try:
+        assert snapshot_ready.wait(timeout=5)
+        promoter.start()
+        promoter_started = True
+        _finish_process(promoter)
+        assert promoter.exitcode == 0
+    finally:
+        release_snapshot.set()
+        _finish_process(updater)
+        if promoter_started:
+            _finish_process(promoter)
+    assert updater.exitcode == 0
+    persisted = json.loads(
+        (tmp_path / ".workflow" / "state.json").read_text(encoding="utf-8")
+    )
+    assert persisted["changeClass"] == "high_risk"
+    assert persisted["phases"]["impl"]["status"] == "completed"
+    for phase in ("review", "approve", "verify"):
+        assert persisted["phases"][phase] == {"status": "pending", "retries": 0}
+    assert persisted["gates"]["G2"] == {
+        "passed": None,
+        "provider": None,
+        "provider_status": None,
+    }
+    assert persisted["gates"]["G3"] == {"passed": None, "scope_hash": None}
+    assert persisted["gates"]["G5"] == {
+        "passed": None,
+        "provider": None,
+        "provider_status": None,
+    }
+    actions = {event["action"] for event in persisted["history"]}
+    assert {"completed", "database_risk_escalated"} <= actions
+
+
+@pytest.mark.parametrize("failure", ["write", "replace"])
+def test_database_risk_atomic_save_cleans_temporary_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    import awf.core.state as workflow_state
+
+    workflow_dir = tmp_path / ".workflow"
+    workflow_dir.mkdir()
+    state_path = workflow_dir / "state.json"
+    original_state = '{"changeClass":"small"}\n'
+    state_path.write_text(original_state, encoding="utf-8")
+
+    if failure == "write":
+        def fail_temporary_write(_fd: int, _data: bytes) -> int:
+            raise OSError("temporary write failed")
+
+        monkeypatch.setattr(os, "write", fail_temporary_write)
+    else:
+        def fail_temporary_replace(*_args: Any, **_kwargs: Any) -> None:
+            raise OSError("replace failed")
+
+        monkeypatch.setattr(os, "replace", fail_temporary_replace)
+
+    with pytest.raises(OSError):
+        workflow_state.save_workflow_state_snapshot(
+            str(tmp_path),
+            {"changeClass": "high_risk"},
+        )
+
+    assert state_path.read_text(encoding="utf-8") == original_state
+    assert not list(workflow_dir.glob("*.tmp"))
+
+
+def test_database_risk_threads_share_a_deadlock_free_lock_order(tmp_path: Path) -> None:
+    state = _make_state("small")
+    _apply_policy_skips(state)
+    _write_workflow_state(tmp_path, state)
+    start = threading.Event()
+    errors: list[BaseException] = []
+
+    def promote() -> None:
+        start.wait(timeout=5)
+        try:
+            promote_database_change_to_high_risk(tmp_path, ("text:query",))
+        except BaseException as error:
+            errors.append(error)
+
+    threads = [
+        threading.Thread(target=promote, daemon=True),
+        threading.Thread(target=promote, daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    start.set()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert not [thread for thread in threads if thread.is_alive()]
+    assert not errors
+    persisted = json.loads(
+        (tmp_path / ".workflow" / "state.json").read_text(encoding="utf-8")
+    )
+    assert persisted["changeClass"] == "high_risk"
+    assert len(
+        [
+            event
+            for event in persisted["history"]
+            if event["action"] == "database_risk_escalated"
+        ]
+    ) == 1
+
+
+
+
+def _write_small_workflow_state(root: Path) -> Path:
+    state = _make_state("small")
+    _apply_policy_skips(state)
+    _write_workflow_state(root, state)
+    return root / ".workflow" / "state.json"
+
+
+def test_database_risk_rejects_workflow_directory_symlink(tmp_path: Path) -> None:
+    import awf.core.state as workflow_state
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    outside = tmp_path / "outside-workflow"
+    outside.mkdir()
+    external_state = outside / "state.json"
+    original = '{"outside":true}\n'
+    external_state.write_text(original, encoding="utf-8")
+    (root / ".workflow").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="Unsafe workflow state"):
+        workflow_state.save_workflow_state_snapshot(
+            str(root),
+            {"changeClass": "high_risk"},
+        )
+
+    assert external_state.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize("link_kind", ["symlink", "hardlink"])
+def test_database_risk_rejects_unsafe_state_file_links(
+    tmp_path: Path,
+    link_kind: str,
+) -> None:
+    import awf.core.state as workflow_state
+
+    root = tmp_path / "repo"
+    workflow_dir = root / ".workflow"
+    workflow_dir.mkdir(parents=True)
+    external_state = tmp_path / f"external-state-{link_kind}.json"
+    state = _make_state("small")
+    _apply_policy_skips(state)
+    original = json.dumps(state, ensure_ascii=False) + "\n"
+    external_state.write_text(original, encoding="utf-8")
+    state_path = workflow_dir / "state.json"
+    if link_kind == "symlink":
+        state_path.symlink_to(external_state)
+    else:
+        os.link(external_state, state_path)
+
+    with pytest.raises(ValueError, match="Unsafe workflow state"):
+        workflow_state.promote_database_change_to_high_risk(
+            str(root),
+            ("text:query",),
+        )
+
+    assert external_state.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize("link_kind", ["symlink", "hardlink"])
+def test_database_risk_rejects_unsafe_lock_file_links(
+    tmp_path: Path,
+    link_kind: str,
+) -> None:
+    import awf.core.state as workflow_state
+
+    root = tmp_path / "repo"
+    state_path = _write_small_workflow_state(root)
+    external_lock = tmp_path / f"external-lock-{link_kind}"
+    original = "lock target must not change\n"
+    external_lock.write_text(original, encoding="utf-8")
+    lock_path = state_path.with_name("state.json.lock")
+    if link_kind == "symlink":
+        lock_path.symlink_to(external_lock)
+    else:
+        os.link(external_lock, lock_path)
+
+    with pytest.raises(ValueError, match="Unsafe workflow state"):
+        workflow_state.promote_database_change_to_high_risk(
+            str(root),
+            ("text:query",),
+        )
+
+    assert external_lock.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize("link_kind", ["symlink", "hardlink"])
+def test_database_risk_rejects_preexisting_temporary_links(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    link_kind: str,
+) -> None:
+    import awf.core.state as workflow_state
+
+    root = tmp_path / "repo"
+    state_path = _write_small_workflow_state(root)
+    external_temp = tmp_path / f"external-temp-{link_kind}"
+    original = "temporary target must not change\n"
+    external_temp.write_text(original, encoding="utf-8")
+    temporary_path = state_path.with_name(".state.json.fixed.tmp")
+    if link_kind == "symlink":
+        temporary_path.symlink_to(external_temp)
+    else:
+        os.link(external_temp, temporary_path)
+    monkeypatch.setattr(
+        workflow_state,
+        "secrets",
+        SimpleNamespace(token_hex=lambda _size: "fixed"),
+        raising=False,
+    )
+
+    with pytest.raises(ValueError, match="Unsafe workflow state"):
+        workflow_state.save_workflow_state_snapshot(
+            str(root),
+            {"changeClass": "high_risk"},
+        )
+
+    assert external_temp.read_text(encoding="utf-8") == original
 
 
 # ===========================================================================
