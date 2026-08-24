@@ -2024,3 +2024,119 @@ def test_no_database_signal_is_not_applicable_without_profile_or_evidence(
     assert result.status == "not_applicable"
     assert result.blockers == ()
     assert not evidence_path(tmp_path).exists()
+
+
+def test_each_persisted_stage_records_the_exact_evidence_identities(
+    tmp_path: Path,
+) -> None:
+    prepare_database_workflow(
+        tmp_path,
+        verify_command=database_command(verify_evidence()),
+        test_command=database_command(database_test_payload()),
+    )
+
+    assert run_database_check(tmp_path, "plan").status == "pass"
+    assert run_database_check(tmp_path, "verify").status == "pass"
+    assert run_database_check(tmp_path, "test").status == "pass"
+
+    persisted = json.loads(evidence_path(tmp_path).read_text(encoding="utf-8"))
+    expected = {
+        field: persisted[field]
+        for field in ("signal_hash", "profile_hash", "decision_hash")
+    }
+    for record in persisted["stages"].values():
+        assert {
+            field: record[field]
+            for field in ("signal_hash", "profile_hash", "decision_hash")
+        } == expected
+
+
+def test_plan_rejects_malformed_stale_evidence_before_refreshing(
+    tmp_path: Path,
+) -> None:
+    prepare_database_workflow(tmp_path)
+    assert run_database_check(tmp_path, "plan").status == "pass"
+
+    path = evidence_path(tmp_path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted["profile_hash"] = "b" * 64
+    del persisted["stages"]["plan"]["status"]
+    path.write_text(json.dumps(persisted), encoding="utf-8")
+    before = path.read_bytes()
+
+    result = run_database_check(tmp_path, "plan")
+
+    assert result.status == "fail"
+    assert result.blockers == ("evidence_invalid",)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("field", "unsafe_value"),
+    [
+        ("engine", "postgres://readonly@example.test/database"),
+        ("engine_version", "8.0\ninjected"),
+    ],
+)
+def test_plan_rejects_unsafe_persisted_schema_strings(
+    tmp_path: Path,
+    field: str,
+    unsafe_value: str,
+) -> None:
+    payload = schema_evidence(**{field: unsafe_value})
+    payload_path = tmp_path / "unsafe-schema-evidence.json"
+    payload_path.write_text(json.dumps(payload), encoding="utf-8")
+    prepare_database_workflow(
+        tmp_path,
+        schema_command=[
+            sys.executable,
+            "-c",
+            "from pathlib import Path; import sys; print(Path(sys.argv[1]).read_text())",
+            str(payload_path),
+        ],
+    )
+
+    result = run_database_check(tmp_path, "plan")
+
+    assert result.status == "fail"
+    assert result.blockers == ("schema_evidence_invalid",)
+    assert not evidence_path(tmp_path).exists()
+
+
+@pytest.mark.parametrize(
+    ("target", "unsafe_value"),
+    [
+        ("id", "rewrite-query\ninjected"),
+        ("free_text", "https://readonly@example.test/decision"),
+        ("free_text", "password=database-secret"),
+        ("free_text", "ALTER TABLE customer ADD COLUMN secret text"),
+        ("free_text", "SELECT * FROM customer"),
+        ("free_text", "x" * 4097),
+        ("waiver", "raw production rows were inspected"),
+    ],
+)
+def test_decision_rejects_unsafe_persisted_ids_and_free_text(
+    tmp_path: Path,
+    target: str,
+    unsafe_value: str,
+) -> None:
+    decision = database_decision()
+    if target == "id":
+        decision["candidates"][1]["id"] = unsafe_value
+        decision["recommended_option_id"] = unsafe_value
+        decision["selected_option_id"] = unsafe_value
+    elif target == "waiver":
+        decision["local_data_test_waiver"] = {
+            "reason": unsafe_value,
+            "approver": "database-owner",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    else:
+        decision["recommendation_rationale"] = unsafe_value
+    write_workflow_artifacts(tmp_path, concept="Update the database query")
+    write_database_decision(tmp_path, decision)
+
+    with pytest.raises(DatabaseValidationError) as raised:
+        load_database_decision(tmp_path)
+
+    assert raised.value.code == "decision_invalid"

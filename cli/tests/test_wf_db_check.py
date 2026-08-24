@@ -922,3 +922,32 @@ def test_db_check_operational_exception_never_emits_exception_contents(
     assert "RAW_COMMAND_OUTPUT" not in captured.out
     assert "postgres://secret" not in captured.out
     assert captured.err == ""
+
+
+@pytest.mark.parametrize("blocker", ["decision_missing", "database_signal_changed"])
+def test_db_check_stable_database_validation_blockers_exit_one(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    blocker: str,
+) -> None:
+    _write_valid_database_workflow(tmp_path)
+    if blocker == "decision_missing":
+        (tmp_path / ".workflow" / "artifacts" / "database-decision.json").unlink()
+        stage = "plan"
+    else:
+        assert main(
+            ["wf", "db-check", "--stage", "plan", "--repo-root", str(tmp_path), "--json"]
+        ) == 0
+        capsys.readouterr()
+        (tmp_path / ".workflow" / "concept.md").write_text(
+            "Update the database query plan with a new index",
+            encoding="utf-8",
+        )
+        stage = "verify"
+
+    return_code = main(
+        ["wf", "db-check", "--stage", stage, "--repo-root", str(tmp_path), "--json"]
+    )
+
+    assert return_code == 1
+    assert json.loads(capsys.readouterr().out)["blockers"] == [blocker]

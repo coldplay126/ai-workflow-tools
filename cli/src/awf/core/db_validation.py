@@ -105,13 +105,13 @@ DATABASE_CHECK_STATUSES = frozenset({"pass", "fail", "not_applicable"})
 DATABASE_CHECK_MAX_VALUES = 64
 DATABASE_CHECK_EVIDENCE_PATH = ".workflow/artifacts/database-validation-evidence.json"
 _DATABASE_CHECK_EVIDENCE_HASH = re.compile(r"^[a-f0-9]{64}$")
-DATABASE_CHECK_BLOCKERS = frozenset(
-    {
+DATABASE_CHECK_BLOCKERS = frozenset({
         "repo_root_invalid",
         "profile_missing",
         "profile_invalid",
         "profile_incomplete",
         "profile_disabled",
+        "decision_missing",
         "decision_invalid",
         "command_start_failed",
         "command_timeout",
@@ -126,13 +126,13 @@ DATABASE_CHECK_BLOCKERS = frozenset(
         "evidence_write_failed",
         "profile_changed",
         "decision_changed",
+        "database_signal_changed",
         "plan_evidence_missing",
         "test_waiver_missing",
         "production_schema_changed",
         "stage_invalid",
         "signal_callback_failed",
-    }
-)
+})
 DATABASE_CHECK_TEXT_REASONS = frozenset(
     {
         *(f"text:{reason}" for reason, _ in _STRONG_TEXT_SIGNAL_PATTERNS),
@@ -507,6 +507,28 @@ _SENSITIVE_ASSIGNMENT = re.compile(
     re.IGNORECASE,
 )
 _URI_VALUE = re.compile(r"[a-z][a-z0-9+.-]*://", re.IGNORECASE)
+_MAX_PERSISTED_TEXT_BYTES = 4 * 1024
+_MAX_PERSISTED_IDENTIFIER_BYTES = 128
+_MAX_ENGINE_IDENTIFIER_BYTES = 64
+_MAX_ENGINE_VERSION_BYTES = 64
+_ENGINE_IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+_ENGINE_VERSION = re.compile(r"^[vV]?[0-9]+(?:[._+-][0-9A-Za-z]+)*$")
+_PERSISTED_IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+_PERSISTED_SECRET = re.compile(
+    r"\b(?:api[_-]?key|access[_-]?token|password|passwd|secret|"
+    r"credential|dsn|connection[_-]?string)\b\s*(?:=|:)|\bbearer\s+\S+",
+    re.IGNORECASE,
+)
+_PERSISTED_DDL = re.compile(
+    r"\b(?:create|alter|drop|truncate)\s+(?:table|index|schema|database)|"
+    r"\b(?:add|drop)\s+column\b",
+    re.IGNORECASE,
+)
+_PERSISTED_RAW_DATA = re.compile(
+    r"\b(?:select\s+.+\s+from|insert\s+into|update\s+\w+\s+set|delete\s+from|"
+    r"raw(?:\s+(?:production|database))?\s+(?:data|rows?|records?|samples?))\b",
+    re.IGNORECASE,
+)
 _SHELL_EXECUTABLES = {"sh", "bash", "zsh", "dash", "fish", "ksh"}
 _DECISION_KINDS = {
     "maintain",
@@ -628,6 +650,7 @@ _EVIDENCE_FIELDS = {
     "decision_hash",
     "stages",
 }
+_STAGE_IDENTITY_FIELDS = {"signal_hash", "profile_hash", "decision_hash"}
 _SENSITIVE_KEY_FRAGMENTS = {
     "dsn",
     "url",
@@ -724,6 +747,49 @@ def _nonempty_string(value: object) -> Optional[str]:
         return None
     normalized = value.strip()
     return normalized or None
+
+
+def _within_byte_limit(value: str, maximum: int) -> bool:
+    return len(value.encode("utf-8")) <= maximum
+
+
+def _is_safe_persisted_text(value: object) -> bool:
+    if not isinstance(value, str) or not value or value != value.strip():
+        return False
+    if (
+        not _within_byte_limit(value, _MAX_PERSISTED_TEXT_BYTES)
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        or _URI_VALUE.search(value) is not None
+        or _PERSISTED_SECRET.search(value) is not None
+        or _PERSISTED_DDL.search(value) is not None
+        or _PERSISTED_RAW_DATA.search(value) is not None
+    ):
+        return False
+    return True
+
+
+def _is_safe_persisted_identifier(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and _within_byte_limit(value, _MAX_PERSISTED_IDENTIFIER_BYTES)
+        and _PERSISTED_IDENTIFIER.fullmatch(value) is not None
+    )
+
+
+def _is_safe_engine_identifier(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and _within_byte_limit(value, _MAX_ENGINE_IDENTIFIER_BYTES)
+        and _ENGINE_IDENTIFIER.fullmatch(value) is not None
+    )
+
+
+def _is_safe_engine_version(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and _within_byte_limit(value, _MAX_ENGINE_VERSION_BYTES)
+        and _ENGINE_VERSION.fullmatch(value) is not None
+    )
 
 
 def _normalized_key(key: str) -> str:
@@ -869,7 +935,7 @@ def load_database_profile(repo_root: Path) -> DatabaseProfile:
 
 
 def _validate_string_list(value: object) -> bool:
-    return isinstance(value, list) and all(_nonempty_string(item) is not None for item in value)
+    return isinstance(value, list) and all(_is_safe_persisted_text(item) for item in value)
 
 
 def _validate_structured_assessment(
@@ -880,7 +946,7 @@ def _validate_structured_assessment(
     if not isinstance(value, dict) or set(value) != fields:
         raise DatabaseValidationError("decision_invalid")
     _reject_sensitive_fields(value, "decision_invalid")
-    if any(_nonempty_string(entry) is None for entry in value.values()):
+    if any(not _is_safe_persisted_text(entry) for entry in value.values()):
         raise DatabaseValidationError("decision_invalid")
 
 
@@ -891,11 +957,11 @@ def _validate_candidate(candidate: object) -> dict[str, Any]:
     if set(candidate) != _CANDIDATE_FIELDS:
         raise DatabaseValidationError("decision_invalid")
     if (
-        _nonempty_string(candidate["id"]) is None
+        not _is_safe_persisted_identifier(candidate["id"])
         or candidate["kind"] not in _DECISION_KINDS
         or not isinstance(candidate["applicable"], bool)
         or any(
-            _nonempty_string(candidate[field]) is None
+            not _is_safe_persisted_text(candidate[field])
             for field in (
                 "summary",
                 "equivalence_plan",
@@ -906,7 +972,7 @@ def _validate_candidate(candidate: object) -> dict[str, Any]:
         )
         or (
             candidate["normalization_assessment"] is not None
-            and _nonempty_string(candidate["normalization_assessment"]) is None
+            and not _is_safe_persisted_text(candidate["normalization_assessment"])
         )
         or not _validate_string_list(candidate["operational_risks"])
         or not _validate_string_list(candidate["transition_risks"])
@@ -919,7 +985,7 @@ def _validate_candidate(candidate: object) -> dict[str, Any]:
     if candidate["applicable"]:
         if unavailable_reason not in (None, ""):
             raise DatabaseValidationError("decision_invalid")
-    elif _nonempty_string(unavailable_reason) is None:
+    elif not _is_safe_persisted_text(unavailable_reason):
         raise DatabaseValidationError("decision_invalid")
 
     kind = candidate["kind"]
@@ -979,8 +1045,8 @@ def _validate_waiver(value: object) -> Optional[dict[str, str]]:
     _reject_sensitive_fields(value, "decision_invalid")
     if set(value) != {"reason", "approver", "timestamp"}:
         raise DatabaseValidationError("decision_invalid")
-    reason = _nonempty_string(value["reason"])
-    approver = _nonempty_string(value["approver"])
+    reason = value["reason"] if _is_safe_persisted_text(value["reason"]) else None
+    approver = value["approver"] if _is_safe_persisted_text(value["approver"]) else None
     timestamp = _nonempty_string(value["timestamp"])
     parsed_timestamp = _parse_timestamp(timestamp) if timestamp else None
     if not reason or not approver or parsed_timestamp is None:
@@ -1051,9 +1117,9 @@ def load_database_decision(repo_root: Path) -> DatabaseDecision:
     ):
         raise DatabaseValidationError("decision_invalid")
 
-    baseline_id = _nonempty_string(decision["baseline_option_id"])
-    recommended_id = _nonempty_string(decision["recommended_option_id"])
-    selected_id = _nonempty_string(decision["selected_option_id"])
+    baseline_id = decision["baseline_option_id"] if _is_safe_persisted_identifier(decision["baseline_option_id"]) else None
+    recommended_id = decision["recommended_option_id"] if _is_safe_persisted_identifier(decision["recommended_option_id"]) else None
+    selected_id = decision["selected_option_id"] if _is_safe_persisted_identifier(decision["selected_option_id"]) else None
     if (
         baseline_id not in candidates_by_id
         or recommended_id not in candidates_by_id
@@ -1061,12 +1127,12 @@ def load_database_decision(repo_root: Path) -> DatabaseDecision:
         or candidates_by_id[baseline_id]["kind"] != "maintain"
         or not candidates_by_id[recommended_id]["applicable"]
         or not candidates_by_id[selected_id]["applicable"]
-        or _nonempty_string(decision["recommendation_rationale"]) is None
+        or not _is_safe_persisted_text(decision["recommendation_rationale"])
     ):
         raise DatabaseValidationError("decision_invalid")
     if (
         set(normalized_surfaces) & _NORMALIZATION_SURFACES
-        and _nonempty_string(candidates_by_id[selected_id]["normalization_assessment"]) is None
+        and not _is_safe_persisted_text(candidates_by_id[selected_id]["normalization_assessment"])
     ):
         raise DatabaseValidationError("decision_invalid")
 
@@ -1238,8 +1304,8 @@ def _validate_schema_evidence(
         or payload["target_class"] != "production_metadata"
         or payload["read_only"] is not True
         or payload["schema_only"] is not True
-        or _nonempty_string(payload["engine"]) is None
-        or _nonempty_string(payload["engine_version"]) is None
+        or not _is_safe_engine_identifier(payload["engine"])
+        or not _is_safe_engine_version(payload["engine_version"])
         or not isinstance(payload["schema_hash"], str)
         or _SHA256_PATTERN.fullmatch(payload["schema_hash"]) is None
     ):
@@ -1259,8 +1325,8 @@ def _validate_schema_evidence(
         raise DatabaseValidationError("schema_evidence_invalid")
     return {
         "schema_hash": payload["schema_hash"],
-        "engine": payload["engine"].strip(),
-        "engine_version": payload["engine_version"].strip(),
+        "engine": payload["engine"],
+        "engine_version": payload["engine_version"],
         "captured_at": _utc_timestamp(captured_at),
         "object_counts": {
             "tables": counts["tables"],
@@ -1282,6 +1348,7 @@ def _validate_verify_evidence(
         or payload["schema_version"] != 1
         or payload["kind"] != "database_verify"
         or payload["production_schema_hash"] != schema_hash
+        or not _is_safe_persisted_identifier(payload["selected_option_id"])
         or payload["selected_option_id"] != decision.selected_option_id
         or any(payload[field] not in {"pass", "fail", "not_applicable"} for field in statuses)
         or payload["equivalence"] != "pass"
@@ -1321,6 +1388,7 @@ def _validate_test_evidence(
         or payload["schema_version"] != 1
         or payload["kind"] != "database_test"
         or payload["production_schema_hash"] != schema_hash
+        or not _is_safe_persisted_identifier(payload["selected_option_id"])
         or payload["selected_option_id"] != decision.selected_option_id
         or payload["local_target"] not in _LOCAL_TARGETS
         or payload["masked"] is not True
@@ -1363,7 +1431,7 @@ def _load_existing_evidence(root: Path) -> Optional[dict[str, Any]]:
         or evidence["database_signal"] is not True
         or evidence["change_class"] != "high_risk"
         or not isinstance(evidence["signal_reasons"], list)
-        or not all(isinstance(reason, str) for reason in evidence["signal_reasons"])
+        or not all(is_database_check_reason(reason) for reason in evidence["signal_reasons"])
         or not isinstance(evidence["signal_hash"], str)
         or _SHA256_PATTERN.fullmatch(evidence["signal_hash"]) is None
         or not isinstance(evidence["profile_hash"], str)
@@ -1387,7 +1455,7 @@ def _parse_utc_timestamp(value: object) -> Optional[datetime]:
 
 def _validated_stored_schema(
     schema: object,
-    profile: DatabaseProfile,
+    profile: Optional[DatabaseProfile],
 ) -> dict[str, Any]:
     if not isinstance(schema, dict) or set(schema) != {
         "schema_hash",
@@ -1403,11 +1471,14 @@ def _validated_stored_schema(
     if (
         captured_at is None
         or captured_at > now
-        or now - captured_at > timedelta(hours=profile.max_schema_age_hours)
+        or (
+            profile is not None
+            and now - captured_at > timedelta(hours=profile.max_schema_age_hours)
+        )
         or not isinstance(schema["schema_hash"], str)
         or _SHA256_PATTERN.fullmatch(schema["schema_hash"]) is None
-        or _nonempty_string(schema["engine"]) is None
-        or _nonempty_string(schema["engine_version"]) is None
+        or not _is_safe_engine_identifier(schema["engine"])
+        or not _is_safe_engine_version(schema["engine_version"])
         or not isinstance(counts, dict)
         or set(counts) != {"tables", "columns", "indexes", "constraints"}
         or any(not _is_strict_int(count) or count < 0 for count in counts.values())
@@ -1416,18 +1487,114 @@ def _validated_stored_schema(
     return schema
 
 
+def _database_evidence_identity(
+    signal: DatabaseSignal,
+    profile: DatabaseProfile,
+    decision: DatabaseDecision,
+) -> dict[str, str]:
+    return {
+        "signal_hash": signal.snapshot_hash,
+        "profile_hash": profile.profile_hash,
+        "decision_hash": decision.decision_hash,
+    }
+
+
+def _stored_evidence_identity(evidence: dict[str, Any]) -> dict[str, str]:
+    return {field: evidence[field] for field in _STAGE_IDENTITY_FIELDS}
+
+
+def _evidence_matches_current(
+    evidence: dict[str, Any],
+    signal: DatabaseSignal,
+    profile: DatabaseProfile,
+    decision: DatabaseDecision,
+) -> bool:
+    return (
+        _stored_evidence_identity(evidence)
+        == _database_evidence_identity(signal, profile, decision)
+        and tuple(evidence["signal_reasons"]) == signal.reasons
+    )
+
+
+def _validate_stored_verify_shape(
+    verification: object,
+    schema_hash: str,
+) -> None:
+    statuses = ("equivalence", "integrity", "query_plan", "migration", "rollback")
+    if (
+        not isinstance(verification, dict)
+        or set(verification)
+        != {
+            "production_schema_hash",
+            "selected_option_id",
+            "equivalence",
+            "integrity",
+            "query_plan",
+            "migration",
+            "rollback",
+        }
+        or verification["production_schema_hash"] != schema_hash
+        or not _is_safe_persisted_identifier(verification["selected_option_id"])
+        or any(verification[field] not in {"pass", "fail", "not_applicable"} for field in statuses)
+        or verification["equivalence"] != "pass"
+        or verification["integrity"] != "pass"
+        or any(verification[field] == "fail" for field in ("query_plan", "migration", "rollback"))
+    ):
+        raise DatabaseValidationError("evidence_invalid")
+
+
+def _validate_stored_test_shape(test: object, schema_hash: str) -> None:
+    if not isinstance(test, dict):
+        raise DatabaseValidationError("evidence_invalid")
+    if test.get("status") == "waived":
+        if set(test) != {"status", "waiver"}:
+            raise DatabaseValidationError("evidence_invalid")
+        try:
+            waiver = _validate_waiver(test["waiver"])
+        except DatabaseValidationError:
+            raise DatabaseValidationError("evidence_invalid") from None
+        if waiver != test["waiver"]:
+            raise DatabaseValidationError("evidence_invalid")
+        return
+    if (
+        set(test)
+        != {
+            "status",
+            "production_schema_hash",
+            "selected_option_id",
+            "local_target",
+            "masked",
+            "equivalence",
+            "integrity",
+            "performance",
+        }
+        or test["status"] != "pass"
+        or test["production_schema_hash"] != schema_hash
+        or not _is_safe_persisted_identifier(test["selected_option_id"])
+        or test["local_target"] not in _LOCAL_TARGETS
+        or test["masked"] is not True
+        or any(test[field] != "pass" for field in ("equivalence", "integrity", "performance"))
+    ):
+        raise DatabaseValidationError("evidence_invalid")
+
+
 def _validate_existing_stage_record(
     stage: str,
     record: object,
-    profile: DatabaseProfile,
-    decision: DatabaseDecision,
+    profile: Optional[DatabaseProfile],
+    decision: Optional[DatabaseDecision],
+    identity: dict[str, str],
 ) -> dict[str, Any]:
     expected_fields = {
         "plan": {"status", "checked_at", "schema"},
         "verify": {"status", "checked_at", "schema", "verify"},
         "test": {"status", "checked_at", "schema", "test"},
-    }[stage]
-    if not isinstance(record, dict) or set(record) != expected_fields:
+    }[stage] | _STAGE_IDENTITY_FIELDS
+    if (
+        not isinstance(record, dict)
+        or set(record) != expected_fields
+        or any(record[field] != identity[field] for field in _STAGE_IDENTITY_FIELDS)
+    ):
         raise DatabaseValidationError("evidence_invalid")
     checked_at = _parse_utc_timestamp(record["checked_at"])
     if (
@@ -1438,55 +1605,32 @@ def _validate_existing_stage_record(
         raise DatabaseValidationError("evidence_invalid")
     schema = _validated_stored_schema(record["schema"], profile)
     if stage == "verify":
-        verification = record["verify"]
-        if not isinstance(verification, dict) or set(verification) != {
-            "production_schema_hash",
-            "selected_option_id",
-            "equivalence",
-            "integrity",
-            "query_plan",
-            "migration",
-            "rollback",
-        }:
-            raise DatabaseValidationError("evidence_invalid")
-        try:
-            _validate_verify_evidence(
-                {"schema_version": 1, "kind": "database_verify", **verification},
-                decision,
-                schema["schema_hash"],
-            )
-        except DatabaseValidationError:
-            raise DatabaseValidationError("evidence_invalid") from None
+        _validate_stored_verify_shape(record["verify"], schema["schema_hash"])
+        if decision is not None:
+            try:
+                _validate_verify_evidence(
+                    {"schema_version": 1, "kind": "database_verify", **record["verify"]},
+                    decision,
+                    schema["schema_hash"],
+                )
+            except DatabaseValidationError:
+                raise DatabaseValidationError("evidence_invalid") from None
     elif stage == "test":
-        test = record["test"]
-        if not isinstance(test, dict):
-            raise DatabaseValidationError("evidence_invalid")
-        if test.get("status") == "waived":
+        _validate_stored_test_shape(record["test"], schema["schema_hash"])
+        if decision is not None and record["test"]["status"] == "waived":
             if (
-                set(test) != {"status", "waiver"}
-                or decision.local_data_test_waiver is None
-                or test["waiver"] != decision.local_data_test_waiver
+                decision.local_data_test_waiver is None
+                or record["test"]["waiver"] != decision.local_data_test_waiver
             ):
                 raise DatabaseValidationError("evidence_invalid")
-        else:
-            if set(test) != {
-                "status",
-                "production_schema_hash",
-                "selected_option_id",
-                "local_target",
-                "masked",
-                "equivalence",
-                "integrity",
-                "performance",
-            }:
-                raise DatabaseValidationError("evidence_invalid")
+        elif decision is not None:
             try:
                 _validate_test_evidence(
                     {
                         "schema_version": 1,
                         "kind": "database_test",
                         "raw_production_rows": False,
-                        **test,
+                        **record["test"],
                     },
                     decision,
                     profile,
@@ -1499,14 +1643,22 @@ def _validate_existing_stage_record(
 
 def _validated_existing_stages(
     evidence: dict[str, Any],
-    profile: DatabaseProfile,
-    decision: DatabaseDecision,
+    profile: Optional[DatabaseProfile],
+    decision: Optional[DatabaseDecision],
+    identity: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
     stages = evidence["stages"]
     if "plan" not in stages:
         raise DatabaseValidationError("evidence_invalid")
+    expected_identity = identity or _stored_evidence_identity(evidence)
     schemas = {
-        name: _validate_existing_stage_record(name, record, profile, decision)
+        name: _validate_existing_stage_record(
+            name,
+            record,
+            profile,
+            decision,
+            expected_identity,
+        )
         for name, record in stages.items()
     }
     plan_hash = schemas["plan"]["schema_hash"]
@@ -1721,8 +1873,17 @@ def run_database_check(
         decision = load_database_decision(root)
         pre_run_profile_hash = profile.profile_hash
         pre_run_decision_hash = decision.decision_hash
+        current_identity = _database_evidence_identity(signal, profile, decision)
         existing = _load_existing_evidence(root)
+        prior_stale = False
         if existing is not None:
+            _validated_existing_stages(existing, None, None)
+            prior_stale = not _evidence_matches_current(
+                existing,
+                signal,
+                profile,
+                decision,
+            )
             if stage in {"verify", "test"}:
                 if existing["profile_hash"] != profile.profile_hash:
                     raise DatabaseValidationError("profile_changed")
@@ -1733,14 +1894,9 @@ def run_database_check(
                     or tuple(existing["signal_reasons"]) != signal.reasons
                 ):
                     raise DatabaseValidationError("database_signal_changed")
-                _validated_existing_stages(existing, profile, decision)
-            elif (
-                existing["profile_hash"] == profile.profile_hash
-                and existing["decision_hash"] == decision.decision_hash
-                and existing["signal_hash"] == signal.snapshot_hash
-                and tuple(existing["signal_reasons"]) == signal.reasons
-            ):
-                _validated_existing_stages(existing, profile, decision)
+                _validated_existing_stages(existing, profile, decision, current_identity)
+            elif not prior_stale:
+                _validated_existing_stages(existing, profile, decision, current_identity)
         elif stage in {"verify", "test"}:
             raise DatabaseValidationError("plan_evidence_missing")
 
@@ -1798,6 +1954,11 @@ def run_database_check(
                 raise DatabaseValidationError("profile_changed")
             if locked_decision.decision_hash != pre_run_decision_hash:
                 raise DatabaseValidationError("decision_changed")
+            locked_identity = _database_evidence_identity(
+                locked_signal,
+                locked_profile,
+                locked_decision,
+            )
             current = _load_existing_evidence(root)
             if current is None:
                 if stage in {"verify", "test"}:
@@ -1806,30 +1967,39 @@ def run_database_check(
                 locked_plan_schema = None
                 refresh_invalidates_downstream = False
             else:
-                refresh_invalidates_downstream = (
-                    current["profile_hash"] != locked_profile.profile_hash
-                    or current["decision_hash"] != locked_decision.decision_hash
-                    or current["signal_hash"] != locked_signal.snapshot_hash
-                    or tuple(current["signal_reasons"]) != locked_signal.reasons
+                _validated_existing_stages(current, None, None)
+                current_stale = not _evidence_matches_current(
+                    current,
+                    locked_signal,
+                    locked_profile,
+                    locked_decision,
                 )
+                refresh_invalidates_downstream = prior_stale or current_stale
                 if stage == "plan" and not refresh_invalidates_downstream:
                     _validated_existing_stages(
                         current,
                         locked_profile,
                         locked_decision,
+                        locked_identity,
                     )
                 if stage in {"verify", "test"}:
                     if current["profile_hash"] != locked_profile.profile_hash:
                         raise DatabaseValidationError("profile_changed")
                     if current["decision_hash"] != locked_decision.decision_hash:
                         raise DatabaseValidationError("decision_changed")
+                    if (
+                        current["signal_hash"] != locked_signal.snapshot_hash
+                        or tuple(current["signal_reasons"]) != locked_signal.reasons
+                    ):
+                        raise DatabaseValidationError("database_signal_changed")
                     locked_plan_schema = _validated_existing_stages(
                         current,
                         locked_profile,
                         locked_decision,
+                        locked_identity,
                     )
                 else:
-                    locked_plan_schema = current["stages"].get("plan", {}).get("schema")
+                    locked_plan_schema = current["stages"]["plan"]["schema"]
                 stages = dict(current["stages"])
 
             if stage in {"verify", "test"}:
@@ -1849,6 +2019,7 @@ def run_database_check(
                 stages["plan"] = {
                     "status": "pass",
                     "checked_at": checked_at,
+                    **locked_identity,
                     "schema": schema,
                 }
             elif stage == "verify":
@@ -1856,6 +2027,7 @@ def run_database_check(
                 stages["verify"] = {
                     "status": "pass",
                     "checked_at": checked_at,
+                    **locked_identity,
                     "schema": schema,
                     "verify": verify,
                 }
@@ -1863,6 +2035,7 @@ def run_database_check(
                 stages["test"] = {
                     "status": "pass",
                     "checked_at": checked_at,
+                    **locked_identity,
                     "schema": schema,
                     "test": test,
                 }
@@ -1870,13 +2043,19 @@ def run_database_check(
                 stages["test"] = {
                     "status": "pass",
                     "checked_at": checked_at,
+                    **locked_identity,
                     "schema": schema,
                     "test": {
                         "status": "waived",
                         "waiver": locked_decision.local_data_test_waiver,
                     },
                 }
-            evidence = _build_evidence(signal, locked_profile, locked_decision, stages)
+            evidence = _build_evidence(
+                locked_signal,
+                locked_profile,
+                locked_decision,
+                stages,
+            )
             evidence_hash = _atomic_write_evidence(directory_fd, evidence)
         finally:
             _release_evidence_lock(directory_fd, lock_fd)
@@ -2025,7 +2204,8 @@ def evaluate_database_gate(repo_root: Path, stage: str) -> list[dict[str, Any]]:
         and decision_is_current
     ):
         try:
-            _validated_existing_stages(evidence, profile, decision)
+            identity = _database_evidence_identity(signal, profile, decision)
+            _validated_existing_stages(evidence, profile, decision, identity)
             record = evidence["stages"].get(stage)
             if record is not None:
                 schema = _validate_existing_stage_record(
@@ -2033,6 +2213,7 @@ def evaluate_database_gate(repo_root: Path, stage: str) -> list[dict[str, Any]]:
                     record,
                     profile,
                     decision,
+                    identity,
                 )
                 stage_is_current = True
         except DatabaseValidationError:

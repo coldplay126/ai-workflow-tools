@@ -16,6 +16,7 @@ from awf.core.db_validation import (
     DATABASE_CHECK_MAX_VALUES,
     DATABASE_CHECK_STATUSES,
     DatabaseCheckResult,
+    DatabaseValidationError,
     is_database_check_evidence_hash,
     is_database_check_reason,
     run_database_check,
@@ -362,6 +363,12 @@ def run_wf_db_check(args: argparse.Namespace) -> int:
             return 2
         _emit_database_check_result(payload, as_json=as_json)
         return 0 if status in {"pass", "not_applicable"} else 1
+    except DatabaseValidationError as error:
+        if error.code in DATABASE_CHECK_BLOCKERS:
+            _emit_database_check_failure(stage, as_json=as_json, blocker=error.code)
+            return 1
+        _emit_database_check_failure(stage, as_json=as_json, blocker="operational_error")
+        return 2
     except Exception:
         _emit_database_check_failure(stage, as_json=as_json, blocker="operational_error")
         return 2
