@@ -689,8 +689,10 @@ def reset_workflow(explicit_root: Optional[str], concept: Optional[str] = None) 
     return new_state
 
 
-def load_workflow_state(explicit_root: Optional[str] = None) -> dict:
-    root = find_repo_root(explicit_root)
+def load_workflow_state(
+    explicit_root: Optional[str | Path] = None, *, canonical: bool = False
+) -> dict:
+    root = Path(explicit_root) if canonical else find_repo_root(explicit_root)
     directory_fd = _open_workflow_state_directory(root)
     try:
         return _read_workflow_state_from_directory(directory_fd)

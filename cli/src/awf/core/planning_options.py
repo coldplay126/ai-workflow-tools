@@ -943,7 +943,7 @@ def _write_reconciliation_marker(directory_fd: int, journal: dict[str, object]) 
 
 
 def _reconciliation_pending(
-    directory_fd: int, artifact_hash: str
+    directory_fd: int, artifact: PlanningOptionsArtifact
 ) -> Optional[dict[str, object]]:
     descriptor: Optional[int] = None
     try:
@@ -967,12 +967,39 @@ def _reconciliation_pending(
             "schema_version", "current_hash", "previous_hash", "decision_id",
             "option_id", "artifact_status", "source",
         }
+        decision_ids = {item.id: item for item in artifact.decisions}
         if (
             not isinstance(journal, dict)
             or set(journal) != required
+            or not isinstance(journal.get("schema_version"), int)
+            or isinstance(journal.get("schema_version"), bool)
             or journal.get("schema_version") != 1
-            or journal.get("current_hash") != artifact_hash
             or not all(isinstance(journal.get(key), str) for key in required - {"schema_version"})
+            or any(
+                re.fullmatch(r"[0-9a-f]{64}", str(journal[key])) is None
+                for key in ("current_hash", "previous_hash")
+            )
+            or journal["current_hash"] == journal["previous_hash"]
+            or journal["current_hash"] != artifact.artifact_hash
+            or _DECISION_ID.fullmatch(str(journal["decision_id"])) is None
+            or _OPTION_ID.fullmatch(str(journal["option_id"])) is None
+            or journal["source"] != "cli"
+            or journal["artifact_status"] != artifact.status
+            or journal["artifact_status"] not in PLANNING_OPTIONS_STATUSES
+        ):
+            raise _selection_artifact_error()
+        decision = decision_ids.get(str(journal["decision_id"]))
+        if (
+            decision is None
+            or decision.selected_option_id != journal["option_id"]
+            or not artifact.selection_history
+        ):
+            raise _selection_artifact_error()
+        last = artifact.selection_history[-1]
+        if (
+            last.decision_id != journal["decision_id"]
+            or last.selected_option_id != journal["option_id"]
+            or last.source != journal["source"]
         ):
             raise _selection_artifact_error()
         return journal

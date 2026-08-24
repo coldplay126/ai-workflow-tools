@@ -11,6 +11,7 @@ from awf.cli import build_parser
 from awf.commands import wf as wf_commands
 from awf.commands.wf import run_wf_select_option
 from awf.core.planning_options import load_planning_options
+from awf.core import planning_options, state as workflow_state
 
 
 _PHASES = ("plan", "review", "approve", "impl", "verify", "test", "done")
@@ -398,6 +399,66 @@ def test_select_option_rejects_a_symlinked_root_before_artifact_publication(
         )
     )
     assert artifact["decisions"][0]["selected_option_id"] is None
+
+def test_select_option_resolves_once_and_keeps_the_canonical_root_after_retarget(
+    tmp_path: Path, monkeypatch
+) -> None:
+    original_root = tmp_path / "original"
+    redirected_parent = tmp_path / "redirected-parent"
+    redirected_root = redirected_parent / "original"
+    for root in (original_root, redirected_root):
+        _write_artifact(root, _artifact())
+        _write_state(root, _state(current_phase="plan", plan_status="deciding", g1_passed=None))
+
+    supplied_parent = tmp_path / "supplied-parent"
+    supplied_parent.symlink_to(tmp_path, target_is_directory=True)
+    supplied_root = supplied_parent / "original"
+    resolver_calls: list[object] = []
+    original_find_repo_root = workflow_state.find_repo_root
+
+    def find_and_retarget(explicit_root=None):
+        resolver_calls.append(explicit_root)
+        root = original_find_repo_root(explicit_root)
+        if len(resolver_calls) == 1:
+            supplied_parent.unlink()
+            supplied_parent.symlink_to(redirected_parent, target_is_directory=True)
+        return root
+
+    state_roots: list[Path] = []
+    original_open_state_directory = workflow_state._open_workflow_state_directory
+
+    def capture_state_root(root: Path) -> int:
+        state_roots.append(root)
+        return original_open_state_directory(root)
+
+    artifact_roots: list[Path] = []
+    original_artifact_transaction = planning_options._planning_options_transaction
+
+    def capture_artifact_root(root: Path):
+        artifact_roots.append(root)
+        return original_artifact_transaction(root)
+
+    monkeypatch.setattr(workflow_state, "find_repo_root", find_and_retarget)
+    monkeypatch.setattr(
+        workflow_state, "_open_workflow_state_directory", capture_state_root
+    )
+    monkeypatch.setattr(
+        planning_options, "_planning_options_transaction", capture_artifact_root
+    )
+
+    assert run_wf_select_option(_args(supplied_root, "D-001", "O-002")) == 0
+
+    assert len(resolver_calls) == 1
+    assert state_roots == [original_root, original_root]
+    assert artifact_roots == [original_root]
+    assert _load_state(original_root)["planningOptions"]["option"] == "O-002"
+    assert _load_state(redirected_root).get("planningOptions") is None
+    redirected_artifact = json.loads(
+        (redirected_root / ".workflow" / "artifacts" / "planning-options.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert redirected_artifact["decisions"][0]["selected_option_id"] is None
 
 
 def test_marker_hash_reuses_a_multi_decision_artifact_for_each_decision(

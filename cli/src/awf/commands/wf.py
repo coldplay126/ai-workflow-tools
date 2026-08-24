@@ -646,14 +646,15 @@ def run_wf_select_option(args: argparse.Namespace) -> int:
             args.actor,
         )
         with planning_option_selection_transaction(root, canonical=True) as (_, directory_fd):
-            state = load_workflow_state(root)
+            state = load_workflow_state(root, canonical=True)
             if _selection_state_is_blocked(state):
                 raise ValueError("selection state is blocked")
             selection = _select_planning_option_in_transaction(
                 directory_fd,
                 *requested,
             )
-            pending = _reconciliation_pending(directory_fd, selection.current_hash)
+            validated_artifact = load_planning_options(root)
+            pending = _reconciliation_pending(directory_fd, validated_artifact)
             if pending:
                 _, action = apply_planning_option_selection(
                     root,
