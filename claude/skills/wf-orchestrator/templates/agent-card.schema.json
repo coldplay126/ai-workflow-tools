@@ -105,6 +105,25 @@
             }
           }
         },
+        "database": {
+          "type": "object",
+          "description": "Signal-gated database validation inputs. Paths are relative to .workflow/.",
+          "required": [
+            "stage",
+            "profile_artifact",
+            "decision_artifact",
+            "evidence_artifact",
+            "production_schema_required"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "stage": { "enum": ["plan", "verify", "test"] },
+            "profile_artifact": { "type": "string" },
+            "decision_artifact": { "type": "string" },
+            "evidence_artifact": { "type": "string" },
+            "production_schema_required": { "const": true }
+          }
+        },
         "optional_context": {
           "type": "array",
           "items": {
@@ -130,7 +149,11 @@
               "key": { "type": "string" },
               "path": { "type": "string" },
               "format": { "enum": ["markdown", "json"] },
-              "required": { "type": "boolean", "default": true }
+              "required": { "type": "boolean", "default": true },
+              "required_when_database_signal": {
+                "type": "boolean",
+                "default": false
+              }
             }
           }
         },
@@ -153,6 +176,25 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Human-readable conditions. All must be true for gate to pass."
+        },
+        "database_conditions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "database.signal",
+              "database.risk_class",
+              "database.decision",
+              "database.production_schema",
+              "database.equivalence",
+              "database.integrity",
+              "database.query_plan",
+              "database.migration",
+              "database.rollback",
+              "database.local_test"
+            ]
+          },
+          "description": "Mandatory machine-evaluated database conditions when a database signal is present."
         },
         "on_pass": {
           "type": "object",

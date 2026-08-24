@@ -1,6 +1,6 @@
 {
   "name": "phase-verify",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Verifies implementation scope (closed-system check) and spec compliance. Detects scope violations, unimplemented requirements, and code quality issues.",
 
   "agent": {
@@ -44,12 +44,20 @@
     "optional_context": [
       { "key": "impl_log", "path": "artifacts/impl-log.md" },
       { "key": "git_diff", "path": null, "description": "git diff <base>...HEAD — generated at runtime by orchestrator" }
-    ]
+    ],
+    "database": {
+      "stage": "verify",
+      "profile_artifact": "manifest.json",
+      "decision_artifact": "artifacts/database-decision.json",
+      "evidence_artifact": "artifacts/database-validation-evidence.json",
+      "production_schema_required": true
+    }
   },
 
   "output": {
     "artifacts": [
-      { "key": "verification_report", "path": "artifacts/verification-report.md", "format": "markdown", "required": true }
+      { "key": "verification_report", "path": "artifacts/verification-report.md", "format": "markdown", "required": true },
+      { "key": "database_validation_evidence", "path": "artifacts/database-validation-evidence.json", "format": "json", "required": false, "required_when_database_signal": true }
     ],
     "structured_result": {
       "conclusion": "PASS|FAIL",
@@ -84,6 +92,14 @@
       "compliance.percentage >= 90",
       "quality.critical == 0",
       "REVIEW_CONFLICT count == 0 (when multi-LLM)"
+    ],
+    "database_conditions": [
+      "database.production_schema",
+      "database.equivalence",
+      "database.integrity",
+      "database.query_plan",
+      "database.migration",
+      "database.rollback"
     ],
     "on_pass": { "next_phase": "test" },
     "on_fail": {

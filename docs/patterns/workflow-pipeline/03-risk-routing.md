@@ -32,6 +32,20 @@ flowchart TD
 
 고위험 키워드 목록 및 길이 임계값은 reference 문서를 참조한다.
 
+### Database signal routing
+
+plan artifacts or planned paths that signal a database change take the
+`high_risk` route even when the concept-text classifier selected a lower class.
+The route is evidence-gated, not prose-gated: plan creates the selected
+comparative decision and current production schema evidence, verify records
+equivalence/integrity/query-plan/migration/rollback evidence, and test records
+local-test evidence or its narrow waiver.
+
+Each affected phase runs `awf wf db-check --stage <plan|verify|test> --json`
+immediately before its ordinary gate. `not_applicable` preserves the non-DB
+route; a detected signal without current validated evidence fails closed and
+uses the phase card's existing failure route.
+
 ---
 
 ## 2. 위험 비례 투자

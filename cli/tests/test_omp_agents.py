@@ -4,8 +4,10 @@ import json
 from pathlib import Path
 
 from awf.cli import main
-from awf.core.omp_agents import sync_omp_agents
+from awf.core.omp_agents import compile_claude_agent, sync_omp_agents
 
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 def _write_claude_agent(path: Path, *, name: str = "implementer") -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -141,3 +143,12 @@ def test_agents_sync_omp_cli_supports_dry_run_json(tmp_path: Path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["created"] == ["worker.md"]
     assert not (tmp_path / ".omp").exists()
+
+
+def test_spec_writer_ask_capability_survives_omp_agent_compilation() -> None:
+    source = REPO_ROOT / "claude" / "agents" / "spec-writer.md"
+
+    name, generated = compile_claude_agent(source)
+
+    assert name == "spec-writer"
+    assert "tools: read, grep, glob, edit, write, bash, ask" in generated

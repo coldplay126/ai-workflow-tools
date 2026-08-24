@@ -13,6 +13,23 @@
 - plan.md의 각 단계에 예상 변경 파일과 영향 범위 포함
 - 기존 코드베이스의 패턴과 컨벤션을 따를 것
 
+DB signal이 있는 계획은
+`.workflow/artifacts/database-decision.json`을 함께 작성한다. `maintain` baseline을
+포함한 2개 또는 3개의 materially different candidate를 비교하고, selected option,
+equivalence plan, integrity plan, read/write cost, operational/transition risk,
+rollback 또는 exit를 기록한다. query, index, column, constraint, ERD, normalize,
+denormalize 중 실제 변경 surface만 기록한다. index는 명시적으로 근거를 갖춘
+physical-design 선택일 때만 포함한다.
+
+production schema는 DB signal에서 mandatory이며
+`.workflow/artifacts/database-validation-evidence.json`은 `awf wf db-check`가
+검증한 결과만 참조한다. Prose is not a substitute for machine-validated database
+evidence. DB driver나 masking을 제공한다고 가정하거나 약속하지 않는다.
+
+AskUserQuestion은 materially different candidate 사이에서 요구사항과 프로젝트
+관례만으로 선택할 수 없을 때만 사용한다. 단순 확인이나 이미 결정된 제약에는
+질문하지 않는다.
+
 이전 턴에 리뷰어 피드백이 있으면, 해당 이슈를 우선 해결하세요.
 
 카테고리: sw_spec_gap, sw_plan_gap, sw_ambiguity, sw_dependency

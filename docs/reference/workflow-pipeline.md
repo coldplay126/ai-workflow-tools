@@ -165,7 +165,53 @@ pattern 문서의 불변식/파생 규칙이 참조하는 구체적 수치와 �
 
 ---
 
-## 6. 에러 유형 상세
+## 6. Database validation route
+
+The route is signal-gated: a workflow without a detected database change reports
+`not_applicable`; a detected change must pass its stage-specific checks before
+the enclosing gate can pass. The exact operator sequence is:
+
+```bash
+awf wf db-check --stage plan --json
+awf wf gate plan
+```
+
+```bash
+awf wf db-check --stage verify --json
+awf wf gate verify
+```
+
+```bash
+awf wf db-check --stage test --json
+awf wf gate test
+```
+
+| Stage | Required database conditions when signaled |
+|-------|--------------------------------------------|
+| plan | signal classification, high-risk route, selected comparative decision, current production schema |
+| verify | production schema, equivalence, integrity, query plan, migration, rollback |
+| test | production schema and local test, or a recorded waiver for the missing local test command |
+
+`database-decision.json` contains two or three materially different candidates,
+including a `maintain` baseline. Each candidate documents equivalence and
+integrity plans, operational and transition risk, read/write cost, and rollback
+or exit. The decision names only the relevant change surfaces: query, index,
+column, constraint, ERD, normalize, or denormalize.
+
+Production schema evidence is mandatory. Use a same-engine local environment
+for DDL and planner work; DuckDB may support profiling or equivalence analysis
+but cannot stand in for same-engine evidence. A project-specific replica sample
+requires explicit opt-in. raw primary rows are prohibited, and the test result
+must state that its rows are masked. A waiver applies only to the absence of a
+local test command and requires a decision reason, approver, and timestamp.
+
+The CLI validates sanitized JSON supplied by project commands. It does not
+implement a database driver, masking, or replica provisioning.
+
+---
+
+## 7. 에러 유형 상세
+
 
 | 에러 유형 | 복구 가능 | 복구 동작 | backoff (초) | 판별 키워드 |
 |----------|----------|----------|-------------|-----------|
@@ -180,7 +226,7 @@ pattern 문서의 불변식/파생 규칙이 참조하는 구체적 수치와 �
 
 ---
 
-## 7. 상태 디렉토리 구조
+## 8. 상태 디렉토리 구조
 
 ```
 .workflow/
@@ -205,6 +251,8 @@ pattern 문서의 불변식/파생 규칙이 참조하는 구체적 수치와 �
 │   ├── impl-log.md
 │   ├── verification-report.md
 │   ├── test-report.md
+│   ├── database-decision.json
+│   ├── database-validation-evidence.json
 │   └── confirmation.json
 └── tmp/
 ```
@@ -224,7 +272,7 @@ pattern 문서의 불변식/파생 규칙이 참조하는 구체적 수치와 �
 
 ---
 
-## allowed-files.json 그래프 확장 (`awf wf expand-scope`)
+## 9. allowed-files.json 그래프 확장 (`awf wf expand-scope`)
 
 `allowed-files.json`은 plan SKILL이 `tasks.md`에서 추출한 `planned_files` 목록이다. LLM이 직접 만들기 때문에 dependent / dependency 파일이 누락되어 G5 SCOPE_VIOLATION false positive가 자주 발생한다.
 
@@ -256,7 +304,7 @@ awf wf expand-scope --dry-run --json
 - `expanded_files`: 정렬·중복 제거된 추가 경로 목록
 - `graph_expansion`: 사용된 direction/depth, 항목별 사유(`dependent_of:X` / `import_of:X`), planned_files coverage 진단
 
-## G5 결정론적 스코프 검증 (`awf wf scope-check`)
+## 10. G5 결정론적 스코프 검증 (`awf wf scope-check`)
 
 verify SKILL은 `awf wf scope-check`를 호출해 결정론적으로 SCOPE_VIOLATION을 판정한다. LLM이 git diff와 allowed-files를 직접 비교하지 않는다.
 

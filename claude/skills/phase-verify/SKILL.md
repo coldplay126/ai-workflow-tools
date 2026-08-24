@@ -1,6 +1,6 @@
 ---
 name: phase-verify
-version: 1.1.0
+version: 1.2.0
 description: "Phase 5: 검증. 스코프 + spec 준수 검증 및 G5 게이트."
 type: workflow-phase
 phase: verify
@@ -63,6 +63,19 @@ awf wf scope-check --json
 `--no-expanded` 플래그는 expanded_files를 무시하고 legacy 동작(planned_files만 비교)으로 fallback합니다. expanded 영역을 의도적으로 좁게 가두려는 정책에서만 사용하세요.
 
 위반이 있으면 `verification-report.md`의 "스코프 검증" 표에 CRITICAL로 기록하고, 각 행에 `awf wf scope-check`의 reason을 그대로 인용합니다.
+
+### 2.5 데이터베이스 evidence 검증
+
+DB 신호가 있으면 G5 전에 `awf wf db-check --stage verify --json`을 실행한다.
+이 단계는 plan stage의 current production schema hash와 같은 schema를
+확인하고, selected option에 대한 equivalence, integrity, query plan,
+migration, rollback 상태를 검증한다. 문서의 주장이나 verification-report.md의
+요약은 `.workflow/artifacts/database-validation-evidence.json`을 대신할 수 없다.
+
+DDL과 planner 확인은 production engine과 같은 engine의 local 환경에서 수행한다.
+DuckDB는 profiling 또는 equivalence 분석에 사용할 수 있지만 same-engine DDL/planner
+검증을 대신하지 않는다. DB driver, 복제본 생성, masking은 AWF가 구현하는 기능이
+아니며 project-provided command가 책임진다.
 
 ### 3. Spec 준수 검증 (spec-verifier 에이전트, fork context)
 
@@ -145,12 +158,23 @@ spec.md의 각 acceptance scenario에 대해:
 - [ ] Spec 준수율 >= 90% (Codex 병용 시 양쪽 평균)
 - [ ] 코드 품질 CRITICAL 0건
 - [ ] REVIEW_CONFLICT 0건 (Codex 병용 시)
+- [ ] DB 신호 시 production schema, equivalence, integrity, query plan, migration, rollback evidence 통과
 
+```bash
+awf wf db-check --stage verify --json
+awf wf gate verify
+```
 **G5 통과 시:**
 - state.json: `phases.verify: completed`, `gates.G5.passed: true`, `currentPhase: "test"`
 - 출력: `✓ G5 게이트 통과`
 
 **G5 실패 — 분기 결정 트리:**
+
+`db-check` exit `1`은 G5를 평가하지 않는다. decision/profile/production schema
+blocker 또는 stale evidence는 `plan`으로 보내 계획 evidence를 새로 만들고,
+equivalence, integrity, query plan, migration, rollback failure는 `impl`로 보내
+구현을 고친다. exit `2`는 command 또는 환경 설정을 운영자가 고칠 때까지 verify를
+중단한다.
 
 ```
 SCOPE_VIOLATION 존재?
@@ -168,7 +192,7 @@ Coverage gap?
     state: currentPhase → "plan"
 ```
 
-`phases.verify.retries += 1` 후 해당 phase로 회귀.
+`db-check`가 통과한 뒤 G5가 실패하면 `phases.verify.retries += 1` 후 해당 phase로 회귀.
 
 ## 주의사항
 

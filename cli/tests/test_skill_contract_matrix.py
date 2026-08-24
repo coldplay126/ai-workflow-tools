@@ -590,6 +590,104 @@ def test_phase_cards_match_state_machine_skill_metadata_and_routes() -> None:
         assert set(card["capabilities"]["execution_modes"]) == expected["modes"]
 
 
+DATABASE_STAGE_CONTRACTS = {
+    "plan": {
+        "conditions": (
+            "database.signal",
+            "database.risk_class",
+            "database.decision",
+            "database.production_schema",
+        ),
+        "decision_artifact": True,
+    },
+    "verify": {
+        "conditions": (
+            "database.production_schema",
+            "database.equivalence",
+            "database.integrity",
+            "database.query_plan",
+            "database.migration",
+            "database.rollback",
+        ),
+        "decision_artifact": False,
+    },
+    "test": {
+        "conditions": ("database.production_schema", "database.local_test"),
+        "decision_artifact": False,
+    },
+}
+
+
+def test_database_cards_declare_typed_artifacts_and_mandatory_conditions() -> None:
+    schema = json.loads((AGENT_CARD_ROOT / "agent-card.schema.json").read_text())
+    database_schema = schema["properties"]["input"]["properties"]["database"]
+    assert database_schema["required"] == [
+        "stage",
+        "profile_artifact",
+        "decision_artifact",
+        "evidence_artifact",
+        "production_schema_required",
+    ]
+    assert database_schema["properties"]["stage"]["enum"] == ["plan", "verify", "test"]
+    assert database_schema["properties"]["production_schema_required"]["const"] is True
+
+    artifact_schema = schema["properties"]["output"]["properties"]["artifacts"]["items"]
+    assert artifact_schema["properties"]["required_when_database_signal"] == {
+        "type": "boolean",
+        "default": False,
+    }
+
+    condition_schema = schema["properties"]["gate"]["properties"]["database_conditions"]
+    assert condition_schema["items"]["enum"] == [
+        "database.signal",
+        "database.risk_class",
+        "database.decision",
+        "database.production_schema",
+        "database.equivalence",
+        "database.integrity",
+        "database.query_plan",
+        "database.migration",
+        "database.rollback",
+        "database.local_test",
+    ]
+
+    for phase, expected in DATABASE_STAGE_CONTRACTS.items():
+        card = json.loads(
+            (AGENT_CARD_ROOT / "agent-cards" / f"{phase}.json").read_text()
+        )
+        database_input = card["input"]["database"]
+        assert database_input["stage"] == phase
+        assert database_input["profile_artifact"] == "manifest.json"
+        assert database_input["decision_artifact"] == "artifacts/database-decision.json"
+        assert (
+            database_input["evidence_artifact"]
+            == "artifacts/database-validation-evidence.json"
+        )
+        assert database_input["production_schema_required"] is True
+        assert tuple(card["gate"]["database_conditions"]) == expected["conditions"]
+
+        database_artifacts = {
+            artifact["key"]: artifact
+            for artifact in card["output"]["artifacts"]
+            if artifact["key"].startswith("database_")
+        }
+        assert database_artifacts["database_validation_evidence"] == {
+            "key": "database_validation_evidence",
+            "path": "artifacts/database-validation-evidence.json",
+            "format": "json",
+            "required": False,
+            "required_when_database_signal": True,
+        }
+        if expected["decision_artifact"]:
+            assert database_artifacts["database_decision"] == {
+                "key": "database_decision",
+                "path": "artifacts/database-decision.json",
+                "format": "json",
+                "required": False,
+                "required_when_database_signal": True,
+            }
+
+
 OUTCOME_TOKENS = {
     "analysis": ("allow", "dry_run_only"),
     "multi-agent": ("PASS", "FAIL", "ESCALATE"),

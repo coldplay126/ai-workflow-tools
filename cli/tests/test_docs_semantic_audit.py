@@ -1256,3 +1256,77 @@ def test_protected_index_entry_docs_define_supported_stage_zero_modes() -> None:
         prose = " ".join(path.read_text(encoding="utf-8").lower().split())
         for requirement in required_prose:
             assert requirement in prose
+
+
+def test_database_workflow_docs_define_evidence_and_safety_policy() -> None:
+    phase_skills = {
+        "plan": REPO_ROOT / "claude" / "skills" / "phase-plan" / "SKILL.md",
+        "verify": REPO_ROOT / "claude" / "skills" / "phase-verify" / "SKILL.md",
+        "test": REPO_ROOT / "claude" / "skills" / "phase-test" / "SKILL.md",
+    }
+    for stage, path in phase_skills.items():
+        assert (
+            f"```bash\nawf wf db-check --stage {stage} --json\nawf wf gate {stage}\n```"
+            in path.read_text(encoding="utf-8")
+        )
+
+    policy_paths = (
+        REPO_ROOT / "docs" / "reference" / "workflow-pipeline.md",
+        CLI_README,
+        REPO_ROOT / "CHANGELOG.md",
+    )
+    required_policy = (
+        "production schema",
+        "same-engine local",
+        "DuckDB",
+        "project-specific replica",
+        "raw primary rows",
+        "waiver",
+    )
+    for path in policy_paths:
+        prose = path.read_text(encoding="utf-8")
+        for requirement in required_policy:
+            assert requirement in prose, f"{path}: missing {requirement}"
+        assert re.search(r"auto[- ]?index", prose, re.IGNORECASE) is None
+
+
+def test_database_planning_contract_compares_options_without_index_default() -> None:
+    plan_skill = (
+        REPO_ROOT / "claude" / "skills" / "phase-plan" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    required_contract = (
+        "정확히 2개 또는 3개",
+        "`maintain` baseline",
+        "equivalence_plan",
+        "integrity_plan",
+        "`query`",
+        "`index`",
+        "`column`",
+        "`constraint`",
+        "`erd`",
+        "`normalize`",
+        "`denormalize`",
+        "hard gate",
+    )
+    for requirement in required_contract:
+        assert requirement in plan_skill, f"missing planning requirement: {requirement}"
+    assert re.search(r"auto[- ]?index", plan_skill, re.IGNORECASE) is None
+
+    writer = (REPO_ROOT / "claude" / "agents" / "spec-writer.md").read_text(
+        encoding="utf-8"
+    )
+    assert "tools: Read, Grep, Glob, Edit, Write, Bash, AskUserQuestion" in writer
+    assert "material" in writer
+
+
+def test_database_agents_require_machine_validated_evidence() -> None:
+    agent_paths = (
+        REPO_ROOT / "claude" / "agents" / "spec-writer.md",
+        REPO_ROOT / "claude" / "agents" / "spec-verifier.md",
+        REPO_ROOT / "claude" / "agents" / "happy-path-tester.md",
+        REPO_ROOT / "claude" / "skills" / "multi-agent" / "protocols" / "spec_writer.md",
+    )
+    for path in agent_paths:
+        prose = path.read_text(encoding="utf-8")
+        assert "database-validation-evidence.json" in prose
+        assert "prose is not a substitute" in prose.lower()
