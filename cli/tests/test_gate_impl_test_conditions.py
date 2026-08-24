@@ -354,3 +354,6 @@ def test_database_local_test_valid_waiver_passes_g6(tmp_path: Path) -> None:
 
     assert passed, checks
     assert _checks_by_condition(checks)["database.local_test"]["passed"] is True
+    summary = _checks_by_condition(checks)["database.local_test"]["database_summary"]
+    assert summary["waiver_present"] == "true"
+    assert "waiver_reason" not in summary

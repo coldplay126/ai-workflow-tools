@@ -323,11 +323,6 @@ def render_review_report(
 
 
 _SAFE_DATABASE_REPORT_VALUE = re.compile(r"^[A-Za-z0-9._:+-]{1,128}$")
-_UNSAFE_DATABASE_WAIVER_TEXT = re.compile(
-    r"\b(?:argv|stdout|env(?:ironment)?|ddl|create\s+table|alter\s+table|"
-    r"insert\s+into|select\b|sample|raw\s+(?:data|row)|password|token|secret|dsn|url)\b",
-    re.IGNORECASE,
-)
 
 
 def _database_gate_report_detail(check: dict[str, Any]) -> str:
@@ -354,15 +349,11 @@ def _database_gate_report_detail(check: dict[str, Any]) -> str:
         if isinstance(value, str) and _SAFE_DATABASE_REPORT_VALUE.fullmatch(value):
             detail.append(f"{key}={value}")
 
-    waiver_reason = summary.get("waiver_reason")
-    if isinstance(waiver_reason, str):
-        normalized_reason = " ".join(waiver_reason.split())
-        if (
-            normalized_reason
-            and len(normalized_reason) <= 240
-            and _UNSAFE_DATABASE_WAIVER_TEXT.search(normalized_reason) is None
-        ):
-            detail.append(f"waiver_reason={normalized_reason}")
+    if (
+        summary.get("waiver_present") in {True, "true"}
+        or isinstance(summary.get("waiver_reason"), str)
+    ):
+        detail.append("waiver_present=true")
     return ",".join(detail) or "status=unavailable"
 
 

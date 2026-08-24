@@ -1812,7 +1812,7 @@ def _database_gate_evaluation(
     schema: Optional[dict[str, Any]] = None,
     decision: Optional[DatabaseDecision] = None,
     local_target: Optional[str] = None,
-    waiver_reason: Optional[str] = None,
+    waiver_present: bool = False,
 ) -> dict[str, Any]:
     evaluation: dict[str, Any] = {
         "condition": condition,
@@ -1835,8 +1835,8 @@ def _database_gate_evaluation(
         summary["selected_option"] = decision.selected_option_id
     if local_target is not None:
         summary["local_target"] = local_target
-    if waiver_reason is not None:
-        summary["waiver_reason"] = waiver_reason
+    if waiver_present:
+        summary["waiver_present"] = "true"
     evaluation["database_summary"] = summary
     return evaluation
 
@@ -1978,7 +1978,6 @@ def evaluate_database_gate(repo_root: Path, stage: str) -> list[dict[str, Any]]:
         else None
     )
     if test is not None and test["status"] == "waived":
-        waiver = test["waiver"]
         return [
             _database_gate_evaluation(
                 "database.production_schema",
@@ -1994,7 +1993,7 @@ def evaluate_database_gate(repo_root: Path, stage: str) -> list[dict[str, Any]]:
                 stage="test",
                 status="waived",
                 decision=decision,
-                waiver_reason=waiver["reason"],
+                waiver_present=True,
             ),
         ]
 
