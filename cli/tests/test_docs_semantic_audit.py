@@ -1265,12 +1265,14 @@ DATABASE_GATE_COMMANDS = {
         "awf wf gate plan --repo-root . --json",
     ),
     "verify": (
+        ': "${VERIFY_RESULT:?set from the result path emitted by awf wf next}"',
         "awf wf db-check --stage verify --repo-root . --json",
-        "awf wf gate verify --repo-root . --result-file .workflow/tmp/verify-result.json --json",
+        'awf wf gate verify --repo-root . --result-file "$VERIFY_RESULT" --json',
     ),
     "test": (
+        ': "${TEST_RESULT:?set from the result path emitted by awf wf next}"',
         "awf wf db-check --stage test --repo-root . --json",
-        "awf wf gate test --repo-root . --result-file .workflow/tmp/test-result.json --json",
+        'awf wf gate test --repo-root . --result-file "$TEST_RESULT" --json',
     ),
 }
 
@@ -1287,9 +1289,30 @@ def test_database_workflow_docs_define_evidence_and_safety_policy() -> None:
         assert f"```bash\n{chr(10).join(commands)}\n```" in path.read_text(
             encoding="utf-8"
         )
+        result_variable = {
+            "verify": "VERIFY_RESULT",
+            "test": "TEST_RESULT",
+        }.get(stage)
+        result_path = (
+            f".workflow/tmp/{stage}-result-from-next.json"
+            if result_variable is not None
+            else None
+        )
         for command in commands:
-            parser.parse_args(_argv_from_displayed_command(command))
-            assert not any(marker in command for marker in ("<", ">", "|", ";", "$"))
+            assert not any(marker in command for marker in ("<", ">", "|", ";"))
+            if command.startswith(": "):
+                assert command == (
+                    f': "${{{result_variable}:?set from the result path emitted by awf wf next}}"'
+                )
+                continue
+            expanded = (
+                command.replace(f"${result_variable}", result_path)
+                if result_variable is not None and result_path is not None
+                else command
+            )
+            parsed = parser.parse_args(_argv_from_displayed_command(expanded))
+            if result_path is not None and "gate" in command:
+                assert parsed.result_file == result_path
 
     reference_path = REPO_ROOT / "docs" / "reference" / "workflow-pipeline.md"
     reference_block = "```bash\n" + "\n\n".join(
@@ -1297,6 +1320,11 @@ def test_database_workflow_docs_define_evidence_and_safety_policy() -> None:
         for stage in ("plan", "verify", "test")
     ) + "\n```"
     assert reference_block in reference_path.read_text(encoding="utf-8")
+
+    readme = CLI_README.read_text(encoding="utf-8")
+    assert "result: /actual/result/path" in readme
+    assert "`VERIFY_RESULT`" in readme
+    assert "`TEST_RESULT`" in readme
 
     policy_paths = (
         reference_path,

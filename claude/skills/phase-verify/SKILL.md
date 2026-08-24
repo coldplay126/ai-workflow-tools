@@ -162,9 +162,13 @@ spec.md의 각 acceptance scenario에 대해:
 - [ ] REVIEW_CONFLICT 0건 (Codex 병용 시)
 - [ ] DB 신호 시 production schema, equivalence, integrity, query plan, migration, rollback evidence 통과
 
+`awf wf next`가 stderr에 출력한 `result: /actual/result/path`의 실제 경로를
+`VERIFY_RESULT`에 설정한 뒤 다음 block을 실행한다.
+
 ```bash
+: "${VERIFY_RESULT:?set from the result path emitted by awf wf next}"
 awf wf db-check --stage verify --repo-root . --json
-awf wf gate verify --repo-root . --result-file .workflow/tmp/verify-result.json --json
+awf wf gate verify --repo-root . --result-file "$VERIFY_RESULT" --json
 ```
 **G5 통과 시:**
 - state.json: `phases.verify: completed`, `gates.G5.passed: true`, `currentPhase: "test"`

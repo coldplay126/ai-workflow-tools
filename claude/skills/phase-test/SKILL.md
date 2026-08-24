@@ -154,9 +154,13 @@ Production primary is never a verify/test benchmark or executable-query target. 
 - [ ] 수동 항목 있으면: 사용자에게 서명 요청
 - [ ] DB 신호 시 production schema와 local test evidence 통과 또는 유효한 waiver
 
+`awf wf next`가 stderr에 출력한 `result: /actual/result/path`의 실제 경로를
+`TEST_RESULT`에 설정한 뒤 다음 block을 실행한다.
+
 ```bash
+: "${TEST_RESULT:?set from the result path emitted by awf wf next}"
 awf wf db-check --stage test --repo-root . --json
-awf wf gate test --repo-root . --result-file .workflow/tmp/test-result.json --json
+awf wf gate test --repo-root . --result-file "$TEST_RESULT" --json
 ```
 **G6 — 수동 항목 처리:**
 수동 테스트 항목이 있는 경우:

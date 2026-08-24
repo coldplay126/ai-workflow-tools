@@ -171,15 +171,21 @@ The route is signal-gated: a workflow without a detected database change reports
 `not_applicable`; a detected change must pass its stage-specific checks before
 the enclosing gate can pass. The exact operator sequence is:
 
+`awf wf next`는 stderr에 `result: /actual/result/path`를 출력한다. verify/test의
+operator 또는 runtime은 그 실제 경로를 각각 `VERIFY_RESULT` 또는 `TEST_RESULT`에
+설정한 뒤 다음 명령을 실행한다.
+
 ```bash
 awf wf db-check --stage plan --repo-root . --json
 awf wf gate plan --repo-root . --json
 
+: "${VERIFY_RESULT:?set from the result path emitted by awf wf next}"
 awf wf db-check --stage verify --repo-root . --json
-awf wf gate verify --repo-root . --result-file .workflow/tmp/verify-result.json --json
+awf wf gate verify --repo-root . --result-file "$VERIFY_RESULT" --json
 
+: "${TEST_RESULT:?set from the result path emitted by awf wf next}"
 awf wf db-check --stage test --repo-root . --json
-awf wf gate test --repo-root . --result-file .workflow/tmp/test-result.json --json
+awf wf gate test --repo-root . --result-file "$TEST_RESULT" --json
 ```
 
 | Stage | Required database conditions when signaled |
