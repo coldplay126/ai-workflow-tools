@@ -1328,6 +1328,106 @@ def test_query_only_verification_allows_not_applicable_schema_migration(
 
     assert run_database_check(tmp_path, "verify").status == "pass"
 
+@pytest.mark.parametrize(
+    ("concept", "surface", "reason"),
+    [
+        ("Apply normalization to the account schema", "normalize", "text:normalization"),
+        (
+            "Apply denormalization to the account summary",
+            "denormalize",
+            "text:denormalization",
+        ),
+        ("Update the ERD for audit records", "erd", "text:erd"),
+        ("Add a foreign key to the audit actor", "constraint", "text:foreign key"),
+        ("Replace the primary key for the audit record", "constraint", "text:primary key"),
+        (
+            "Add a unique constraint to the audit actor",
+            "constraint",
+            "text:unique constraint",
+        ),
+        ("Partition the audit event ledger", "partition", "text:partition"),
+    ],
+    ids=[
+        "normalization",
+        "denormalization",
+        "erd",
+        "foreign-key",
+        "primary-key",
+        "unique-constraint",
+        "partition",
+    ],
+)
+def test_strong_structural_text_signal_requires_its_matching_surface(
+    tmp_path: Path,
+    concept: str,
+    surface: str,
+    reason: str,
+) -> None:
+    write_workflow_artifacts(tmp_path, concept=concept)
+    assert reason in detect_database_signal(tmp_path).reasons
+    write_database_decision(tmp_path, database_decision(change_surfaces=["query"]))
+
+    with pytest.raises(DatabaseValidationError) as raised:
+        load_database_decision(tmp_path)
+
+    assert raised.value.code == "decision_invalid"
+    decision = database_decision(change_surfaces=[surface])
+    if surface in {"normalize", "denormalize"}:
+        candidate = {
+            **decision["candidates"][1],
+            "id": f"{surface}-option",
+            "kind": surface,
+        }
+        if surface == "denormalize":
+            candidate["denormalization_assessment"] = {
+                "source_of_truth": "The audit ledger remains authoritative.",
+                "consistency_window": "Summary writes converge within one minute.",
+                "reconciliation": "A scheduled job compares summary and ledger.",
+                "rollback": "Stop summary writes and rebuild from the ledger.",
+            }
+        decision["candidates"] = [decision["candidates"][0], candidate]
+        decision["recommended_option_id"] = candidate["id"]
+        decision["selected_option_id"] = candidate["id"]
+    write_database_decision(tmp_path, decision)
+
+    assert load_database_decision(tmp_path).change_surfaces == (surface,)
+
+
+@pytest.mark.parametrize(
+    ("planned_path", "category"),
+    [
+        ("src/database/models/audit.py", "model"),
+        ("src/database/entities/audit.py", "entity"),
+        ("src/database/schemas/audit.py", "schema"),
+        ("src/database/schema.prisma", "prisma"),
+        ("src/database/migrations/001_audit.sql", "migration"),
+    ],
+    ids=["model", "entity", "schema", "prisma", "migration"],
+)
+def test_structural_database_path_requires_a_structural_surface(
+    tmp_path: Path,
+    planned_path: str,
+    category: str,
+) -> None:
+    write_workflow_artifacts(
+        tmp_path,
+        concept="Coordinate the application release",
+        allowed_files=[planned_path],
+    )
+    assert any(
+        reason.startswith(f"path:{category}:")
+        for reason in detect_database_signal(tmp_path).reasons
+    )
+    write_database_decision(tmp_path, database_decision(change_surfaces=["query"]))
+
+    with pytest.raises(DatabaseValidationError) as raised:
+        load_database_decision(tmp_path)
+
+    assert raised.value.code == "decision_invalid"
+    write_database_decision(tmp_path, database_decision(change_surfaces=["index"]))
+
+    assert load_database_decision(tmp_path).change_surfaces == ("index",)
+
 
 @pytest.mark.parametrize("schema_version", [True, 1.0, "1"])
 def test_schema_version_requires_integer_one_everywhere(

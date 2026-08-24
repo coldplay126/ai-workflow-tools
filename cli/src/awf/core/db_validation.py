@@ -219,10 +219,10 @@ def _database_path_reason(path: str) -> str:
                     "index",
                     "column",
                     "schema",
-                    "database",
-                    "repository",
                     "entity",
                     "model",
+                    "database",
+                    "repository",
                 )
                 if candidate in categories
             ),
@@ -1096,12 +1096,27 @@ def _validate_decision_signal_surfaces(
 
     signal_reasons = set(signal.reasons)
     requires_path_structural_surface = any(
-        reason.startswith(("path:migration:", "path:schema:", "path:prisma:"))
+        reason.startswith(
+            (
+                "path:model:",
+                "path:entity:",
+                "path:migration:",
+                "path:schema:",
+                "path:prisma:",
+            )
+        )
         for reason in signal_reasons
     )
     required_surfaces = {
         surface
         for reason, surface in (
+            ("text:normalization", "normalize"),
+            ("text:denormalization", "denormalize"),
+            ("text:erd", "erd"),
+            ("text:foreign key", "constraint"),
+            ("text:primary key", "constraint"),
+            ("text:unique constraint", "constraint"),
+            ("text:partition", "partition"),
             ("text:index", "index"),
             ("text:index_ddl", "index"),
             ("text:column", "column"),
