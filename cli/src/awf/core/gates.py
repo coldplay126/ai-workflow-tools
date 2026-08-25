@@ -7,6 +7,11 @@ from typing import Any, Optional, Tuple
 
 from awf.core.db_validation import evaluate_database_gate
 from awf.core.paths import find_repo_root
+from awf.core.planning_options import (
+    PlanningOptionsError,
+    resolve_planning_options_policy,
+    validate_planning_options_provenance,
+)
 
 
 def _as_list(value: Any) -> list[Any]:
@@ -44,6 +49,85 @@ _SUPPORTED_GATE_CONDITIONS = frozenset(
 )
 _TASK_PATTERN = re.compile(r"^- \[ \] T\d+", re.MULTILINE)
 
+_PLANNING_OPTIONS_CONDITIONS = (
+    "planning_options.artifact",
+    "planning_options.shape",
+    "planning_options.selection",
+    "planning_options.recommendation",
+    "planning_options.materiality",
+    "planning_options.provenance",
+)
+_PLANNING_OPTIONS_ERROR_DETAILS = frozenset(
+    {
+        "artifact_invalid",
+        "artifact_missing",
+        "profile_invalid",
+        "provenance_invalid",
+        "provenance_missing",
+    }
+)
+
+
+def _planning_options_evaluations(
+    passed: bool, detail: str
+) -> list[dict[str, Any]]:
+    return [
+        {"condition": condition, "passed": passed, "detail": detail}
+        for condition in _PLANNING_OPTIONS_CONDITIONS
+    ]
+
+
+def evaluate_planning_options_gate(root: Path) -> Tuple[bool, list[dict[str, Any]]]:
+    """Evaluate the planning-options policy without exposing artifact contents."""
+    try:
+        policy = resolve_planning_options_policy(root)
+    except PlanningOptionsError as exc:
+        detail = (
+            exc.code
+            if exc.code in _PLANNING_OPTIONS_ERROR_DETAILS
+            else "planning_options_invalid"
+        )
+        return False, _planning_options_evaluations(False, detail)
+
+    if policy.required and policy.artifact is None:
+        return False, _planning_options_evaluations(False, "artifact_missing")
+
+    detail = f"status={policy.status}"
+    evaluations = _planning_options_evaluations(True, detail)
+    if policy.status == "selection_required":
+        evaluations[2] = {
+            "condition": "planning_options.selection",
+            "passed": False,
+            "detail": "decision_selection_required",
+        }
+        evaluations[5] = {
+            "condition": "planning_options.provenance",
+            "passed": False,
+            "detail": "selection_required",
+        }
+        return False, evaluations
+
+    if policy.required:
+        try:
+            assert policy.artifact is not None
+            provenance_passed, provenance_detail = validate_planning_options_provenance(
+                root, policy.artifact.artifact_hash
+            )
+        except PlanningOptionsError as exc:
+            provenance_passed = False
+            provenance_detail = (
+                exc.code
+                if exc.code in _PLANNING_OPTIONS_ERROR_DETAILS
+                else "planning_options_invalid"
+            )
+        evaluations[5] = {
+            "condition": "planning_options.provenance",
+            "passed": provenance_passed,
+            "detail": provenance_detail,
+        }
+        return provenance_passed, evaluations
+    return True, evaluations
+
 
 def _extract_fr_ids(text: str) -> set[str]:
     """Extract all FR-NNN identifiers from text."""
@@ -79,6 +163,8 @@ def evaluate_plan_gate(root: Path) -> Tuple[bool, list[dict[str, Any]]]:
         })
 
     if not all(e["passed"] for e in evaluations):
+        _, planning_evaluations = evaluate_planning_options_gate(root)
+        evaluations.extend(planning_evaluations)
         evaluations.extend(evaluate_database_gate(root, "plan"))
         return False, evaluations
 
@@ -93,6 +179,8 @@ def evaluate_plan_gate(root: Path) -> Tuple[bool, list[dict[str, Any]]]:
             "passed": False,
             "detail": f"read_error:{exc}",
         })
+        _, planning_evaluations = evaluate_planning_options_gate(root)
+        evaluations.extend(planning_evaluations)
         evaluations.extend(evaluate_database_gate(root, "plan"))
         return False, evaluations
 
@@ -158,6 +246,8 @@ def evaluate_plan_gate(root: Path) -> Tuple[bool, list[dict[str, Any]]]:
                 "detail": f"path={constitution_path},exists={const_ok}",
             })
 
+    _, planning_evaluations = evaluate_planning_options_gate(root)
+    evaluations.extend(planning_evaluations)
     evaluations.extend(evaluate_database_gate(root, "plan"))
 
     overall = all(e["passed"] for e in evaluations)

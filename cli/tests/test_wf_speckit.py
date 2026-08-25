@@ -20,6 +20,7 @@ from pathlib import Path
 
 from awf.core.db_validation import detect_database_signal, run_database_check
 from awf.core.gates import _extract_fr_ids, _extract_fr_tags, evaluate_plan_gate
+from awf.core.planning_options import seal_planning_options
 from awf.core.state import promote_database_change_to_high_risk
 
 
@@ -103,6 +104,38 @@ def test_004_missing_spec_fails():
         spec_eval = next(e for e in evals if "spec.md" in e["condition"])
         assert not spec_eval["passed"]
 
+
+
+def test_004_required_planning_options_are_checked_after_early_artifact_failure():
+    """Required planning artifact still contributes stable G1 checks on early return."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = _make_project(
+            Path(tmp),
+            plan="plan",
+            tasks="- [ ] T01 task",
+            test_criteria="criteria",
+            manifest={"planning_options": {"required": True}},
+            omit={"spec.md"},
+        )
+
+        passed, evaluations = evaluate_plan_gate(root)
+        planning_checks = {
+            str(item["condition"]): item
+            for item in evaluations
+            if str(item["condition"]).startswith("planning_options.")
+        }
+
+        assert not passed
+        assert set(planning_checks) == {
+            "planning_options.artifact",
+            "planning_options.shape",
+            "planning_options.selection",
+            "planning_options.recommendation",
+            "planning_options.materiality",
+            "planning_options.provenance",
+        }
+        assert planning_checks["planning_options.artifact"]["passed"] is False
+        assert planning_checks["planning_options.artifact"]["detail"] == "artifact_missing"
 
 def test_004_missing_tasks_fails():
     """tasks.md 누락 → G1 FAIL."""
@@ -287,9 +320,164 @@ def test_004_no_manifest_skips_constitution_check():
             test_criteria="# Test",
         )
         passed, evals = evaluate_plan_gate(root)
+        planning_checks = [
+            item for item in evals if item["condition"].startswith("planning_options.")
+        ]
+
         assert passed
         assert not any("constitution" in e["condition"] for e in evals)
+        assert [item["condition"] for item in planning_checks] == [
+            "planning_options.artifact",
+            "planning_options.shape",
+            "planning_options.selection",
+            "planning_options.recommendation",
+            "planning_options.materiality",
+            "planning_options.provenance",
+        ]
+        assert all(item["passed"] for item in planning_checks)
 
+
+
+def test_004_required_planning_options_need_a_current_host_seal() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = _make_project(
+            Path(tmp),
+            spec="# Spec",
+            plan="# Plan",
+            tasks="- [ ] T01 Deliver",
+            test_criteria="# Criteria",
+            constitution="# Constitution",
+            manifest={"planning_options": {"required": True}},
+        )
+        artifacts = root / ".workflow" / "artifacts"
+        (artifacts / "planning-options.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "status": "no_decision_required",
+                    "no_decision_reason": "One safe delivery path is determined.",
+                    "decisions": [],
+                    "selection_history": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        (artifacts / "constitution.md").write_text(
+            "# Constitution", encoding="utf-8"
+        )
+        (artifacts / "allowed-files.json").write_text(
+            "{\"allowed_files\":[]}", encoding="utf-8"
+        )
+
+        passed, evaluations = evaluate_plan_gate(root)
+        assert not passed
+        provenance = _evaluation_by_condition(evaluations)["planning_options.provenance"]
+        assert provenance == {
+            "condition": "planning_options.provenance",
+            "passed": False,
+            "detail": "provenance_missing",
+        }
+
+        seal_planning_options(root)
+        passed, evaluations = evaluate_plan_gate(root)
+        assert passed, evaluations
+
+        (artifacts / "plan.md").write_text("# Regenerated plan", encoding="utf-8")
+        passed, evaluations = evaluate_plan_gate(root)
+        assert not passed
+        assert _evaluation_by_condition(evaluations)["planning_options.provenance"][
+            "detail"
+        ] == "provenance_changed"
+
+
+def test_004_legacy_present_options_also_need_a_current_host_seal() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = _make_project(
+            Path(tmp),
+            spec="# Spec",
+            plan="# Plan",
+            tasks="- [ ] T01 Deliver",
+            test_criteria="# Criteria",
+        )
+        artifacts = root / ".workflow" / "artifacts"
+        (artifacts / "constitution.md").write_text(
+            "# Constitution", encoding="utf-8"
+        )
+        (artifacts / "allowed-files.json").write_text(
+            "{\"allowed_files\":[]}", encoding="utf-8"
+        )
+        (artifacts / "planning-options.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "status": "no_decision_required",
+                    "no_decision_reason": "One safe delivery path is determined.",
+                    "decisions": [],
+                    "selection_history": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        passed, evaluations = evaluate_plan_gate(root)
+        assert not passed
+        assert _evaluation_by_condition(evaluations)["planning_options.provenance"][
+            "detail"
+        ] == "provenance_missing"
+
+        seal_planning_options(root)
+        passed, evaluations = evaluate_plan_gate(root)
+        assert passed, evaluations
+
+
+def test_004_explicit_opt_out_with_present_options_requires_a_current_seal() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = _make_project(
+            Path(tmp),
+            spec="# Spec",
+            plan="# Plan",
+            tasks="- [ ] T01 Deliver",
+            test_criteria="# Criteria",
+            manifest={"planning_options": {"required": False}},
+        )
+        artifacts = root / ".workflow" / "artifacts"
+        (artifacts / "constitution.md").write_text(
+            "# Constitution", encoding="utf-8"
+        )
+        (artifacts / "allowed-files.json").write_text(
+            "{\"allowed_files\":[]}", encoding="utf-8"
+        )
+        (artifacts / "planning-options.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "status": "no_decision_required",
+                    "no_decision_reason": "One safe delivery path is determined.",
+                    "decisions": [],
+                    "selection_history": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        passed, evaluations = evaluate_plan_gate(root)
+        assert not passed
+        assert _evaluation_by_condition(evaluations)["planning_options.provenance"][
+            "detail"
+        ] == "provenance_missing"
+
+        seal_planning_options(root)
+        passed, evaluations = evaluate_plan_gate(root)
+        assert passed, evaluations
+
+        (artifacts / "allowed-files.json").write_text(
+            "{\"allowed_files\":[\"src/new.py\"]}", encoding="utf-8"
+        )
+        passed, evaluations = evaluate_plan_gate(root)
+        assert not passed
+        assert _evaluation_by_condition(evaluations)["planning_options.provenance"][
+            "detail"
+        ] == "provenance_changed"
 
 # ---------------------------------------------------------------------------
 # P0 database evidence: G1 mandatory conditions

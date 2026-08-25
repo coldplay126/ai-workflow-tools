@@ -1,6 +1,6 @@
 ---
 name: phase-plan
-version: 2.2.0
+version: 2.4.0
 description: "Phase 1: 기획. spec-kit 루틴으로 5 산출물 생성 (constitution/spec/plan/tasks/test-criteria) 및 G1 게이트."
 type: workflow-phase
 phase: plan
@@ -49,7 +49,7 @@ awf wf next --phase plan --repo-root . --dry-run --output-format json
 - 반영 완료 후 피드백 파일 삭제
 
 ### 2. concept.md 확인
-`.workflow/concept.md` 읽기. 내용이 부족하면 사용자에게 보충 요청.
+`.workflow/concept.md`를 읽는다. 실행을 막는 필수 사실이 없을 때만 보충을 요청하며, 되돌릴 수 있는 선호나 material하지 않은 선택을 확인하려고 질문하지 않는다.
 
 ### 3. 컨텍스트 수집
 
@@ -284,12 +284,231 @@ Production primary is never a verify/test benchmark or executable-query target. 
 사용한다. plan.md의 서술, command 출력 요약, agent finding은 그 evidence를
 대체하지 않는다.
 
+### 6.3 Planning Options lifecycle
+
+manifest의 `planning_options.required`가 `true`이면
+`.workflow/artifacts/planning-options.json`을 canonical decision artifact로 작성한다.
+이 artifact는 planner의 prose, chat transcript, 또는 worker result가 대신할 수 없다.
+
+- 질문은 요구사항과 프로젝트 관례로 해결할 수 없는 **material** decision에만 만든다.
+  되돌릴 수 있는 선호, 표기, 파일명, 이미 확정된 제약은 decision이나 질문으로 만들지
+  않는다. materiality는 `external_behavior`, `compatibility_migration`, `security_slo`,
+  `scope_delivery_risk`, `lifecycle_reversibility` 축으로 기록한다.
+- 각 decision은 `D-NNN` ID, question, materiality axes, 2개 또는 3개의 서로 다른
+  `O-NNN` option을 가진다. option의 `summary`, `affected_work`, `acceptance_delta`,
+  `work_risks`, `transition_risks`, `rollback_or_exit`는 실질적으로 달라야 한다.
+- recommendation을 option 목록보다 먼저 제시한다. `recommended_option_id`는 첫
+  option을 가리키고, `recommendation_rationale`은 비어 있을 수 없다.
+- material decision이 없으면 `status: "no_decision_required"`와 non-empty
+  `no_decision_reason`, 빈 `decisions`/`selection_history`를 기록한다. 이 경로는
+  사용자 선택 없이 G1으로 진행한다.
+- material decision이 있으면 selected field가 비어 있는
+  `status: "selection_required"` artifact를 기록하고, G1을 통과시키지 않는다.
+  worker는 `recommended_action: "user_decision"` escape를 반환해 parent workflow가
+  plan을 `deciding`으로 전환하게 한다. `hil`을 true로 바꾸거나 worker가 state를
+  직접 mutation하지 않는다.
+
+#### Canonical schema and validation
+
+Write `schema_version: 1` and exactly these top-level fields:
+`schema_version`, `status`, `no_decision_reason`, `decisions`, `selection_history`.
+Every decision has exactly `id`, `question`, `materiality_axes`, `options`,
+`recommended_option_id`, `recommendation_rationale`, `selected_option_id`,
+`selected_by`, `selected_at`. Every option has exactly `id`, `summary`,
+`affected_work`, `acceptance_delta`, `work_risks`, `transition_risks`,
+`rollback_or_exit`. Every history entry has exactly `decision_id`,
+`previous_option_id`, `selected_option_id`, `selected_by`, `selected_at`,
+`source`, and `source` is `cli`.
+
+`no_decision_required` requires a non-empty `no_decision_reason` and empty
+`decisions`/`selection_history`. `selection_required` requires
+`no_decision_reason: null`, at least one decision, and at least one decision
+whose `selected_option_id`/`selected_by`/`selected_at` are all null; any
+selected triple is all-present and must have matching append-only history.
+`selected` requires `no_decision_reason: null`, at least one decision, every
+selected triple all-present, and matching append-only history. The canonical
+loader validates the written artifact before any `user_decision` escape; a
+loader failure is `artifact_invalid`, not an escape.
+
+#### Canonical fixture: no_decision_required
+
+```json
+{
+  "schema_version": 1,
+  "status": "no_decision_required",
+  "no_decision_reason": "Requirements and project conventions determine the implementation.",
+  "decisions": [],
+  "selection_history": []
+}
+```
+
+#### Canonical fixture: selection_required
+
+```json
+{
+  "schema_version": 1,
+  "status": "selection_required",
+  "no_decision_reason": null,
+  "decisions": [
+    {
+      "id": "D-001",
+      "question": "Which compatibility strategy should the API use?",
+      "materiality_axes": ["external_behavior", "compatibility_migration"],
+      "options": [
+        {
+          "id": "O-001",
+          "summary": "Ship a versioned endpoint and preserve the existing endpoint.",
+          "affected_work": ["Add the v2 route and contract tests."],
+          "acceptance_delta": "Existing clients retain their response shape.",
+          "work_risks": ["Two endpoint contracts require temporary maintenance."],
+          "transition_risks": ["Consumers may migrate later than planned."],
+          "rollback_or_exit": "Remove v2 before publishing it."
+        },
+        {
+          "id": "O-002",
+          "summary": "Replace the existing endpoint with the new response contract.",
+          "affected_work": ["Update every client and delete the previous route."],
+          "acceptance_delta": "All clients must use the new response shape.",
+          "work_risks": ["Coordinated client releases are required."],
+          "transition_risks": ["Unmigrated consumers fail at cutover."],
+          "rollback_or_exit": "Restore the prior route from the release branch."
+        }
+      ],
+      "recommended_option_id": "O-001",
+      "recommendation_rationale": "It preserves compatibility while clients migrate deliberately.",
+      "selected_option_id": null,
+      "selected_by": null,
+      "selected_at": null
+    }
+  ],
+  "selection_history": []
+}
+```
+
+#### Canonical fixture: selected
+
+```json
+{
+  "schema_version": 1,
+  "status": "selected",
+  "no_decision_reason": null,
+  "decisions": [
+    {
+      "id": "D-001",
+      "question": "Which compatibility strategy should the API use?",
+      "materiality_axes": ["external_behavior", "compatibility_migration"],
+      "options": [
+        {
+          "id": "O-001",
+          "summary": "Ship a versioned endpoint and preserve the existing endpoint.",
+          "affected_work": ["Add the v2 route and contract tests."],
+          "acceptance_delta": "Existing clients retain their response shape.",
+          "work_risks": ["Two endpoint contracts require temporary maintenance."],
+          "transition_risks": ["Consumers may migrate later than planned."],
+          "rollback_or_exit": "Remove v2 before publishing it."
+        },
+        {
+          "id": "O-002",
+          "summary": "Replace the existing endpoint with the new response contract.",
+          "affected_work": ["Update every client and delete the previous route."],
+          "acceptance_delta": "All clients must use the new response shape.",
+          "work_risks": ["Coordinated client releases are required."],
+          "transition_risks": ["Unmigrated consumers fail at cutover."],
+          "rollback_or_exit": "Restore the prior route from the release branch."
+        }
+      ],
+      "recommended_option_id": "O-001",
+      "recommendation_rationale": "It preserves compatibility while clients migrate deliberately.",
+      "selected_option_id": "O-001",
+      "selected_by": "workflow-owner",
+      "selected_at": "2026-08-24T00:00:00Z"
+    }
+  ],
+  "selection_history": [
+    {
+      "decision_id": "D-001",
+      "previous_option_id": null,
+      "selected_option_id": "O-001",
+      "selected_by": "workflow-owner",
+      "selected_at": "2026-08-24T00:00:00Z",
+      "source": "cli"
+    }
+  ]
+}
+```
+
+#### Planning provenance seal
+
+After a `selected` or `no_decision_required` rerun regenerates exactly
+`constitution.md`, `spec.md`, `plan.md`, `tasks.md`, `test-criteria.md`, and
+`allowed-files.json`, the host writes `.workflow/artifacts/planning-provenance.json`
+before G1. The marker is an exact object with `schema_version: 1`, a lowercase
+64-hex `planning_options_hash`, and `artifacts` containing exactly those six
+filenames mapped to lowercase 64-hex content hashes. A worker does not invent
+or edit this host seal.
+
+`selection_required` cannot seal. `awf wf seal-plan` returns
+`{"status":"blocked","reason":"selection_required"}` and G1 remains blocked.
+Before any seal, G1 reports `provenance_missing`; a malformed/unsafe marker
+reports `provenance_invalid`; a changed option or any of the six regenerated
+artifacts reports `provenance_changed`. On selection change, the host archives
+the six active outputs and active provenance as
+`.stale.<previous_hash[:12]>.<name>`; retries archive recreated outputs again
+instead of overwriting stale evidence. Same-hash `reuse` creates no archive.
+Regenerate the six artifacts and seal again after every changed selection; an
+old seal is deliberately stale.
+
+#### Canonical provenance fixture
+
+```json
+{
+  "schema_version": 1,
+  "planning_options_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "artifacts": {
+    "constitution.md": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "spec.md": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "plan.md": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "tasks.md": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "test-criteria.md": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "allowed-files.json": "0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}
+```
+
+사용자는 recommendation-first output을 검토한 뒤 아래의 **정확한 실행 명령**으로
+한 decision을 선택한다. `AWF_OPERATOR`에는 `planner` 같은 placeholder가 아니라
+실제 human 또는 service actor identity를 설정한다. 다른 flag 순서, positional
+alias, 또는 state 직접 수정은 사용하지 않는다.
+
+```bash
+awf wf select-option --decision-id D-001 --option-id O-001 --actor "${AWF_OPERATOR:?set operator identity}" --repo-root . --json
+```
+
+선택이 모두 끝나면 artifact는 `status: "selected"`가 되고 append-only
+`selection_history`에 `source: "cli"` record가 남는다. 다음 plan rerun은 selected
+artifact를 input으로 로드하여 selection을 다시 묻지 않고 spec/plan/tasks/test
+criteria를 생성한 뒤 G1을 다시 평가한다. `no_decision_required` artifact도 같은
+rerun input이며, reason을 보존하고 질문 없이 계속한다.
+
+이미 G1을 통과한 뒤 다른 option을 선택하면 CLI는 `replanned`를 반환한다. canonical
+selection 변화는 plan부터 done까지 pending으로 reset하고 retries/executions,
+runtime/skip marker, G1–G6 initial shape(`G3.scope_hash: null` 포함)를 초기화하며
+`loop.replanCount`와 history semantics를 보존한다. 같은 canonical selection hash를
+다시 제출한 경우는 `reuse`이며 replan하지 않는다.
+
+manifest가 없거나 `planning_options` profile이 없고 artifact도 없으면
+`legacy_not_required`로 계속한다. `required: false`와 artifact 부재도
+`not_required`다. Artifact가 present인 legacy workflow도 current seal이 필요하며,
+profile과 무관하게 strict validation한다. malformed profile 또는 artifact는 fail
+closed이며 G1 detail은 `profile_invalid` 또는 sanitized `artifact_invalid`이다.
+
 ### 7. Gate G1 검증
 
 **반드시 아래 CLI 명령으로 검증합니다** (LLM 판단이 아닌 결정론적 Python 검증기 사용):
 
 ```bash
 awf wf db-check --stage plan --repo-root . --json
+awf wf seal-plan --repo-root . --json
 awf wf gate plan --repo-root . --json
 ```
 
@@ -299,6 +518,11 @@ awf wf gate plan --repo-root . --json
 - tasks.md에 최소 1개 task (`- [ ] T` 패턴)
 - spec.md의 모든 FR-NNN이 plan.md/tasks.md/test-criteria.md에 태그로 존재
 - manifest.constitution_path 설정 시 constitution 파일 존재
+- Planning Options의 `planning_options.artifact`, `.shape`, `.selection`,
+  `.recommendation`, `.materiality`, `.provenance` 조건. `selected`와
+  `no_decision_required`는 current host seal이 있어야 통과하며
+  `selection_required`는 `decision_selection_required` detail로 사용자 결정을
+  요구한다.
 
 명령 결과가 `G-plan: PASS`이면 통과, `FAIL`이면 실패.
 JSON 상세 결과가 필요하면 `awf wf gate plan --json`.
@@ -317,6 +541,16 @@ JSON 상세 결과가 필요하면 `awf wf gate plan --json`.
 - `db-check` exit `1`이면 G1을 평가하지 않는다. profile, decision, production schema
   blocker를 수정하고 plan에 남아 위의 두 명령을 같은 순서로 다시 실행한다.
 - exit `2`이면 사용법, repo root, command 실행 환경을 운영자가 수정할 때까지 중단한다.
+- `planning_options.selection`이 `decision_selection_required`이면 retry나 추측을
+  하지 않는다. worker escape에 따라 plan은 `deciding`에서 대기하고, 위의
+  `awf wf select-option` 명령으로 선택한 뒤 selected artifact input으로 plan을
+  rerun한다. 일부 선택만 남으면 `selected_pending`, 모두 선택되면 `continued`다.
+- `artifact_invalid`, `profile_invalid`, 또는 required artifact missing은 먼저
+  canonical artifact/profile을 고친 뒤 rerun한다. legacy/no-decision path는
+  질문 없이 G1 평가를 계속한다.
+- `provenance_missing`, `provenance_invalid`, 또는 `provenance_changed`이면 plan
+  artifacts를 다시 생성하고 `seal-plan`을 실행한 뒤 G1을 재평가한다. stale seal을
+  재사용하거나 content hash를 수동으로 수정하지 않는다.
 
 - `db-check`가 통과한 뒤 G1이 실패하면 `phases.plan.retries += 1`
 - CLI 출력에서 ✗ 표시된 조건을 확인하고 해당 산출물을 수정

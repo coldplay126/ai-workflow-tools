@@ -57,8 +57,8 @@ stateDiagram-v2
     in_progress --> escaped: Worker escape
     escaped --> deciding: severity×reason 자동 규칙
 
-    deciding --> continued: advisory 또는 degraded+quality
-    deciding --> replanned: spec/scope divergence
+    deciding --> continued: advisory/degraded or all plan selections recorded
+    deciding --> replanned: spec/scope divergence or changed post-G1 selection
     deciding --> aborted: constraint violation
     deciding --> escalated: 규칙 매칭 없음 또는 budget 소진
 
@@ -68,6 +68,40 @@ stateDiagram-v2
     aborted --> [*]
     escalated --> [*]: 사용자 판단 대기
 ```
+
+## Planning Options lifecycle
+
+plan worker는 requirement/convention으로 결정할 수 없는 material choice만 canonical
+`.workflow/artifacts/planning-options.json`에 2개 또는 3개의 substantively
+different option과 recommendation-first rationale으로 작성한다. 되돌릴 수 있거나
+material하지 않은 선호는 질문하지 않는다.
+
+`no_decision_required`는 non-empty reason을 기록하고 G1으로 계속한다.
+`selection_required`는 worker가 state를 mutation하지 않은 채
+`recommended_action: "user_decision"` escape를 반환한다. parent workflow가 plan을
+`deciding`으로 전환한 뒤 user는 exact CLI로 append-only selection journal을 쓴다.
+
+```bash
+awf wf select-option --decision-id D-001 --option-id O-001 --actor "${AWF_OPERATOR:?set operator identity}" --repo-root . --json
+```
+
+Selected/no-decision rerun은 `constitution.md`, `spec.md`, `plan.md`, `tasks.md`,
+`test-criteria.md`, `allowed-files.json`을 모두 만든 뒤 host-only provenance seal을
+쓴다. Unselected options는 seal할 수 없고, selection 또는 여섯 artifact 중 하나가
+바뀌면 host가 six outputs/provenance를 `.stale.<previous_hash[:12]>.<name>`로
+archive한 뒤 G1은 `provenance_changed`로 막힌다.
+
+```bash
+awf wf seal-plan --repo-root . --json
+```
+
+partial selection은 `selected_pending`, all-selected plan은 `continued`이며,
+selected/no-decision artifact는 plan rerun input이다. G1 후 selection 변경은
+`replanned`: plan~done phases, retries/executions, runtime/skip marker와 G1–G6
+initial shape(`G3.scope_hash: null`)를 reset하되 loop/history를 보존한다. same hash는
+`reuse`. Missing manifest/profile plus absent artifact is `legacy_not_required`.
+Only explicit `planning_options.required: false` plus absent artifact is
+`not_required`. Every present artifact is strictly validated regardless of profile.
 
 ## Replan Budget
 

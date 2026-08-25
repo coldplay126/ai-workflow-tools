@@ -100,11 +100,57 @@ pattern 문서의 불변식/파생 규칙이 참조하는 구체적 수치와 �
 }
 ```
 
+### Plan의 conditional Planning Options output
+
+plan card는 `input.planning_options`에서
+`policy: "manifest.planning_options.required"`와
+`artifact: "artifacts/planning-options.json"`을 선언한다. Planning provenance도
+`artifacts/planning-provenance.json`의 conditional output이며 두 artifact 모두
+`required: false`, `required_when_planning_options: true`다. profile이 required인
+경우에만 worker가 canonical options artifact를 만들며, host가 selected/no-decision
+options와 정확히 여섯 plan artifact를 seal한다. artifact가 present이면 profile과
+관계없이 strict validation한다.
+
+`planning_options_conditions`는 순서대로 `planning_options.artifact`, `.shape`,
+`.selection`, `.recommendation`, `.materiality`, `.provenance`다. `selected` 또는
+`no_decision_required` status는 current provenance seal이 있을 때만 G1을 통과한다.
+`selection_required`는
+`decision_selection_required` on-fail route로
+`recommended_action: "user_decision"` escape를 생성한다. plan card의 `hil`은
+계속 false이고, parent workflow만 `deciding`을 소유한다.
+
+```bash
+awf wf select-option --decision-id D-001 --option-id O-001 --actor "${AWF_OPERATOR:?set operator identity}" --repo-root . --json
+```
+
+```bash
+awf wf seal-plan --repo-root . --json
+```
+
+The host seals only after selected/no-decision rerun regenerates
+`constitution.md`, `spec.md`, `plan.md`, `tasks.md`, `test-criteria.md`, and
+`allowed-files.json`. `selection_required` is blocked; pre-seal G1 is
+`provenance_missing`; malformed markers are `provenance_invalid`; option or
+artifact drift archives six outputs plus active provenance as
+`.stale.<previous_hash[:12]>.<name>` and becomes `provenance_changed`, requiring
+rerun and reseal.
+
+partial selection은 `selected_pending`, complete selection은 `continued`이며
+selected/no-decision artifact는 plan rerun input이다. G1 이후 canonical selection
+변경은 `replanned`로 plan~done phase, retries/executions, runtime/skip marker,
+G1–G6 initial gate shape(`G3.scope_hash: null`)를 reset하고 replan/history
+semantics를 보존한다. unchanged selection hash는 `reuse`다. Missing
+manifest/profile plus absent artifact is `legacy_not_required`. Only explicit
+`planning_options.required: false` plus absent artifact is `not_required`. Every
+present artifact is strictly validated regardless of profile. A present artifact
+requires a current seal; same-hash `reuse` creates no archive.
+
+
 ### Phase별 Agent Card 비교
 
 | Phase | Gate ID | retry.max | hil | on_pass | on_fail 주요 분기 |
 |-------|---------|-----------|-----|---------|------------------|
-| plan | G1 | 3 | false | review | missing_artifact → plan |
+| plan | G1 | 3 | false | review | missing_artifact → plan, decision_selection_required → user_decision/plan |
 | review | G2 | 2 | false | approve | critical_found → plan, high_only → prompt_user |
 | approve | G3 | 1 | true | impl | revision → plan, rejected → 중단 |
 | impl | G4 | 5 | false | verify | incomplete_tasks → impl |
@@ -120,6 +166,7 @@ pattern 문서의 불변식/파생 규칙이 참조하는 구체적 수치와 �
 |-------|----------|------|-----------|
 | plan | missing_artifact | prompt_user + replan | plan |
 | plan | clarification_needed | prompt_user + replan | plan |
+| plan | decision_selection_required | `user_decision` escape → deciding → exact option journal → selected plan rerun | plan |
 | review | critical_found | replan + feedback 생성 | plan |
 | review | high_only | prompt_user | -- |
 | approve | revision | replan + feedback 생성 | plan |
@@ -177,6 +224,7 @@ operator 또는 runtime은 그 실제 경로를 각각 `VERIFY_RESULT` 또는 `T
 
 ```bash
 awf wf db-check --stage plan --repo-root . --json
+awf wf seal-plan --repo-root . --json
 awf wf gate plan --repo-root . --json
 
 : "${VERIFY_RESULT:?set from the result path emitted by awf wf next}"
@@ -302,6 +350,8 @@ implement a database driver, masking, or replica provisioning.
 │   ├── plan.md
 │   ├── tasks.md
 │   ├── allowed-files.json
+│   ├── planning-options.json
+│   ├── planning-provenance.json
 │   ├── review-report.md
 │   ├── approval.json
 │   ├── impl-log.md

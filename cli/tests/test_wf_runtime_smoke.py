@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import getpass
 import json
+import shlex
 import subprocess
-from pathlib import Path
+
+import pytest
 
 from fixture_support import (
     REVIEW_RESULT,
@@ -525,3 +528,195 @@ def test_wf_next_verify_compliance_failure_replans_to_impl(tmp_path: Path) -> No
     assert state["gates"]["G5"]["passed"] is None
     assert state["loop"]["replanCount"] == 1
     assert state["history"][-1]["action"] == "replanned"
+
+
+def test_wf_next_plan_user_decision_escape_prints_safe_selection_commands(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    prepare_workflow_repo(repo_root)
+    initialized = initialize_workflow_fixture(
+        repo_root,
+        "Fixture runtime smoke concept requiring a material plan selection",
+    )
+    _assert_success(initialized)
+
+    (repo_root / ".workflow" / "artifacts" / "planning-options.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "selection_required",
+                "no_decision_reason": None,
+                "decisions": [
+                    {
+                        "id": "D-001",
+                        "question": "Which rollout should apply?",
+                        "materiality_axes": [
+                            "compatibility_migration",
+                            "security_slo",
+                        ],
+                        "options": [
+                            {
+                                "id": "O-001",
+                                "summary": "Use the guarded rollout.",
+                                "affected_work": ["service", "tests"],
+                                "acceptance_delta": "Acceptance evidence changes with the rollout.",
+                                "work_risks": ["Implementation work differs."],
+                                "transition_risks": ["Transition behavior differs."],
+                                "rollback_or_exit": "Restore the prior release before reopening traffic.",
+                            },
+                            {
+                                "id": "O-002",
+                                "summary": "Use the direct cutover.",
+                                "affected_work": ["service", "tests"],
+                                "acceptance_delta": "Acceptance evidence changes after direct cutover.",
+                                "work_risks": ["Implementation work changes differently."],
+                                "transition_risks": ["Transition behavior changes differently."],
+                                "rollback_or_exit": "Restore the prior release before reopening traffic.",
+                            },
+                        ],
+                        "recommended_option_id": "O-001",
+                        "recommendation_rationale": "The guarded rollout preserves an explicit exit path.",
+                        "selected_option_id": None,
+                        "selected_by": None,
+                        "selected_at": None,
+                    }
+                ],
+                "selection_history": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    escaped_plan = repo_root / "escaped-plan.json"
+    escaped_plan.write_text(
+        json.dumps(
+            {
+                "status": "escaped",
+                "phase": "plan",
+                "provider": "fixture",
+                "result": {},
+                "escape": {
+                    "severity": "blocking",
+                    "reason": "decision_selection_required",
+                    "summary": "Worker summary that must never appear.",
+                    "recommended_action": "user_decision",
+                },
+                "meta": {"format_version": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    escaped = run_awf(
+        repo_root,
+        "wf",
+        "next",
+        "--phase",
+        "plan",
+        "--provider",
+        "fixture",
+        "--mode",
+        "solo",
+        "--auto-apply",
+        "--yolo",
+        extra_env={"AWF_FIXTURE_RESULT_FILE": str(escaped_plan)},
+    )
+
+    assert escaped.returncode == 5
+    actor = shlex.quote(getpass.getuser())
+    recommended_command = (
+        "awf wf select-option --decision-id D-001 --option-id O-001 "
+        f"--actor {actor} --repo-root . --json"
+    )
+    alternative_command = (
+        "awf wf select-option --decision-id D-001 --option-id O-002 "
+        f"--actor {actor} --repo-root . --json"
+    )
+    assert "decision_id: D-001" in escaped.stderr
+    assert "recommended_option_id: O-001" in escaped.stderr
+    assert "option_ids: O-001, O-002" in escaped.stderr
+    assert recommended_command in escaped.stderr
+    assert alternative_command in escaped.stderr
+    assert escaped.stderr.index(recommended_command) < escaped.stderr.index(
+        alternative_command
+    )
+    assert "review wf status and decide" not in escaped.stderr
+    assert "Worker summary" not in escaped.stderr
+    assert "guarded rollout" not in escaped.stderr
+    assert "Which rollout" not in escaped.stderr
+
+    state = _workflow_state(repo_root)
+    assert state["phases"]["plan"]["status"] == "deciding"
+    assert state["phases"]["plan"]["decision"] == "user_decision"
+    assert state["phases"]["plan"]["escapeSummary"] == ""
+    assert state["loop"]["lastEscape"]["summary"] == ""
+    assert "Worker summary" not in json.dumps(state)
+
+
+@pytest.mark.parametrize(
+    ("phase", "reason"),
+    (
+        ("review", "missing_input"),
+        ("verify", "unsafe_change"),
+        ("plan", "missing_input"),
+    ),
+)
+def test_wf_next_non_selection_user_decision_keeps_generic_escape(
+    tmp_path: Path,
+    phase: str,
+    reason: str,
+) -> None:
+    repo_root = tmp_path / "repo"
+    prepare_workflow_repo(repo_root)
+    initialized = initialize_workflow_fixture(
+        repo_root,
+        "Fixture runtime smoke concept for generic user decision handling",
+    )
+    _assert_success(initialized)
+    if phase != "plan":
+        mark_workflow_prerequisites_passed(repo_root)
+
+    summary = f"Generic {phase} escape summary remains visible."
+    escaped_result = repo_root / f"escaped-{phase}.json"
+    escaped_result.write_text(
+        json.dumps(
+            {
+                "status": "escaped",
+                "phase": phase,
+                "provider": "fixture",
+                "result": {},
+                "escape": {
+                    "severity": "blocking",
+                    "reason": reason,
+                    "summary": summary,
+                    "recommended_action": "user_decision",
+                },
+                "meta": {"format_version": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    escaped = run_awf(
+        repo_root,
+        "wf",
+        "next",
+        "--phase",
+        phase,
+        "--provider",
+        "fixture",
+        "--mode",
+        "solo",
+        "--auto-apply",
+        "--yolo",
+        extra_env={"AWF_FIXTURE_RESULT_FILE": str(escaped_result)},
+    )
+
+    assert escaped.returncode == 5
+    assert f"escape_summary: {summary}" in escaped.stderr
+    assert "next_step: review wf status and decide whether to replan, continue, or abort" in escaped.stderr
+    assert "planning option selection is unavailable" not in escaped.stderr
+    assert "awf wf select-option" not in escaped.stderr
+    state = _workflow_state(repo_root)
+    assert state["phases"][phase]["escapeSummary"] == summary
+    assert state["loop"]["lastEscape"]["summary"] == summary

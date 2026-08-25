@@ -12,6 +12,21 @@
 
 - code fallback 후 Judge evidence provenance를 최초 Writer 결과가 아니라 실제 재실행 Writer 결과와 대조해 잘못된 `unknown_claim_id`·`evidence_modified` 경고를 방지합니다.
 
+### Added
+
+- Plan phase now records material, recommendation-first design choices in the
+  canonical `.workflow/artifacts/planning-options.json` artifact. A required
+  unselected option routes G1 through `user_decision`/`deciding`; users select
+  through `awf wf select-option --decision-id ... --option-id ... --actor ...
+  --repo-root . --json`. Selected artifacts are plan-rerun inputs, while a
+  changed post-G1 selection re-plans the workflow and preserves the audit
+  history.
+- `awf wf seal-plan --repo-root . --json` host-seals the current selected or
+  no-decision Planning Options artifact to exactly six regenerated Plan
+  artifacts, including `allowed-files.json`. Selection changes archive six
+  outputs plus active provenance before G1 rejects missing, malformed, or stale
+  provenance.
+
 ### Changed
 
 - 기본 exact promotion은 변경하지 않았고, 선행 staging 변경 A를 production에

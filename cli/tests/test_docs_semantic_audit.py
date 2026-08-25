@@ -11,6 +11,11 @@ import pytest
 from awf.cli import KNOWN_COMMANDS, build_parser
 from awf.core.config import AwfConfig
 from awf.core.db_validation import load_database_decision
+from awf.core.planning_options import (
+    load_planning_options,
+    load_planning_options_provenance,
+)
+from awf.core.workflow_envelope import normalize_worker_result
 from awf.core.state import PHASE_GATE, PHASE_ORDER
 
 
@@ -495,7 +500,306 @@ def test_all_displayed_skill_awf_commands_parse_with_current_cli() -> None:
 
     assert invalid == []
 
+PLANNING_OPTION_SELECTION_COMMAND = (
+    'awf wf select-option --decision-id D-001 --option-id O-001 '
+    '--actor "${AWF_OPERATOR:?set operator identity}" --repo-root . --json'
+)
+PLANNING_OPTION_COMMAND_DOCS = (
+    REPO_ROOT / "claude" / "skills" / "phase-plan" / "SKILL.md",
+    REPO_ROOT / "docs" / "specs" / "multi-agent-protocol.md",
+    REPO_ROOT / "docs" / "reference" / "workflow-pipeline.md",
+    REPO_ROOT / "docs" / "architecture" / "02-wf-pipeline.md",
+    REPO_ROOT / "docs" / "architecture" / "wf-architecture.md",
+    CLI_README,
+)
 
+
+def test_planning_options_docs_use_parseable_canonical_selection_command() -> None:
+    parser = build_parser()
+    expected = parser.parse_args(
+        [
+            "wf",
+            "select-option",
+            "--decision-id",
+            "D-001",
+            "--option-id",
+            "O-001",
+            "--actor",
+            "${AWF_OPERATOR:?set operator identity}",
+            "--repo-root",
+            ".",
+            "--json",
+        ]
+    )
+    assert expected.wf_command == "select-option"
+    assert expected.decision_id == "D-001"
+    assert expected.option_id == "O-001"
+    assert expected.actor == "${AWF_OPERATOR:?set operator identity}"
+    assert expected.repo_root == "."
+    assert expected.json is True
+
+    for path in PLANNING_OPTION_COMMAND_DOCS:
+        commands = _shell_fenced_awf_commands(path.read_text(encoding="utf-8"))
+        assert PLANNING_OPTION_SELECTION_COMMAND in commands
+        parsed = parser.parse_args(
+            _argv_from_displayed_command(PLANNING_OPTION_SELECTION_COMMAND)
+        )
+        assert parsed.wf_command == expected.wf_command
+        assert parsed.decision_id == expected.decision_id
+        assert parsed.option_id == expected.option_id
+        assert parsed.repo_root == expected.repo_root
+        assert parsed.json is expected.json
+        assert parsed.actor == "$1"
+
+
+
+PLANNING_OPTIONS_FIXTURE_RE = re.compile(
+    r"#### Canonical fixture: (?P<status>no_decision_required|selection_required|selected)"
+    r"\n\n```json\n(?P<payload>.*?)\n```",
+    re.DOTALL,
+)
+
+
+def test_planning_options_canonical_fixtures_load_through_the_real_loader(
+    tmp_path: Path,
+) -> None:
+    phase_plan = (
+        REPO_ROOT / "claude" / "skills" / "phase-plan" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    fixtures = {
+        match.group("status"): json.loads(match.group("payload"))
+        for match in PLANNING_OPTIONS_FIXTURE_RE.finditer(phase_plan)
+    }
+    assert set(fixtures) == {
+        "no_decision_required",
+        "selection_required",
+        "selected",
+    }
+
+    expected_top_level = {
+        "schema_version",
+        "status",
+        "no_decision_reason",
+        "decisions",
+        "selection_history",
+    }
+    expected_decision = {
+        "id",
+        "question",
+        "materiality_axes",
+        "options",
+        "recommended_option_id",
+        "recommendation_rationale",
+        "selected_option_id",
+        "selected_by",
+        "selected_at",
+    }
+    expected_option = {
+        "id",
+        "summary",
+        "affected_work",
+        "acceptance_delta",
+        "work_risks",
+        "transition_risks",
+        "rollback_or_exit",
+    }
+    expected_history = {
+        "decision_id",
+        "previous_option_id",
+        "selected_option_id",
+        "selected_by",
+        "selected_at",
+        "source",
+    }
+
+    for status, payload in fixtures.items():
+        assert set(payload) == expected_top_level
+        artifact_path = tmp_path / status / ".workflow" / "artifacts" / "planning-options.json"
+        artifact_path.parent.mkdir(parents=True)
+        artifact_path.write_text(json.dumps(payload), encoding="utf-8")
+        artifact = load_planning_options(artifact_path.parents[2])
+
+        assert artifact.schema_version == 1
+        assert artifact.status == status
+        if status == "no_decision_required":
+            assert artifact.no_decision_reason
+            assert artifact.decisions == ()
+            assert artifact.selection_history == ()
+            continue
+
+        assert payload["no_decision_reason"] is None
+        assert len(artifact.decisions) == 1
+        decision_payload = payload["decisions"][0]
+        assert set(decision_payload) == expected_decision
+        assert decision_payload["recommended_option_id"] == "O-001"
+        assert [option["id"] for option in decision_payload["options"]] == [
+            "O-001",
+            "O-002",
+        ]
+        assert all(set(option) == expected_option for option in decision_payload["options"])
+        if status == "selection_required":
+            assert all(
+                decision_payload[field] is None
+                for field in ("selected_option_id", "selected_by", "selected_at")
+            )
+            assert artifact.selection_history == ()
+        else:
+            assert decision_payload["selected_option_id"] == "O-001"
+            assert decision_payload["selected_by"] == "workflow-owner"
+            assert decision_payload["selected_at"] == "2026-08-24T00:00:00Z"
+            assert len(artifact.selection_history) == 1
+            assert set(payload["selection_history"][0]) == expected_history
+            assert payload["selection_history"][0]["source"] == "cli"
+
+SPEC_WRITER_ENVELOPE_RE = re.compile(
+    r"#### (?P<kind>completed|selection_required) plan envelope"
+    r"\n\n```json\n(?P<payload>.*?)\n```",
+    re.DOTALL,
+)
+
+
+def test_spec_writer_documents_real_completed_and_selection_escape_envelopes() -> None:
+    source = (REPO_ROOT / "claude" / "agents" / "spec-writer.md").read_text(
+        encoding="utf-8"
+    )
+    examples = {
+        match.group("kind"): json.loads(match.group("payload"))
+        for match in SPEC_WRITER_ENVELOPE_RE.finditer(source)
+    }
+    assert set(examples) == {"completed", "selection_required"}
+
+    completed = normalize_worker_result(
+        examples["completed"], phase="plan", provider="fixture"
+    )
+    assert completed["status"] == "completed"
+    assert completed["phase"] == "plan"
+    assert completed["escape"] is None
+    assert completed["result"]["conclusion"] == "PASS"
+
+    escaped = normalize_worker_result(
+        examples["selection_required"], phase="plan", provider="fixture"
+    )
+    assert escaped["status"] == "escaped"
+    assert escaped["phase"] == "plan"
+    assert escaped["result"]["conclusion"] == "FAIL"
+    assert escaped["escape"] == {
+        "reason": "decision_selection_required",
+        "severity": "blocking",
+        "summary": "A material plan decision requires a recorded option selection.",
+        "affected_files": [".workflow/artifacts/planning-options.json"],
+        "recommended_action": "user_decision",
+    }
+
+DESIGN_SELECTION_REQUIRED_RE = re.compile(
+    r"### Material decision awaiting selection\n\n```json\n(?P<payload>.*?)\n```",
+    re.DOTALL,
+)
+
+
+def test_design_selection_required_fixture_loads_with_two_material_options(
+    tmp_path: Path,
+) -> None:
+    design = (
+        REPO_ROOT
+        / "docs"
+        / "superpowers"
+        / "specs"
+        / "2026-08-24-planning-options-design.md"
+    ).read_text(encoding="utf-8")
+    match = DESIGN_SELECTION_REQUIRED_RE.search(design)
+    assert match is not None
+    payload = json.loads(match.group("payload"))
+    artifact_path = (
+        tmp_path / ".workflow" / "artifacts" / "planning-options.json"
+    )
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    artifact = load_planning_options(tmp_path)
+
+    assert artifact.status == "selection_required"
+    assert len(artifact.decisions) == 1
+    decision = artifact.decisions[0]
+    assert [option.id for option in decision.options] == ["O-001", "O-002"]
+    assert decision.options[0] != decision.options[1]
+
+
+LEGACY_POLICY_DOCS = (
+    CLI_README,
+    REPO_ROOT / "docs" / "architecture" / "02-wf-pipeline.md",
+    REPO_ROOT / "docs" / "architecture" / "wf-architecture.md",
+    REPO_ROOT / "docs" / "reference" / "workflow-pipeline.md",
+    REPO_ROOT / "docs" / "specs" / "multi-agent-protocol.md",
+)
+LEGACY_POLICY_SENTENCES = (
+    "Missing manifest/profile plus absent artifact is `legacy_not_required`.",
+    "Only explicit `planning_options.required: false` plus absent artifact is `not_required`.",
+    "Every present artifact is strictly validated regardless of profile.",
+)
+
+
+def test_planning_options_docs_separate_legacy_and_explicit_opt_out() -> None:
+    for path in LEGACY_POLICY_DOCS:
+        normalized = " ".join(path.read_text(encoding="utf-8").split())
+        for sentence in LEGACY_POLICY_SENTENCES:
+            assert sentence in normalized, f"{path}: missing policy: {sentence}"
+
+PLANNING_SEAL_COMMAND = "awf wf seal-plan --repo-root . --json"
+PLANNING_SEAL_COMMAND_DOCS = (
+    REPO_ROOT / "claude" / "skills" / "phase-plan" / "SKILL.md",
+    REPO_ROOT / "docs" / "architecture" / "02-wf-pipeline.md",
+    REPO_ROOT / "docs" / "architecture" / "wf-architecture.md",
+    REPO_ROOT / "docs" / "reference" / "workflow-pipeline.md",
+    CLI_README,
+)
+
+
+def test_planning_provenance_docs_use_parseable_seal_command() -> None:
+    parser = build_parser()
+    expected = parser.parse_args(["wf", "seal-plan", "--repo-root", ".", "--json"])
+    assert expected.wf_command == "seal-plan"
+    assert expected.repo_root == "."
+    assert expected.json is True
+
+    for path in PLANNING_SEAL_COMMAND_DOCS:
+        commands = _shell_fenced_awf_commands(path.read_text(encoding="utf-8"))
+        assert PLANNING_SEAL_COMMAND in commands
+        assert vars(
+            parser.parse_args(_argv_from_displayed_command(PLANNING_SEAL_COMMAND))
+        ) == vars(expected)
+
+
+PLANNING_PROVENANCE_FIXTURE_RE = re.compile(
+    r"#### Canonical provenance fixture\n\n```json\n(?P<payload>.*?)\n```",
+    re.DOTALL,
+)
+
+
+def test_planning_provenance_fixture_loads_through_canonical_loader(
+    tmp_path: Path,
+) -> None:
+    phase_plan = (
+        REPO_ROOT / "claude" / "skills" / "phase-plan" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    match = PLANNING_PROVENANCE_FIXTURE_RE.search(phase_plan)
+    assert match is not None
+    payload = json.loads(match.group("payload"))
+    marker_path = tmp_path / ".workflow" / "artifacts" / "planning-provenance.json"
+    marker_path.parent.mkdir(parents=True)
+    marker_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    provenance = load_planning_options_provenance(tmp_path)
+
+    assert provenance.schema_version == 1
+    assert provenance.planning_options_hash == "a" * 64
+    assert dict(provenance.artifacts) == {
+        "constitution.md": "b" * 64,
+        "spec.md": "c" * 64,
+        "plan.md": "d" * 64,
+        "tasks.md": "e" * 64,
+        "test-criteria.md": "f" * 64,
+        "allowed-files.json": "0" * 64,
+    }
 def test_skill_frontmatter_has_required_identity_metadata() -> None:
     invalid: list[str] = []
     required = {"name", "version", "description", "type"}
@@ -1262,6 +1566,7 @@ def test_protected_index_entry_docs_define_supported_stage_zero_modes() -> None:
 DATABASE_GATE_COMMANDS = {
     "plan": (
         "awf wf db-check --stage plan --repo-root . --json",
+        "awf wf seal-plan --repo-root . --json",
         "awf wf gate plan --repo-root . --json",
     ),
     "verify": (
@@ -1455,7 +1760,8 @@ def test_database_planning_contract_compares_options_without_index_default() -> 
     writer = (REPO_ROOT / "claude" / "agents" / "spec-writer.md").read_text(
         encoding="utf-8"
     )
-    assert "tools: Read, Grep, Glob, Edit, Write, Bash, AskUserQuestion" in writer
+    assert "tools: Read, Grep, Glob, Edit, Write, Bash" in writer
+    assert "AskUserQuestion" not in writer
     assert "material" in writer
 
     waiver_contract = (

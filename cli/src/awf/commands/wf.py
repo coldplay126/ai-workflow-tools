@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
+import shlex
 import sys
 import time
 import uuid
@@ -33,9 +35,24 @@ from awf.core.output_schemas import (
     write_temp_schema_file,
 )
 from awf.core.progress import ProgressDisplay
+from awf.core.planning_options import (
+    PlanningOptionSelection,
+    PlanningOptionsArtifact,
+    PlanningOptionsError,
+    _clear_reconciliation_marker,
+    _reconciliation_pending,
+    _select_planning_option_in_transaction,
+    _selection_request_values,
+    _stale_planning_outputs,
+    load_planning_options,
+    planning_option_selection_transaction,
+    seal_planning_options,
+)
 from awf.core.readiness import maybe_doctor_hint
 from awf.core.state_updater import WorkflowStateUpdater
 from awf.core.state import (
+    PHASE_ORDER,
+    apply_planning_option_selection,
     abort_workflow,
     apply_gate_result,
     initialize_workflow,
@@ -569,6 +586,203 @@ def run_wf_reset(args: argparse.Namespace) -> int:
     return 0
 
 
+
+
+
+
+
+
+def _selection_state_is_blocked(state: dict) -> bool:
+    phases = state.get("phases")
+    current = state.get("currentPhase")
+    allowed = {"pending", "deciding", "in_progress", "completed", "failed", "escaped", "aborted", "skipped"}
+    if not isinstance(phases, dict) or current not in PHASE_ORDER:
+        return True
+    plan = phases.get("plan")
+    phase = phases.get(current)
+    return (
+        not isinstance(plan, dict)
+        or not isinstance(phase, dict)
+        or plan.get("status") not in allowed
+        or phase.get("status") not in allowed
+        or plan.get("status") == "aborted"
+        or phase.get("status") == "aborted"
+    )
+
+
+def _selection_result_payload(
+    selection: PlanningOptionSelection, workflow_action: str
+) -> dict[str, object]:
+    return {
+        "decision_id": selection.decision_id,
+        "option_id": selection.option_id,
+        "status": selection.status,
+        "selection_action": "selected" if selection.changed else "reuse",
+        "workflow_action": workflow_action,
+        "previous_hash": selection.previous_hash,
+        "current_hash": selection.current_hash,
+    }
+
+
+def _print_selection_result(payload: dict[str, object], *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(payload, sort_keys=True))
+        return
+    for key, value in payload.items():
+        print(f"{key}: {value}")
+
+
+
+_PLANNING_OPTION_SELECTION_UNAVAILABLE = (
+    "error: planning option selection is unavailable"
+)
+
+
+def _planning_option_selection_guidance(
+    repo_root: str | Path,
+) -> tuple[str, ...]:
+    """Return safe CLI guidance for every unselected planning decision."""
+
+    try:
+        artifact = load_planning_options(repo_root)
+        actor = shlex.quote(getpass.getuser())
+    except (KeyError, OSError, PlanningOptionsError):
+        return (_PLANNING_OPTION_SELECTION_UNAVAILABLE,)
+    if artifact.status != "selection_required":
+        return (_PLANNING_OPTION_SELECTION_UNAVAILABLE,)
+
+    guidance: list[str] = []
+    for decision in artifact.decisions:
+        if decision.selected_option_id is not None:
+            continue
+        option_ids = tuple(option.id for option in decision.options)
+        guidance.extend(
+            (
+                f"decision_id: {decision.id}",
+                f"recommended_option_id: {decision.recommended_option_id}",
+                f"option_ids: {', '.join(option_ids)}",
+            )
+        )
+        for option_id in option_ids:
+            guidance.append(
+                "select_option: "
+                "awf wf select-option "
+                f"--decision-id {decision.id} "
+                f"--option-id {option_id} "
+                f"--actor {actor} --repo-root . --json"
+            )
+    return tuple(guidance) or (_PLANNING_OPTION_SELECTION_UNAVAILABLE,)
+
+
+def run_wf_select_option(args: argparse.Namespace) -> int:
+    """Persist one option, then atomically reconcile its sanitized state marker."""
+
+    try:
+        supplied_root = getattr(args, "repo_root", None)
+        if supplied_root and Path(supplied_root).expanduser().is_symlink():
+            raise ValueError("unsafe root")
+        root = Path(resolve_repo_root(supplied_root))
+    except Exception:
+        print("error: planning option selection is unavailable", file=sys.stderr)
+        return 2
+    try:
+        requested = _selection_request_values(
+            args.decision_id,
+            args.option_id,
+            args.actor,
+        )
+        with planning_option_selection_transaction(root, canonical=True) as (_, directory_fd):
+            state = load_workflow_state(root, canonical=True)
+            if _selection_state_is_blocked(state):
+                raise ValueError("selection state is blocked")
+            selection = _select_planning_option_in_transaction(
+                directory_fd,
+                *requested,
+            )
+            validated_artifact = load_planning_options(root)
+            pending = _reconciliation_pending(directory_fd, validated_artifact)
+            if pending:
+                _stale_planning_outputs(
+                    directory_fd, str(pending["previous_hash"])
+                )
+                _, action = apply_planning_option_selection(
+                    root,
+                    current_hash=str(pending["current_hash"]),
+                    previous_hash=str(pending["previous_hash"]),
+                    decision_id=str(pending["decision_id"]),
+                    option_id=str(pending["option_id"]),
+                    artifact_status=str(pending["artifact_status"]),
+                    source=str(pending["source"]),
+                )
+                _clear_reconciliation_marker(directory_fd)
+            else:
+                action = "reuse"
+    except PlanningOptionsError as error:
+        if error.code == "repo_root_invalid":
+            print("error: planning option selection is unavailable", file=sys.stderr)
+            return 2
+        print("selection rejected", file=sys.stderr)
+        return 1
+    except ValueError:
+        print("selection rejected", file=sys.stderr)
+        return 1
+    except Exception:
+        print("error: planning option selection is unavailable", file=sys.stderr)
+        return 2
+
+    _print_selection_result(
+        _selection_result_payload(selection, action),
+        as_json=bool(getattr(args, "json", False)),
+    )
+    return 0
+
+
+def _print_seal_plan_result(payload: dict[str, object], *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(payload, sort_keys=True))
+        return
+    for key, value in payload.items():
+        print(f"{key}: {value}")
+
+
+def run_wf_seal_plan(args: argparse.Namespace) -> int:
+    """Host-seal a resolved Planning Options artifact to plan outputs."""
+
+    as_json = bool(getattr(args, "json", False))
+    try:
+        supplied_root = getattr(args, "repo_root", None)
+        if supplied_root and Path(supplied_root).expanduser().is_symlink():
+            raise ValueError("unsafe root")
+        root = Path(resolve_repo_root(supplied_root))
+        provenance = seal_planning_options(root)
+    except PlanningOptionsError as error:
+        if error.code == "selection_required":
+            _print_seal_plan_result(
+                {"status": "blocked", "reason": "selection_required"},
+                as_json=as_json,
+            )
+            return 1
+        _print_seal_plan_result(
+            {"status": "failed", "reason": "seal_unavailable"}, as_json=as_json
+        )
+        return 2
+    except Exception:
+        _print_seal_plan_result(
+            {"status": "failed", "reason": "seal_unavailable"}, as_json=as_json
+        )
+        return 2
+
+    _print_seal_plan_result(
+        {
+            "status": "sealed",
+            "planning_options_hash": provenance.planning_options_hash,
+            "artifacts": dict(provenance.artifacts),
+        },
+        as_json=as_json,
+    )
+    return 0
+
+
 def run_wf_decide(args: argparse.Namespace) -> int:
     try:
         state = load_workflow_state(args.repo_root)
@@ -991,7 +1205,33 @@ def run_wf_next(args: argparse.Namespace) -> int:
         )
         print(f"  provider: {candidate}", file=sys.stderr)
         print(f"  result: {result_path}", file=sys.stderr)
-        if result.stdout:
+        last_returncode = result.returncode
+        try:
+            normalized_result = normalize_worker_result(
+                json.loads(captured_output),
+                phase=phase,
+                provider=candidate,
+            )
+        except Exception:
+            normalized_result = None
+        escape = (
+            normalized_result.get("escape")
+            if isinstance(normalized_result, dict)
+            else None
+        )
+        planning_guidance: tuple[str, ...] | None = None
+        if (
+            phase == "plan"
+            and isinstance(escape, dict)
+            and normalized_result.get("status") == "escaped"
+            and escape.get("reason") == "decision_selection_required"
+            and escape.get("recommended_action") == "user_decision"
+        ):
+            candidate_guidance = _planning_option_selection_guidance(repo_root)
+            if candidate_guidance != (_PLANNING_OPTION_SELECTION_UNAVAILABLE,):
+                planning_guidance = candidate_guidance
+        is_planning_option_selection_escape = planning_guidance is not None
+        if result.stdout and not is_planning_option_selection_escape:
             try:
                 parsed = json.loads(result.stdout)
                 conclusion = parsed.get("result", parsed).get("conclusion", parsed.get("conclusion", ""))
@@ -1014,31 +1254,28 @@ def run_wf_next(args: argparse.Namespace) -> int:
                     print(f"  발견: 이슈 없음", file=sys.stderr)
             except (json.JSONDecodeError, TypeError, AttributeError):
                 pass
-        if result.stderr:
+        if result.stderr and not is_planning_option_selection_escape:
             print(result.stderr.rstrip(), file=sys.stderr)
             hint = maybe_doctor_hint(candidate, result.stderr)
             if hint:
                 print(hint, file=sys.stderr)
-        last_returncode = result.returncode
-        try:
-            normalized_result = normalize_worker_result(
-                json.loads(captured_output),
-                phase=phase,
-                provider=candidate,
-            )
-        except Exception:
-            normalized_result = None
         if normalized_result is not None and normalized_result.get("status") != "completed":
             worker_status = str(normalized_result.get("status", "failed"))
             print(f"worker_status: {worker_status}", file=sys.stderr)
-            escape = normalized_result.get("escape")
-            if isinstance(escape, dict):
+            if isinstance(escape, dict) and not is_planning_option_selection_escape:
                 summary = str(escape.get("summary", "") or "").strip()
                 reason = str(escape.get("reason", "") or "").strip()
                 if reason:
                     print(f"escape_reason: {reason}", file=sys.stderr)
                 if summary:
                     print(f"escape_summary: {summary}", file=sys.stderr)
+            if is_planning_option_selection_escape:
+                workflow_escape = {
+                    "reason": "user_decision",
+                    "recommended_action": "user_decision",
+                }
+            else:
+                workflow_escape = escape if isinstance(escape, dict) else {}
             if worker_status == "escaped":
                 processor.emit(
                     event_type=EventType.ESCAPE_TRIGGERED,
@@ -1047,19 +1284,21 @@ def run_wf_next(args: argparse.Namespace) -> int:
                     data={
                         "phase": phase,
                         "provider": candidate,
-                        "reason": str((escape or {}).get("reason", "") or ""),
-                        "summary": str((escape or {}).get("summary", "") or ""),
-                        "recommended_action": str((escape or {}).get("recommended_action", "") or ""),
+                        "reason": str(workflow_escape.get("reason", "") or ""),
+                        "summary": str(workflow_escape.get("summary", "") or ""),
+                        "recommended_action": str(
+                            workflow_escape.get("recommended_action", "") or ""
+                        ),
                     },
                 )
                 record_phase_escape(
                     args.repo_root,
                     phase,
                     provider=candidate,
-                    escape=escape if isinstance(escape, dict) else {},
+                    escape=workflow_escape,
                 )
                 decision, decision_reason, replan_target = _orchestrator_decision_from_escape(
-                    escape if isinstance(escape, dict) else None,
+                    workflow_escape,
                     state=state,
                 )
                 processor.emit(
@@ -1101,6 +1340,12 @@ def run_wf_next(args: argparse.Namespace) -> int:
                         "next_step: inspect workflow history before resetting or restarting",
                         file=sys.stderr,
                     )
+                elif (
+                    decision == "user_decision"
+                    and planning_guidance is not None
+                ):
+                    for line in planning_guidance:
+                        print(line, file=sys.stderr)
                 else:
                     print(
                         "next_step: review wf status and decide whether to replan, continue, or abort",
@@ -1769,6 +2014,8 @@ def _orchestrator_decision_from_escape(escape: dict | None, *, state: dict | Non
     severity = str(escape.get("severity", "") or "").strip().lower()
     replan_target = str(escape.get("replan_target", "") or escape.get("replanTarget", "") or "").strip() or "plan"
     replan_count, max_replans = _workflow_replan_budget(state)
+    if recommended == "user_decision":
+        return "user_decision", f"{reason} requires user decision", None
 
     if severity == "advisory":
         return "continue", f"{reason} marked advisory", None
@@ -1790,8 +2037,6 @@ def _orchestrator_decision_from_escape(escape: dict | None, *, state: dict | Non
         return "replan", f"{reason} requested replan", replan_target
     if recommended == "continue":
         return "continue", f"{reason} requested continue", None
-    if recommended == "user_decision":
-        return "escalate_user", f"{reason} requires user decision", None
     return "escalate_user", f"{reason} requires operator review", None
 
 

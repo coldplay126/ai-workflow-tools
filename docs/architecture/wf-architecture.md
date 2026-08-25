@@ -5,7 +5,7 @@
 ```
 Phase      | Gate | 통과 시              | 실패 시
 -----------|------|---------------------|---------------------------
-plan (P1)  | G1   | → review (자동)      | retry (max 3)
+plan (P1)  | G1   | → review (자동)      | retry (max 3), selection_required → deciding
 review (P2)| G2   | → approve (자동)     | CRITICAL → plan, HIGH → 사용자 선택
 approve(P3)| G3   | → impl (자동)        | 수정 → plan, 거부 → 중단
 impl (P4)  | G4   | → verify (자동)      | retry (max 5)
@@ -18,7 +18,7 @@ done (P7)  | —    | 완료                 | —
 
 | Gate | 조건 |
 |------|------|
-| **G1** | `spec.md`, `plan.md`, `tasks.md`, `test-criteria.md` 존재, `[NEEDS CLARIFICATION]` 0건, task ≥ 1, spec의 모든 `FR-*`가 plan/tasks/test-criteria에 태깅됨 |
+| **G1** | `spec.md`, `plan.md`, `tasks.md`, `test-criteria.md` 존재, `[NEEDS CLARIFICATION]` 0건, task ≥ 1, spec의 모든 `FR-*`가 plan/tasks/test-criteria에 태깅됨, Planning Options artifact/shape/selection/recommendation/materiality 통과 |
 | **G2** | CRITICAL 0건, HIGH 해결/확인, coverage ≥ 80%, multi-LLM HIGH 이상 review conflict 0건. 마지막 조건은 dual-mode judge synthesis가 강제하며 solo gate evaluator에서는 아직 모델링되지 않음 |
 | **G3** | 사용자 승인 + scope hash 계산 |
 | **G4** | pending task 0건, `lint_clean`, `build_passed`, commit ≥ 1 |
@@ -39,6 +39,8 @@ done (P7)  | —    | 완료                 | —
 │   ├── tasks.md                ← P1: 작업 분해
 │   ├── test-criteria.md        ← P1: FR별 수락·회귀 검증 기준
 │   ├── allowed-files.json      ← P1: planned_files + 선택적 expanded_files (graph 확장) + graph_expansion audit
+│   ├── planning-options.json  ← P1: conditional material decision + append-only CLI selection journal
+│   ├── planning-provenance.json ← P1: host-sealed Planning Options + six plan artifact hashes
 │   ├── review-report.md        ← P2: 교차 검증 결과
 │   ├── approval.json           ← P3: 승인 기록 + scope hash
 │   ├── impl-log.md             ← P4: 구현 로그
@@ -49,6 +51,44 @@ done (P7)  | —    | 완료                 | —
     ├── plan.json, review.json, approve.json,
     ├── impl.json, verify.json, test.json, done.json
 ```
+
+## Planning Options lifecycle
+
+`manifest.planning_options.required` plan은 canonical
+`artifacts/planning-options.json`을 conditional output으로 사용한다. material하지
+않거나 되돌릴 수 있는 선호는 질문이 아니다. material decision만 2개 또는 3개의
+substantively different option과 recommendation-first rationale으로 기록한다.
+
+- `no_decision_required`: non-empty reason과 empty decisions/history. 선택 없이 G1을
+  계속한다.
+- `selection_required`: plan card가 `recommended_action: "user_decision"` escape를
+  내보낸다. worker는 state를 mutation하지 않고 `hil: false`를 유지하며 parent가
+  plan을 `deciding`으로 전환한다.
+- `selected`: CLI가 append-only selection journal을 기록하고 다음 plan rerun이
+  artifact를 input으로 load한다.
+
+```bash
+awf wf select-option --decision-id D-001 --option-id O-001 --actor "${AWF_OPERATOR:?set operator identity}" --repo-root . --json
+```
+
+After selected/no-decision rerun writes the six plan artifacts
+(`constitution.md`, `spec.md`, `plan.md`, `tasks.md`, `test-criteria.md`,
+`allowed-files.json`), only the host may write `planning-provenance.json`.
+`selection_required` blocks seal. Any later option or plan-artifact change archives
+the six outputs and active provenance as `.stale.<previous_hash[:12]>.<name>`;
+G1 fails `provenance_changed` until rerun and reseal.
+
+```bash
+awf wf seal-plan --repo-root . --json
+```
+
+Partial plan selection은 `selected_pending`, 마지막 plan selection은 `continued`다.
+G1 이후 selection을 변경하면 CLI는 `replanned`로 plan~done phases와 G1–G6
+gate/runtime state를 initial shape로 reset하고 `loop.replanCount`/history를
+보존한다. 같은 selection hash는 `reuse`다. Missing manifest/profile plus absent
+artifact is `legacy_not_required`. Only explicit `planning_options.required: false`
+plus absent artifact is `not_required`. Every present artifact is strictly
+validated regardless of profile.
 
 ## Dual Mode (provider-config.json)
 

@@ -82,6 +82,30 @@
 - Phase별 관련 아티팩트 경로도 함께 전달
 - Gate 실패 시 적절한 모드를 제안
 
+### Plan의 material decision
+
+plan worker는 되돌릴 수 있거나 material하지 않은 선호를 사용자에게 질문하지
+않는다. 요구사항과 프로젝트 관례가 결정할 수 없는 material choice만
+`.workflow/artifacts/planning-options.json`에 2개 또는 3개의 substantively
+different option과 recommendation-first rationale으로 기록한다.
+
+`status: "no_decision_required"`이면 non-empty reason을 남기고 G1으로 진행한다.
+`status: "selection_required"`이면 worker는 state를 바꾸지 않고
+`recommended_action: "user_decision"` escape를 반환한다. parent workflow만 plan을
+`deciding`으로 전환하고 다음 exact command로 append-only selection journal을
+기록한다.
+
+```bash
+awf wf select-option --decision-id D-001 --option-id O-001 --actor "${AWF_OPERATOR:?set operator identity}" --repo-root . --json
+```
+
+`selected` artifact는 다음 plan rerun의 canonical input이다. G1 후 selection이
+달라지면 parent CLI가 `replanned`로 phase/gate runtime state를 reset한다. 동일
+selection hash는 `reuse`이다. Missing manifest/profile plus absent artifact is
+`legacy_not_required`. Only explicit `planning_options.required: false` plus absent
+artifact is `not_required`. Every present artifact is strictly validated regardless
+of profile.
+
 ## Codex Host 변형
 
 같은 프로토콜을 Codex host에서 운영할 때는 다음처럼 해석합니다.

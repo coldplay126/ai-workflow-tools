@@ -222,6 +222,7 @@ def test_wf_next_auto_apply_ensures_database_evidence_before_gate_apply(
             "fixture",
             "--non-interactive",
             "--yolo",
+            "--no-ready-gate",
             "--repo-root",
             str(repo_root),
         ]
@@ -275,6 +276,7 @@ def test_wf_next_auto_apply_continues_when_database_check_errors(
             "fixture",
             "--non-interactive",
             "--yolo",
+            "--no-ready-gate",
             "--repo-root",
             str(repo_root),
         ]

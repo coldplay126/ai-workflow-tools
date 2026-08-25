@@ -1,6 +1,6 @@
 {
   "name": "phase-plan",
-  "version": "2.2.0",
+  "version": "2.4.0",
   "description": "Spec-kit routine: generates constitution, spec, plan, tasks, test-criteria from concept. Cross-referenced via FR-NNN ID tags.",
 
   "agent": {
@@ -49,6 +49,10 @@
       "decision_artifact": "artifacts/database-decision.json",
       "evidence_artifact": "artifacts/database-validation-evidence.json",
       "production_schema_required": true
+    },
+    "planning_options": {
+      "policy": "manifest.planning_options.required",
+      "artifact": "artifacts/planning-options.json"
     }
   },
 
@@ -60,6 +64,8 @@
       { "key": "tasks", "path": "artifacts/tasks.md", "format": "markdown", "required": true },
       { "key": "test_criteria", "path": "artifacts/test-criteria.md", "format": "markdown", "required": true },
       { "key": "allowed_files", "path": "artifacts/allowed-files.json", "format": "json", "required": true },
+      { "key": "planning_options", "path": "artifacts/planning-options.json", "format": "json", "required": false, "required_when_planning_options": true },
+      { "key": "planning_provenance", "path": "artifacts/planning-provenance.json", "format": "json", "required": false, "required_when_planning_options": true },
       { "key": "database_decision", "path": "artifacts/database-decision.json", "format": "json", "required": false, "required_when_database_signal": true },
       { "key": "database_validation_evidence", "path": "artifacts/database-validation-evidence.json", "format": "json", "required": false, "required_when_database_signal": true }
     ],
@@ -99,11 +105,20 @@
       "database.decision",
       "database.production_schema"
     ],
+    "planning_options_conditions": [
+      "planning_options.artifact",
+      "planning_options.shape",
+      "planning_options.selection",
+      "planning_options.recommendation",
+      "planning_options.materiality",
+      "planning_options.provenance"
+    ],
     "on_pass": { "next_phase": "review" },
     "on_fail": {
       "missing_artifact": { "next_phase": "plan", "prompt_user": true },
       "clarification_needed": { "next_phase": "plan", "prompt_user": true },
-      "fr_coverage_gap": { "next_phase": "plan", "prompt_user": false }
+      "fr_coverage_gap": { "next_phase": "plan", "prompt_user": false },
+      "decision_selection_required": { "next_phase": "plan", "prompt_user": true, "recommended_action": "user_decision" }
     }
   },
 

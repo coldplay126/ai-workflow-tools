@@ -6,6 +6,11 @@ from pathlib import Path
 from typing import Optional
 
 from awf.core.paths import find_repo_root
+from awf.core.planning_options import (
+    PlanningOptionsError,
+    canonical_planning_options_json,
+    resolve_planning_options_policy,
+)
 
 
 def _read_optional_text(path: Path) -> Optional[str]:
@@ -176,6 +181,69 @@ def is_hil_phase(agent_card: dict, change_class: str | None = None) -> bool:
     return True
 
 
+def _planning_options_prompt_parts(
+    root: Path, agent_card: dict, phase: str
+) -> list[str]:
+    if phase != "plan":
+        return []
+    declaration = agent_card.get("input", {}).get("planning_options")
+    if declaration is None:
+        return []
+    if declaration != {
+        "policy": "manifest.planning_options.required",
+        "artifact": "artifacts/planning-options.json",
+    }:
+        return [
+            "=== PLANNING OPTIONS ===",
+            "Planning Options input is unavailable or invalid.",
+            "Do not use unvalidated Planning Options content.",
+            "",
+        ]
+    try:
+        policy = resolve_planning_options_policy(root)
+    except PlanningOptionsError:
+        return [
+            "=== PLANNING OPTIONS ===",
+            "Planning Options input is unavailable or invalid.",
+            "Do not use unvalidated Planning Options content.",
+            "",
+        ]
+    if policy.artifact is None:
+        if not policy.required:
+            return [
+                "=== PLANNING OPTIONS ===",
+                "Planning Options are not required by the active profile.",
+                "",
+            ]
+        return [
+            "=== PLANNING OPTIONS ===",
+            "Planning Options input is unavailable or invalid.",
+            "Do not use unvalidated Planning Options content.",
+            "",
+        ]
+    if policy.status == "selection_required":
+        return [
+            "=== PLANNING OPTIONS ===",
+            "Planning Options selection is required before regenerating the plan.",
+            "Do not use unselected option content as plan input.",
+            "",
+        ]
+    if policy.status in {"selected", "no_decision_required"}:
+        return [
+            "=== PLANNING OPTIONS ===",
+            "The following validated canonical Planning Options input is authoritative.",
+            "--- planning_options (artifacts/planning-options.json) ---",
+            canonical_planning_options_json(policy.artifact),
+            "",
+        ]
+    return [
+        "=== PLANNING OPTIONS ===",
+        "Planning Options input is unavailable or invalid.",
+        "Do not use unvalidated Planning Options content.",
+        "",
+    ]
+
+
 def build_workflow_prompt(explicit_root: Optional[str], state: dict, provider_config: dict, phase: str) -> str:
     root = find_repo_root(explicit_root)
     wf_dir = root / ".workflow"
@@ -254,6 +322,8 @@ def build_workflow_prompt(explicit_root: Optional[str], state: dict, provider_co
         parts.append(f"--- {item.get('key', rel_path)} ({rel_path}) ---")
         parts.append(content)
         parts.append("")
+
+    parts.extend(_planning_options_prompt_parts(root, agent_card, phase))
 
     optional_context = agent_card.get("input", {}).get("optional_context", [])
     if optional_context:
@@ -337,7 +407,7 @@ def build_workflow_prompt(explicit_root: Optional[str], state: dict, provider_co
                     "result": result_schema,
                     "escape": {
                         "severity": "blocking|degraded|advisory",
-                        "reason": "scope_divergence|missing_dependency|contract_conflict|unsafe_change|missing_input|unknown",
+                        "reason": "scope_divergence|missing_dependency|contract_conflict|unsafe_change|missing_input|decision_selection_required|unknown",
                         "summary": "short description",
                         "evidence": [{"kind": "file|symbol|log|note", "value": "evidence"}],
                         "affected_files": ["path/to/file"],

@@ -6,12 +6,40 @@
 - plan.md: 구현 계획 (단계별 작업, 파일 목록, 의존성)
 - tasks.md: 체크리스트 형식 작업 목록 ([ ] 미완료, [x] 완료)
 - test-criteria.md: 수락 기준 + 테스트 시나리오
+- planning-options.json: `manifest.planning_options.required`일 때의 canonical material decision artifact
 
 작성 원칙:
 - 요구사항은 검증 가능한 형태로 작성 (모호한 표현 금지)
 - 각 FR/NFR에 우선순위(P0~P2)와 검증 방법 명시
 - plan.md의 각 단계에 예상 변경 파일과 영향 범위 포함
 - 기존 코드베이스의 패턴과 컨벤션을 따를 것
+
+Planning Options:
+- 되돌릴 수 있거나 material하지 않은 선호는 질문으로 만들지 않는다. requirements와
+  conventions로 해소되지 않는 material difference만 `D-NNN` decision으로 기록한다.
+  decision은 axes와 2개 또는 3개의 substantively different `O-NNN` option을 가지며
+  recommendation은 first option을 가리킨다.
+- Write `schema_version: 1` and exactly top-level `schema_version`, `status`,
+  `no_decision_reason`, `decisions`, `selection_history`. Decision fields are
+  exactly `id`, `question`, `materiality_axes`, `options`, `recommended_option_id`,
+  `recommendation_rationale`, `selected_option_id`, `selected_by`, `selected_at`.
+  Option fields are exactly `id`, `summary`, `affected_work`, `acceptance_delta`,
+  `work_risks`, `transition_risks`, `rollback_or_exit`. History fields are exactly
+  `decision_id`, `previous_option_id`, `selected_option_id`, `selected_by`,
+  `selected_at`, `source`; source is `cli`.
+- `no_decision_required` has non-empty reason and empty decisions/history.
+  `selection_required` has null reason, one or more decisions, and at least one
+  all-null selected triple; selected triples are all-present with matching history.
+  `selected` has null reason, one or more decisions, all triples present, and
+  matching append-only history.
+- Canonical loader validation is required before a result. Loader failure is
+  `artifact_invalid`, never an escape. `no_decision_required` continues;
+  `selection_required` returns the canonical `status: "escaped"` envelope with
+  `recommended_action: "user_decision"` and no worker state mutation.
+- Parent owns `deciding`; a real human/service actor journals with
+  `awf wf select-option --decision-id D-001 --option-id O-001 --actor "${AWF_OPERATOR:?set operator identity}" --repo-root . --json`,
+  never placeholder `planner`. selected/no-decision is next plan rerun input;
+  changed post-G1 selection is parent-owned `replanned`.
 
 DB signal이 있는 계획은 `.workflow/artifacts/database-decision.json`을 함께
 작성한다. decision은 `schema_version: 1`, `status: "selected"`,
@@ -62,9 +90,9 @@ production schema는 DB signal에서 mandatory이며
 검증한 결과만 참조한다. Prose is not a substitute for machine-validated database
 evidence. DB driver나 masking을 제공한다고 가정하거나 약속하지 않는다.
 
-AskUserQuestion은 materially different candidate 사이에서 요구사항과 프로젝트
-관례만으로 선택할 수 없을 때만 사용한다. 단순 확인이나 이미 결정된 제약에는
-질문하지 않는다.
+Planning Options selection은 `AskUserQuestion`으로 처리하지 않는다. material
+artifact가 selection을 요구하면 worker는 `user_decision` escape만 반환하고 parent
+workflow의 exact CLI journal/`deciding` lifecycle을 따른다.
 
 이전 턴에 리뷰어 피드백이 있으면, 해당 이슈를 우선 해결하세요.
 
