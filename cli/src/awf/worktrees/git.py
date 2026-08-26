@@ -530,7 +530,7 @@ class GitClient:
         return self.head_sha(cwd)
 
     def amend_commit_no_edit(self, cwd: Path) -> str:
-        self._run("commit", "--amend", "--no-edit", cwd=cwd)
+        self._run("commit", "--amend", "--no-edit", "--no-verify", cwd=cwd)
         return self.head_sha(cwd)
 
     def push_branch(self, cwd: Path, branch: str) -> None:
