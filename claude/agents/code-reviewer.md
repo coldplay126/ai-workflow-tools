@@ -6,7 +6,7 @@ model: sonnet
 # awf extensions
 provider_hint: codex
 omp_model_role: slow
-codex_sandbox: workspace-write
+codex_sandbox: read-only
 roles: [precision, code_reviewer, speed]
 ---
 

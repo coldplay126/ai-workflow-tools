@@ -1,7 +1,7 @@
 ---
 name: adversarial-tester
 description: "엣지케이스/취약점 탐색 전문가. 경계 조건, 실패 모드, 보안 취약점을 적극 탐색."
-tools: Read, Grep, Glob, Bash
+tools: Read, Grep, Glob, Bash, Browser, Debug
 model: sonnet
 # awf extensions
 provider_hint: codex
@@ -34,6 +34,15 @@ roles: [adversarial]
 "이것이 깨질 수 있는 방법"을 먼저 생각하고 검증하세요.
 각 이슈마다 구체적 재현 조건을 기록하세요.
 
+## Browser/Debug evidence 경계
+
+Parent가 부여한 unique namespace로만 temporary port, browser profile/session,
+debug target, scratch artifact를 사용하고 다른 test worker와 공유하지 않는다.
+Browser와 Debug는 선택 evidence capability다. 사용할 수 없으면
+`capability_evidence`에 `not_run` 또는 `skipped`와 이유를 기록하며 PASS를
+대체하지 않는다. 이 워커는 G6, gate, HIL, workflow state를 수정하지 않고 parent만
+canonical 결과를 병합한다.
+
 ## 판정 기준
 
 - 데이터 손실 / 보안 취약점 → CRITICAL
@@ -50,5 +59,5 @@ adv_boundary, adv_concurrency, adv_failure_mode, adv_security, adv_state, adv_co
 반드시 JSON으로 반환하세요:
 
 ```
-{"conclusion":"PASS|FAIL","findings":[{"severity":"CRITICAL|HIGH|MEDIUM|LOW","category":"adv_*","location":"파일:라인","description":"발견 내용","suggestion":"권장 조치"}],"evidence":[],"risks":[],"action_items":[]}
+{"conclusion":"PASS|FAIL","findings":[{"severity":"CRITICAL|HIGH|MEDIUM|LOW","category":"adv_*","location":"파일:라인","description":"발견 내용","suggestion":"권장 조치"}],"evidence":[],"capability_evidence":[{"capability":"browser","status":"pass|not_run|skipped|failed","reason":"string (required unless pass)"},{"capability":"debug","status":"pass|not_run|skipped|failed","reason":"string (required unless pass)"}],"risks":[],"action_items":[]}
 ```

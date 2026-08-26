@@ -11,6 +11,8 @@
 ### Fixed
 
 - code fallback 후 Judge evidence provenance를 최초 Writer 결과가 아니라 실제 재실행 Writer 결과와 대조해 잘못된 `unknown_claim_id`·`evidence_modified` 경고를 방지합니다.
+- Review/Verify의 multi-LLM conflict 조건이 더 이상 자동 PASS하지 않고, malformed
+  또는 grounded conflict evidence를 fail-closed로 판정합니다.
 
 ### Added
 
@@ -26,6 +28,24 @@
   artifacts, including `allowed-files.json`. Selection changes archive six
   outputs plus active provenance before G1 rejects missing, malformed, or stale
   provenance.
+- `awf wf approve --decision approve|revise|reject --actor ...`가 provider나
+  OMP worker를 거치지 않고 parent-only G3 scope hash, approval artifact,
+  state/history를 결정론적으로 기록합니다.
+- `awf wf confirm --decision complete|hold --actor ...`가 G6 이후 Done을
+  provider에 위임하지 않고 interactive parent-only confirmation artifact와
+  state/history로 기록합니다. approval/Done CLI는 interactive TTY를 요구합니다.
+- `awf wf autoresearch-register --result-json ...`가 G3 이후 Impl에서 완료된
+  OMP Autoresearch 결과를 Planning Options·scope hash·allowed files·metrics
+  digest에 결합해 등록합니다. Autoresearch score는 G4/G5/G6을 대체하지 않습니다.
+- `awf wf autoresearch-schema --json`이 등록 envelope의 exact versioned JSON
+  Schema를 출력합니다. G3 six-artifact seal은 Impl 진입, isolated patch 적용,
+  Autoresearch 등록, G5 scope-check에서 다시 검증됩니다.
+- OMP team 설정에 opt-in Plan baseline research, Review lens, disjoint
+  write-scope Impl isolation을 추가하고, agent compiler가 LSP/AST,
+  Browser/Debug, Security Scan 도구 이름을 지원합니다.
+- Done/status가 redacted OMP provenance, cancellation/partial/checkpoint,
+  patch-scope, follow-up lineage와 출처가 분리된 worker usage를 read-only로
+  표시합니다.
 
 ### Changed
 
@@ -48,6 +68,9 @@
   local test command가 없을 때만 reason/approver/timestamp
   waiver를 사용합니다. CLI는 database driver, masking, replica provisioning을
   제공하지 않고 project-owned sanitized JSON evidence를 검증합니다.
+- OMP 전문 도구 evidence는 optional capability이며 unavailable 상태를 PASS로
+  대체하지 않습니다. Verify/Test와 deployment health의 최종 판정은 계속
+  parent deterministic gate와 실제 rollout evidence가 소유합니다.
 
 ## [0.1.6] - 2026-08-13
 

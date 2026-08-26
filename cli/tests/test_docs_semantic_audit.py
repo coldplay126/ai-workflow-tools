@@ -828,7 +828,13 @@ def test_workflow_phase_skill_metadata_matches_phase_contracts() -> None:
 
         phase = name.removeprefix("phase-")
         expected_gate = PHASE_GATE.get(phase)
-        expected_command = f"awf wf next --phase {phase}"
+        phase_commands = {
+            "approve": "awf wf approve --decision approve --actor human --repo-root . --json",
+            "done": "awf wf confirm --decision complete --actor human --repo-root . --json",
+        }
+        expected_command = phase_commands.get(
+            phase, f"awf wf next --phase {phase}"
+        )
         command = _skill_command_template(path)
 
         if phase not in PHASE_ORDER:
@@ -1050,8 +1056,8 @@ def test_workflow_agent_card_required_and_output_paths_are_workflow_relative() -
 def test_core_skill_command_templates_are_current() -> None:
     expected = {
         "analysis": "awf analyze {service} {unit}",
-        "phase-approve": "awf wf next --phase approve",
-        "phase-done": "awf wf next --phase done",
+        "phase-approve": "awf wf approve --decision approve --actor human --repo-root . --json",
+        "phase-done": "awf wf confirm --decision complete --actor human --repo-root . --json",
         "phase-impl": "awf wf next --phase impl",
         "phase-plan": "awf wf next --phase plan",
         "phase-review": "awf wf next --phase review",

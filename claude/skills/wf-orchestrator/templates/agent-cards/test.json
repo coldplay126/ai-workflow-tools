@@ -25,7 +25,8 @@
   "skills": [
     { "id": "regression-test", "description": "Executes test_command and captures pass/fail/skip counts" },
     { "id": "acceptance-test", "description": "Validates spec.md acceptance scenarios against implementation and test code" },
-    { "id": "test-bootstrap", "description": "Generates test skeletons from acceptance scenarios (optional)" }
+    { "id": "test-bootstrap", "description": "Generates test skeletons from acceptance scenarios (optional)" },
+    { "id": "browser-debug-evidence", "description": "Optional namespaced browser/debug evidence; not_run/skipped must be explicit and cannot satisfy G6" }
   ],
 
   "input": {
@@ -60,6 +61,7 @@
       "conclusion": "PASS|FAIL",
       "findings": [{ "severity": "CRITICAL|HIGH|MEDIUM|LOW", "category": "hp_*", "location": "string", "description": "string", "suggestion": "string" }],
       "evidence": [],
+      "capability_evidence": [{ "capability": "browser", "status": "pass|not_run|skipped|failed", "reason": "string (required unless pass)" }, { "capability": "debug", "status": "pass|not_run|skipped|failed", "reason": "string (required unless pass)" }],
       "risks": [],
       "action_items": [],
       "phase_metrics": {

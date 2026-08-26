@@ -9,12 +9,18 @@ Python evaluates termination deterministically from discussion JSON.
 """
 from __future__ import annotations
 
+from copy import deepcopy
+from fnmatch import fnmatchcase
+import hashlib
 import json
+import os
+import re
+import stat
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from awf.core.agent_runner import AgentResult, MultiAgentResult, run_agent
@@ -61,14 +67,30 @@ class RoleConfig:
     provider: str  # e.g., "claude-code", "codex"
     protocol: str = ""  # protocol file name (defaults to id)
     write_scope: list[str] = field(default_factory=list)
+    baseline_research: bool = False
+    review_lens: str = ""
+    isolated_omp: bool = False
+    task_selector: str = ""
+    selected_task_ids: tuple[str, ...] = ()
+    planning_seal_identity: str = ""
+    read_only_agent: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RoleConfig:
+        write_scope = data.get("write_scope", [])
         return cls(
             id=data.get("id", ""),
             provider=data.get("provider", "claude-code"),
             protocol=data.get("protocol", "") or data.get("id", ""),
-            write_scope=data.get("write_scope", []),
+            write_scope=write_scope if isinstance(write_scope, list) else [],
+            baseline_research=data.get("baseline_research") is True,
+            review_lens=data.get("review_lens", "")
+            if isinstance(data.get("review_lens", ""), str)
+            else "",
+            isolated_omp=data.get("isolated_omp") is True,
+            task_selector=data.get("task_selector", "")
+            if isinstance(data.get("task_selector", ""), str)
+            else "",
         )
 
 
@@ -82,10 +104,15 @@ class TeamConfig:
     max_turns: int = 3
     timeout_sec: int = 600
     workspace: str = ""
+    on_write_scope_overlap: str = "fail"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TeamConfig:
-        roles = [RoleConfig.from_dict(r) for r in data.get("roles", [])]
+        roles = [
+            RoleConfig.from_dict(role)
+            for role in data.get("roles", [])
+            if isinstance(role, dict)
+        ]
         return cls(
             name=data.get("name", "team"),
             roles=roles,
@@ -93,7 +120,347 @@ class TeamConfig:
             max_turns=data.get("max_turns", 3),
             timeout_sec=data.get("timeout_sec", 600),
             workspace=data.get("workspace", ""),
+            on_write_scope_overlap=data.get("on_write_scope_overlap", "fail"),
         )
+
+
+def _is_read_only_role(role: RoleConfig) -> bool:
+    return role.baseline_research or bool(role.review_lens)
+
+
+def _team_entrypoint_validation_errors(
+    phase: str,
+    team_config: dict[str, Any],
+    provider_config: dict[str, Any] | None,
+) -> list[str]:
+    """Validate the exact team that will be dispatched before workspace creation."""
+    from awf.core.team_config import validate_provider_config
+
+    routing = (
+        provider_config.get("phase_routing")
+        if isinstance(provider_config, dict)
+        else None
+    )
+    if isinstance(routing, dict):
+        errors = validate_provider_config(provider_config)
+        phase_config = routing.get(phase)
+        if not isinstance(phase_config, dict):
+            errors.append(f"phase_routing.{phase}: missing for dispatched team")
+        elif phase_config.get("pattern") != "team":
+            errors.append(f"phase_routing.{phase}.pattern: must be 'team' for dispatched team")
+        elif phase_config.get("team") != team_config:
+            errors.append(f"phase_routing.{phase}.team: differs from dispatched team config")
+        return errors
+
+    return validate_provider_config(
+        {
+            "version": "3.0.0",
+            "phase_routing": {
+                phase: {
+                    "pattern": "team",
+                    "team": deepcopy(team_config),
+                }
+            },
+        }
+    )
+
+
+def _read_only_role_preflight_error(config: TeamConfig) -> str | None:
+    """Resolve evidence-only roles to an agent without mutation-capable tools."""
+    from awf.core.spec_loader import load_agent_definition, resolve_agent_for_role
+
+    prohibited_tools = {
+        "ast_edit",
+        "bash",
+        "edit",
+        "edit_file",
+        "write",
+        "write_file",
+    }
+    for role in config.roles:
+        if not _is_read_only_role(role):
+            continue
+        try:
+            agent_name = resolve_agent_for_role(role.id)
+            if not agent_name:
+                return f"read-only worker '{role.id}' does not resolve to an agent definition"
+            definition = load_agent_definition(agent_name)
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            return f"read-only worker '{role.id}' cannot load its agent definition: {exc}"
+
+        metadata = definition.get("meta")
+        raw_tools = metadata.get("tools", ()) if isinstance(metadata, dict) else ()
+        declared_tools = (
+            [str(item) for item in raw_tools]
+            if isinstance(raw_tools, list)
+            else str(raw_tools).split(",")
+        )
+        unsafe = sorted(
+            tool.strip().replace("-", "_").replace(" ", "_").casefold()
+            for tool in declared_tools
+            if tool.strip().replace("-", "_").replace(" ", "_").casefold()
+            in prohibited_tools
+        )
+        if unsafe:
+            return (
+                f"read-only worker '{role.id}' resolves to mutation-capable agent "
+                f"'{agent_name}' with tools: {', '.join(unsafe)}"
+            )
+        role.read_only_agent = agent_name
+    return None
+
+
+def _effective_team_config(
+    team_config: dict[str, Any],
+    config: TeamConfig,
+) -> dict[str, Any]:
+    """Return a config copy whose isolated lanes use their sealed exact scopes."""
+    effective = deepcopy(team_config)
+    roles = effective.get("roles")
+    if not isinstance(roles, list):
+        return effective
+    for raw_role, role in zip(roles, config.roles):
+        if isinstance(raw_role, dict) and role.isolated_omp:
+            raw_role["write_scope"] = list(role.write_scope)
+    return effective
+
+
+@dataclass(frozen=True)
+class _SealedTask:
+    identifier: str
+    parallel: bool
+    paths: tuple[str, ...]
+
+
+_INCOMPLETE_TASK = re.compile(
+    r"^\s*[-*+]\s+\[\s\]\s+(?P<identifier>T[0-9]+)\b(?P<body>.*)$"
+)
+
+
+def _normalize_repo_path(value: str) -> str:
+    candidate = value.strip()
+    if (
+        not candidate
+        or "\\" in candidate
+        or candidate.startswith("/")
+        or any(marker in candidate for marker in "*?[")
+    ):
+        raise ValueError(f"invalid repo-relative path: {value!r}")
+    path = PurePosixPath(candidate)
+    if path.is_absolute() or any(part in {".", ".."} for part in path.parts):
+        raise ValueError(f"invalid repo-relative path: {value!r}")
+    normalized = path.as_posix()
+    if normalized in {"", "."}:
+        raise ValueError(f"invalid repo-relative path: {value!r}")
+    return normalized
+
+
+def _task_paths(scope: str) -> tuple[str, ...]:
+    if "`" in scope:
+        paths = re.findall(r"`([^`]+)`", scope)
+        remainder = re.sub(r"`[^`]+`", "", scope).strip()
+        if not paths or remainder.strip(" ,;"):
+            raise ValueError("task scope must contain only comma-separated repo-relative paths")
+    else:
+        paths = scope.split(",")
+    normalized = tuple(dict.fromkeys(_normalize_repo_path(path) for path in paths))
+    if not normalized:
+        raise ValueError("task has no file scope")
+    return normalized
+
+
+def _load_incomplete_tasks(tasks_text: str) -> dict[str, _SealedTask]:
+    tasks: dict[str, _SealedTask] = {}
+    for line in tasks_text.splitlines():
+        match = _INCOMPLETE_TASK.match(line)
+        if not match:
+            continue
+        identifier = match.group("identifier")
+        if identifier in tasks:
+            raise ValueError(f"sealed tasks.md defines incomplete task '{identifier}' more than once")
+        body = match.group("body")
+        _, separator, scope = body.partition(" — ")
+        if not separator:
+            raise ValueError(f"sealed task '{identifier}' has no explicit file scope")
+        tasks[identifier] = _SealedTask(
+            identifier=identifier,
+            parallel=bool(re.search(r"(?:^|\s)\[P\](?:\s|$)", body)),
+            paths=_task_paths(scope),
+        )
+    return tasks
+
+
+def _load_allowed_scope(allowed_bytes: bytes) -> set[str]:
+    try:
+        payload = json.loads(allowed_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"sealed allowed-files.json is invalid: {exc}") from None
+    if not isinstance(payload, dict):
+        raise ValueError("sealed allowed-files.json must be an object")
+
+    planned = payload.get("planned_files", payload.get("files"))
+    expanded = payload.get("expanded_files", [])
+    if not isinstance(planned, list) or not isinstance(expanded, list):
+        raise ValueError("sealed allowed-files.json must declare planned_files and expanded_files lists")
+    values = [*planned, *expanded]
+    if not values or not all(isinstance(value, str) for value in values):
+        raise ValueError("sealed allowed-files.json must contain non-empty string paths")
+    return {_normalize_repo_path(value) for value in values}
+
+
+def _load_sealed_impl_scope(
+    cwd: str,
+) -> tuple[dict[str, _SealedTask], set[str], str]:
+    """Load exact task and file scopes only after their G3 seal validates."""
+    from awf.core.approval import ApprovalError, validate_approved_planning_seal
+
+    root = Path(cwd)
+    try:
+        seal = validate_approved_planning_seal(root)
+        artifacts = seal.planning_seal.get("artifacts")
+        if not isinstance(artifacts, dict):
+            raise ValueError("G3 planning seal has no artifact digests")
+        tasks_bytes = (root / ".workflow" / "artifacts" / "tasks.md").read_bytes()
+        allowed_bytes = (
+            root / ".workflow" / "artifacts" / "allowed-files.json"
+        ).read_bytes()
+        for name, content in (
+            ("tasks.md", tasks_bytes),
+            ("allowed-files.json", allowed_bytes),
+        ):
+            expected = artifacts.get(name)
+            actual = hashlib.sha256(content).hexdigest()
+            if not isinstance(expected, str) or expected != actual:
+                raise ValueError(f"G3 sealed {name} changed while loading impl scope")
+        seal_identity = seal.planning_seal.get("identity")
+        if not isinstance(seal_identity, str) or not seal_identity:
+            raise ValueError("G3 planning seal has no identity")
+        return (
+            _load_incomplete_tasks(tasks_bytes.decode("utf-8")),
+            _load_allowed_scope(allowed_bytes),
+            seal_identity,
+        )
+    except (ApprovalError, OSError, UnicodeDecodeError, ValueError) as exc:
+        raise ValueError(f"isolated_omp requires a valid immutable G3 planning seal: {exc}") from None
+
+
+def _restrict_isolated_omp_scopes(cwd: str, config: TeamConfig) -> str | None:
+    """Bind each isolated lane to selected sealed tasks and approved files."""
+    workers = [role for role in config.roles if role.isolated_omp]
+    if not workers:
+        return None
+    try:
+        tasks, allowed_paths, seal_identity = _load_sealed_impl_scope(cwd)
+    except ValueError as exc:
+        return str(exc)
+
+    for role in workers:
+        if role.task_selector == "parallel":
+            selected = [task for task in tasks.values() if task.parallel]
+            if not selected:
+                return (
+                    f"isolated_omp worker '{role.id}' task_selector 'parallel' "
+                    "does not resolve to an incomplete [P] task in sealed tasks.md"
+                )
+        else:
+            selected_task = tasks.get(role.task_selector)
+            if selected_task is None:
+                return (
+                    f"isolated_omp worker '{role.id}' task_selector "
+                    f"'{role.task_selector}' does not resolve to an incomplete sealed task"
+                )
+            selected = [selected_task]
+
+        selected_paths = tuple(
+            dict.fromkeys(path for task in selected for path in task.paths)
+        )
+        for path in selected_paths:
+            if path not in allowed_paths:
+                return (
+                    f"isolated_omp worker '{role.id}' selected task path '{path}' "
+                    "is outside G3-sealed allowed-files scope"
+                )
+            if not any(fnmatchcase(path, scope) for scope in role.write_scope):
+                return (
+                    f"isolated_omp worker '{role.id}' selected task path '{path}' "
+                    "is outside its configured write_scope"
+                )
+        role.write_scope = list(selected_paths)
+        role.selected_task_ids = tuple(task.identifier for task in selected)
+        role.planning_seal_identity = seal_identity
+    return None
+
+
+def _scope_patterns_overlap(left: list[str], right: list[str]) -> bool:
+    """Return true unless two configured scopes are provably disjoint.
+
+    An isolated patch worker starts from the same parent checkout as its peers.
+    Globs cannot be proven disjoint without materializing the checkout, so they
+    are conservatively treated as overlapping. Exact paths are compared by
+    ancestor relationship.
+    """
+    for left_path in left:
+        for right_path in right:
+            if any(marker in left_path or marker in right_path for marker in "*?["):
+                return True
+            normalized_left = left_path.strip("/")
+            normalized_right = right_path.strip("/")
+            if (
+                normalized_left == normalized_right
+                or normalized_left.startswith(f"{normalized_right}/")
+                or normalized_right.startswith(f"{normalized_left}/")
+            ):
+                return True
+    return False
+
+
+def _isolated_omp_roles_overlap(config: TeamConfig) -> bool:
+    """Check isolated implementation roles before concurrent patch generation."""
+    workers = [role for role in config.roles if role.isolated_omp]
+    return any(
+        _scope_patterns_overlap(left.write_scope, right.write_scope)
+        for index, left in enumerate(workers)
+        for right in workers[index + 1:]
+    )
+
+
+def _isolated_omp_preflight_error(
+    phase: str,
+    config: TeamConfig,
+    *,
+    check_overlap: bool = True,
+) -> str | None:
+    """Fail closed before dispatching an invalid isolated implementation lane."""
+    workers = [role for role in config.roles if role.isolated_omp]
+    if not workers:
+        return None
+    if phase != "impl":
+        return "isolated_omp workers are only permitted during impl"
+    for role in workers:
+        if not role.write_scope:
+            return f"isolated_omp worker '{role.id}' requires a non-empty write_scope"
+        if not (
+            role.task_selector == "parallel"
+            or (
+                role.task_selector.startswith("T")
+                and role.task_selector[1:].isdigit()
+            )
+        ):
+            return (
+                f"isolated_omp worker '{role.id}' requires task_selector "
+                "'parallel' or an explicit T-number"
+            )
+    if (
+        check_overlap
+        and config.execution == "parallel"
+        and _isolated_omp_roles_overlap(config)
+        and config.on_write_scope_overlap != "sequential"
+    ):
+        return (
+            "isolated_omp workers have overlapping or unprovable write_scope; "
+            "set on_write_scope_overlap to 'sequential' or make scopes disjoint"
+        )
+    return None
 
 
 def run_team(
@@ -123,11 +490,6 @@ def run_team(
     """
     config = TeamConfig.from_dict(team_config)
 
-    # Resolve phase-specific effort for providers
-    _pm = (provider_config or {}).get("phase_models", {}).get(phase, {})
-    _effort = _pm.get("effort")
-    _codex_re = _pm.get("codex_reasoning")
-
     if not config.roles:
         _log(f"team: {config.name} — no roles configured, returning FAIL")
         return MultiAgentResult(
@@ -137,7 +499,55 @@ def run_team(
             selected_agent=config.name,
         )
 
-    bb = Blackboard.create(cwd, phase, team_config=team_config)
+    validation_errors = _team_entrypoint_validation_errors(
+        phase, team_config, provider_config
+    )
+    if validation_errors:
+        detail = "; ".join(validation_errors)
+        _log(f"team: {config.name} — config rejected: {detail}")
+        return MultiAgentResult(
+            mode=f"team:{config.name}",
+            judge_verdict="FAIL",
+            judge_reason=f"invalid provider/team config: {detail}",
+            selected_agent=config.name,
+        )
+
+    read_only_error = _read_only_role_preflight_error(config)
+    if read_only_error:
+        _log(f"team: {config.name} — read-only lane rejected: {read_only_error}")
+        return MultiAgentResult(
+            mode=f"team:{config.name}",
+            judge_verdict="FAIL",
+            judge_reason=read_only_error,
+            selected_agent=config.name,
+        )
+
+    lane_error = _isolated_omp_preflight_error(
+        phase, config, check_overlap=False
+    )
+    if lane_error is None:
+        lane_error = _restrict_isolated_omp_scopes(cwd, config)
+    if lane_error is None:
+        lane_error = _isolated_omp_preflight_error(phase, config)
+    if lane_error:
+        _log(f"team: {config.name} — isolated OMP lane rejected: {lane_error}")
+        return MultiAgentResult(
+            mode=f"team:{config.name}",
+            judge_verdict="FAIL",
+            judge_reason=lane_error,
+            selected_agent=config.name,
+        )
+
+    # Resolve phase-specific effort for providers
+    _pm = (provider_config or {}).get("phase_models", {}).get(phase, {})
+    _effort = _pm.get("effort")
+    _codex_re = _pm.get("codex_reasoning")
+
+    bb = Blackboard.create(
+        cwd,
+        phase,
+        team_config=_effective_team_config(team_config, config),
+    )
     bb.begin_run()
 
     all_agents: list[AgentResult] = []
@@ -333,6 +743,17 @@ def _execute_workers(
     Sequential: one by one (each sees previous worker's output).
     Parallel: all at once via the dispatch backend.
     """
+    if (
+        config.execution == "parallel"
+        and _isolated_omp_roles_overlap(config)
+        and config.on_write_scope_overlap == "sequential"
+    ):
+        _log("isolated OMP write scopes overlap; falling back to sequential execution")
+        return _execute_sequential(bb, turn, config, registry, cwd,
+                                   timeout_sec=timeout_sec, add_dirs=add_dirs,
+                                   processor=processor, phase=phase,
+                                   effort=effort, codex_reasoning=codex_reasoning,
+                                   provider_config=provider_config)
     if config.execution == "parallel":
         return _execute_parallel(bb, turn, config, registry, cwd,
                                  timeout_sec=timeout_sec, add_dirs=add_dirs,
@@ -368,6 +789,92 @@ def _resolve_team_dispatch(
         workers=workers,
         provider_config=provider_config,
         omp_options=resolve_omp_options_from_config(provider_config),
+    )
+
+
+def _parent_checkout_snapshot(cwd: str) -> bytes:
+    """Hash all parent files except the runner-owned team workspace."""
+    status = subprocess.run(
+        ["git", "status", "--porcelain=v1", "-z"],
+        cwd=cwd,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    if status.returncode != 0:
+        detail = status.stderr.decode("utf-8", errors="replace").strip()
+        raise ValueError(
+            "cannot establish read-only parent mutation guard"
+            + (f": {detail}" if detail else "")
+        )
+
+    root = Path(cwd).resolve()
+    digest = hashlib.sha256()
+    for directory, subdirectories, filenames in os.walk(root, followlinks=False):
+        current = Path(directory)
+        relative_directory = current.relative_to(root)
+        subdirectories[:] = sorted(
+            name
+            for name in subdirectories
+            if (relative_directory / name).as_posix()
+            not in {".git", ".workflow/team"}
+        )
+        for filename in sorted(filenames):
+            path = current / filename
+            relative = path.relative_to(root).as_posix()
+            if relative == ".git" or relative.startswith(".workflow/team/"):
+                continue
+            metadata = path.lstat()
+            digest.update(relative.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(str(stat.S_IMODE(metadata.st_mode)).encode("ascii"))
+            digest.update(b"\0")
+            if stat.S_ISLNK(metadata.st_mode):
+                digest.update(os.readlink(path).encode("utf-8"))
+            elif stat.S_ISREG(metadata.st_mode):
+                with path.open("rb") as source:
+                    for chunk in iter(lambda: source.read(64 * 1024), b""):
+                        digest.update(chunk)
+            else:
+                digest.update(str(metadata.st_mode).encode("ascii"))
+            digest.update(b"\0")
+    return status.stdout + digest.digest()
+
+def _mark_parent_mutation_guard(
+    result: AgentResult,
+    *,
+    before: bytes,
+    cwd: str,
+) -> bool:
+    """Fail closed if a read-only worker changed the parent checkout."""
+    try:
+        after = _parent_checkout_snapshot(cwd)
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        result.returncode = 2
+        result.stderr = f"{result.stderr}\nread_only_guard_failed: {exc}".strip()
+        result.metadata["read_only_guard"] = {"valid": False, "error": str(exc)}
+        return False
+    if after == before:
+        result.metadata["read_only_guard"] = {"valid": True}
+        return True
+    result.returncode = 2
+    result.stderr = (
+        f"{result.stderr}\nread_only_parent_mutation_detected".strip()
+    )
+    result.metadata["read_only_guard"] = {
+        "valid": False,
+        "error": "parent_checkout_changed",
+    }
+    return False
+
+def _read_only_dispatch_failure(role_cfg: RoleConfig, reason: str) -> AgentResult:
+    return AgentResult(
+        provider_name=role_cfg.provider,
+        role=role_cfg.id,
+        stdout="",
+        stderr=reason,
+        returncode=2,
+        elapsed_sec=0.0,
     )
 
 
@@ -418,6 +925,7 @@ def _execute_sequential(
         _log(f"  worker: {role_cfg.id} ({role_cfg.provider})")
         _emit_worker_event(processor, phase, turn, role_cfg.id, "spawned")
 
+        requires_read_only_isolation = _is_read_only_role(role_cfg)
         spec = WorkerSpec(
             role=role_cfg.id,
             provider=provider,
@@ -425,27 +933,79 @@ def _execute_sequential(
             timeout_sec=actual_timeout,
             require_json=True,
             add_dirs=tuple(add_dirs or ()),
-            isolated=True if role_cfg.write_scope else None,
+            agent_type=role_cfg.read_only_agent or None,
+            isolated=True
+            if role_cfg.write_scope or requires_read_only_isolation
+            else None,
         )
-        dispatch = _resolve_team_dispatch(
-            cwd=cwd,
-            worker_count=1,
-            estimated_seconds=float(actual_timeout),
-            provider_config=provider_config,
-            workers=[spec],
-        )
-        result = dispatch.run([spec], cwd=cwd, strategy="sequential")[0]
+        parent_snapshot: bytes | None = None
+        dispatch = None
+        if requires_read_only_isolation:
+            try:
+                parent_snapshot = _parent_checkout_snapshot(cwd)
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
+                result = _read_only_dispatch_failure(
+                    role_cfg,
+                    f"read-only worker cannot establish parent mutation guard: {exc}",
+                )
+            else:
+                try:
+                    dispatch = _resolve_team_dispatch(
+                        cwd=cwd,
+                        worker_count=1,
+                        estimated_seconds=float(actual_timeout),
+                        provider_config=provider_config,
+                        workers=[spec],
+                    )
+                except Exception as exc:
+                    result = _read_only_dispatch_failure(
+                        role_cfg,
+                        f"read-only worker cannot acquire disposable isolation: {exc}",
+                    )
+                else:
+                    if dispatch.name != "omp":
+                        result = _read_only_dispatch_failure(
+                            role_cfg,
+                            "read-only worker requires the OMP isolated dispatch backend",
+                        )
+                    else:
+                        result = dispatch.run([spec], cwd=cwd, strategy="sequential")[0]
+                        _mark_parent_mutation_guard(
+                            result,
+                            before=parent_snapshot,
+                            cwd=cwd,
+                        )
+        else:
+            dispatch = _resolve_team_dispatch(
+                cwd=cwd,
+                worker_count=1,
+                estimated_seconds=float(actual_timeout),
+                provider_config=provider_config,
+                workers=[spec],
+            )
+            if role_cfg.isolated_omp and dispatch.name != "omp":
+                result = AgentResult(
+                    provider_name=role_cfg.provider,
+                    role=role_cfg.id,
+                    stdout="",
+                    stderr="isolated_omp worker requires the OMP dispatch backend",
+                    returncode=2,
+                    elapsed_sec=0.0,
+                )
+            else:
+                result = dispatch.run([spec], cwd=cwd, strategy="sequential")[0]
         _enforce_worker_write_scope(bb, role_cfg, result, cwd)
         results.append(result)
-        _record_omp_team_provenance(
-            cwd,
-            backend=dispatch.name,
-            strategy="sequential",
-            phase=phase,
-            turn=turn,
-            agents=[result],
-            elapsed_sec=result.elapsed_sec,
-        )
+        if dispatch is not None:
+            _record_omp_team_provenance(
+                cwd,
+                backend=dispatch.name,
+                strategy="sequential",
+                phase=phase,
+                turn=turn,
+                agents=[result],
+                elapsed_sec=result.elapsed_sec,
+            )
 
         _emit_worker_event(processor, phase, turn, role_cfg.id, "completed", data={
             "passed": _worker_passed(result),
@@ -498,6 +1058,9 @@ def _execute_parallel(
     if not available:
         return []
 
+    requires_read_only_isolation = any(
+        _is_read_only_role(role_cfg) for role_cfg, _, _ in available
+    )
     specs = [
         WorkerSpec(
             role=role_cfg.id,
@@ -506,49 +1069,127 @@ def _execute_parallel(
             timeout_sec=timeout_sec,
             require_json=True,
             add_dirs=tuple(add_dirs or ()),
-            isolated=True if role_cfg.write_scope else None,
+            agent_type=role_cfg.read_only_agent or None,
+            isolated=True
+            if role_cfg.write_scope or _is_read_only_role(role_cfg)
+            else None,
         )
         for role_cfg, provider, prompt in available
     ]
-    dispatch = _resolve_team_dispatch(
-        cwd=cwd,
-        worker_count=len(specs),
-        estimated_seconds=float(timeout_sec),
-        provider_config=provider_config,
-        workers=specs,
-    )
+    parent_snapshot: bytes | None = None
+    dispatch = None
     dispatch_started_at = time.monotonic()
+    executed = False
 
-    try:
-        results = list(dispatch.run(specs, cwd=cwd, strategy="parallel"))
-    except Exception as exc:
-        # Dispatch backend failure (e.g., cmux unavailable mid-batch). Synthesize
-        # failure rows so blackboard termination sees the problem rather than
-        # losing the whole turn silently.
-        _log(f"  dispatch failure: {exc}")
-        results = [
-            AgentResult(
-                provider_name=role_cfg.provider,
-                role=role_cfg.id,
-                stdout="",
-                stderr=f"dispatch failure: {exc}",
-                returncode=2,
-                elapsed_sec=0.0,
+    if requires_read_only_isolation:
+        try:
+            parent_snapshot = _parent_checkout_snapshot(cwd)
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            results = [
+                _read_only_dispatch_failure(
+                    role_cfg,
+                    f"parallel batch cannot establish read-only parent mutation guard: {exc}",
+                )
+                for role_cfg, _, _ in available
+            ]
+        else:
+            try:
+                dispatch = _resolve_team_dispatch(
+                    cwd=cwd,
+                    worker_count=len(specs),
+                    estimated_seconds=float(timeout_sec),
+                    provider_config=provider_config,
+                    workers=specs,
+                )
+            except Exception as exc:
+                results = [
+                    _read_only_dispatch_failure(
+                        role_cfg,
+                        f"parallel batch cannot acquire disposable isolation: {exc}",
+                    )
+                    for role_cfg, _, _ in available
+                ]
+            else:
+                results = []
+    else:
+        dispatch = _resolve_team_dispatch(
+            cwd=cwd,
+            worker_count=len(specs),
+            estimated_seconds=float(timeout_sec),
+            provider_config=provider_config,
+            workers=specs,
+        )
+        results = []
+
+    if dispatch is not None:
+        requires_omp = requires_read_only_isolation or any(
+            role_cfg.isolated_omp for role_cfg, _, _ in available
+        )
+        if requires_omp and dispatch.name != "omp":
+            reason = (
+                "read-only worker requires the OMP isolated dispatch backend"
+                if requires_read_only_isolation
+                else "isolated_omp worker requires the OMP dispatch backend"
             )
-            for role_cfg, _, _ in available
-        ]
+            results = [
+                _read_only_dispatch_failure(role_cfg, reason)
+                for role_cfg, _, _ in available
+            ]
+        else:
+            try:
+                results = list(dispatch.run(specs, cwd=cwd, strategy="parallel"))
+                executed = True
+            except Exception as exc:
+                # Dispatch backend failure (e.g., cmux unavailable mid-batch). Synthesize
+                # failure rows so blackboard termination sees the problem rather than
+                # losing the whole turn silently.
+                _log(f"  dispatch failure: {exc}")
+                results = [
+                    AgentResult(
+                        provider_name=role_cfg.provider,
+                        role=role_cfg.id,
+                        stdout="",
+                        stderr=f"dispatch failure: {exc}",
+                        returncode=2,
+                        elapsed_sec=0.0,
+                    )
+                    for role_cfg, _, _ in available
+                ]
 
-    for (role_cfg, _, _), result in zip(available, results):
-        _enforce_worker_write_scope(bb, role_cfg, result, cwd)
-    _record_omp_team_provenance(
-        cwd,
-        backend=dispatch.name,
-        strategy="parallel",
-        phase=phase,
-        turn=turn,
-        agents=results,
-        elapsed_sec=time.monotonic() - dispatch_started_at,
-    )
+    parent_guard_valid = True
+    if executed and parent_snapshot is not None:
+        for (role_cfg, _, _), result in zip(available, results):
+            if _is_read_only_role(role_cfg):
+                parent_guard_valid = (
+                    _mark_parent_mutation_guard(
+                        result,
+                        before=parent_snapshot,
+                        cwd=cwd,
+                    )
+                    and parent_guard_valid
+                )
+    if parent_guard_valid:
+        for (role_cfg, _, _), result in zip(available, results):
+            _enforce_worker_write_scope(bb, role_cfg, result, cwd)
+    else:
+        for (role_cfg, _, _), result in zip(available, results):
+            if role_cfg.isolated_omp:
+                result.returncode = 2
+                result.stderr = (
+                    f"{result.stderr}\nwrite_scope_validation_failed: "
+                    "parent checkout changed during read-only dispatch"
+                ).strip()
+
+    if dispatch is not None:
+        _record_omp_team_provenance(
+            cwd,
+            backend=dispatch.name,
+            strategy="parallel",
+            phase=phase,
+            turn=turn,
+            agents=results,
+            elapsed_sec=time.monotonic() - dispatch_started_at,
+        )
 
     for (role_cfg, _, _), result in zip(available, results):
         _save_worker_output(bb, turn, role_cfg.id, result)
@@ -574,6 +1215,41 @@ def _build_worker_prompt(bb: Blackboard, turn: int, role_cfg: RoleConfig) -> str
     mission = bb.read_mission()
     if mission:
         parts.append(mission)
+    if role_cfg.baseline_research:
+        parts.append(
+            "## Opt-in Baseline Research\n\n"
+            "Collect baseline facts and cite their source paths as evidence only. "
+            "Do not edit canonical workflow artifacts, workflow state, gates, or "
+            "HIL records; the parent planner/judge owns those decisions."
+        )
+    if role_cfg.review_lens:
+        parts.append(
+            "## Assigned Review Lens\n\n"
+            f"Review from the `{role_cfg.review_lens}` perspective. Report evidence "
+            "and findings only; the parent judge owns canonical artifacts, gates, "
+            "and HIL decisions."
+        )
+    if role_cfg.isolated_omp:
+        parts.append(
+            "## Isolated OMP Implementation Lane\n\n"
+            f"Work only on sealed parent-selected task(s) "
+            f"`{', '.join(role_cfg.selected_task_ids) or role_cfg.task_selector}`. "
+            "Return an isolated patch proposal inside the enforced write scope. "
+            "Do not apply patches to the parent checkout, update task status, create "
+            "commits, or modify G4/gates/HIL; the parent alone owns patch application "
+            "and workflow completion."
+        )
+    if bb.phase == "test":
+        namespace = f"awf-test-turn-{turn}-{role_cfg.id}"
+        parts.append(
+            "## Test Runtime Isolation\n\n"
+            f"Use `{namespace}` as the unique namespace for every temporary port, "
+            "browser profile/session, debugger target, and scratch artifact. Do not "
+            "share these resources with another worker. Browser/debug evidence is "
+            "optional: if unavailable, emit explicit `not_run` or `skipped` "
+            "capability evidence and do not treat it as a passing result. The parent "
+            "alone merges canonical results and owns G6/HIL."
+        )
     if role_cfg.write_scope:
         allowed = "\n".join(f"- `{scope}`" for scope in role_cfg.write_scope)
         parts.append(
@@ -617,7 +1293,13 @@ def _worker_passed(result: AgentResult) -> bool:
     return result.ok and not result.parse_error and bool(result.stdout.strip())
 
 def _patch_changed_paths(cwd: str, patch_path: Path) -> list[Path]:
-    """Return both source and destination paths touched by a git patch."""
+    """Return changed paths and reject renames before a parent patch apply."""
+    with patch_path.open("rb") as source:
+        for line in source:
+            if line.startswith(
+                (b"rename from ", b"rename to ", b"similarity index ")
+            ):
+                raise ValueError("isolated patch renames are not permitted")
     preview = subprocess.run(
         ["git", "apply", "--numstat", "-z", str(patch_path)],
         cwd=cwd,
@@ -643,19 +1325,30 @@ def _patch_changed_paths(cwd: str, patch_path: Path) -> list[Path]:
         if fields[2]:
             paths.append(Path(fields[2].decode("utf-8", errors="strict")))
             continue
-        if index + 1 >= len(chunks):
-            raise ValueError("cannot inspect isolated patch: incomplete rename paths")
-        paths.extend(
-            (
-                Path(chunks[index].decode("utf-8", errors="strict")),
-                Path(chunks[index + 1].decode("utf-8", errors="strict")),
-            )
-        )
-        index += 2
+        raise ValueError("isolated patch renames are not permitted")
     if not paths:
         raise ValueError("cannot inspect isolated patch: no changed paths")
     return paths
 
+
+
+def _validate_current_impl_seal(cwd: str, role_cfg: RoleConfig) -> None:
+    from awf.core.approval import ApprovalError, validate_approved_planning_seal
+    from awf.core.state import load_workflow_state
+
+    try:
+        state = load_workflow_state(cwd)
+        if state.get("currentPhase") != "impl":
+            raise ValueError("workflow phase changed after isolated dispatch")
+        seal = validate_approved_planning_seal(Path(cwd), state=state)
+        current_identity = seal.planning_seal.get("identity")
+        if (
+            not role_cfg.planning_seal_identity
+            or current_identity != role_cfg.planning_seal_identity
+        ):
+            raise ValueError("G3 planning seal changed after isolated dispatch")
+    except (ApprovalError, OSError, ValueError, TypeError) as exc:
+        raise ValueError(f"isolated patch approval identity is stale: {exc}") from None
 
 def _enforce_worker_write_scope(
     bb: Blackboard,
@@ -664,6 +1357,18 @@ def _enforce_worker_write_scope(
     cwd: str,
 ) -> None:
     """Validate and apply an isolated OMP patch only within the role's scope."""
+    if _is_read_only_role(role_cfg):
+        if result.ok and result.metadata.get("patch_path"):
+            result.returncode = 2
+            result.stderr = (
+                f"{result.stderr}\nread_only_patch_rejected".strip()
+            )
+            result.metadata["write_scope_validation"] = {
+                "valid": False,
+                "applied": False,
+                "error": "read-only worker cannot submit a patch",
+            }
+        return
     if not role_cfg.write_scope or not result.ok:
         return
     patch_value = result.metadata.get("patch_path")
@@ -677,6 +1382,8 @@ def _enforce_worker_write_scope(
         return
 
     try:
+        if role_cfg.isolated_omp:
+            _validate_current_impl_seal(cwd, role_cfg)
         patch_path = Path(str(patch_value)).expanduser()
         if not patch_path.is_absolute():
             patch_path = Path(cwd) / patch_path
@@ -704,6 +1411,8 @@ def _enforce_worker_write_scope(
                 "isolated patch does not apply cleanly: "
                 + (check.stderr.strip() or "git apply --check failed")
             )
+        if role_cfg.isolated_omp:
+            _validate_current_impl_seal(cwd, role_cfg)
         applied = subprocess.run(
             ["git", "apply", str(patch_path)],
             cwd=cwd,
@@ -721,6 +1430,7 @@ def _enforce_worker_write_scope(
             "valid": True,
             "applied": True,
             "changed_paths": [str(path) for path in changed_paths],
+            "selected_tasks": list(role_cfg.selected_task_ids),
         }
     except (OSError, subprocess.SubprocessError, UnicodeError, ValueError) as exc:
         result.returncode = 2

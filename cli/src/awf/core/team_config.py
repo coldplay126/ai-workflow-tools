@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+import re
 from typing import Any, Callable
 
 
@@ -262,7 +263,10 @@ def _get_default_mode(provider_config: dict[str, Any]) -> str:
 def validate_provider_config(provider_config: dict[str, Any]) -> list[str]:
     """Validate provider-config.json structure. Returns list of error messages.
 
-    Supports both v2.0.0 and v3.0.0 schemas.
+    Supports both v2.0.0 and v3.0.0 schemas. Team roles may opt into
+    evidence-only baseline research, a named review lens, or an isolated OMP
+    implementation lane. The latter is deliberately narrow: it needs an
+    explicit task selector and a non-empty write scope.
     """
     errors: list[str] = []
 
@@ -315,6 +319,13 @@ def validate_provider_config(provider_config: dict[str, Any]) -> list[str]:
             if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout < 10:
                 errors.append(f"phase_routing.{phase}.team.timeout_sec: must be >= 10")
 
+            overlap_policy = team.get("on_write_scope_overlap", "fail")
+            if overlap_policy not in ("fail", "sequential"):
+                errors.append(
+                    f"phase_routing.{phase}.team.on_write_scope_overlap: "
+                    "must be 'fail' or 'sequential'"
+                )
+
             # Validate role fields
             if isinstance(roles, list):
                 for i, role in enumerate(roles):
@@ -323,9 +334,92 @@ def validate_provider_config(provider_config: dict[str, Any]) -> list[str]:
                     provider = role.get("provider")
                     if provider is not None and not isinstance(provider, str):
                         errors.append(f"phase_routing.{phase}.team.roles[{i}].provider: must be a string")
-                    ws = role.get("write_scope")
-                    if ws is not None and not isinstance(ws, list):
+
+                    write_scope = role.get("write_scope")
+                    has_write_scope = (
+                        isinstance(write_scope, list)
+                        and bool(write_scope)
+                        and all(
+                            isinstance(path, str) and path.strip()
+                            for path in write_scope
+                        )
+                    )
+                    if write_scope is not None and not isinstance(write_scope, list):
                         errors.append(f"phase_routing.{phase}.team.roles[{i}].write_scope: must be a list")
+                    elif isinstance(write_scope, list) and not all(
+                        isinstance(path, str) and path.strip()
+                        for path in write_scope
+                    ):
+                        errors.append(
+                            f"phase_routing.{phase}.team.roles[{i}].write_scope: "
+                            "must contain non-empty strings"
+                        )
+
+                    baseline_research = role.get("baseline_research", False)
+                    if not isinstance(baseline_research, bool):
+                        errors.append(
+                            f"phase_routing.{phase}.team.roles[{i}].baseline_research: "
+                            "must be a boolean"
+                        )
+                    elif baseline_research:
+                        if phase not in ("plan", "review"):
+                            errors.append(
+                                f"phase_routing.{phase}.team.roles[{i}].baseline_research: "
+                                "only allowed for plan or review"
+                            )
+                        if write_scope:
+                            errors.append(
+                                f"phase_routing.{phase}.team.roles[{i}].baseline_research: "
+                                "must not declare write_scope"
+                            )
+
+                    review_lens = role.get("review_lens")
+                    if review_lens is not None:
+                        if not isinstance(review_lens, str) or not review_lens.strip():
+                            errors.append(
+                                f"phase_routing.{phase}.team.roles[{i}].review_lens: "
+                                "must be a non-empty string"
+                            )
+                        if phase != "review":
+                            errors.append(
+                                f"phase_routing.{phase}.team.roles[{i}].review_lens: "
+                                "only allowed for review"
+                            )
+                        if write_scope:
+                            errors.append(
+                                f"phase_routing.{phase}.team.roles[{i}].review_lens: "
+                                "must not declare write_scope"
+                            )
+
+                    isolated_omp = role.get("isolated_omp", False)
+                    if not isinstance(isolated_omp, bool):
+                        errors.append(
+                            f"phase_routing.{phase}.team.roles[{i}].isolated_omp: "
+                            "must be a boolean"
+                        )
+                    elif isolated_omp:
+                        if phase != "impl":
+                            errors.append(
+                                f"phase_routing.{phase}.team.roles[{i}].isolated_omp: "
+                                "only allowed for impl"
+                            )
+                        if not has_write_scope:
+                            errors.append(
+                                f"phase_routing.{phase}.team.roles[{i}].isolated_omp: "
+                                "requires a non-empty write_scope of non-empty strings"
+                            )
+                        task_selector = role.get("task_selector")
+                        if (
+                            not isinstance(task_selector, str)
+                            or not (
+                                task_selector == "parallel"
+                                or re.fullmatch(r"T[0-9]+", task_selector)
+                            )
+                        ):
+                            errors.append(
+                                f"phase_routing.{phase}.team.roles[{i}].task_selector: "
+                                "isolated_omp requires 'parallel' or an explicit T-number"
+                            )
 
             # Validate fallback if present
             fallback = phase_cfg.get("fallback")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import subprocess
 from argparse import Namespace
 from pathlib import Path
@@ -12,6 +13,7 @@ from awf.commands import agents as agents_command
 from awf.core.agent_runner import AgentResult
 from awf.core.dispatch_provenance import (
     lookup_omp_provenance,
+    summarize_omp_evidence,
     write_omp_dispatch_provenance,
 )
 from awf.runners.omp import OmpRunnerConfig
@@ -222,6 +224,306 @@ def test_v2_provenance_persists_handles_lineage_and_only_hashes_bodies(tmp_path:
     assert "sensitive response body" not in encoded
     assert "secret prompt body" not in encoded
 
+
+
+def test_provenance_normalizes_nested_metadata_without_secret_bodies(
+    tmp_path: Path,
+) -> None:
+    canary = "NESTED_SECRET_CANARY_must_not_persist"
+    agent = _agent()
+    (tmp_path / ".workflow").mkdir()
+    agent.parsed = {"conclusion": f"PASS {canary}", "findings": []}
+    agent.metadata.update(
+        {
+            "followup_evidence": {
+                "hub": [
+                    {
+                        "index": 0,
+                        "outcome": "delivered",
+                        "target_task_id": "task-1",
+                        "message": canary,
+                        "response": {"credential": canary},
+                    }
+                ],
+                "read": [
+                    {
+                        "index": 1,
+                        "outcome": "delivered",
+                        "path": "history://task-1",
+                        "diagnostic_body": canary,
+                    }
+                ],
+                "task": [
+                    {
+                        "index": 2,
+                        "outcome": "delivered",
+                        "token": canary,
+                    }
+                ],
+            },
+            "cost": {
+                "cost_usd": 0.25,
+                "response": {"token": canary},
+            },
+            "worker_usage": {
+                "input_tokens": math.inf,
+                "output_tokens": -1,
+                "duration_ms": 8,
+                "prompt": canary,
+                "diagnostics": {"secret": canary},
+            },
+            "usage": {
+                "total_tokens": 3,
+                "cost_usd": -0.25,
+                "message": canary,
+                "credential": {"value": canary},
+            },
+            "schema_validation": {
+                "valid": True,
+                "status": {"prompt": canary},
+                "mode": "strict",
+            },
+            "write_scope_validation": {
+                "valid": True,
+                "status": {"secret": canary},
+            },
+            "steering_evidence": {
+                "reported": True,
+                "wait_calls": 1,
+                "inspected_completed": ["safe-task", canary * 20],
+                "message_sent": True,
+                "message_target": canary * 20,
+                "message_kind": "corrective",
+            },
+        }
+    )
+    path = write_omp_dispatch_provenance(
+        tmp_path,
+        strategy="parallel",
+        mode="cross",
+        agents=[agent],
+        elapsed_sec=0.5,
+    )
+    assert path is not None
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    [record] = payload["agents"]
+    assert record["conclusion"] == "PASS"
+    assert len(record["conclusion_sha256"]) == 64
+    assert record["schema_validation"] == {"valid": True, "mode": "strict"}
+    assert record["write_scope_validation"] == {"valid": True}
+    assert record["steering_evidence"]["inspected_completed"] == ["safe-task"]
+    assert record["steering_evidence"]["message_target"] is None
+    assert record["followup_evidence"] == {
+        "hub": [
+            {
+                "index": 0,
+                "outcome": "delivered",
+                "target_task_id": "task-1",
+            }
+        ],
+        "read": [
+            {
+                "index": 1,
+                "outcome": "delivered",
+                "history_uri": "history://task-1",
+            }
+        ],
+        "task": [{"index": 2, "outcome": "delivered"}],
+    }
+    assert record["runtime"]["cost"] == {"cost_usd": 0.25}
+    assert record["runtime"]["usage"] == {"duration_ms": 8}
+    assert record["runtime"]["coordinator_usage"] == {"total_tokens": 3}
+    assert record["runtime"]["worker_reported_usage"] == {"duration_ms": 8}
+
+    status = summarize_omp_evidence(
+        tmp_path,
+        state={
+            "id": "workflow-canary",
+            "currentPhase": "verify",
+            "phases": {"verify": {"retries": 0}},
+            "telemetry": {
+                "phases": {
+                    "verify": {
+                        "input_tokens": math.nan,
+                        "output_tokens": -1,
+                        "cost_usd": math.inf,
+                    }
+                }
+            },
+        },
+    )
+    assert status["usage"]["phase_primary_estimated"]["status"] == "unknown"
+    encoded = path.read_text(encoding="utf-8") + json.dumps(
+        status, allow_nan=False
+    )
+    assert canary not in encoded
+    assert "Infinity" not in encoded
+    assert "NaN" not in encoded
+
+
+def test_omp_evidence_summary_keeps_correlation_usage_and_audit_sources_separate(
+    tmp_path: Path,
+):
+    workflow = tmp_path / ".workflow"
+    workflow.mkdir()
+    (workflow / "state.json").write_text(
+        json.dumps(
+            {
+                "id": "workflow-evidence",
+                "currentPhase": "impl",
+                "phases": {"impl": {"retries": 2}},
+                "telemetry": {
+                    "phases": {
+                        "impl": {
+                            "input_tokens": 100,
+                            "output_tokens": 25,
+                            "cost_usd": 0.125,
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    agent = _agent()
+    agent.metadata.update(
+        {
+            "worker_usage": {
+                "input_tokens": 7,
+                "output_tokens": 11,
+                "cost": 0.25,
+            },
+            "schema_validation": {"mode": "strict", "valid": True},
+            "write_scope_validation": {"valid": True, "applied": True},
+            "cancellation_audit": {
+                "requested": True,
+                "acknowledged": True,
+                "final": True,
+                "partial": True,
+                "unresolved": False,
+            },
+            "partial_result": True,
+        }
+    )
+    path = write_omp_dispatch_provenance(
+        tmp_path,
+        strategy="parallel",
+        mode="cross",
+        agents=[agent],
+        elapsed_sec=0.5,
+    )
+    assert path is not None
+
+    evidence = summarize_omp_evidence(tmp_path)
+
+    assert evidence["status"] == "available"
+    assert evidence["workflow"] == {
+        "workflow_id": "workflow-evidence",
+        "phase": "impl",
+        "attempt": 3,
+    }
+    [dispatch] = evidence["dispatches"]
+    assert dispatch["correlation"] == evidence["workflow"]
+    assert dispatch["provenance"] == {
+        "path": path.relative_to(tmp_path).as_posix(),
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
+    assert dispatch["cancellation"] == {
+        "requested": True,
+        "acknowledged": True,
+        "final": True,
+        "partial": True,
+        "unresolved": False,
+    }
+    assert dispatch["partial_result"] == "partial"
+    [worker] = dispatch["agents"]
+    assert worker["schema"]["strict_status"] == "valid"
+    assert worker["patch_scope_status"] == "valid"
+    assert worker["reported_usage"] == {
+        "source": "omp_worker_reported",
+        "status": "reported",
+        "values": {
+            "input_tokens": 7,
+            "output_tokens": 11,
+            "cost_usd": 0.25,
+        },
+    }
+    assert evidence["usage"]["phase_primary_estimated"] == {
+        "source": "phase_primary_estimated",
+        "status": "estimated",
+        "by_phase": [
+            {
+                "phase": "impl",
+                "input_tokens": 100,
+                "output_tokens": 25,
+                "cost_usd": 0.125,
+            }
+        ],
+        "totals": {
+            "input_tokens": 100,
+            "output_tokens": 25,
+            "cost_usd": 0.125,
+        },
+    }
+    assert evidence["usage"]["omp_worker_reported"]["totals"] == {
+        "input_tokens": 7,
+        "output_tokens": 11,
+        "cost_usd": 0.25,
+    }
+    encoded = json.dumps(evidence)
+    assert "sensitive response body" not in encoded
+    assert "secret prompt body" not in encoded
+
+
+def test_omp_evidence_summary_reports_missing_and_invalid_artifacts_without_pass(
+    tmp_path: Path,
+):
+    dispatch_dir = tmp_path / ".workflow" / "artifacts" / "dispatch"
+    dispatch_dir.mkdir(parents=True)
+
+    missing = summarize_omp_evidence(tmp_path)
+
+    assert missing["status"] == "unknown"
+    assert missing["diagnostics"] == ["omp_provenance_missing"]
+
+    invalid = dispatch_dir / "corrupt.json"
+    invalid.write_text("{not json", encoding="utf-8")
+    blocked = summarize_omp_evidence(tmp_path)
+
+    assert blocked["status"] == "blocked"
+    assert blocked["dispatches"] == [
+        {
+            "status": "blocked",
+            "provenance": {
+                "path": invalid.relative_to(tmp_path).as_posix(),
+                "sha256": hashlib.sha256(invalid.read_bytes()).hexdigest(),
+            },
+            "diagnostic": "invalid_provenance",
+        }
+    ]
+
+
+def test_omp_evidence_summary_blocks_invalid_strict_schema_evidence(tmp_path: Path):
+    (tmp_path / ".workflow").mkdir()
+    agent = _agent()
+    agent.metadata["schema_validation"] = {"mode": "strict", "valid": False}
+    path = write_omp_dispatch_provenance(
+        tmp_path,
+        strategy="parallel",
+        mode="cross",
+        agents=[agent],
+        elapsed_sec=0.5,
+    )
+    assert path is not None
+
+    evidence = summarize_omp_evidence(tmp_path)
+
+    assert evidence["status"] == "blocked"
+    [dispatch] = evidence["dispatches"]
+    assert dispatch["status"] == "failed"
+    assert dispatch["evidence_status"] == "blocked"
+    assert dispatch["agents"][0]["schema"]["strict_status"] == "invalid"
 
 def test_lookup_omp_provenance_reports_not_found_and_duplicate_run_id(tmp_path: Path):
     path = _write_parent(tmp_path)

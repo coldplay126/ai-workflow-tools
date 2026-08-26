@@ -1,7 +1,7 @@
 {
   "name": "phase-approve",
-  "version": "1.0.0",
-  "description": "Human-in-the-loop approval gate. Presents scope summary and risk assessment, awaits user decision (approve/revise/reject).",
+  "version": "1.1.0",
+  "description": "Parent-only human approval contract. Presents scope and risk, then requires explicit awf wf approve CLI recording; providers and OMP workers cannot approve.",
 
   "capabilities": {
     "file_access": true,
@@ -13,7 +13,8 @@
   },
 
   "skills": [
-    { "id": "scope-summary", "description": "Presents file scope, risk assessment, and task count for approval" }
+    { "id": "scope-summary", "description": "Presents file scope, risk assessment, task count, and read-only OMP evidence for a human decision" },
+    { "id": "parent-approval", "description": "Runs awf wf approve only after an explicit human approve, revise, or reject decision" }
   ],
 
   "input": {
@@ -33,9 +34,10 @@
       { "key": "approval", "path": "artifacts/approval.json", "format": "json", "required": true }
     ],
     "structured_result": {
-      "decision": "approved|revision_requested|rejected",
-      "scope_hash": "string",
-      "branch": "string"
+      "decision": "approve|revise|reject",
+      "status": "approved|revised|rejected|blocked",
+      "scope_hash": "string|null",
+      "current_phase": "impl|plan|rejected"
     }
   },
 

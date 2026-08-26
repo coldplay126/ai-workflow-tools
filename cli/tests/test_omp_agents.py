@@ -156,6 +156,116 @@ def test_spec_writer_omits_direct_user_prompt_capability() -> None:
     assert generated.splitlines()[3] == "tools: read, grep, glob, edit, write, bash"
 
 
+
+def test_omp_compiler_maps_additive_tool_aliases_to_exact_omp_names(tmp_path: Path) -> None:
+    source = _write_claude_agent(tmp_path / "claude" / "agents" / "tool-worker.md")
+    source.write_text(
+        source.read_text(encoding="utf-8").replace(
+            "Read, Grep, Glob, Edit, Write, Bash",
+            "LSP, AST Search, AST Edit, Debug, Browser, Security Scan",
+        ),
+        encoding="utf-8",
+    )
+
+    _, generated = compile_claude_agent(source)
+
+    assert generated.splitlines()[3] == (
+        "tools: lsp, ast_grep, ast_edit, debug, browser, security_scan"
+    )
+
+
+def test_phase_agent_tool_allowlists_preserve_read_only_reviewers() -> None:
+    expected_tools = {
+        "implementer.md": (
+            "read, grep, glob, edit, write, bash, lsp, ast_grep, ast_edit"
+        ),
+        "spec-verifier.md": "read, grep, glob, bash, security_scan",
+        "happy-path-tester.md": "read, grep, glob, bash, browser, debug",
+        "adversarial-tester.md": "read, grep, glob, bash, browser, debug",
+    }
+    for filename, expected in expected_tools.items():
+        _, generated = compile_claude_agent(REPO_ROOT / "claude" / "agents" / filename)
+        tool_line = generated.splitlines()[3]
+        assert tool_line == f"tools: {expected}"
+        assert "ask" not in tool_line
+
+    for filename in (
+        "analyzer.md",
+        "artifact-reviewer.md",
+        "code-reviewer.md",
+        "plan-validator.md",
+        "quality-validator.md",
+        "spec-verifier.md",
+    ):
+        source = (REPO_ROOT / "claude" / "agents" / filename).read_text(encoding="utf-8")
+        _, generated = compile_claude_agent(REPO_ROOT / "claude" / "agents" / filename)
+        tool_line = generated.splitlines()[3]
+        assert "codex_sandbox: read-only" in source
+        assert "edit" not in tool_line
+        assert "write" not in tool_line
+        assert "ask" not in tool_line
+        if filename in {"analyzer.md", "artifact-reviewer.md"}:
+            assert tool_line == "tools: read, grep, glob"
+            assert "bash" not in tool_line
+
+
+def test_optional_omp_capabilities_are_evidence_not_gate_or_hil_ownership() -> None:
+    agents_root = REPO_ROOT / "claude" / "agents"
+    verifier = (agents_root / "spec-verifier.md").read_text(encoding="utf-8")
+    assert "Security Scan evidence" in verifier
+    assert "`not_run` 또는 `skipped`" in verifier
+    assert "G5, gate, HIL, workflow state를\n수정하지 않는다" in verifier
+
+    for filename in ("happy-path-tester.md", "adversarial-tester.md"):
+        source = (agents_root / filename).read_text(encoding="utf-8")
+        assert "unique namespace" in source
+        assert "`not_run` 또는 `skipped`" in source
+        assert "G6, gate, HIL, workflow state를 수정하지 않고" in source
+
+    cards_root = REPO_ROOT / "claude" / "skills" / "wf-orchestrator" / "templates" / "agent-cards"
+    verify_card = json.loads((cards_root / "verify.json").read_text(encoding="utf-8"))
+    test_card = json.loads((cards_root / "test.json").read_text(encoding="utf-8"))
+    assert verify_card["capabilities"]["sandbox_modes"] == ["read-only"]
+    verify_capabilities = verify_card["output"]["structured_result"][
+        "capability_evidence"
+    ]
+    test_capabilities = test_card["output"]["structured_result"][
+        "capability_evidence"
+    ]
+    assert verify_capabilities == [
+        {
+            "capability": "security_scan",
+            "status": "pass|not_run|skipped|failed",
+            "reason": "string (required unless pass)",
+        }
+    ]
+    assert test_capabilities == [
+        {
+            "capability": "browser",
+            "status": "pass|not_run|skipped|failed",
+            "reason": "string (required unless pass)",
+        },
+        {
+            "capability": "debug",
+            "status": "pass|not_run|skipped|failed",
+            "reason": "string (required unless pass)",
+        },
+    ]
+    assert (
+        '"capability":"security_scan","status":"pass|not_run|skipped|failed"'
+        in verifier
+    )
+    for filename in ("happy-path-tester.md", "adversarial-tester.md"):
+        source = (agents_root / filename).read_text(encoding="utf-8")
+        assert (
+            '"capability":"browser","status":"pass|not_run|skipped|failed"'
+            in source
+        )
+        assert (
+            '"capability":"debug","status":"pass|not_run|skipped|failed"'
+            in source
+        )
+
 def test_checked_in_omp_agents_match_all_canonical_sources() -> None:
     generated_root = REPO_ROOT / ".omp" / "agents"
     manifest = json.loads(

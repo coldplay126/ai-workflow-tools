@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from awf.commands.wf import run_wf_expand_scope
 from awf.core.import_graph import GraphEdge, GraphNode, ImportGraph
+from awf.core.approval import apply_approval
 from awf.core.wf_scope import (
     apply_expansion_to_payload,
     expand_allowed_files,
@@ -1124,3 +1125,59 @@ def test_apply_expansion_to_payload_single_repo_omits_per_repo(tmp_path: Path):
     )
     out = apply_expansion_to_payload({"planned_files": ["src/service.ts"]}, result)
     assert "per_repo" not in out["graph_expansion"]
+
+
+def test_scope_check_fails_closed_when_approved_allowed_files_seal_is_stale(
+    tmp_path: Path,
+) -> None:
+    from awf.core.wf_scope import check_scope_violations
+
+    _setup_repo_with_changes(
+        tmp_path,
+        planned=["src/a.ts"],
+        expanded=[],
+        base_files=["src/a.ts"],
+        changed_files=["src/a.ts"],
+    )
+    artifacts = tmp_path / ".workflow" / "artifacts"
+    for name, content in {
+        "constitution.md": "# Constitution\n",
+        "spec.md": "# Spec\n",
+        "plan.md": "# Plan\n",
+        "tasks.md": "# Tasks\n",
+        "test-criteria.md": "# Criteria\n",
+    }.items():
+        (artifacts / name).write_text(content, encoding="utf-8")
+    phases = {
+        phase: {"status": "pending", "retries": 0}
+        for phase in ("plan", "review", "approve", "impl", "verify", "test", "done")
+    }
+    phases["plan"]["status"] = "completed"
+    phases["review"]["status"] = "completed"
+    (tmp_path / ".workflow" / "state.json").write_text(
+        json.dumps(
+            {
+                "currentPhase": "approve",
+                "phases": phases,
+                "gates": {
+                    "G2": {"passed": True},
+                    "G3": {"passed": None, "scope_hash": None},
+                },
+                "history": [],
+                "loop": {"replanCount": 0, "maxReplans": 3, "history": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+    apply_approval(str(tmp_path), decision="approve", actor="release-manager")
+    (artifacts / "allowed-files.json").write_text(
+        json.dumps({"planned_files": ["src/a.ts", "src/b.ts"]}),
+        encoding="utf-8",
+    )
+
+    result = check_scope_violations(tmp_path, base_branch="main")
+
+    assert result.violation_count == 1
+    assert result.changed_files == ()
+    assert result.violations[0].path == ".workflow/artifacts/approval.json"
+    assert result.violations[0].reason.endswith("approval_seal_changed")

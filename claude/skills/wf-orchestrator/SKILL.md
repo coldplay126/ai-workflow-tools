@@ -98,8 +98,29 @@ Dispatch Surface Policy를 따릅니다.
    cost budget, priority를 먼저 적용하고 routing 설정이 없을 때만 기존 inline/cmux
    heuristic을 유지합니다.
 
-approve/done과 scope hash 승인은 parent session만 수행합니다. OMP todo, agent
-registry, transcript는 provenance이며 gate 통과 조건이 아닙니다.
+approve와 Done confirmation은 parent session만 수행합니다. `--actor`는 감사 라벨이며
+authorization credential이 아닙니다. Done은 `awf wf confirm`의 명시적 parent CLI만
+기록할 수 있고 provider/OMP/worker는 그 코드 경로를 호출할 수 없습니다. OMP todo, agent
+registry, transcript는 provenance이며 gate 통과 조건이 아닙니다. OMP evidence panel은
+read-only이며 worktree mutation, PR 생성·merge·cleanup, deployment health 추론을 수행하거나
+대체할 수 없습니다.
+
+### Opt-in team lanes
+
+- Plan/Review team roles may declare `baseline_research: true` or a
+  `review_lens`; these are read-only evidence roles. A configured three-lens
+  review reports independent findings while the parent planner/judge remains
+  the sole owner of canonical artifacts and G1/G2 decisions.
+- `isolated_omp: true` is valid only for an Impl worker with
+  `task_selector: "parallel"` or one explicit `T` task and a non-empty,
+  disjoint `write_scope`. Overlap must fail closed or use the explicit
+  sequential policy. The parent alone applies a validated patch, marks tasks,
+  commits, and evaluates G4.
+- Browser, Debug, and Security Scan are optional evidence capabilities. A
+  missing capability is reported as `not_run` or `skipped`, never as a PASS
+  substitute or a direct gate/HIL update. Test workers use a unique namespace
+  for ports, browser sessions, debugger targets, and scratch artifacts; the
+  parent performs the canonical merge.
 
 ## Quick Resume (세션 컴팩션 후 우선 실행)
 
@@ -115,8 +136,9 @@ registry, transcript는 provenance이며 gate 통과 조건이 아닙니다.
 
 ## 역할
 
-`.workflow/state.json`과 `.workflow/agent-cards/{phase}.json`을 읽고, provider-config에 따라 Phase를 **라우팅**합니다.
-Primary phase는 provider-direct로 실행하고, 독립 secondary/team worker는 provider-config의 dispatch surface로 라우팅합니다.
+`.workflow/state.json`과 `.workflow/agent-cards/{phase}.json`을 읽고, provider-config에 따라
+provider-backed Phase만 **라우팅**합니다. approve와 done은 routing 예외인 HIL이며,
+provider-direct 실행 대신 parent-only 결정론적 CLI를 사용합니다.
 
 ## Work History (K5)
 
@@ -371,8 +393,8 @@ Primary가 구현 → Secondary가 git diff 리뷰 → 피드백 반영. Phase 4
 
 ### 6. HIL Phase (approve, done)
 
-Agent Card에 `"hil": true`인 Phase는 항상 인라인 실행.
-아래 인라인 로직을 직접 실행하고 사용자 입력을 대기.
+Agent Card에 `"hil": true`인 Phase는 provider/OMP에 위임하지 않습니다. parent가 요약을
+검토하고 명시적 CLI를 실행합니다. `awf wf next --phase approve|done`은 hard-block됩니다.
 
 ### 7. 종료 조건
 - `phases.done.status == "completed"` → 워크플로우 완료
@@ -388,7 +410,7 @@ Agent Card에 `"hil": true`인 Phase는 항상 인라인 실행.
 3. TTL 7일 경과 경고.
 
 ### 로직
-1. `phases.approve.status: "in_progress"` 업데이트.
+1. 승인 요약을 표시하는 동안 state는 `pending`으로 유지한다. state/history 전이는 explicit CLI만 수행한다.
 2. 승인 요약 표시:
    ```
    ══════════════════════════════════════
@@ -421,83 +443,57 @@ Agent Card에 `"hil": true`인 Phase는 항상 인라인 실행.
    2. 수정요청 — 기획 수정으로 회귀
    3. 거부 — 워크플로우 폐기
    ```
-4. **승인 시**:
-   - `scope_hash` = spec.md + plan.md + tasks.md 해시
-   - `.workflow/artifacts/approval.json` 생성
-   - state.json: `phases.approve: completed`, `gates.G3.passed: true`, `gates.G3.scope_hash: <hash>`, `currentPhase: "impl"`
-   - git branch 생성 (main/master/staging이면)
-5. **수정요청 시**: review-feedback.md에 기록, `currentPhase: "plan"`
-6. **거부 시**: `phases.approve.status: "rejected"`, 워크플로우 종료
+4. 사용자 선택을 받은 parent host만 아래 결정론적 CLI를 실행한다. `<actor>`는
+   감사 라벨일 뿐 authorization credential이나 worker 권한 위임 수단이 아니며,
+   `agent`, `automation`, `claude`, `codex`, `omp`, `provider`, `system`, `worker`는 사용할 수 없다.
+   - 승인: `awf wf approve --decision approve --actor "<actor>" --repo-root . --json`
+   - 수정요청: `awf wf approve --decision revise --actor "<actor>" --reason "<reason>" --repo-root . --json`
+   - 거부: `awf wf approve --decision reject --actor "<actor>" --reason "<reason>" --repo-root . --json`
+5. CLI는 승인 시 spec.md + plan.md + tasks.md의 canonical scope hash,
+   `.workflow/artifacts/approval.json`, G3/state/history를 원자 기록한다.
+   수정요청은 plan으로 회귀하고 거부는 workflow를 rejected로 종료한다.
+6. `awf wf next --phase approve`, delegated provider, OMP worker, non-interactive
+   implicit approval은 금지한다. small phase skip은 parent의 deterministic
+   change-class policy이며 worker approval이 아니다.
 
-## Phase 7: 최종확인 (인라인 — HIL)
+## Phase 7: 최종확인 (parent-only — HIL)
 
 ### 프리앰블
-1. `gates.G6.passed` true 확인.
-2. TTL 경고.
+1. `gates.G6.passed` true, `currentPhase: "done"`, `phases.test.status: "completed"`를 확인한다.
+2. TTL 경고와 읽기 전용 workflow/OMP evidence 요약을 표시한다.
+3. `awf wf next --phase done`은 explicit/implicit, `--dry-run`, non-interactive 여부와
+   관계없이 hard-block된다. Done provider, OMP, worker 실행은 없다.
 
 ### 로직
-1. `phases.done.status: "in_progress"` 업데이트.
-2. 종합 요약 생성:
+1. 종합 요약을 표시한다. 타임라인, G1~G6, 테스트 결과, `awf wf status --repo-root .`의
+   redacted OMP evidence panel, 해당 시 `awf wt status --repo-root . --refresh --json`의
+   읽기 전용 managed lease 상태를 포함할 수 있다.
+2. OMP artifact가 없으면 `unknown`, strict evidence가 손상되었으면 `blocked`로 표시한다.
+   이는 gate를 대체하지 않는다. 원문 prompt/response/secret은 표시하지 않는다.
+3. 사용자 선택을 받은 parent host만 다음 명시적 CLI를 실행한다.
+
+   ```bash
+   # 완료: strict confirmation.json과 Done state/history를 기록
+   awf wf confirm --decision complete --actor "<audit-label>" --repo-root . --json
+
+   # 선택적으로 기존 GitHub PR URL을 감사 정보로만 기록
+   awf wf confirm --decision complete --actor "<audit-label>" \
+     --pr-url "https://github.com/<owner>/<repo>/pull/<number>" --repo-root . --json
+
+   # 보류: Done을 pending으로 두고 state/history에 보류 결정을 기록
+   awf wf confirm --decision hold --actor "<audit-label>" --repo-root . --json
    ```
-   ══════════════════════════════════════
-   워크플로우 최종 확인
-   ══════════════════════════════════════
 
-   기능: <state.id>
-   브랜치: <state.branch>
-   소요 시간: <createdAt ~ now>
-
-   ── 7단계 타임라인 ──
-   ✓ 기획    <completedAt> (retry: <N>)
-   ✓ 검토    <completedAt> (retry: <N>)
-   ✓ 승인    <completedAt>
-   ✓ 작업    <completedAt> (retry: <N>)
-   ✓ 검증    <completedAt> (retry: <N>)
-   ✓ 테스트  <completedAt> (retry: <N>)
-   ▶ 최종확인 진행 중
-
-   ── 게이트 현황 ──
-   G1~G6: PASS
-   Bypass: <있으면 표시>
-   Provider: <G2/G5에 provider 표시>
-
-   ── 테스트 결과 ──
-   회귀: <pass>/<total>
-   수락: <auto + manual>/<total>
-
-   ── 문서 갱신 체크 ──
-   <context_providers 기반>
-   ```
-3. **문서 갱신 체크 (doc-update-check)**:
-   a. `git diff <base-branch>...HEAD --name-only`로 변경 파일 목록 추출
-   b. 아래 트리거 테이블과 매칭:
-
-      | 변경 패턴 | 갱신 대상 (analysis-docs) |
-      |----------|---------------------|
-      | `**/routes.*`, `**/router.*` | 해당 서비스 `ROUTES.md` |
-      | `**/migration*`, `**/schema*` | `02_infrastructure/databases/README.md` |
-      | `package.json` 의존성 변경 | 해당 서비스 `README.md` |
-      | 환경변수/시크릿 파일 | `13_operations/OPERATIONS_RUNBOOK.md` |
-      | 서비스 간 HTTP 호출 변경 | `MANIFEST.md` + 관련 딥다이브 |
-
-   c. 매칭 결과 출력:
-      - 매칭 있음: `"📋 문서 갱신이 필요할 수 있습니다:"` + 대상 문서 목록
-      - 매칭 없음: `"✓ 문서 갱신 트리거 없음"`
-   d. analysis-docs MCP 등록 여부 확인. 등록되어 있으면 해당 문서를 읽어 현재 내용과 비교 가능
-   e. 사용자에게 갱신 여부 확인: `"문서를 갱신하시겠습니까? (y/N)"`
-   f. 갱신 시: analysis-docs 레포에서 브랜치 생성 → 문서 수정 → 커밋 → PR 생성
-
-4. 수동 테스트 미서명 확인: test-report.md에 `- [ ]` 있으면 서명 요청
-5. 사용자 최종 확인:
-   ```
-   최종 확인:
-   1. 확인 + PR 생성
-   2. 확인만 (PR 수동)
-   3. 보류
-   ```
-6. **옵션 1**: 문서 갱신 → 커밋 → PR 생성 (squash merge 호환 body) → confirmation.json 기록 → state 완료
-7. **옵션 2**: PR 생략, confirmation.json (pr_url: null), state 완료
-8. 완료 메시지 + 후속 절차 안내
+4. `<audit-label>`은 기록용 라벨일 뿐 authorization credential이 아니다. `complete`는
+   strict `.workflow/artifacts/confirmation.json`을 기록하고 state/history를 완료 상태로
+   전이한다. 동일 완료 기록은 idempotently reuse하며 malformed artifact, G6 false,
+   current Done 불일치는 fail-closed한다. `hold`는 final artifact를 만들지 않아 나중에
+   parent가 complete를 다시 결정할 수 있다.
+5. Done은 PR 생성·조회·merge, worktree cleanup, deployment health check/inference를 수행하거나
+   그 결과를 추론하지 않는다. `--pr-url`은 canonical GitHub URL만 허용하는 감사 필드다.
+   workflow done, PR merged, local pass는 deployment healthy를 의미하지 않는다.
+6. `--non-interactive`, `--yes`, `--force`, provider/OMP 같은 automation escape는 Done
+   command에 없으며 worker/provider는 confirmation/state를 기록할 코드 경로가 없다.
 
 ## Provider Config
 
@@ -505,6 +501,10 @@ Agent Card에 `"hil": true`인 Phase는 항상 인라인 실행.
 1. `.workflow/provider-config.json` 존재 시: Phase별 라우팅
 2. `.workflow/codex-config.json`만 존재 시: review/verify만 dual (하위 호환)
 3. 둘 다 없으면: 모든 Phase inline (기존 동작)
+
+approve와 done의 `inline` 표기는 parent HIL 요약을 뜻할 뿐 provider 실행을 뜻하지 않는다.
+두 Phase는 provider-config와 fallback chain을 무시하고 각각 `awf wf approve`, `awf wf confirm`
+명령으로만 기록한다.
 
 ### provider-config.json 스키마
 
@@ -597,7 +597,7 @@ Agent Card에 `"hil": true`인 Phase는 항상 인라인 실행.
 
 - **총 실행 상한**: 전체 phase 실행 30회 초과 시 자동 중단
 - **Retry budget**: plan:3, review:2, approve:1, impl:5, verify:2, test:3
-- **HIL 필수**: approve/done은 절대 자동 통과 불가, 위임 불가
+- **HIL 필수**: approve/done은 절대 자동 통과·위임 불가이며 각각 explicit parent CLI로만 기록한다.
 - **State 무결성**: 매 phase 전 state.json 읽기 + 선행 gate 확인
 - **TTL**: createdAt > 7일이면 경고 표시
 - **Bypass 감사**: `--force` 사용 시 history에 bypass 기록

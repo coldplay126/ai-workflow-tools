@@ -119,6 +119,55 @@ def test_render_verify_report_accepts_string_evidence_entries() -> None:
     assert "- action: Use parent-to-commit diff" in markdown
 
 
+def test_apply_verify_synthesizes_explicit_not_run_capability_evidence(
+    tmp_path: Path,
+) -> None:
+    repo = _make_workflow_root(tmp_path)
+    result_file = tmp_path / "verify-result.json"
+    result_file.write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "result": {
+                    "conclusion": "PASS",
+                    "scope": {
+                        "changed_files": 0,
+                        "planned_files": 0,
+                        "violations": 0,
+                    },
+                    "compliance": {
+                        "pass": 1,
+                        "fail": 0,
+                        "total_requirements": 1,
+                        "percentage": 100,
+                    },
+                    "quality": {
+                        "critical": 0,
+                        "high": 0,
+                        "medium": 0,
+                        "low": 0,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    output_path, passed = apply_workflow_result(
+        str(repo),
+        "verify",
+        str(result_file),
+        skip_gate_apply=True,
+    )
+
+    report = output_path.read_text(encoding="utf-8")
+    assert passed
+    assert "## Capability Evidence" in report
+    normalized_report = report.replace("\\", "")
+    assert "- security_scan: not_run" in normalized_report
+    assert "legacy_result_missing_capability_evidence" in normalized_report
+
+
 def test_database_gate_reports_render_only_sanitized_fields() -> None:
     unsafe_detail = (
         "argv=['db-client', '--password=secret'] stdout=CREATE TABLE users "

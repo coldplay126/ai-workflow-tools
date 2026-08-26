@@ -198,6 +198,114 @@ def record_scope_check(
     return record_event(repo_root, "scope_check", payload)
 
 
+_OMP_CANCELLATION_AUDIT_STATES = (
+    "requested",
+    "acknowledged",
+    "final",
+    "partial",
+    "unresolved",
+)
+_OMP_PHASE_USAGE_STATUSES = frozenset({"estimated", "unknown"})
+_OMP_WORKER_USAGE_STATUSES = frozenset({"reported", "unknown"})
+
+
+
+def _omp_usage_event_value(
+    value: Any,
+    *,
+    source: str,
+    allowed_statuses: frozenset[str],
+) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    status = raw.get("status")
+    normalized_status = status if status in allowed_statuses else "unknown"
+    totals = raw.get("totals")
+    safe_totals: dict[str, int | float] | None = None
+    if isinstance(totals, dict):
+        candidate = {
+            key: item
+            for key, item in totals.items()
+            if key in {"input_tokens", "output_tokens", "total_tokens", "cost_usd"}
+            and isinstance(item, (int, float))
+            and not isinstance(item, bool)
+            and item >= 0
+        }
+        safe_totals = candidate or None
+    return {
+        "source": source,
+        "status": normalized_status,
+        "totals": safe_totals,
+    }
+
+
+def record_omp_evidence_summary(
+    repo_root: str | os.PathLike[str],
+    evidence: dict[str, Any],
+) -> Path:
+    """Persist a redacted OMP evidence summary without conflating usage sources."""
+    usage = evidence.get("usage")
+    usage_map = usage if isinstance(usage, dict) else {}
+    workflow = evidence.get("workflow")
+    workflow_map = workflow if isinstance(workflow, dict) else {}
+    dispatches = evidence.get("dispatches")
+    dispatch_rows = dispatches if isinstance(dispatches, list) else []
+    cancellation: dict[str, bool | None] = {}
+    for state in _OMP_CANCELLATION_AUDIT_STATES:
+        values = [
+            dispatch.get("cancellation", {}).get(state)
+            for dispatch in dispatch_rows
+            if isinstance(dispatch, dict)
+            and isinstance(dispatch.get("cancellation"), dict)
+            and type(dispatch["cancellation"].get(state)) is bool
+        ]
+        cancellation[state] = (
+            True
+            if any(value is True for value in values)
+            else False
+            if values and len(values) == len(dispatch_rows)
+            else None
+        )
+    correlations = [
+        {
+            "dispatch_run_id": dispatch.get("dispatch_run_id"),
+            "workflow_id": dispatch.get("correlation", {}).get("workflow_id"),
+            "phase": dispatch.get("correlation", {}).get("phase"),
+            "attempt": dispatch.get("correlation", {}).get("attempt"),
+            "status": dispatch.get("status"),
+        }
+        for dispatch in dispatch_rows
+        if isinstance(dispatch, dict)
+        and isinstance(dispatch.get("correlation"), dict)
+        and isinstance(dispatch.get("dispatch_run_id"), str)
+    ]
+    payload = {
+        "panel_status": (
+            evidence.get("status")
+            if evidence.get("status") in {"available", "unknown", "blocked"}
+            else "unknown"
+        ),
+        "workflow": {
+            "workflow_id": workflow_map.get("workflow_id"),
+            "phase": workflow_map.get("phase"),
+            "attempt": workflow_map.get("attempt"),
+        },
+        "dispatch_count": len(dispatch_rows),
+        "dispatches": correlations,
+        "cancellation": cancellation,
+        "phase_primary_estimated_usage": _omp_usage_event_value(
+            usage_map.get("phase_primary_estimated"),
+            source="phase_primary_estimated",
+            allowed_statuses=_OMP_PHASE_USAGE_STATUSES,
+        ),
+        "omp_worker_reported_usage": _omp_usage_event_value(
+            usage_map.get("omp_worker_reported"),
+            source="omp_worker_reported",
+            allowed_statuses=_OMP_WORKER_USAGE_STATUSES,
+        ),
+    }
+    return record_event(repo_root, "omp_evidence_summary", payload)
+
+
 def iter_events(repo_root: str | os.PathLike[str]):
     """Yield every recorded event in chronological order.
 

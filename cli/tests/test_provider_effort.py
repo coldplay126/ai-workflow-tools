@@ -213,12 +213,12 @@ class TestPhaseEffort:
         _apply_phase_sandbox(provider, "review")
         assert provider.flags == ["exec", "--sandbox", "read-only"]
 
-    def test_apply_phase_sandbox_verify_write(self):
+    def test_apply_phase_sandbox_verify_read_only(self):
         from awf.commands.wf import _apply_phase_sandbox
 
-        provider = CodexProvider(command="echo", flags=["exec", "--sandbox", "read-only"])
+        provider = CodexProvider(command="echo", flags=["exec", "--sandbox", "workspace-write"])
         _apply_phase_sandbox(provider, "verify")
-        assert provider.flags == ["exec", "--sandbox", "workspace-write"]
+        assert provider.flags == ["exec", "--sandbox", "read-only"]
 
     def test_apply_phase_sandbox_plan_write(self):
         from awf.commands.wf import _apply_phase_sandbox

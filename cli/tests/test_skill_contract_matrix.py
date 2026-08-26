@@ -454,7 +454,9 @@ def test_agent_card_state_machine_matches_documented_semantics() -> None:
     _assert_agent_card_state_machine(cards)
     assert cards["done"]["gate"] == {
         "id": None,
-        "pass_conditions": ["user confirms"],
+        "pass_conditions": [
+            "G6 passed and parent explicitly runs awf wf confirm --decision complete"
+        ],
         "on_pass": {"next_phase": None},
         "on_fail": {},
     }
@@ -698,23 +700,33 @@ def test_database_cards_declare_typed_artifacts_and_mandatory_conditions() -> No
     )["capabilities"]
     assert plan_capabilities["file_write"] is True
     assert plan_capabilities["sandbox_modes"] == ["workspace-write"]
-    for phase in ("verify", "test"):
-        capabilities = json.loads(
-            (AGENT_CARD_ROOT / "agent-cards" / f"{phase}.json").read_text()
-        )["capabilities"]
-        assert capabilities["file_write"] is False
-        assert capabilities["sandbox_modes"] == ["workspace-write"]
+    verify_capabilities = json.loads(
+        (AGENT_CARD_ROOT / "agent-cards" / "verify.json").read_text()
+    )["capabilities"]
+    assert verify_capabilities["file_write"] is False
+    assert verify_capabilities["sandbox_modes"] == ["read-only"]
 
-    for agent in ("spec-writer.md", "spec-verifier.md", "happy-path-tester.md"):
+    test_capabilities = json.loads(
+        (AGENT_CARD_ROOT / "agent-cards" / "test.json").read_text()
+    )["capabilities"]
+    assert test_capabilities["file_write"] is False
+    assert test_capabilities["sandbox_modes"] == ["workspace-write"]
+
+    for agent in ("spec-writer.md", "happy-path-tester.md"):
         source = (REPO_ROOT / "claude" / "agents" / agent).read_text(
             encoding="utf-8"
         )
         assert "codex_sandbox: workspace-write" in source
+    verifier_source = (
+        REPO_ROOT / "claude" / "agents" / "spec-verifier.md"
+    ).read_text(encoding="utf-8")
+    assert "codex_sandbox: read-only" in verifier_source
 
     cli_readme = (REPO_ROOT / "cli" / "README.md").read_text(encoding="utf-8")
-    assert "Plan runs with `file_write: true` and `workspace-write`" in cli_readme
+    assert "Plan uses `file_write: true` and `workspace-write`" in cli_readme
+    assert "Verify workers and direct Codex Verify use `read-only`" in cli_readme
     assert (
-        "verify/test keep `file_write: false` but use `workspace-write`"
+        "Test keeps `file_write: false` but uses `workspace-write`"
         in cli_readme
     )
 

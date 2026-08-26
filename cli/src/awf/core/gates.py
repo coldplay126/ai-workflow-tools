@@ -21,6 +21,336 @@ def _as_list(value: Any) -> list[Any]:
 def _is_strict_nonnegative_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
+_CONFLICT_SEVERITY_RANK = {
+    "CRITICAL": 0,
+    "HIGH": 1,
+    "MEDIUM": 2,
+    "LOW": 3,
+}
+_ACTIVE_CONFLICT_STATUSES = frozenset(
+    {"conflict", "conflicted", "open", "unresolved"}
+)
+_INACTIVE_CONFLICT_STATUSES = frozenset(
+    {"acknowledged", "dismissed", "resolved"}
+)
+_REVIEW_JUDGE_CONFLICT_REASONS = frozenset(
+    {
+        "conclusion_conflict",
+        "critical_finding_present",
+        "high_count_mismatch",
+        "high_severity_findings_mismatch",
+    }
+)
+_VERIFY_JUDGE_CONFLICT_REASONS = frozenset(
+    {
+        "compliance_fail_mismatch",
+        "compliance_fail_present",
+        "conclusion_conflict",
+        "quality_critical_mismatch",
+        "quality_critical_present",
+        "scope_violation_present",
+        "scope_violations_mismatch",
+    }
+)
+_NON_CONFLICT_JUDGE_REASONS = frozenset(
+    {"primary_gate_failed", "secondary_gate_failed"}
+)
+_CAPABILITY_EVIDENCE_BY_PHASE = {
+    "verify": ("security_scan",),
+    "test": ("browser", "debug"),
+}
+_CAPABILITY_EVIDENCE_STATUSES = frozenset(
+    {"pass", "not_run", "skipped", "failed"}
+)
+_SYNTHESIZED_CAPABILITY_NOT_RUN_REASON = (
+    "legacy_result_missing_capability_evidence"
+)
+
+
+def canonicalize_capability_evidence(
+    phase: str, result_data: dict[str, Any]
+) -> dict[str, Any]:
+    """Add explicit unavailable optional-capability evidence to legacy results."""
+    capabilities = _CAPABILITY_EVIDENCE_BY_PHASE.get(phase)
+    if not capabilities:
+        return result_data
+    if "capability_evidence" not in result_data:
+        present: set[str] = set()
+        evidence: list[Any] = []
+    else:
+        raw_evidence = result_data["capability_evidence"]
+        if not isinstance(raw_evidence, list) or not raw_evidence:
+            return result_data
+        present = {
+            item["capability"]
+            for item in raw_evidence
+            if isinstance(item, dict)
+            and isinstance(item.get("capability"), str)
+            and item["capability"] in capabilities
+        }
+        evidence = list(raw_evidence)
+    normalized = dict(result_data)
+    normalized["capability_evidence"] = [
+        *evidence,
+        *[
+            {
+                "capability": capability,
+                "status": "not_run",
+                "reason": _SYNTHESIZED_CAPABILITY_NOT_RUN_REASON,
+            }
+            for capability in capabilities
+            if capability not in present
+        ],
+    ]
+    return normalized
+
+
+def _validate_capability_evidence(
+    phase: str, value: object, *, declared: bool
+) -> list[str]:
+    capabilities = _CAPABILITY_EVIDENCE_BY_PHASE.get(phase)
+    if not capabilities or not declared:
+        return []
+    if not isinstance(value, list) or not value:
+        return ["missing_or_invalid:capability_evidence"]
+
+    errors: list[str] = []
+    seen: set[str] = set()
+    allowed = set(capabilities)
+    for index, item in enumerate(value):
+        prefix = f"capability_evidence[{index}]"
+        if not isinstance(item, dict):
+            errors.append(f"invalid:{prefix}")
+            continue
+        if set(item) - {"capability", "status", "reason"}:
+            errors.append(f"unexpected:{prefix}")
+        capability = item.get("capability")
+        status = item.get("status")
+        reason = item.get("reason")
+        if not isinstance(capability, str) or capability not in allowed:
+            errors.append(f"invalid:{prefix}.capability")
+        elif capability in seen:
+            errors.append(f"duplicate:{prefix}.capability")
+        else:
+            seen.add(capability)
+        if not isinstance(status, str) or status not in _CAPABILITY_EVIDENCE_STATUSES:
+            errors.append(f"invalid:{prefix}.status")
+        if status != "pass" and (
+            not isinstance(reason, str) or not reason.strip()
+        ):
+            errors.append(f"missing_or_invalid:{prefix}.reason")
+        elif reason is not None and not isinstance(reason, str):
+            errors.append(f"invalid:{prefix}.reason")
+    return errors
+
+
+def _conflict_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = " ".join(value.split())
+    return normalized if normalized else None
+
+
+def _conflict_location(item: dict[str, Any]) -> str | None:
+    if "location" in item and "locations" in item:
+        return None
+    locations = item.get("locations") if "locations" in item else [item.get("location")]
+    if not isinstance(locations, list):
+        return None
+    normalized = {
+        value.strip().replace("\\", "/")
+        for value in locations
+        if isinstance(value, str) and value.strip()
+    }
+    if not normalized or len(normalized) != len(locations):
+        return None
+    return "|".join(sorted(normalized))
+
+
+def _conflict_evidence(value: object) -> str | None:
+    if not isinstance(value, list) or not value:
+        return None
+    try:
+        normalized = {
+            json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+            for item in value
+        }
+    except (TypeError, ValueError):
+        return None
+    return "|".join(sorted(normalized)) if normalized else None
+
+
+def _structured_conflict_counts(
+    values: object,
+) -> tuple[bool, int, int]:
+    """Return valid, active conflict count, and active HIGH-or-higher count."""
+    if not isinstance(values, list):
+        return False, 0, 0
+    conflicts: dict[tuple[str, str, str, str, str], str] = {}
+    for item in values:
+        if not isinstance(item, dict):
+            return False, 0, 0
+        requirement = _conflict_text(item.get("requirement"))
+        category = _conflict_text(item.get("category"))
+        location = _conflict_location(item)
+        status = _conflict_text(item.get("status"))
+        evidence = _conflict_evidence(item.get("evidence"))
+        severity = _conflict_text(item.get("severity"))
+        if (
+            requirement is None
+            or category is None
+            or location is None
+            or status is None
+            or evidence is None
+            or severity is None
+        ):
+            return False, 0, 0
+        status = status.casefold()
+        severity = severity.upper()
+        if (
+            status not in _ACTIVE_CONFLICT_STATUSES | _INACTIVE_CONFLICT_STATUSES
+            or severity not in _CONFLICT_SEVERITY_RANK
+        ):
+            return False, 0, 0
+        key = (
+            requirement,
+            category.casefold(),
+            location,
+            status,
+            evidence,
+        )
+        existing = conflicts.get(key)
+        if (
+            existing is None
+            or _CONFLICT_SEVERITY_RANK[severity] < _CONFLICT_SEVERITY_RANK[existing]
+        ):
+            conflicts[key] = severity
+    active = [
+        severity
+        for (_, _, _, status, _), severity in conflicts.items()
+        if status in _ACTIVE_CONFLICT_STATUSES
+    ]
+    return (
+        True,
+        len(active),
+        sum(_CONFLICT_SEVERITY_RANK[severity] <= _CONFLICT_SEVERITY_RANK["HIGH"] for severity in active),
+    )
+
+
+def _state_synthesis(explicit_root: Optional[str], phase: str) -> tuple[bool, object]:
+    """Load the persisted synthesis only when this run did not embed one."""
+    try:
+        from awf.core.state import load_workflow_state
+
+        state = load_workflow_state(explicit_root)
+    except FileNotFoundError:
+        return False, None
+    except Exception:
+        return True, None
+    phases = state.get("phases") if isinstance(state, dict) else None
+    phase_state = phases.get(phase) if isinstance(phases, dict) else None
+    if not isinstance(phase_state, dict) or "synthesis" not in phase_state:
+        return False, None
+    return True, phase_state["synthesis"]
+
+
+def _synthesis_conflict_counts(
+    phase: str,
+    synthesis: object,
+) -> tuple[bool, int, int]:
+    if not isinstance(synthesis, dict):
+        return False, 0, 0
+    judge_passed = synthesis.get(
+        "judge_passed",
+        synthesis.get("judgePassed"),
+    )
+    synthesis_passed = synthesis.get(
+        "synthesis_passed",
+        synthesis.get("synthesisPassed"),
+    )
+    judge_reasons = synthesis.get(
+        "judge_reasons",
+        synthesis.get("judgeReasons"),
+    )
+    if (
+        not isinstance(judge_passed, bool)
+        or not isinstance(synthesis_passed, bool)
+        or not isinstance(judge_reasons, list)
+        or not all(isinstance(reason, str) and reason.strip() for reason in judge_reasons)
+        or len(set(judge_reasons)) != len(judge_reasons)
+    ):
+        return False, 0, 0
+    if judge_passed:
+        if judge_reasons or not synthesis_passed:
+            return False, 0, 0
+    elif not judge_reasons:
+        return False, 0, 0
+
+    conflict_reasons = (
+        _REVIEW_JUDGE_CONFLICT_REASONS
+        if phase == "review"
+        else _VERIFY_JUDGE_CONFLICT_REASONS
+    )
+    if any(
+        reason not in conflict_reasons | _NON_CONFLICT_JUDGE_REASONS
+        for reason in judge_reasons
+    ):
+        return False, 0, 0
+    grounded_reasons = set(judge_reasons) & conflict_reasons
+    if grounded_reasons and synthesis_passed:
+        return False, 0, 0
+    if synthesis_passed and not judge_passed and set(judge_reasons) != {
+        "primary_gate_failed"
+    }:
+        return False, 0, 0
+
+    if "conflicts" not in synthesis:
+        if grounded_reasons or not synthesis_passed:
+            return False, 0, 0
+        return True, 0, 0
+
+    valid, count, high_count = _structured_conflict_counts(synthesis["conflicts"])
+    if not valid:
+        return False, 0, 0
+    if (grounded_reasons or not synthesis_passed) and count == 0:
+        return False, 0, 0
+    if judge_passed and count:
+        return False, 0, 0
+    return True, count, high_count
+
+
+def _multi_llm_conflict_counts(
+    explicit_root: Optional[str],
+    phase: str,
+    result_data: dict[str, Any],
+) -> tuple[bool, int, int, str]:
+    """Count de-duplicated, evidenced multi-LLM conflicts without auto-passing malformed evidence."""
+    if "synthesis" in result_data:
+        valid, count, high_count = _synthesis_conflict_counts(
+            phase,
+            result_data["synthesis"],
+        )
+        return valid, count, high_count, "result_synthesis"
+
+    has_state_synthesis, state_synthesis = _state_synthesis(explicit_root, phase)
+    if has_state_synthesis:
+        valid, count, high_count = _synthesis_conflict_counts(
+            phase,
+            state_synthesis,
+        )
+        return valid, count, high_count, "state_synthesis"
+
+    embedded_conflicts = [
+        finding
+        for finding in _as_list(result_data.get("findings"))
+        if isinstance(finding, dict)
+        and str(finding.get("category", "")).strip().casefold() == "review_conflict"
+    ]
+    if embedded_conflicts:
+        valid, count, high_count = _structured_conflict_counts(embedded_conflicts)
+        return valid, count, high_count, "embedded_findings"
+    return True, 0, 0, "not_run"
+
 
 # --- Plan G1 artifact-based evaluation ---
 
@@ -296,6 +626,13 @@ def _validate_required_shape(phase: str, result_data: dict[str, Any]) -> list[st
                 errors.append("missing:compliance.percentage")
         if isinstance(quality, dict) and "critical" not in quality:
             errors.append("missing:quality.critical")
+    errors.extend(
+        _validate_capability_evidence(
+            phase,
+            result_data.get("capability_evidence"),
+            declared="capability_evidence" in result_data,
+        )
+    )
     return errors
 
 
@@ -424,8 +761,17 @@ def evaluate_gate(explicit_root: Optional[str], phase: str, result_data: dict[st
             passed = percentage >= 80
             detail = f"coverage_percentage={percentage}"
         elif condition == "REVIEW_CONFLICT count(severity>=HIGH) == 0 (when multi-LLM)":
-            passed = True
-            detail = "multi_llm_conflicts=0 (not yet modeled)"
+            valid, _, high_count, source = _multi_llm_conflict_counts(
+                explicit_root,
+                phase,
+                result_data,
+            )
+            passed = valid and high_count == 0
+            detail = (
+                f"multi_llm_conflicts_high={high_count}; source={source}"
+                if valid
+                else "multi_llm_conflicts=invalid"
+            )
         elif condition == "scope.violations == 0":
             violations = int(scope.get("violations", 0) or 0)
             passed = violations == 0
@@ -443,8 +789,17 @@ def evaluate_gate(explicit_root: Optional[str], phase: str, result_data: dict[st
             passed = critical == 0
             detail = f"quality_critical={critical}"
         elif condition == "REVIEW_CONFLICT count == 0 (when multi-LLM)":
-            passed = True
-            detail = "multi_llm_conflicts=0 (not yet modeled)"
+            valid, count, _, source = _multi_llm_conflict_counts(
+                explicit_root,
+                phase,
+                result_data,
+            )
+            passed = valid and count == 0
+            detail = (
+                f"multi_llm_conflicts={count}; source={source}"
+                if valid
+                else "multi_llm_conflicts=invalid"
+            )
         # --- §1.1 impl gate (G4) conditions ---
         elif condition == "tasks.pending == 0":
             pending = result_data.get("tasks_pending")
