@@ -196,6 +196,7 @@ nine subcommands are:
 |---------|---------|
 | `awf wt acquire` | Preview or create/reuse a feature, promotion, or scratch lease. |
 | `awf wt promote` | Preview or promote one or more ordered, approved/accepted, merged staging PR deltas to a production branch, with optional exact reviewed-path exclusions. |
+| `awf wt recover-promotion` | Preview or safely amend a blocked out-of-order promotion's committed manual resolution; publication remains a separate `wt promote` step. |
 | `awf wt finish` | Preview or remove one proven-safe managed lease for a merged PR. |
 | `awf wt gc` | Preview or remove stale, proven-safe merged leases; `--merged` is required. |
 | `awf wt import` | Inventory existing direct-child repository worktrees and optionally register them as imported leases. |

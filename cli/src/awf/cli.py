@@ -29,6 +29,7 @@ from awf.commands.wt import (
     run_wt_import,
     run_wt_status,
     run_wt_promote,
+    run_wt_recover_promotion,
     run_wt_finish,
     run_wt_gc,
 )
@@ -901,6 +902,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print a versioned JSON result.",
     )
     wt_promote_parser.set_defaults(handler=run_wt_promote)
+
+    wt_recover_promotion_parser = wt_subparsers.add_parser(
+        "recover-promotion",
+        help=(
+            "Preview or amend allowed post-commit resolution changes for one "
+            "blocked out-of-order promotion."
+        ),
+    )
+    wt_recover_promotion_parser.add_argument(
+        "--lease",
+        required=True,
+        help="Blocked manually reviewed out-of-order promotion lease id.",
+    )
+    wt_recover_promotion_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to current or parent directories.",
+    )
+    wt_recover_promotion_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Stage allowed paths and amend the manual resolution commit.",
+    )
+    wt_recover_promotion_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_recover_promotion_parser.set_defaults(handler=run_wt_recover_promotion)
 
     wt_finish_parser = wt_subparsers.add_parser(
         "finish",
