@@ -69,6 +69,14 @@ class _PromotionRecoveryPreflight:
     dirty_paths: tuple[str, ...]
     reconciliation_head: str | None = None
 
+@dataclass(frozen=True)
+class _PromotionRetryIdentity:
+    initiative: str
+    branch: str
+    worktree_path: Path
+
+
+
 
 def _same_github_actor(author: object, merger: object) -> bool:
     return (
@@ -313,6 +321,24 @@ class WorktreeService:
                     )
                 except sqlite3.Error as error:
                     return self._promotion_blocked("registry_conflict", str(error))
+                retry_identity = self._stale_precommit_promotion_retry_identity(
+                    active,
+                    repository_id=lease.repository_id,
+                    initiative=lease.initiative,
+                    source_pr=lease.source_pr,
+                    target_ref=target_ref,
+                    expected_branch=lease.branch,
+                    live_target_sha=target_sha,
+                )
+                if retry_identity is not None:
+                    lease = self._new_promotion_lease(
+                        sources,
+                        target_ref,
+                        target_sha,
+                        excluded_paths,
+                        promotion_mode=promotion_mode,
+                        retry_identity=retry_identity,
+                    )
                 resolution_preview = self._out_of_order_resolution_preview(
                     active,
                     expected=lease,
@@ -366,23 +392,80 @@ class WorktreeService:
             promotion_mode=promotion_mode,
         )
         expected_branch = self._promotion_branch(initiative)
+        retry_identity: _PromotionRetryIdentity | None = None
+        target_sha: str | None = None
         with repository_lock(self.lock_dir / f"{repository_id}.lock"):
             active = self.registry.find_active(
                 repository_id, initiative, Purpose.PROMOTE
             )
             if active is not None:
-                return self._reuse_promotion(
-                    active,
-                    sources=sources,
-                    excluded_paths=excluded_paths,
-                    promotion_mode=promotion_mode,
-                    target_ref=target_ref,
-                    expected_branch=expected_branch,
-                    github=github,
-                    target_branch=target_branch,
+                if (
+                    promotion_mode is PromotionMode.OUT_OF_ORDER
+                    and active.state is LeaseState.BLOCKED
+                    and active.resolution_state is ResolutionState.NONE
+                    and active.target_base_sha == active.head_sha
+                ):
+                    try:
+                        events = self.registry.list_events(active.id)
+                    except sqlite3.Error:
+                        events = []
+                    if (
+                        events
+                        and events[-1].event_type == "promotion_blocked"
+                        and events[-1].summary.startswith("promotion_apply_failed:")
+                    ):
+                        try:
+                            target_sha = self.git.fetch_ref(target_branch)
+                        except GitRemoteError as error:
+                            return self._external_error(
+                                "wt.promote", "source_delta_unavailable", str(error)
+                            )
+                        except GitError as error:
+                            return self._promotion_blocked(
+                                "source_delta_unavailable", str(error)
+                            )
+                        retry_identity = (
+                            self._stale_precommit_promotion_retry_identity(
+                                active,
+                                repository_id=repository_id,
+                                initiative=initiative,
+                                source_pr=sources[0].number,
+                                target_ref=target_ref,
+                                expected_branch=expected_branch,
+                                live_target_sha=target_sha,
+                            )
+                        )
+                if retry_identity is None:
+                    return self._reuse_promotion(
+                        active,
+                        sources=sources,
+                        excluded_paths=excluded_paths,
+                        promotion_mode=promotion_mode,
+                        target_ref=target_ref,
+                        expected_branch=expected_branch,
+                        github=github,
+                        target_branch=target_branch,
+                    )
+                initiative = retry_identity.initiative
+                expected_branch = retry_identity.branch
+                active = self.registry.find_active(
+                    repository_id, initiative, Purpose.PROMOTE
                 )
+                if active is not None:
+                    return self._reuse_promotion(
+                        active,
+                        sources=sources,
+                        excluded_paths=excluded_paths,
+                        promotion_mode=promotion_mode,
+                        target_ref=target_ref,
+                        expected_branch=expected_branch,
+                        github=github,
+                        target_branch=target_branch,
+                    )
             try:
-                target_sha = self.git.fetch_ref(target_branch)
+                if target_sha is None:
+                    target_sha = self.git.fetch_ref(target_branch)
+                assert target_sha is not None
                 staging_sha = (
                     self.git.fetch_ref(sources[0].base_ref)
                     if excluded_paths
@@ -556,6 +639,7 @@ class WorktreeService:
                 target_sha,
                 excluded_paths,
                 promotion_mode=promotion_mode,
+                retry_identity=retry_identity,
             )
             branch_conflict = self._branch_conflict(lease.branch)
             if branch_conflict is not None:
@@ -3490,13 +3574,18 @@ class WorktreeService:
         target_sha: str,
         excluded_paths: Sequence[str],
         promotion_mode: PromotionMode = PromotionMode.EXACT,
+        retry_identity: _PromotionRetryIdentity | None = None,
     ) -> Lease:
         target_branch = target_ref[len("origin/") :]
-        initiative = self._promotion_initiative(
-            tuple(source.number for source in sources),
-            target_branch,
-            excluded_paths,
-            promotion_mode=promotion_mode,
+        initiative = (
+            retry_identity.initiative
+            if retry_identity is not None
+            else self._promotion_initiative(
+                tuple(source.number for source in sources),
+                target_branch,
+                excluded_paths,
+                promotion_mode=promotion_mode,
+            )
         )
         lease = Lease.new(
             repository_id=self.git.repository_id(),
@@ -3505,7 +3594,11 @@ class WorktreeService:
             worktree_path=self.cache_dir / self.git.repository_name(),
             initiative=initiative,
             purpose=Purpose.PROMOTE,
-            branch=self._promotion_branch(initiative),
+            branch=(
+                retry_identity.branch
+                if retry_identity is not None
+                else self._promotion_branch(initiative)
+            ),
             base_ref=target_ref,
             head_sha=target_sha,
             managed=True,
@@ -3543,7 +3636,11 @@ class WorktreeService:
         )
         return replace(
             lease,
-            worktree_path=self.cache_dir / lease.repository_name / lease.id,
+            worktree_path=(
+                retry_identity.worktree_path
+                if retry_identity is not None
+                else self.cache_dir / lease.repository_name / lease.id
+            ),
         )
 
     @staticmethod
@@ -3568,6 +3665,70 @@ class WorktreeService:
     @staticmethod
     def _promotion_branch(initiative: str) -> str:
         return f"awf/{initiative}/promote"
+
+    def _stale_precommit_promotion_retry_identity(
+        self,
+        lease: Lease | None,
+        *,
+        repository_id: str,
+        initiative: str,
+        source_pr: int | None,
+        target_ref: str,
+        expected_branch: str,
+        live_target_sha: str,
+    ) -> _PromotionRetryIdentity | None:
+        if (
+            lease is None
+            or lease.state is not LeaseState.BLOCKED
+            or lease.purpose is not Purpose.PROMOTE
+            or lease.promotion_mode is not PromotionMode.OUT_OF_ORDER
+            or lease.target_base_sha != lease.head_sha
+            or not lease.managed
+            or lease.target_pr is not None
+            or lease.resolution_state is not ResolutionState.NONE
+            or lease.conflicted_paths
+            or lease.protected_index_entries
+            or lease.repository_id != repository_id
+            or lease.initiative != initiative
+            or lease.source_pr != source_pr
+            or lease.base_ref != target_ref
+            or lease.branch != expected_branch
+            or lease.head_sha == live_target_sha
+            or _GIT_OBJECT_ID.fullmatch(lease.head_sha) is None
+            or _GIT_OBJECT_ID.fullmatch(live_target_sha) is None
+        ):
+            return None
+        try:
+            events = self.registry.list_events(lease.id)
+            worktree = self._registered_worktree(lease)
+            if (
+                not events
+                or events[-1].event_type != "promotion_blocked"
+                or not events[-1].summary.startswith("promotion_apply_failed:")
+                or worktree is None
+                or worktree.bare
+                or worktree.branch != lease.branch
+                or self.git.status_porcelain(lease.worktree_path)
+                or self.git.head_sha(lease.worktree_path) != lease.head_sha
+                or self.git.remote_branch_sha(lease.branch) is not None
+            ):
+                return None
+        except (GitError, OSError, RuntimeError, sqlite3.Error):
+            return None
+        retry_initiative = f"{initiative}-retry-{live_target_sha}"
+        worktree_digest = hashlib.sha256(
+            retry_initiative.encode("utf-8")
+        ).hexdigest()[:16]
+        return _PromotionRetryIdentity(
+            initiative=retry_initiative,
+            branch=self._promotion_branch(retry_initiative),
+            worktree_path=(
+                self.cache_dir
+                / lease.repository_name
+                / f"promotion-retry-{live_target_sha}-{worktree_digest}"
+            ),
+        )
+
 
     def _out_of_order_resolution_preview(
         self,
