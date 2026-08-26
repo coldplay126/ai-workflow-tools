@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from datetime import datetime, timedelta, timezone
 
@@ -61,6 +61,13 @@ _GITHUB_ACTOR_LOGIN = re.compile(
 )
 _GIT_OBJECT_ID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 
+
+
+@dataclass(frozen=True)
+class _PromotionRecoveryPreflight:
+    target_branch: str
+    dirty_paths: tuple[str, ...]
+    reconciliation_head: str | None = None
 
 
 def _same_github_actor(author: object, merger: object) -> bool:
@@ -756,6 +763,256 @@ class WorktreeService:
                 lease=lease,
                 actions=verification_actions,
             )
+
+    def recover_promotion(
+        self, lease_id: str, *, apply: bool = False
+    ) -> CommandResult:
+        if not isinstance(lease_id, str) or not lease_id:
+            return self._recover_promotion_blocked(
+                "invalid_lease", "lease must be a non-empty string"
+            )
+        if not apply:
+            try:
+                lease = self.registry.get_lease_read_only(lease_id)
+            except sqlite3.Error as error:
+                return self._recover_promotion_blocked(
+                    "registry_conflict", str(error)
+                )
+            if lease is None:
+                return self._recover_promotion_blocked(
+                    "unknown_lease", f"lease {lease_id} does not exist"
+                )
+            preflight = self._recover_promotion_preflight(lease, apply=False)
+            if isinstance(preflight, CommandResult):
+                return preflight
+            if preflight.reconciliation_head is not None:
+                actions = (
+                    {
+                        "kind": "reconcile_promotion_head",
+                        "lease_id": lease.id,
+                        "head_sha": preflight.reconciliation_head,
+                    },
+                )
+            else:
+                actions = (
+                    {
+                        "kind": "stage_paths",
+                        "lease_id": lease.id,
+                        "paths": list(lease.conflicted_paths),
+                        "dirty_paths": list(preflight.dirty_paths),
+                    },
+                    {
+                        "kind": "amend_manual_resolution",
+                        "lease_id": lease.id,
+                        "path": str(lease.worktree_path),
+                    },
+                )
+            return CommandResult.ok(
+                "wt.recover-promotion",
+                decision="preview",
+                lease=lease,
+                actions=actions,
+            )
+
+        lease: Lease | None = None
+        try:
+            repository_id = self.git.repository_id()
+            with repository_lock(self.lock_dir / f"{repository_id}.lock"):
+                lease = self.registry.get_lease(lease_id)
+                if lease is None:
+                    return self._recover_promotion_blocked(
+                        "unknown_lease", f"lease {lease_id} does not exist"
+                    )
+                preflight = self._recover_promotion_preflight(lease, apply=True)
+                if isinstance(preflight, CommandResult):
+                    return preflight
+                if preflight.reconciliation_head is not None:
+                    reconciled = self.registry.transition(
+                        lease.id,
+                        LeaseState.BLOCKED,
+                        expected_version=lease.version,
+                        event_type="promotion_manual_resolution_amend_reconciled",
+                        summary="manually reviewed amended resolution reconciled",
+                        observed_head_sha=preflight.reconciliation_head,
+                        head_sha=preflight.reconciliation_head,
+                        resolution_state=ResolutionState.MANUAL_REVIEWED,
+                    )
+                    return CommandResult.ok(
+                        "wt.recover-promotion",
+                        decision="reconciled",
+                        lease=reconciled,
+                        actions=(
+                            {
+                                "kind": "reconcile_promotion_head",
+                                "lease_id": reconciled.id,
+                                "head_sha": reconciled.head_sha,
+                            },
+                        ),
+                    )
+
+                target_branch = preflight.target_branch
+                worktree = self._registered_worktree(lease)
+                if (
+                    worktree is None
+                    or worktree.branch != lease.branch
+                    or worktree.detached
+                    or worktree.bare
+                    or self.git.head_sha(lease.worktree_path) != lease.head_sha
+                    or self.git.commit_parents(lease.head_sha)
+                    != (lease.target_base_sha,)
+                    or self.git.commit_message(lease.worktree_path)
+                    != self._manual_reviewed_promotion_message(
+                        lease, target_branch
+                    )
+                    or self.git.committed_diff_has_conflict_markers(
+                        lease.worktree_path,
+                        lease.target_base_sha,
+                        lease.head_sha,
+                    )
+                ):
+                    return self._recover_promotion_blocked(
+                        "promotion_incomplete",
+                        f"lease {lease.id} changed after recovery preflight",
+                        lease=lease,
+                    )
+                self.git.stage_paths(lease.worktree_path, lease.conflicted_paths)
+                staged_tree_sha = self.git.index_tree_sha(lease.worktree_path)
+                if self.git.unmerged_paths(lease.worktree_path):
+                    return self._recover_promotion_blocked(
+                        "promotion_resolution_unmerged",
+                        f"lease {lease.id} still has unmerged paths after staging",
+                        lease=lease,
+                    )
+                if self.git.unstaged_paths(lease.worktree_path):
+                    return self._recover_promotion_blocked(
+                        "promotion_resolution_scope_mismatch",
+                        f"lease {lease.id} has unstaged changes after staging",
+                        lease=lease,
+                    )
+                if self.git.staged_diff_has_conflict_markers(lease.worktree_path):
+                    return self._recover_promotion_blocked(
+                        "promotion_incomplete",
+                        f"lease {lease.id} staged resolution has conflict markers",
+                        lease=lease,
+                    )
+                if not self._protected_index_entries_match(lease):
+                    return self._recover_promotion_blocked(
+                        "promotion_resolution_scope_mismatch",
+                        f"lease {lease.id} protected reviewed paths changed",
+                        lease=lease,
+                    )
+                promoted_paths = self.git.indexed_changed_paths(
+                    lease.worktree_path, lease.target_base_sha
+                )
+                if not promoted_paths or not set(promoted_paths).issubset(
+                    lease.reviewed_paths
+                ):
+                    return self._recover_promotion_blocked(
+                        "promotion_resolution_scope_mismatch",
+                        (
+                            f"lease {lease.id} amended delta is not a non-empty "
+                            "reviewed subset"
+                        ),
+                        lease=lease,
+                    )
+                promotion_head = self.git.amend_commit_no_edit(lease.worktree_path)
+                if (
+                    self.git.head_sha(lease.worktree_path) != promotion_head
+                    or self.git.commit_tree_sha(
+                        promotion_head, lease.worktree_path
+                    )
+                    != staged_tree_sha
+                    or self.git.commit_parents(promotion_head)
+                    != (lease.target_base_sha,)
+                    or self.git.commit_message(lease.worktree_path)
+                    != self._manual_reviewed_promotion_message(
+                        lease, target_branch
+                    )
+                ):
+                    return self._recover_promotion_blocked(
+                        "promotion_incomplete",
+                        f"lease {lease.id} amended resolution provenance changed",
+                        lease=lease,
+                    )
+                promoted_paths = self.git.changed_paths(
+                    lease.worktree_path,
+                    lease.target_base_sha,
+                    promotion_head,
+                    find_renames=True,
+                )
+                if not promoted_paths or not set(promoted_paths).issubset(
+                    lease.reviewed_paths
+                ):
+                    return self._recover_promotion_blocked(
+                        "promotion_resolution_scope_mismatch",
+                        (
+                            f"lease {lease.id} amended delta is not a non-empty "
+                            "reviewed subset"
+                        ),
+                        lease=lease,
+                    )
+                worktree = self._registered_worktree(lease)
+                if (
+                    worktree is None
+                    or worktree.branch != lease.branch
+                    or worktree.detached
+                    or worktree.bare
+                    or self.git.status_porcelain(lease.worktree_path)
+                    or self.git.committed_diff_has_conflict_markers(
+                        lease.worktree_path,
+                        lease.target_base_sha,
+                        promotion_head,
+                    )
+                    or not self._protected_index_entries_match(lease)
+                ):
+                    return self._recover_promotion_blocked(
+                        "promotion_incomplete",
+                        f"lease {lease.id} amended resolution did not remain clean",
+                        lease=lease,
+                    )
+                publication_blocker = self._recover_promotion_publication_blocker(
+                    lease, target_branch
+                )
+                if publication_blocker is not None:
+                    return publication_blocker
+                lease = self.registry.transition(
+                    lease.id,
+                    LeaseState.BLOCKED,
+                    expected_version=lease.version,
+                    event_type="promotion_manual_resolution_amended",
+                    summary="manually reviewed conflict resolution amended",
+                    observed_head_sha=promotion_head,
+                    head_sha=promotion_head,
+                    resolution_state=ResolutionState.MANUAL_REVIEWED,
+                )
+        except GitRemoteError as error:
+            return self._external_error(
+                "wt.recover-promotion",
+                "promotion_recovery_failed",
+                str(error),
+                lease=lease,
+            )
+        except (GitError, OSError, RuntimeError, sqlite3.Error, ValueError) as error:
+            return self._recover_promotion_blocked(
+                "promotion_recovery_failed", str(error), lease=lease
+            )
+        return CommandResult.ok(
+            "wt.recover-promotion",
+            decision="recovered",
+            lease=lease,
+            actions=(
+                {
+                    "kind": "stage_paths",
+                    "lease_id": lease.id,
+                    "paths": list(lease.conflicted_paths),
+                },
+                {
+                    "kind": "amend_manual_resolution",
+                    "lease_id": lease.id,
+                    "path": str(lease.worktree_path),
+                },
+            ),
+        )
 
     def status(
         self, *, initiative: str | None = None, refresh: bool = False
@@ -3470,6 +3727,330 @@ class WorktreeService:
                     "base": target_branch,
                 },
             ),
+        )
+
+    def _recover_promotion_preflight(
+        self, lease: Lease, *, apply: bool
+    ) -> _PromotionRecoveryPreflight | CommandResult:
+        if (
+            lease.purpose is not Purpose.PROMOTE
+            or not lease.managed
+            or lease.owner_kind != "awf"
+            or lease.promotion_mode is not PromotionMode.OUT_OF_ORDER
+            or lease.state is not LeaseState.BLOCKED
+            or lease.resolution_state is not ResolutionState.MANUAL_REVIEWED
+            or lease.target_pr is not None
+        ):
+            return self._recover_promotion_blocked(
+                "promotion_incomplete",
+                f"lease {lease.id} is not a blocked manually reviewed out-of-order promotion",
+                lease=lease,
+            )
+        if (
+            not isinstance(lease.source_pr, int)
+            or isinstance(lease.source_pr, bool)
+            or lease.source_pr <= 0
+            or any(
+                value is None or _GIT_OBJECT_ID.fullmatch(value) is None
+                for value in (
+                    lease.source_base_sha,
+                    lease.source_head_sha,
+                    lease.target_base_sha,
+                    lease.head_sha,
+                )
+            )
+        ):
+            return self._recover_promotion_blocked(
+                "promotion_incomplete",
+                f"lease {lease.id} has incomplete manual resolution provenance",
+                lease=lease,
+            )
+        try:
+            reviewed_paths = self._promotion_excluded_paths(lease.reviewed_paths)
+            conflicted_paths = self._promotion_excluded_paths(lease.conflicted_paths)
+        except ValueError:
+            return self._recover_promotion_blocked(
+                "promotion_incomplete",
+                f"lease {lease.id} has invalid reviewed-path provenance",
+                lease=lease,
+            )
+        if (
+            not reviewed_paths
+            or not conflicted_paths
+            or reviewed_paths != lease.reviewed_paths
+            or conflicted_paths != lease.conflicted_paths
+            or not set(conflicted_paths).issubset(reviewed_paths)
+        ):
+            return self._recover_promotion_blocked(
+                "promotion_incomplete",
+                f"lease {lease.id} has incomplete conflict-path provenance",
+                lease=lease,
+            )
+        try:
+            target_ref = self._remote_base_ref(lease.base_ref)
+            target_branch = target_ref[len("origin/") :]
+            if (
+                target_ref != lease.base_ref
+                or self._promotion_target_ref(target_branch) != target_ref
+                or not self._is_safe_remote_branch(lease.branch)
+                or lease.branch != self._promotion_branch(lease.initiative)
+                or lease.repository_id != self.git.repository_id()
+                or lease.repository_root != self.git.repository_root()
+            ):
+                return self._recover_promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} does not match its managed promotion provenance",
+                    lease=lease,
+                )
+            source_blocker = self._recover_promotion_source_blocker(
+                lease, target_ref, verify_objects=apply
+            )
+            if source_blocker is not None:
+                return source_blocker
+            worktree = self._registered_worktree(lease)
+            promotion_head = self.git.head_sha(lease.worktree_path)
+            if (
+                worktree is None
+                or worktree.branch != lease.branch
+                or worktree.detached
+                or worktree.bare
+                or self.git.commit_parents(promotion_head)
+                != (lease.target_base_sha,)
+                or self.git.commit_message(lease.worktree_path)
+                != self._manual_reviewed_promotion_message(lease, target_branch)
+                or self.git.committed_diff_has_conflict_markers(
+                    lease.worktree_path,
+                    lease.target_base_sha,
+                    promotion_head,
+                )
+            ):
+                return self._recover_promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} does not match its single manual resolution commit",
+                    lease=lease,
+                )
+            promoted_paths = self.git.changed_paths(
+                lease.worktree_path,
+                lease.target_base_sha,
+                promotion_head,
+                find_renames=True,
+            )
+            if not promoted_paths or not set(promoted_paths).issubset(
+                lease.reviewed_paths
+            ):
+                return self._recover_promotion_blocked(
+                    "promotion_resolution_scope_mismatch",
+                    f"lease {lease.id} committed delta is not a non-empty reviewed subset",
+                    lease=lease,
+                )
+            if not self._protected_index_entries_match(lease):
+                return self._recover_promotion_blocked(
+                    "promotion_resolution_scope_mismatch",
+                    f"lease {lease.id} protected reviewed paths changed",
+                    lease=lease,
+                )
+            publication_blocker = self._recover_promotion_publication_blocker(
+                lease, target_branch
+            )
+            if publication_blocker is not None:
+                return publication_blocker
+            unmerged_paths = self.git.unmerged_paths(lease.worktree_path)
+            if unmerged_paths:
+                return self._recover_promotion_blocked(
+                    "promotion_resolution_unmerged",
+                    f"lease {lease.id} has unmerged paths",
+                    lease=lease,
+                )
+            if promotion_head != lease.head_sha:
+                if self.git.status_porcelain(lease.worktree_path):
+                    return self._recover_promotion_blocked(
+                        "promotion_incomplete",
+                        f"lease {lease.id} amended resolution is not clean",
+                        lease=lease,
+                    )
+                return _PromotionRecoveryPreflight(
+                    target_branch=target_branch,
+                    dirty_paths=(),
+                    reconciliation_head=promotion_head,
+                )
+            dirty_paths = self.git.worktree_changed_paths(lease.worktree_path)
+            if not dirty_paths:
+                return self._recover_promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} has no post-commit resolution changes to amend",
+                    lease=lease,
+                )
+            if not set(dirty_paths).issubset(conflicted_paths):
+                return self._recover_promotion_blocked(
+                    "promotion_resolution_scope_mismatch",
+                    f"lease {lease.id} has dirty changes outside conflicted paths",
+                    lease=lease,
+                )
+            if (
+                self.git.staged_diff_has_conflict_markers(lease.worktree_path)
+                or self.git.worktree_diff_has_conflict_markers(lease.worktree_path)
+            ):
+                return self._recover_promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} resolution has conflict markers",
+                    lease=lease,
+                )
+        except GitRemoteError as error:
+            return self._external_error(
+                "wt.recover-promotion",
+                "promotion_recovery_failed",
+                str(error),
+                lease=lease,
+            )
+        except ExternalServiceError as error:
+            return self._external_error(
+                "wt.recover-promotion",
+                "promotion_recovery_failed",
+                str(error),
+                lease=lease,
+            )
+        except (AttributeError, ConfigError, GitError, OSError, ValueError) as error:
+            return self._recover_promotion_blocked(
+                "promotion_incomplete", str(error), lease=lease
+            )
+        return _PromotionRecoveryPreflight(
+            target_branch=target_branch,
+            dirty_paths=dirty_paths,
+        )
+
+    def _recover_promotion_source_blocker(
+        self, lease: Lease, target_ref: str, *, verify_objects: bool
+    ) -> CommandResult | None:
+        try:
+            github = self.github or GhClient(self.git.repository_root())
+            source = github.view_pr(lease.source_pr)
+        except ExternalServiceError as error:
+            return self._external_error(
+                "wt.recover-promotion",
+                "source_pr_unavailable",
+                str(error),
+                lease=lease,
+            )
+        if source.number != lease.source_pr:
+            return self._recover_promotion_blocked(
+                "promotion_provenance_changed",
+                f"lease {lease.id} source pull request identity changed",
+                lease=lease,
+            )
+        source_blocker = self._promotion_source_blocker(source, target_ref)
+        if source_blocker is not None:
+            return self._recover_promotion_blocked(
+                source_blocker.blockers[0]["code"],
+                source_blocker.blockers[0]["message"],
+                lease=lease,
+            )
+        invalid_oid = self._invalid_promotion_oid(source)
+        if invalid_oid is not None:
+            return self._recover_promotion_blocked(
+                "source_pr_invalid_oid",
+                f"source pull request #{source.number} has an invalid {invalid_oid}",
+                lease=lease,
+            )
+        if (
+            lease.source_base_sha != source.base_sha
+            or lease.source_head_sha != source.head_sha
+            or lease.reviewed_paths != tuple(sorted(source.changed_paths))
+        ):
+            return self._recover_promotion_blocked(
+                "promotion_provenance_changed",
+                f"lease {lease.id} source pull request provenance changed",
+                lease=lease,
+            )
+        if not verify_objects:
+            return None
+        source_blocker = self._out_of_order_reuse_source_blocker(lease, source)
+        if source_blocker is None:
+            return None
+        code = source_blocker.blockers[0]["code"]
+        message = source_blocker.blockers[0]["message"]
+        if source_blocker.status == "error":
+            return self._external_error(
+                "wt.recover-promotion",
+                code,
+                message,
+                lease=lease,
+            )
+        return self._recover_promotion_blocked(
+            "promotion_provenance_changed",
+            message,
+            lease=lease,
+        )
+
+    def _recover_promotion_publication_blocker(
+        self, lease: Lease, target_branch: str
+    ) -> CommandResult | None:
+        try:
+            live_target_sha = self.git.remote_branch_sha(target_branch)
+            if live_target_sha is None:
+                return self._recover_promotion_blocked(
+                    "target_ref_unavailable",
+                    f"target branch {target_branch!r} is unavailable on origin",
+                    lease=lease,
+                )
+            if live_target_sha != lease.target_base_sha:
+                return self._recover_promotion_blocked(
+                    "promotion_provenance_changed",
+                    f"lease {lease.id} target branch changed after manual review",
+                    lease=lease,
+                )
+            if self.git.remote_branch_sha(lease.branch) is not None:
+                return self._recover_promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} promotion branch is already published",
+                    lease=lease,
+                )
+            github = self.github or GhClient(self.git.repository_root())
+            if github.find_open_pr(head=lease.branch, base=target_branch) is not None:
+                return self._recover_promotion_blocked(
+                    "promotion_incomplete",
+                    f"lease {lease.id} already has a target pull request",
+                    lease=lease,
+                )
+        except GitRemoteError as error:
+            return self._external_error(
+                "wt.recover-promotion",
+                "promotion_recovery_failed",
+                str(error),
+                lease=lease,
+            )
+        except ExternalServiceError as error:
+            return self._external_error(
+                "wt.recover-promotion",
+                "promotion_recovery_failed",
+                str(error),
+                lease=lease,
+            )
+        return None
+
+    @staticmethod
+    def _manual_reviewed_promotion_message(lease: Lease, target_branch: str) -> str:
+        return "\n".join(
+            (
+                f"Promote PR #{lease.source_pr} to {target_branch}",
+                "",
+                f"AWF-Source-PR: {lease.source_pr}",
+                f"AWF-Source-Base: {lease.source_base_sha}",
+                f"AWF-Source-Head: {lease.source_head_sha}",
+                f"AWF-Target-Base: {lease.target_base_sha}",
+                f"AWF-Lease-ID: {lease.id}",
+                "AWF-Promotion-Mode: out-of-order",
+                "AWF-Resolution: manual-reviewed",
+            )
+        )
+
+    @staticmethod
+    def _recover_promotion_blocked(
+        code: str, message: str, *, lease: Lease | None = None
+    ) -> CommandResult:
+        return CommandResult.blocked(
+            "wt.recover-promotion",
+            blockers=({"code": code, "message": message},),
+            lease=lease,
         )
 
     def _resume_out_of_order_conflict(

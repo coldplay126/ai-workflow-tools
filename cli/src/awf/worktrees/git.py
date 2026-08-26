@@ -408,6 +408,14 @@ class GitClient:
             entries[path] = (mode, blob_oid)
         return tuple((path, entries[path]) for path in paths)
 
+    def index_tree_sha(self, cwd: Path) -> str:
+        return self._text(self._run("write-tree", cwd=cwd).stdout)
+
+    def commit_tree_sha(self, ref: str, cwd: Path) -> str:
+        return self._text(
+            self._run("show", "--no-patch", "--format=%T", ref, cwd=cwd).stdout
+        )
+
     def unstaged_paths(self, cwd: Path) -> tuple[str, ...]:
         tracked = _nul_records(
             self._run(
@@ -433,6 +441,41 @@ class GitClient:
         return _has_added_conflict_marker(
             self._run("diff", "--cached", "--no-ext-diff", cwd=cwd).stdout
         )
+
+    def worktree_diff_has_conflict_markers(self, cwd: Path) -> bool:
+        if _has_added_conflict_marker(
+            self._run("diff", "--no-ext-diff", cwd=cwd).stdout
+        ):
+            return True
+        untracked = _nul_records(
+            self._run(
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "-z",
+                cwd=cwd,
+            ).stdout
+        )
+        for path in untracked:
+            candidate = cwd / path
+            try:
+                if candidate.is_symlink():
+                    contents = os.fsencode(candidate.readlink())
+                elif candidate.is_file():
+                    contents = candidate.read_bytes()
+                else:
+                    continue
+            except OSError as error:
+                raise GitError(
+                    f"unable to inspect untracked path {path!r} for conflict markers: {error}"
+                ) from error
+            if any(
+                line.startswith(_CONFLICT_MARKER_PREFIXES)
+                for line in contents.splitlines()
+            ):
+                return True
+        return False
+
 
     def committed_diff_has_conflict_markers(
         self, cwd: Path, base: str, head: str
@@ -484,6 +527,10 @@ class GitClient:
             arguments.append("--allow-empty")
         arguments.extend(("-m", message))
         self._run(*arguments, cwd=cwd)
+        return self.head_sha(cwd)
+
+    def amend_commit_no_edit(self, cwd: Path) -> str:
+        self._run("commit", "--amend", "--no-edit", cwd=cwd)
         return self.head_sha(cwd)
 
     def push_branch(self, cwd: Path, branch: str) -> None:
