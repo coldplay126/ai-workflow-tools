@@ -48,6 +48,10 @@ REPORT_SCHEMA = "awf_skill_pressure_report_v1"
 DETERMINISTIC_REPORT_SCHEMA = "awf_skill_deterministic_report_v1"
 INSTALL_REPORT_SCHEMA = "awf_skill_install_report_v1"
 DISCOVERY_REPORT_SCHEMA = "awf_skill_discovery_report_v1"
+INSTALL_RECORD_COUNT = 48
+SKILL_COUNT = 16
+FIELD_REPORT_COUNT = 28
+EVIDENCE_CELL_COUNT = 144
 EVIDENCE_SUMMARY_SCHEMA = "awf_skill_evidence_matrix_v1"
 EVIDENCE_LAYERS = {
     "trigger_selection": "static",
@@ -1551,8 +1555,10 @@ def write_deterministic_report(
 
 def _validate_install_records(records: Sequence[Mapping[str, object]]) -> None:
     required = {"runtime", "skill", "source_sha256", "target_root", "status", "diagnostic"}
-    if len(records) != 45:
-        raise EvidenceError("install report requires exactly 45 records")
+    if len(records) != INSTALL_RECORD_COUNT:
+        raise EvidenceError(
+            f"install report requires exactly {INSTALL_RECORD_COUNT} records"
+        )
     identities: list[tuple[str, str]] = []
     for record in records:
         if set(record) != required:
@@ -1921,8 +1927,10 @@ def _validate_discovery_records(records: Sequence[Mapping[str, Any]]) -> None:
 
 
 def _canonical_skill_hashes(root: Path, matrix: SkillMatrix) -> dict[str, str]:
-    if len(matrix.skills) != 15:
-        raise EvidenceError("current matrix must identify exactly 15 Skills")
+    if len(matrix.skills) != SKILL_COUNT:
+        raise EvidenceError(
+            f"current matrix must identify exactly {SKILL_COUNT} Skills"
+        )
     hashes: dict[str, str] = {}
     for skill in matrix.skills:
         if Path(skill).parts != (skill,) or skill in {".", ".."}:
@@ -1961,8 +1969,10 @@ def _expect_exact_runtime_identities(
     label: str,
     matrix: SkillMatrix | None,
 ) -> None:
-    if len(records) != 45:
-        raise EvidenceError(f"{label} report requires exactly 45 records")
+    if len(records) != INSTALL_RECORD_COUNT:
+        raise EvidenceError(
+            f"{label} report requires exactly {INSTALL_RECORD_COUNT} records"
+        )
     identities: list[tuple[str, str]] = []
     for record in records:
         runtime = record.get("runtime")
@@ -2219,8 +2229,10 @@ def validate_source_bundle(
         canonical_skill_hashes=canonical_skill_hashes,
     )
 
-    if len(field_paths) != 27:
-        raise EvidenceError("field reports require exactly 27 paths")
+    if len(field_paths) != FIELD_REPORT_COUNT:
+        raise EvidenceError(
+            f"field reports require exactly {FIELD_REPORT_COUNT} paths"
+        )
     field_root = _pressure_operations_root(root)
     field_snapshots: list[_ReportSnapshot] = []
     field_identities: list[tuple[str, int]] = []
@@ -2647,8 +2659,10 @@ def _json_source_references(
         for label in ("deterministic", "install", "discovery")
     }
     field = sources["field"]
-    if not isinstance(field, tuple) or len(field) != 27:
-        raise EvidenceError("evidence field sources must contain exactly 27 reports")
+    if not isinstance(field, tuple) or len(field) != FIELD_REPORT_COUNT:
+        raise EvidenceError(
+            f"evidence field sources must contain exactly {FIELD_REPORT_COUNT} reports"
+        )
     serialized["field"] = [
         _validated_source_reference(root, run_id, label="field", reference=reference)
         for reference in field
@@ -2666,14 +2680,18 @@ def write_evidence_summary(
 ) -> Path:
     root = _repository_root(repo_root)
     safe_run_id = _require_safe_batch_id(run_id)
-    if len(cells) != 135:
-        raise EvidenceError("evidence summary requires exactly 135 cells")
+    if len(cells) != EVIDENCE_CELL_COUNT:
+        raise EvidenceError(
+            f"evidence summary requires exactly {EVIDENCE_CELL_COUNT} cells"
+        )
     validate_evidence_matrix(matrix or _summary_matrix(cells), cells)
     if set(sources) != {"deterministic", "install", "discovery", "field"}:
         raise EvidenceError("evidence sources are incomplete")
     serialized_sources = _json_source_references(root, safe_run_id, sources)
-    if not isinstance(serialized_sources["field"], list) or len(serialized_sources["field"]) != 27:
-        raise EvidenceError("evidence field sources must contain exactly 27 reports")
+    if not isinstance(serialized_sources["field"], list) or len(serialized_sources["field"]) != FIELD_REPORT_COUNT:
+        raise EvidenceError(
+            f"evidence field sources must contain exactly {FIELD_REPORT_COUNT} reports"
+        )
     report = {
         "schema": EVIDENCE_SUMMARY_SCHEMA,
         "run_id": safe_run_id,

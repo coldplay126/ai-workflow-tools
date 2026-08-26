@@ -347,8 +347,8 @@ def load_expected_skills(repo_root: Path, matrix_path: Path) -> dict[str, Expect
             source_sha256=source_sha256,
             source_error=source_error,
         )
-    if len(expected) != 15:
-        raise ValueError("Skill matrix must identify exactly 15 Skills")
+    if len(expected) != 16:
+        raise ValueError("Skill matrix must identify exactly 16 Skills")
     return expected
 
 

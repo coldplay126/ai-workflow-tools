@@ -8,12 +8,14 @@
 - `wf`: gated init/status/next/apply-result/reset, manual decide, ready gates, scope expansion/check, deterministic gate helpers 지원
 - `agents`: OMP agent 동기화와 persisted native worker follow-up 지원
 - `wt`: managed worktree lease, ordered staging PR-chain promotion, reviewed-path exclusion, evidence-gated cleanup 지원
+- `lsp`: repo/worktree local-only LSP profile preview, explicit apply, shared profile materialize 지원
 - `wiki`/`cmux`: operations telemetry/wiki compile, cmux observability, Pi opt-in field-smoke evidence 소비 지원
 최근 문서:
 - [Gateway Migration Checklist](../docs/manuals/06-gateway-migration-checklist.md)
 - [awf CLI Architecture](../docs/architecture/awf-cli-architecture.md)
 - [Workflow Pipeline Architecture](../docs/architecture/02-wf-pipeline.md)
 - [Provider Contract](../docs/specs/provider-contract.md)
+- [Worktree-local LSP setup reference](../docs/reference/lsp-worktree-setup.md)
 
 현재 CLI 표면:
 - `awf --version`: 설치된 `awf-cli` 패키지 버전 출력
@@ -100,6 +102,9 @@ awf wf seal-plan --repo-root . --json
 - `awf wf scope-check`: `git diff`와 allowed-files를 비교하는 deterministic G5 scope check. `.workflow/manifest.json`의 `sibling_repos: [{name, path, branch}]`이 선언되면 각 sibling repo의 `git diff`도 합산한다. allowed-files 경로는 `@<name>/...` prefix로 sibling repo의 파일을 가리킨다 (docs/specs/multi-repo-scope.md). exit 코드는 violation 있으면 1, repo-level config 오류(missing path, branch 미해석 등)는 2
 - `awf wf reset`: workflow state를 다시 `plan` phase로 초기화
 - `awf config show`: 3-level merge 결과와 resolved path 확인
+- `awf lsp setup [--apply] [--repo-root <path>] [--json]`: 기본값은 read-only preview다. JSON은 `schema_version`, `command`, `decision`, `languages`, `servers`, `actions`, `blockers`, `warnings`를 출력한다. `--apply`는 preview의 blocker/warning을 검토하고 명시적으로 요청한 경우에만 user profile, user OMP LSP config merge, shared Git common directory의 local ignore, ignored worktree link와 AWF managed prepare를 구성한다. tracked local file, unsafe symlink, malformed config, incompatible custom prepare는 fail closed한다.
+- `awf lsp status [--repo-root <path>] [--json]`: 현재 repository 또는 linked worktree의 profile, 언어, server binary 가용성, pending 상태를 조회한다.
+- `awf lsp materialize [--repo-root <path>] [--json]`: shared Git common directory identity를 사용해 현재 main 또는 linked worktree에 local profile link를 materialize한다. 이 명령은 명시적으로 실행하며 실제 local config는 Git에 커밋하지 않는다.
 - `awf skills list`: supported search paths에서 `SKILL.md`를 탐색해 skill 목록 출력
 - `awf agents sync-omp [--dry-run] [--force] [--json]`: `claude/agents/*.md`를 OMP-native `.omp/agents/*.md`로 결정적으로 변환한다. 생성 manifest에 등록된 파일만 갱신·삭제하며, 수동 OMP agent와 이름이 충돌하면 `--force` 없이는 중단한다
 - `awf agents followup-omp (--run <run-id-or-json> --role <role> | --task-id <id>) (--message <text> | --message-file <path>) [--json]`: persisted OMP host session이나 strict schema 검증을 통과한 native checkpoint에서 exact task를 먼저 steer/revive한다. `--run` + `--role`이 둘 이상의 worker와 일치하면 추측하지 않고 차단한다. original registry agent가 없을 때만 exact history에서 lineage-linked successor 한 개를 만들 수 있으며 successor는 original agent가 아니다. provenance inspect는 read-only이고 worker/follow-up은 `.workflow/state.json`, gate, scope hash, approve/done을 갱신하지 않는다(모두 parent-only)

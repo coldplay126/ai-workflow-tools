@@ -500,6 +500,45 @@ def test_all_displayed_skill_awf_commands_parse_with_current_cli() -> None:
 
     assert invalid == []
 
+def test_lsp_worktree_setup_docs_keep_local_mutation_in_cli() -> None:
+    reference_path = REPO_ROOT / "docs" / "reference" / "lsp-worktree-setup.md"
+    skill_path = (
+        REPO_ROOT / "claude" / "skills" / "lsp-worktree-setup" / "SKILL.md"
+    )
+    reference = reference_path.read_text(encoding="utf-8")
+    skill = skill_path.read_text(encoding="utf-8")
+
+    for command in (
+        "awf lsp setup --repo-root <repo> --json",
+        "awf lsp setup --apply --repo-root <repo> --json",
+        "awf lsp status --repo-root <repo> --json",
+        "awf lsp materialize --repo-root <repo> --json",
+    ):
+        assert command in reference
+    for field in (
+        "schema_version",
+        "command",
+        "decision",
+        "languages",
+        "servers",
+        "actions",
+        "blockers",
+        "warnings",
+    ):
+        assert f"`{field}`" in reference
+
+    assert "task.isolation.mode=auto" in reference
+    assert "task.isolation.apply=false" in reference
+    assert "task.isolation.merge=patch" in reference
+    assert "custom prepare" in reference
+    normalized_skill = " ".join(skill.split())
+    assert "직접 만들거나 수정하지 않습니다." in normalized_skill
+    assert "LSP server binary도 설치하지 않습니다." in normalized_skill
+    assert _skill_frontmatter(skill_path)["type"] == "repository-setup"
+    assert _skill_command_template(skill_path) == (
+        "awf lsp setup --repo-root <repo> --json"
+    )
+
 PLANNING_OPTION_SELECTION_COMMAND = (
     'awf wf select-option --decision-id D-001 --option-id O-001 '
     '--actor "${AWF_OPERATOR:?set operator identity}" --repo-root . --json'
