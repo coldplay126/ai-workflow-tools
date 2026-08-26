@@ -3,7 +3,147 @@ from __future__ import annotations
 from pathlib import Path
 
 from awf.core.cmux_health import probe_cmux_broker_health
+from awf.core.dispatch_provenance import summarize_omp_evidence
 from awf.core.event_sync_summary import summarize_event_sync
+
+
+def _format_omp_audit(value: object) -> str:
+    audit = value if isinstance(value, dict) else {}
+    return ",".join(
+        f"{state}={audit.get(state) if audit.get(state) is not None else 'unknown'}"
+        for state in ("requested", "acknowledged", "final", "partial", "unresolved")
+    )
+
+
+def _format_omp_usage(value: object) -> str:
+    usage = value if isinstance(value, dict) else {}
+    totals = usage.get("totals")
+    if not isinstance(totals, dict):
+        return "unknown"
+    return " ".join(f"{name}={amount}" for name, amount in sorted(totals.items()))
+
+
+def _append_omp_evidence_panel(lines: list[str], evidence: dict) -> None:
+    status = str(evidence.get("status") or "unknown")
+    diagnostics = evidence.get("diagnostics")
+    suffix = (
+        f" ({', '.join(str(item) for item in diagnostics)})"
+        if isinstance(diagnostics, list) and diagnostics
+        else ""
+    )
+    lines.append(f"omp_evidence: {status}{suffix}")
+
+    workflow = evidence.get("workflow")
+    if isinstance(workflow, dict):
+        lines.append(
+            "  workflow: "
+            f"id={workflow.get('workflow_id') or 'unknown'} "
+            f"phase={workflow.get('phase') or 'unknown'} "
+            f"attempt={workflow.get('attempt') or 'unknown'}"
+        )
+
+    usage = evidence.get("usage")
+    usage_map = usage if isinstance(usage, dict) else {}
+    primary_usage = usage_map.get("phase_primary_estimated")
+    primary_map = primary_usage if isinstance(primary_usage, dict) else {}
+    lines.append(
+        "  usage.phase_primary_estimated: "
+        f"{primary_map.get('status', 'unknown')} "
+        f"{_format_omp_usage(primary_map)}"
+    )
+    worker_usage = usage_map.get("omp_worker_reported")
+    worker_usage_map = worker_usage if isinstance(worker_usage, dict) else {}
+    lines.append(
+        "  usage.omp_worker_reported: "
+        f"{worker_usage_map.get('status', 'unknown')} "
+        f"{_format_omp_usage(worker_usage_map)} "
+        f"reported_workers={worker_usage_map.get('reported_worker_count', 0)} "
+        f"unknown_workers={worker_usage_map.get('unknown_worker_count', 0)}"
+    )
+
+    dispatches = evidence.get("dispatches")
+    if not isinstance(dispatches, list):
+        return
+    for dispatch in dispatches:
+        if not isinstance(dispatch, dict):
+            continue
+        provenance = dispatch.get("provenance")
+        provenance_map = provenance if isinstance(provenance, dict) else {}
+        if dispatch.get("status") == "blocked":
+            lines.append(
+                "  dispatch: blocked "
+                f"provenance={provenance_map.get('path') or 'unknown'} "
+                f"sha256={provenance_map.get('sha256') or 'unknown'} "
+                f"diagnostic={dispatch.get('diagnostic') or 'unknown'}"
+            )
+            continue
+        correlation = dispatch.get("correlation")
+        correlation_map = correlation if isinstance(correlation, dict) else {}
+        lines.append(
+            "  dispatch: "
+            f"run={dispatch.get('dispatch_run_id') or 'unknown'} "
+            f"status={dispatch.get('status') or 'unknown'} "
+            f"evidence_status={dispatch.get('evidence_status') or 'unknown'} "
+            f"workflow={correlation_map.get('workflow_id') or 'unknown'} "
+            f"phase={correlation_map.get('phase') or 'unknown'} "
+            f"attempt={correlation_map.get('attempt') or 'unknown'} "
+            f"provenance={provenance_map.get('path') or 'unknown'} "
+            f"sha256={provenance_map.get('sha256') or 'unknown'}"
+        )
+        checkpoint = dispatch.get("checkpoint")
+        checkpoint_map = checkpoint if isinstance(checkpoint, dict) else {}
+        lineage = dispatch.get("lineage")
+        lineage_map = lineage if isinstance(lineage, dict) else {}
+        lines.append(
+            "    checkpoint: "
+            f"state={checkpoint_map.get('state') or 'unknown'} "
+            f"resumable={checkpoint_map.get('resumable') if checkpoint_map.get('resumable') is not None else 'unknown'} "
+            f"session_persisted={checkpoint_map.get('session_persisted') if checkpoint_map.get('session_persisted') is not None else 'unknown'} "
+            f"parent_run={lineage_map.get('parent_run_id') or 'unknown'} "
+            f"parent_task={lineage_map.get('parent_task_id') or 'unknown'}"
+        )
+        lines.append(
+            "    dispatch_audit: "
+            f"timeout=unknown cancellation={_format_omp_audit(dispatch.get('cancellation'))} "
+            f"partial={dispatch.get('partial_result') or 'unknown'}"
+        )
+        agents = dispatch.get("agents")
+        if not isinstance(agents, list):
+            continue
+        for agent in agents:
+            if not isinstance(agent, dict):
+                continue
+            schema = agent.get("schema")
+            schema_map = schema if isinstance(schema, dict) else {}
+            reported = agent.get("reported_usage")
+            reported_map = reported if isinstance(reported, dict) else {}
+            lineage = agent.get("lineage")
+            lineage_map = lineage if isinstance(lineage, dict) else {}
+            values = reported_map.get("values")
+            usage_detail = (
+                " ".join(
+                    f"{name}={amount}"
+                    for name, amount in sorted(values.items())
+                )
+                if isinstance(values, dict)
+                else "unknown"
+            )
+            lines.append(
+                "    worker: "
+                f"role={agent.get('role') or 'unknown'} "
+                f"status={agent.get('status') or 'unknown'} "
+                f"strict_schema_status={schema_map.get('strict_status') or 'unknown'} "
+                f"timeout={agent.get('timeout') or 'unknown'} "
+                f"cancellation={_format_omp_audit(agent.get('cancellation'))} "
+                f"partial={agent.get('partial_result') or 'unknown'} "
+                f"patch_scope={agent.get('patch_scope_status') or 'unknown'} "
+                f"model={agent.get('model') or 'unknown'} "
+                f"usage_source={reported_map.get('source') or 'omp_worker_reported'} "
+                f"usage_status={reported_map.get('status') or 'unknown'} "
+                f"usage={usage_detail} "
+                f"parent_task={lineage_map.get('parent_task_id') or 'unknown'} "
+                f"successor_task={lineage_map.get('successor_task_id') or 'unknown'}"
+            )
 
 
 _DETAIL_HIDE_STATUSES = {"absent", "ok", "fresh", "alive"}
@@ -12,8 +152,8 @@ _DETAIL_HIDE_STATUSES = {"absent", "ok", "fresh", "alive"}
 def summarize_workflow_state(state: dict, repo_root: str | Path | None = None) -> str:
     """Workflow state를 사람이 읽는 텍스트로 요약한다.
 
-    ``repo_root`` 가 전달되면 cmux-agent broker health 한 줄을 끝에 추가한다.
-    미전달(None) 시 cmux 통합을 생략한다 (회귀 호환).
+    ``repo_root`` 가 전달되면 읽기 전용 OMP evidence panel과 cmux-agent broker
+    health 한 줄을 추가한다. 미전달(None) 시 두 통합을 생략한다 (회귀 호환).
     """
     lines = [
         f"id: {state.get('id', '-')}",
@@ -150,6 +290,7 @@ def summarize_workflow_state(state: dict, repo_root: str | Path | None = None) -
     phase_tele = telemetry.get("phases") or {}
     if isinstance(phase_tele, dict) and phase_tele:
         lines.append("telemetry:")
+        lines.append("  source: phase_primary_estimated")
         total_in = 0
         total_out = 0
         total_cost = 0.0
@@ -204,6 +345,17 @@ def summarize_workflow_state(state: dict, repo_root: str | Path | None = None) -
                 lines.append(f"  - {transition} ({decision}, {reason}, {at})")
             else:
                 lines.append(f"  - {transition} ({decision}, {at})")
+
+    if repo_root is not None:
+        try:
+            _append_omp_evidence_panel(
+                lines,
+                summarize_omp_evidence(repo_root, state),
+            )
+        except Exception:
+            # Status rendering must not turn unreadable evidence into a pass.
+            lines.append("omp_evidence: blocked (summary_unavailable)")
+
 
     if repo_root is not None:
         cmux = probe_cmux_broker_health(repo_root)

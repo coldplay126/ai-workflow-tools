@@ -15,6 +15,7 @@ from awf.core.operational_metrics import (
     operations_root,
     record_analysis_complete,
     record_event,
+    record_omp_evidence_summary,
     record_scope_check,
     record_stage1_invalidation,
 )
@@ -77,6 +78,93 @@ def test_record_event_rejects_non_serializable_payload(tmp_path):
     with pytest.raises(TypeError):
         record_event(tmp_path, "bad", {"obj": _NotJson()})
 
+
+
+def test_record_omp_evidence_summary_preserves_usage_source_boundaries(tmp_path):
+    record_omp_evidence_summary(
+        tmp_path,
+        {
+            "status": "available",
+            "workflow": {
+                "workflow_id": "workflow-1",
+                "phase": "impl",
+                "attempt": 2,
+            },
+            "dispatches": [
+                {
+                    "dispatch_run_id": "omp-run-1",
+                    "status": "completed",
+                    "correlation": {
+                        "workflow_id": "workflow-1",
+                        "phase": "impl",
+                        "attempt": 2,
+                    },
+                    "cancellation": {
+                        "requested": True,
+                        "acknowledged": True,
+                        "final": True,
+                        "partial": False,
+                        "unresolved": False,
+                    },
+                }
+            ],
+            "usage": {
+                "phase_primary_estimated": {
+                    "source": "phase_primary_estimated",
+                    "status": "estimated",
+                    "totals": {
+                        "input_tokens": 100,
+                        "output_tokens": 20,
+                        "cost_usd": 0.3,
+                    },
+                },
+                "omp_worker_reported": {
+                    "source": "omp_worker_reported",
+                    "status": "reported",
+                    "totals": {
+                        "input_tokens": 7,
+                        "output_tokens": 5,
+                        "cost_usd": 0.04,
+                    },
+                },
+            },
+        },
+    )
+
+    [event] = list(iter_events(tmp_path))
+
+    assert event["type"] == "omp_evidence_summary"
+    payload = event["payload"]
+    assert payload["workflow"] == {
+        "workflow_id": "workflow-1",
+        "phase": "impl",
+        "attempt": 2,
+    }
+    assert payload["phase_primary_estimated_usage"] == {
+        "source": "phase_primary_estimated",
+        "status": "estimated",
+        "totals": {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "cost_usd": 0.3,
+        },
+    }
+    assert payload["omp_worker_reported_usage"] == {
+        "source": "omp_worker_reported",
+        "status": "reported",
+        "totals": {
+            "input_tokens": 7,
+            "output_tokens": 5,
+            "cost_usd": 0.04,
+        },
+    }
+    assert payload["cancellation"] == {
+        "requested": True,
+        "acknowledged": True,
+        "final": True,
+        "partial": False,
+        "unresolved": False,
+    }
 
 def test_iter_events_yields_chronological(tmp_path):
     record_event(tmp_path, "first", {"i": 1})

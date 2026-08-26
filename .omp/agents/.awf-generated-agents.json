@@ -2,17 +2,17 @@
   "files": [
     {
       "name": "adversarial-tester.md",
-      "sha256": "698478b7b492dd146c0a43e49f31204d1c8485dae26f38c371d486ba7830d370",
+      "sha256": "ceb24f5b121eaed772c6c39039d81b1fbfe8aa2ef5d40e85da1ae05f4abde611",
       "source": "claude/agents/adversarial-tester.md"
     },
     {
       "name": "analyzer.md",
-      "sha256": "7a48a7d5f31bdb35e56eab14f68a494dd994efe0424bf7e6a36ce4403069e054",
+      "sha256": "00a76f7742dbc3bef06affbc1ee2d87bcd343538a00d7c3c7daa22175b463903",
       "source": "claude/agents/analyzer.md"
     },
     {
       "name": "artifact-reviewer.md",
-      "sha256": "6a70e4f629ef8a5a0f6b59ae55e30b229ccb29aed70d5e9f02f51b7c30eb4cc3",
+      "sha256": "2d6fc64ffcc4fa3e591cc59bdc9f049f963c237a32bea9edda36cae55db487aa",
       "source": "claude/agents/artifact-reviewer.md"
     },
     {
@@ -22,12 +22,12 @@
     },
     {
       "name": "happy-path-tester.md",
-      "sha256": "489fbfbb16e48a9320eaa418ff7ee46aaa37f0751c1e156c1ec08f253d191746",
+      "sha256": "feeaa3bc1c88485cf345066825c5a8e7c547a8af6e8083b1c1be759e14535a25",
       "source": "claude/agents/happy-path-tester.md"
     },
     {
       "name": "implementer.md",
-      "sha256": "957c8137fc6ae75f64651461bdecc18ac4ad13b3e4ee81b103b43a01170bbb43",
+      "sha256": "19b1b13c6b2c0a11c60439dbf5ab463e976f4f90e50359c4698158c356bb9e68",
       "source": "claude/agents/implementer.md"
     },
     {
@@ -47,7 +47,7 @@
     },
     {
       "name": "spec-verifier.md",
-      "sha256": "185def6005c2b9d6946de2ea21c4064ddf08e3af4302bec970b41faf72302513",
+      "sha256": "0e55b7001cb6f44fe9d2c8a3dca0a32afdd50277e774b257edae37f31be2f898",
       "source": "claude/agents/spec-verifier.md"
     },
     {

@@ -5,6 +5,7 @@ import getpass
 import json
 import os
 import shlex
+import stat
 import sys
 import time
 import uuid
@@ -79,6 +80,16 @@ from awf.core.workflow_results import apply_workflow_result
 from awf.core.workflow_envelope import normalize_worker_result
 from awf.commands.ready_gate import enforce_ready_gate
 from awf.providers.registry import ProviderRegistry, UnknownProviderError
+from awf.core.approval import (
+    ApprovalError,
+    apply_approval,
+    validate_approved_planning_seal,
+)
+from awf.core.autoresearch import (
+    AUTORESEARCH_RUN_JSON_SCHEMA,
+    register_autoresearch_run,
+)
+from awf.core.done import DoneConfirmationError, apply_done_confirmation
 
 
 def _workflow_mode_prompt_note(mode: str | None) -> str:
@@ -107,8 +118,7 @@ def _run_provider_with_heartbeat(provider, prompt: str, cwd: str, label: str, *,
         processor=processor,
     )
 
-
-_CODEX_READ_ONLY_PHASES = {"review"}
+_CODEX_READ_ONLY_PHASES = {"review", "verify"}
 
 
 def _apply_provider_permission_mode(provider, *, yolo: bool) -> None:
@@ -213,6 +223,245 @@ def run_wf_gate(args: argparse.Namespace) -> int:
         print(json.dumps({"phase": phase, "passed": passed, "evaluations": evaluations}, ensure_ascii=False, indent=2))
 
     return 0 if passed else 1
+
+
+def _emit_approval_result(payload: dict[str, object], *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return
+    print(f"approval: {payload['status']}")
+    print(f"decision: {payload['decision']}")
+    if payload.get("current_phase") is not None:
+        print(f"current_phase: {payload['current_phase']}")
+    if payload.get("scope_hash") is not None:
+        print(f"scope_hash: {payload['scope_hash']}")
+    if payload.get("reused"):
+        print("reused: true")
+    if payload.get("code") is not None:
+        print(f"code: {payload['code']}")
+
+
+def run_wf_approve(args: argparse.Namespace) -> int:
+    """Record an explicit parent approval; actor is an audit label, not authorization."""
+    as_json = bool(getattr(args, "json", False))
+    decision = getattr(args, "decision", None)
+    if not sys.stdin.isatty():
+        _emit_approval_result(
+            {
+                "decision": decision if decision in {"approve", "revise", "reject"} else "invalid",
+                "status": "blocked",
+                "code": "approval_tty_required",
+            },
+            as_json=as_json,
+        )
+        return 2
+    try:
+        result = apply_approval(
+            getattr(args, "repo_root", None),
+            decision=decision,
+            actor=getattr(args, "actor", None),
+            reason=getattr(args, "reason", None),
+        )
+    except ApprovalError as error:
+        payload: dict[str, object] = {
+            "decision": decision if decision in {"approve", "revise", "reject"} else "invalid",
+            "status": "blocked",
+            "code": error.code,
+        }
+        _emit_approval_result(payload, as_json=as_json)
+        return 2 if error.code in {
+            "actor_invalid",
+            "actor_not_human",
+            "decision_invalid",
+            "reason_invalid",
+            "reason_required",
+            "repo_root_invalid",
+        } else 1
+    except Exception:
+        _emit_approval_result(
+            {
+                "decision": decision if decision in {"approve", "revise", "reject"} else "invalid",
+                "status": "blocked",
+                "code": "approval_failed",
+            },
+            as_json=as_json,
+        )
+        return 2
+    _emit_approval_result(result.as_payload(), as_json=as_json)
+    return 0
+
+
+def _emit_done_confirmation_result(payload: dict[str, object], *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return
+    print(f"confirmation: {payload['status']}")
+    print(f"decision: {payload['decision']}")
+    if payload.get("current_phase") is not None:
+        print(f"current_phase: {payload['current_phase']}")
+    if payload.get("pr_url") is not None:
+        print(f"pr_url: {payload['pr_url']}")
+    if payload.get("reused"):
+        print("reused: true")
+    if payload.get("code") is not None:
+        print(f"code: {payload['code']}")
+
+
+def run_wf_confirm(args: argparse.Namespace) -> int:
+    """Record a parent-only Done decision without running providers or OMP."""
+    as_json = bool(getattr(args, "json", False))
+    decision = getattr(args, "decision", None)
+    if bool(getattr(args, "non_interactive", False)):
+        _emit_done_confirmation_result(
+            {
+                "decision": decision if decision in {"complete", "hold"} else "invalid",
+                "status": "blocked",
+                "code": "done_non_interactive_forbidden",
+            },
+            as_json=as_json,
+        )
+        return 2
+    if not sys.stdin.isatty():
+        _emit_done_confirmation_result(
+            {
+                "decision": decision if decision in {"complete", "hold"} else "invalid",
+                "status": "blocked",
+                "code": "done_tty_required",
+            },
+            as_json=as_json,
+        )
+        return 2
+    try:
+        result = apply_done_confirmation(
+            getattr(args, "repo_root", None),
+            decision=decision,
+            actor=getattr(args, "actor", None),
+            pr_url=getattr(args, "pr_url", None),
+        )
+    except DoneConfirmationError as error:
+        payload: dict[str, object] = {
+            "decision": decision if decision in {"complete", "hold"} else "invalid",
+            "status": "blocked",
+            "code": error.code,
+        }
+        _emit_done_confirmation_result(payload, as_json=as_json)
+        return 2 if error.code in {
+            "actor_invalid",
+            "actor_reserved",
+            "decision_invalid",
+            "pr_url_invalid",
+            "repo_root_invalid",
+        } else 1
+    except Exception:
+        _emit_done_confirmation_result(
+            {
+                "decision": decision if decision in {"complete", "hold"} else "invalid",
+                "status": "blocked",
+                "code": "confirmation_failed",
+            },
+            as_json=as_json,
+        )
+        return 2
+    _emit_done_confirmation_result(result.as_payload(), as_json=as_json)
+    return 0
+
+
+_MAX_AUTORESEARCH_RESULT_BYTES = 64 * 1024
+
+
+def _read_autoresearch_result_payload(value: object) -> bytes:
+    """Read one small regular result file without following a final symlink."""
+    if not isinstance(value, str) or not value:
+        raise ValueError("result path invalid")
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    nonblocking = getattr(os, "O_NONBLOCK", None)
+    if (
+        not isinstance(nofollow, int)
+        or not isinstance(nonblocking, int)
+        or nofollow == 0
+        or nonblocking == 0
+    ):
+        raise OSError("safe result-file reads are unavailable")
+    path = Path(value).expanduser()
+    metadata = os.lstat(path)
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise OSError("result file is not a regular file")
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_CLOEXEC | nofollow | nonblocking,
+        )
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > _MAX_AUTORESEARCH_RESULT_BYTES:
+            raise OSError("result file is not a bounded regular file")
+        content = bytearray()
+        while True:
+            chunk = os.read(
+                descriptor,
+                min(64 * 1024, _MAX_AUTORESEARCH_RESULT_BYTES + 1 - len(content)),
+            )
+            if not chunk:
+                break
+            content.extend(chunk)
+            if len(content) > _MAX_AUTORESEARCH_RESULT_BYTES:
+                raise OSError("result file exceeds size limit")
+        return bytes(content)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _emit_autoresearch_result(payload: dict[str, object], *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return
+    print(f"autoresearch: {payload['status']}")
+    print(f"reason: {payload['reason']}")
+    if payload.get("artifact_path") is not None:
+        print(f"artifact_path: {payload['artifact_path']}")
+
+
+def run_wf_autoresearch_register(args: argparse.Namespace) -> int:
+    """Register one completed OMP Autoresearch result without running it."""
+    as_json = bool(getattr(args, "json", False))
+    try:
+        payload = _read_autoresearch_result_payload(getattr(args, "result_json", None))
+        root = Path(resolve_repo_root(getattr(args, "repo_root", None)))
+        result = register_autoresearch_run(root, payload)
+    except (OSError, ValueError, TypeError):
+        blocked = {
+            "schema_version": 1,
+            "status": "blocked",
+            "reason": "result_file_unreadable",
+            "artifact_path": None,
+        }
+        _emit_autoresearch_result(blocked, as_json=as_json)
+        return 2
+
+    response = {
+        "schema_version": 1,
+        "status": result.status,
+        "reason": result.reason,
+        "artifact_path": result.artifact_path,
+    }
+    _emit_autoresearch_result(response, as_json=as_json)
+    return result.exit_code
+
+
+def run_wf_autoresearch_schema(args: argparse.Namespace) -> int:
+    """Print the exact versioned result schema consumed by registration."""
+    if bool(getattr(args, "json", False)):
+        print(
+            json.dumps(
+                AUTORESEARCH_RUN_JSON_SCHEMA,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return 0
+    print(json.dumps(AUTORESEARCH_RUN_JSON_SCHEMA, ensure_ascii=False, indent=2))
+    return 0
 
 _DATABASE_CHECK_STAGES = {"plan", "verify", "test"}
 _DATABASE_CHECK_SCHEMA_VERSION = 1
@@ -848,6 +1097,30 @@ def run_wf_next(args: argparse.Namespace) -> int:
     non_interactive = bool(getattr(args, "non_interactive", False))
     auto_apply = bool(args.auto_apply)
     dry_run = bool(getattr(args, "dry_run", False))
+    try:
+        config = load_awf_config(args.repo_root)
+        state = load_workflow_state(args.repo_root)
+        if state.get("currentPhase") == "rejected":
+            raise ValueError("workflow approval was rejected; use `awf wf reset` to restart")
+        phase = resolve_next_phase(state, args.phase)
+        if phase == "approve":
+            raise ValueError(
+                "approval is parent-only; use `awf wf approve --decision <approve|revise|reject> --actor <actor>`"
+            )
+        if phase == "done":
+            raise ValueError(
+                "Done confirmation is parent-only and cannot be delegated; "
+                "use `awf wf confirm --decision <complete|hold> --actor <human>`"
+            )
+        if phase == "impl":
+            validate_approved_planning_seal(
+                Path(resolve_repo_root(args.repo_root)),
+                state=state,
+            )
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
     if not dry_run:
         gate_rc = enforce_ready_gate(
             args,
@@ -857,10 +1130,7 @@ def run_wf_next(args: argparse.Namespace) -> int:
         if gate_rc != 0:
             return gate_rc
     try:
-        config = load_awf_config(args.repo_root)
-        state = load_workflow_state(args.repo_root)
         provider_config = load_workflow_provider_config(args.repo_root)
-        phase = resolve_next_phase(state, args.phase)
         # Save state after resolve (policy skips may have been applied in-memory)
         if not dry_run:
             from awf.core.state import save_workflow_state_snapshot
@@ -1145,6 +1415,14 @@ def run_wf_next(args: argparse.Namespace) -> int:
             ),
         )
         try:
+            if phase == "impl":
+                current_state = load_workflow_state(args.repo_root)
+                if current_state.get("currentPhase") != "impl":
+                    raise ApprovalError("approval_phase_changed")
+                validate_approved_planning_seal(
+                    Path(resolve_repo_root(args.repo_root)),
+                    state=current_state,
+                )
             execution_mode_name = resolve_execution_mode(provider, native_task)
             if execution_mode_name == "native":
                 print(f"provider_execution_mode: {candidate} native", file=sys.stderr)
@@ -1158,6 +1436,12 @@ def run_wf_next(args: argparse.Namespace) -> int:
                     processor=processor,
                     task_id=str(uuid.uuid4()),
                 )
+        except (ApprovalError, OSError, ValueError, TypeError) as error:
+            print(
+                f"error: Impl approval identity changed before provider dispatch: {error}",
+                file=sys.stderr,
+            )
+            return 2
         finally:
             if schema_cleanup_path:
                 try:
@@ -1476,7 +1760,7 @@ def run_wf_next(args: argparse.Namespace) -> int:
         # Team results use their own iterative turn loop for feedback; skip here
         if not is_team and synthesis_pattern in ("generate_then_validate", "implement_then_review"):
             # The primary provider may update workflow state while executing
-            # plan/approve/done. Reload before adding feedback so the
+            # plan/done. Reload before adding feedback so the
             # pre-execution snapshot cannot clobber those transitions.
             feedback_state = load_workflow_state(args.repo_root)
             _run_finding_feedback_loop(
@@ -1670,7 +1954,6 @@ _PHASE_SYNTHESIS_PATTERNS: dict[str, str] = {
     "plan": "generate_then_validate",
     "test": "generate_then_validate",
     "impl": "implement_then_review",
-    "approve": "parallel_evaluate",  # HIL phase — secondary provides recommendation
     "done": "parallel_evaluate",
 }
 

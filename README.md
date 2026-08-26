@@ -158,6 +158,9 @@ awf ready --repo-root . --gate workflow-run
 awf wf next --repo-root . --dry-run --output-format json
 awf wf next --repo-root .
 awf wf apply-result review <result-file>     # 또는 verify / impl / test — impl/test도 자동 G4/G6 marking
+awf wf approve --decision approve --actor "$AWF_OPERATOR" --repo-root . --json
+awf wf confirm --decision complete --actor "$AWF_OPERATOR" --repo-root . --json  # G6 후 parent-only Done 기록
+awf wf autoresearch-register --result-json .omp/autoresearch/completed.json --repo-root . --json  # opt-in Impl evidence
 awf wf pr --dry-run                          # cycle 완료 후 PR 생성 미리보기
 awf wf pr                                    # gh pr create 실행
 awf ready --repo-root .
@@ -215,7 +218,28 @@ The command first addresses the exact registry task. Only when that task is
 unavailable may it read the exact history handle and create one explicitly
 lineage-linked successor; that successor is not the original agent. Worker and
 follow-up sessions never own `.workflow/state.json`, scope hashes, gates, or
-`approve`/`done`: those remain parent-only.
+`approve`/`done`: those remain parent-only. `--actor` is an audit label, not an
+authorization credential. Done is recorded only by explicit `awf wf confirm`;
+`awf wf next --phase done`, provider, and OMP worker paths are blocked.
+
+Phase별 OMP 확장은 parent 권한을 유지한 채 opt-in으로 동작합니다.
+
+- Plan/Review: read-only baseline research와 독립 review lens
+- Impl: disjoint write scope가 검증된 task만 isolated OMP patch lane
+- Verify: LSP/AST 및 immutable Security Scan evidence
+- Test: 격리된 Browser smoke와 실패 재현용 Debug evidence
+- Impl 최적화: G3 이후 완료된 Autoresearch 결과를
+  `awf wf autoresearch-register`로 Planning Options·scope identity에 결합
+- Done/status: redacted provenance, timeout/cancel/partial/checkpoint,
+  follow-up lineage, patch scope와 reported worker usage 표시. G6 후 parent가
+  `awf wf confirm --decision complete|hold --actor <audit-label>`로만 확인을
+  기록하며, 선택적 `--pr-url`은 감사 정보일 뿐 PR 생성·merge·cleanup이나 deployment
+  health 판정을 수행하지 않는다.
+
+전문 도구가 없거나 실행되지 않은 상태는 `not_run`/`skipped`/`unknown`으로
+기록하며 PASS를 대신하지 않습니다. OMP task, history, screenshot, security
+report, Autoresearch score는 모두 evidence/provenance이고 gate·HIL·deployment
+health의 판정권이 아닙니다.
 
 Pi는 기본 dispatch surface가 아니라 opt-in runner입니다. Pi를 쓰려면 먼저
 field-smoke evidence를 남기고 `ready`가 그 결과를 읽게 합니다.
@@ -460,7 +484,9 @@ awf agents followup-omp --task-id <task-id> --message-file followup.txt
 Only an unavailable original task permits a history-based, explicitly
 lineage-linked successor, which is always a new agent. Workers and follow-ups
 must not modify `.workflow/state.json`, scope hashes, gates, or `approve`/`done`;
-those controls remain parent-only.
+those controls remain parent-only. `--actor` is an audit label rather than an
+authorization credential. Done is recorded only by explicit `awf wf confirm`;
+`awf wf next --phase done`, provider, and OMP worker paths are blocked.
 
 Pi remains opt-in. When using Pi dispatch, first persist field-smoke evidence
 and let `ready` incorporate the result:

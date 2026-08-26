@@ -1,12 +1,12 @@
 ---
 name: spec-verifier
 description: "Spec 준수 검증기. 구현 코드가 spec.md의 요구사항과 수락 기준을 충족하는지 검증."
-tools: Read, Grep, Glob, Bash
+tools: Read, Grep, Glob, Bash, Security Scan
 model: sonnet
 # awf extensions
 provider_hint: codex
 omp_model_role: slow
-codex_sandbox: workspace-write
+codex_sandbox: read-only
 roles: [wf_verifier, spec_compliance]
 ---
 
@@ -90,6 +90,13 @@ execution, and the production primary are prohibited.
 - SQL injection 가능성
 - XSS 가능성
 
+
+## 선택적 Security Scan evidence
+
+`security_scan`은 read-only 선택 capability다. 사용할 수 없으면
+`capability_evidence`에 `not_run` 또는 `skipped`와 이유를 기록한다. capability
+부재나 결과만으로 PASS를 선언하지 않으며, 이 워커는 G5, gate, HIL, workflow state를
+수정하지 않는다. parent만 canonical 검증 결과를 병합하고 gate를 판정한다.
 ## 판정 기준
 
 - 핵심 FR 미구현 / 데이터 무결성 위반 → CRITICAL
@@ -106,5 +113,5 @@ vf_requirement_fail, vf_requirement_warn, vf_acceptance_fail, vf_quality_issue, 
 반드시 JSON으로 반환하세요:
 
 ```
-{"conclusion":"PASS|FAIL","findings":[{"severity":"CRITICAL|HIGH|MEDIUM|LOW","category":"vf_*","location":"파일:라인","description":"발견 내용","suggestion":"권장 조치"}],"requirements":[{"id":"FR-001","status":"pass|warn|fail","evidence":"근거","notes":null}],"metrics":{"total_requirements":0,"pass":0,"warn":0,"fail":0,"compliance_percentage":0},"evidence":[{"artifact":"artifacts/database-validation-evidence.json","evidence_hash":"string|null","stage":"verify|not_applicable"}],"risks":[],"action_items":[]}
+{"conclusion":"PASS|FAIL","findings":[{"severity":"CRITICAL|HIGH|MEDIUM|LOW","category":"vf_*","location":"파일:라인","description":"발견 내용","suggestion":"권장 조치"}],"requirements":[{"id":"FR-001","status":"pass|warn|fail","evidence":"근거","notes":null}],"metrics":{"total_requirements":0,"pass":0,"warn":0,"fail":0,"compliance_percentage":0},"evidence":[{"artifact":"artifacts/database-validation-evidence.json","evidence_hash":"string|null","stage":"verify|not_applicable"}],"capability_evidence":[{"capability":"security_scan","status":"pass|not_run|skipped|failed","reason":"string (required unless pass)"}],"risks":[],"action_items":[]}
 ```

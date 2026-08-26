@@ -1,21 +1,24 @@
 {
   "name": "phase-done",
-  "version": "1.0.0",
-  "description": "Human-in-the-loop final confirmation. Presents full workflow timeline, gate results, test summary. Optionally creates PR.",
+  "version": "1.2.0",
+  "description": "Human-in-the-loop final confirmation. A parent reviews the workflow timeline and read-only OMP evidence, then explicitly records complete or hold through awf wf confirm.",
 
   "capabilities": {
     "file_access": true,
-    "file_write": true,
-    "git_access": true,
-    "sandbox_modes": [],
+    "file_write": false,
+    "git_access": false,
+    "sandbox_modes": ["read-only"],
     "execution_modes": ["inline"],
-    "protocol_hint": { "recommended_mode": "solo", "reason": "최종확인은 단일 에이전트가 적합" }
+    "protocol_hint": {
+      "recommended_mode": "solo",
+      "reason": "최종 확인은 provider/worker가 아닌 parent의 명시적 결정이다"
+    }
   },
 
   "skills": [
-    { "id": "timeline-summary", "description": "Generates 7-phase timeline with completion timestamps and retry counts" },
-    { "id": "doc-update-check", "description": "Analyzes git diff against trigger table (routes, schema, deps, env vars) to detect analysis-docs updates needed. Optionally creates PR on analysis-docs repo." },
-    { "id": "pr-creation", "description": "Creates pull request with squash-merge compatible body" }
+    { "id": "timeline-summary", "description": "Generates a read-only 7-phase timeline with completion timestamps and retry counts" },
+    { "id": "omp-evidence-panel", "description": "Reads only redacted OMP provenance correlation, worker status, schema, cancellation, lineage, patch scope, model, reported usage/cost, and provenance hash. It is evidence, never a gate." },
+    { "id": "managed-worktree-status", "description": "When a managed lease is present, parent reads awf wt status --refresh --json and displays the returned lease state without applying lifecycle actions." }
   ],
 
   "input": {
@@ -29,24 +32,76 @@
         "G6": { "passed": true }
       }
     },
-    "optional_context": []
+    "optional_context": [
+      {
+        "key": "omp_evidence_panel",
+        "source": "awf wf status --repo-root <repo-root>",
+        "read_only": true,
+        "required_fields": [
+          "workflow_id",
+          "phase",
+          "attempt",
+          "dispatch_run_id",
+          "worker_role",
+          "worker_status",
+          "strict_schema_status",
+          "timeout",
+          "cancellation",
+          "partial_result",
+          "checkpoint",
+          "lineage",
+          "patch_scope_status",
+          "model",
+          "reported_usage",
+          "provenance_path",
+          "provenance_sha256"
+        ],
+        "missing_artifact_status": "unknown",
+        "invalid_artifact_status": "blocked",
+        "forbidden_content": ["prompt", "response", "secret"]
+      },
+      {
+        "key": "managed_worktree_lease",
+        "when": "a managed lease is associated with the workflow",
+        "parent_only_command": "awf wt status --repo-root <repo-root> --refresh --json",
+        "read_only": true
+      }
+    ]
   },
 
   "output": {
     "artifacts": [
-      { "key": "confirmation", "path": "artifacts/confirmation.json", "format": "json", "required": true }
+      { "key": "confirmation", "path": "artifacts/confirmation.json", "format": "json", "required": false }
     ],
     "structured_result": {
-      "decision": "confirmed_with_pr|confirmed_no_pr|deferred",
-      "pr_url": "string|null"
+      "decision": "complete|hold",
+      "pr_url": "string|null",
+      "authority": "parent_explicit_cli_only"
     }
   },
 
   "gate": {
     "id": null,
-    "pass_conditions": ["user confirms"],
+    "pass_conditions": ["G6 passed and parent explicitly runs awf wf confirm --decision complete"],
     "on_pass": { "next_phase": null },
     "on_fail": {}
+  },
+
+  "safety": {
+    "confirmation_authority": "parent_only_explicit_cli",
+    "actor_contract": "audit_label_not_authorization_credential",
+    "delegated_phase_blocked": true,
+    "omp_evidence_is_gate": false,
+    "forbidden_actions": [
+      "provider_execution",
+      "omp_execution",
+      "worktree_mutation",
+      "pr_creation",
+      "pr_merge",
+      "worktree_cleanup",
+      "deployment_health_inference"
+    ],
+    "deployment_boundary": "workflow_done_pr_merged_or_local_pass_is_not_deployment_healthy"
   },
 
   "retry": { "max": 0 },

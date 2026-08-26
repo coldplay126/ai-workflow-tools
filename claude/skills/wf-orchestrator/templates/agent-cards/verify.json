@@ -17,7 +17,7 @@
     "file_access": true,
     "file_write": false,
     "git_access": true,
-    "sandbox_modes": ["workspace-write"],
+    "sandbox_modes": ["read-only"],
     "execution_modes": ["inline", "delegated"],
     "dual_strategy": "parallel_evaluate",
     "protocol_hint": { "recommended_mode": "cross", "reason": "범위+아키텍처 교차 검증에 최적" }
@@ -26,7 +26,8 @@
   "skills": [
     { "id": "scope-verification", "description": "Compares git diff against allowed-files.json to detect scope violations" },
     { "id": "spec-compliance", "description": "Verifies each FR-NNN requirement has corresponding implementation" },
-    { "id": "code-quality", "description": "Checks for error handling, security vulnerabilities, convention violations" }
+    { "id": "code-quality", "description": "Checks for error handling, security vulnerabilities, convention violations" },
+    { "id": "security-scan-evidence", "description": "Optional read-only security_scan evidence; not_run/skipped must be explicit and cannot satisfy G5" }
   ],
 
   "input": {
@@ -63,6 +64,7 @@
       "conclusion": "PASS|FAIL",
       "findings": [{ "severity": "CRITICAL|HIGH|MEDIUM|LOW", "category": "vf_*", "location": "string", "description": "string", "suggestion": "string" }],
       "evidence": [],
+      "capability_evidence": [{ "capability": "security_scan", "status": "pass|not_run|skipped|failed", "reason": "string (required unless pass)" }],
       "risks": [],
       "action_items": [],
       "phase_metrics": {

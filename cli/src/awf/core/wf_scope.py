@@ -14,11 +14,18 @@ allowed-files.json or feed it into a diagnostic.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+from awf.core import state as workflow_state
+from awf.core.approval import (
+    ApprovalError,
+    ApprovedPlanningSeal,
+    validate_approved_planning_seal,
+)
 from awf.core.import_graph import ImportGraph
 
 
@@ -188,11 +195,21 @@ def expand_allowed_files(
 ALLOWED_FILES_RELATIVE = ".workflow/artifacts/allowed-files.json"
 
 
-def load_allowed_files(repo_root: Path) -> dict:
+def load_allowed_files(
+    repo_root: Path,
+    *,
+    expected_sha256: str | None = None,
+) -> dict:
     path = repo_root / ALLOWED_FILES_RELATIVE
     if not path.is_file():
         raise FileNotFoundError(path)
-    return json.loads(path.read_text(encoding="utf-8"))
+    raw = path.read_bytes()
+    if (
+        expected_sha256 is not None
+        and hashlib.sha256(raw).hexdigest() != expected_sha256
+    ):
+        raise ValueError("approved allowed-files identity changed")
+    return json.loads(raw.decode("utf-8"))
 
 
 def save_allowed_files(repo_root: Path, payload: dict) -> Path:
@@ -840,6 +857,63 @@ def _prefix_path(repo_name: str, path: str) -> str:
     return f"@{repo_name}/{path}"
 
 
+def _approved_seal_status(
+    repo_root: Path,
+) -> tuple[FileClassification | None, ApprovedPlanningSeal | None]:
+    """Return the current approved seal or a fail-closed G5 violation."""
+
+    state_path = repo_root / ".workflow" / "state.json"
+    if not state_path.exists():
+        return None, None
+    try:
+        state = workflow_state.load_workflow_state(repo_root, canonical=True)
+    except Exception:
+        return (
+            FileClassification(
+                path=".workflow/state.json",
+                status=STATUS_VIOLATION,
+                reason="approved G3 planning seal state is unavailable",
+            ),
+            None,
+        )
+    gates = state.get("gates")
+    g3 = gates.get("G3") if isinstance(gates, dict) else None
+    if not isinstance(g3, dict) or g3.get("passed") is not True:
+        return None, None
+    try:
+        approved = validate_approved_planning_seal(repo_root, state=state)
+    except ApprovalError as error:
+        return (
+            FileClassification(
+                path=".workflow/artifacts/approval.json",
+                status=STATUS_VIOLATION,
+                reason=f"approved G3 planning seal is invalid: {error.code}",
+            ),
+            None,
+        )
+    return None, approved
+
+
+def _approved_seal_violation(repo_root: Path) -> FileClassification | None:
+    violation, _ = _approved_seal_status(repo_root)
+    return violation
+
+
+def _failed_seal_result(
+    base_branch: str | None,
+    violation: FileClassification,
+) -> ScopeCheckResult:
+    return ScopeCheckResult(
+        base_branch=base_branch or "",
+        planned_set=(),
+        expanded_set=(),
+        changed_files=(),
+        classifications=(violation,),
+        violations=(violation,),
+        planned_not_changed=(),
+    )
+
+
 def check_scope_violations(
     repo_root: Path,
     *,
@@ -860,7 +934,50 @@ def check_scope_violations(
 
     Returns per-file classifications plus a focused list of violations.
     """
-    payload = load_allowed_files(repo_root)
+    seal_violation, approved_seal = _approved_seal_status(repo_root)
+    if seal_violation is not None:
+        return _failed_seal_result(base_branch, seal_violation)
+    expected_allowed_hash = (
+        approved_seal.planning_seal["artifacts"].get("allowed-files.json")
+        if approved_seal is not None
+        else None
+    )
+    if expected_allowed_hash is not None and not isinstance(
+        expected_allowed_hash, str
+    ):
+        return _failed_seal_result(
+            base_branch,
+            FileClassification(
+                path=".workflow/artifacts/approval.json",
+                status=STATUS_VIOLATION,
+                reason="approved G3 allowed-files identity is invalid",
+            ),
+        )
+    try:
+        payload = load_allowed_files(
+            repo_root,
+            expected_sha256=expected_allowed_hash,
+        )
+    except FileNotFoundError:
+        if approved_seal is None:
+            raise
+        return _failed_seal_result(
+            base_branch,
+            FileClassification(
+                path=ALLOWED_FILES_RELATIVE,
+                status=STATUS_VIOLATION,
+                reason="approved allowed-files payload is missing",
+            ),
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        return _failed_seal_result(
+            base_branch,
+            FileClassification(
+                path=ALLOWED_FILES_RELATIVE,
+                status=STATUS_VIOLATION,
+                reason=f"approved allowed-files payload is invalid: {error}",
+            ),
+        )
     planned_raw = [p for p in planned_files_from_payload(payload) if p]
     expanded_raw = (
         [p for p in (payload.get("expanded_files") or []) if p]
@@ -993,6 +1110,9 @@ def check_scope_violations(
         for repo_name, files in expanded_by_repo.items()
         for p in files
     })
+    seal_violation = _approved_seal_violation(repo_root)
+    if seal_violation is not None:
+        return _failed_seal_result(base_branch, seal_violation)
 
     return ScopeCheckResult(
         base_branch=root_result.base_branch,

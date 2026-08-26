@@ -422,11 +422,11 @@ def test_write_omp_dispatch_provenance_redacts_response_body(tmp_path: Path):
     assert payload["backend"] == "omp"
     assert payload["agents"][0]["metadata"]["session_id"] == "session-1"
     assert payload["agents"][0]["conclusion"] == "PASS"
-    assert payload["agents"][0]["runtime"]["usage"]["tokens"] == 7
-    assert payload["agents"][0]["runtime"]["cost"] == 0.02
+    assert payload["agents"][0]["runtime"]["usage"]["total_tokens"] == 7
+    assert payload["agents"][0]["runtime"]["cost"] == {"cost_usd": 0.02}
     assert payload["agents"][0]["status"] == "completed"
     assert payload["agents"][0]["declared_status_matches_evidence"] is True
-    assert payload["agents"][0]["runtime"]["coordinator_usage"]["totalTokens"] == 99
+    assert payload["agents"][0]["runtime"]["coordinator_usage"]["total_tokens"] == 99
     assert "sensitive response" not in path.read_text(encoding="utf-8")
     assert len(payload["agents"][0]["output_sha256"]) == 64
 

@@ -1,7 +1,7 @@
 ---
 name: happy-path-tester
 description: "정상 시나리오 검증 전문가. test-criteria.md의 수락 기준을 정상 흐름으로 검증."
-tools: Read, Grep, Glob, Bash
+tools: Read, Grep, Glob, Bash, Browser, Debug
 model: sonnet
 # awf extensions
 provider_hint: codex
@@ -34,6 +34,15 @@ adversarial-tester와 쌍으로 동작합니다.
 - 테스트 코드가 있으면 실행하여 결과 확인
 - `docs/tests/`에 구조화된 시나리오가 있으면 해당 시나리오의 Preconditions → Test Scenario → Expected Result 순서로 검증
 
+## Browser/Debug evidence 경계
+
+Parent가 부여한 unique namespace로만 temporary port, browser profile/session,
+debug target, scratch artifact를 사용하고 다른 test worker와 공유하지 않는다.
+Browser와 Debug는 선택 evidence capability다. 사용할 수 없으면
+`capability_evidence`에 `not_run` 또는 `skipped`와 이유를 기록하며 PASS를
+대체하지 않는다. 이 워커는 G6, gate, HIL, workflow state를 수정하지 않고 parent만
+canonical 결과를 병합한다.
+
 ## 데이터베이스 local test evidence
 
 DB signal이 있는 경우
@@ -61,5 +70,5 @@ hp_acceptance, hp_flow, hp_coverage, hp_validated, hp_not_reproduced
 반드시 JSON으로 반환하세요:
 
 ```
-{"conclusion":"PASS|FAIL","findings":[{"severity":"CRITICAL|HIGH|MEDIUM|LOW","category":"hp_*","location":"파일:라인","description":"발견 내용","suggestion":"권장 조치"}],"evidence":[{"artifact":"artifacts/database-validation-evidence.json","evidence_hash":"string|null","stage":"test|not_applicable"}],"risks":[],"action_items":[]}
+{"conclusion":"PASS|FAIL","findings":[{"severity":"CRITICAL|HIGH|MEDIUM|LOW","category":"hp_*","location":"파일:라인","description":"발견 내용","suggestion":"권장 조치"}],"evidence":[{"artifact":"artifacts/database-validation-evidence.json","evidence_hash":"string|null","stage":"test|not_applicable"}],"capability_evidence":[{"capability":"browser","status":"pass|not_run|skipped|failed","reason":"string (required unless pass)"},{"capability":"debug","status":"pass|not_run|skipped|failed","reason":"string (required unless pass)"}],"risks":[],"action_items":[]}
 ```

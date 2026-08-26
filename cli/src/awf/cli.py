@@ -45,6 +45,10 @@ from awf.commands.wf import (
     run_wf_seal_plan,
     run_wf_select_option,
     run_wf_status,
+    run_wf_approve,
+    run_wf_confirm,
+    run_wf_autoresearch_register,
+    run_wf_autoresearch_schema,
 )
 from awf.commands.wiki import (
     run_wiki_compile,
@@ -181,6 +185,97 @@ def build_parser() -> argparse.ArgumentParser:
         help="Refresh interval in seconds when --watch is set. Clamped to 1~60. Default: 5.",
     )
     wf_status_parser.set_defaults(handler=run_wf_status)
+
+    wf_approve_parser = wf_subparsers.add_parser(
+        "approve",
+        help="Record an explicit interactive parent approval decision for G3; never delegates to providers.",
+    )
+    wf_approve_parser.add_argument(
+        "--decision",
+        choices=["approve", "revise", "reject"],
+        required=True,
+        help="Explicit parent decision. revise and reject require --reason.",
+    )
+    wf_approve_parser.add_argument(
+        "--actor",
+        required=True,
+        help="Parent audit label recorded in the approval trail; not an authorization credential.",
+    )
+    wf_approve_parser.add_argument(
+        "--reason",
+        help="Required for revise or reject. Never echoed in command output.",
+    )
+    wf_approve_parser.add_argument(
+        "--repo-root",
+        help="Repository root containing .workflow/. Defaults to current or parent directories.",
+    )
+    wf_approve_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a sanitized deterministic result as JSON.",
+    )
+    wf_approve_parser.set_defaults(handler=run_wf_approve)
+
+    wf_confirm_parser = wf_subparsers.add_parser(
+        "confirm",
+        help="Record an explicit interactive parent Done decision after G6; never delegates to providers.",
+    )
+    wf_confirm_parser.add_argument(
+        "--decision",
+        choices=["complete", "hold"],
+        required=True,
+        help="Explicit parent Done decision. hold leaves Done pending.",
+    )
+    wf_confirm_parser.add_argument(
+        "--actor",
+        required=True,
+        help="Human audit label recorded in confirmation history; not an authorization credential.",
+    )
+    wf_confirm_parser.add_argument(
+        "--pr-url",
+        help="Optional canonical https://github.com/<owner>/<repo>/pull/<number> audit URL.",
+    )
+    wf_confirm_parser.add_argument(
+        "--repo-root",
+        help="Repository root containing .workflow/. Defaults to current or parent directories.",
+    )
+    wf_confirm_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a sanitized deterministic confirmation result as JSON.",
+    )
+    wf_confirm_parser.set_defaults(handler=run_wf_confirm)
+
+    wf_autoresearch_parser = wf_subparsers.add_parser(
+        "autoresearch-register",
+        help="Register one completed OMP Autoresearch result for the approved Impl scope.",
+    )
+    wf_autoresearch_parser.add_argument(
+        "--result-json",
+        required=True,
+        help="Path to the exact completed Autoresearch result JSON.",
+    )
+    wf_autoresearch_parser.add_argument(
+        "--repo-root",
+        help="Repository root containing .workflow/. Defaults to current or parent directories.",
+    )
+    wf_autoresearch_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a sanitized deterministic result as JSON.",
+    )
+    wf_autoresearch_parser.set_defaults(handler=run_wf_autoresearch_register)
+
+    wf_autoresearch_schema_parser = wf_subparsers.add_parser(
+        "autoresearch-schema",
+        help="Print the exact versioned JSON Schema for completed Autoresearch results.",
+    )
+    wf_autoresearch_schema_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the schema as one compact JSON object.",
+    )
+    wf_autoresearch_schema_parser.set_defaults(handler=run_wf_autoresearch_schema)
 
     wf_next_parser = wf_subparsers.add_parser(
         "next",

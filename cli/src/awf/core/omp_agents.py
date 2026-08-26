@@ -26,6 +26,16 @@ _TOOL_MAP = {
     "todo": "todo",
     "askuserquestion": "ask",
     "ask": "ask",
+    "lsp": "lsp",
+    "ast_search": "ast_grep",
+    "ast_grep": "ast_grep",
+    "astgrep": "ast_grep",
+    "ast_edit": "ast_edit",
+    "astedit": "ast_edit",
+    "debug": "debug",
+    "browser": "browser",
+    "security_scan": "security_scan",
+    "securityscan": "security_scan",
 }
 
 
@@ -36,7 +46,7 @@ def _tool_names(value: Any) -> list[str]:
         raw = str(value or "").split(",")
     normalized: list[str] = []
     for item in raw:
-        key = item.strip().replace("-", "_").lower()
+        key = item.strip().replace("-", "_").replace(" ", "_").lower()
         mapped = _TOOL_MAP.get(key)
         if mapped and mapped not in normalized:
             normalized.append(mapped)

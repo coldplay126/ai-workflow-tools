@@ -9,7 +9,7 @@ import stat
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
-from awf.core.gates import evaluate_gate
+from awf.core.gates import canonicalize_capability_evidence, evaluate_gate
 from awf.core.state import apply_gate_result, resolve_repo_root
 from awf.core.workflow_envelope import normalize_worker_result
 from awf.core.workflow_loop import record_phase_escape
@@ -234,14 +234,20 @@ def load_result_envelope(path: str, *, phase: str, provider: str) -> dict[str, A
     )
 
 
-def normalize_phase_result(data: dict[str, Any]) -> dict[str, Any]:
+def normalize_phase_result(
+    data: dict[str, Any], *, phase: str | None = None
+) -> dict[str, Any]:
     """Flatten shared team/OMP phase metrics into the canonical result shape."""
     normalized = dict(data)
     phase_metrics = normalized.get("phase_metrics")
     if isinstance(phase_metrics, dict):
         for key, value in phase_metrics.items():
             normalized.setdefault(key, value)
-    return normalized
+    return (
+        canonicalize_capability_evidence(phase, normalized)
+        if phase is not None
+        else normalized
+    )
 
 
 def load_result_json(path: str) -> dict[str, Any]:
@@ -252,7 +258,11 @@ def load_result_json(path: str) -> dict[str, Any]:
             phase=str(payload.get("phase", "unknown") or "unknown"),
             provider=str(payload.get("provider", "unknown") or "unknown"),
         )
-        return normalize_phase_result(dict(normalized.get("result", {})))
+        phase = normalized.get("phase")
+        return normalize_phase_result(
+            dict(normalized.get("result", {})),
+            phase=phase if isinstance(phase, str) else None,
+        )
     return normalize_phase_result(payload)
 
 
@@ -480,6 +490,24 @@ def _render_gate_checks(gate_checks: list[dict[str, Any]]) -> list[str]:
     return rendered
 
 
+def _render_capability_evidence(data: dict[str, Any]) -> list[str]:
+    entries = [
+        item
+        for item in _as_list(data.get("capability_evidence"))
+        if isinstance(item, dict)
+    ]
+    lines = ["", "## Capability Evidence"]
+    if not entries:
+        return [*lines, "- None"]
+    for item in entries:
+        capability = item.get("capability", "unknown")
+        status = item.get("status", "unknown")
+        reason = item.get("reason")
+        suffix = f" ({reason})" if isinstance(reason, str) and reason else ""
+        lines.append(f"- {capability}: {status}{suffix}")
+    return lines
+
+
 def render_verify_report(
     data: dict[str, Any],
     gate_passed: bool,
@@ -533,6 +561,7 @@ def render_verify_report(
 
     lines.extend(["", "## Gate Checks"])
     lines.extend(_render_gate_checks(gate_checks) or ["- None"])
+    lines.extend(_render_capability_evidence(data))
 
     lines.extend(["", "## Evidence"])
     evidence = _as_list(data.get("evidence"))
@@ -665,6 +694,7 @@ def render_test_report(
         )
     lines.extend(["", "## Gate Checks"])
     lines.extend(_render_gate_checks(gate_checks) or ["- None"])
+    lines.extend(_render_capability_evidence(data))
     lines.append("")
     return "\n".join(lines), gate_passed
 
@@ -759,15 +789,16 @@ def apply_workflow_result(
         elif status != "completed":
             raise ValueError("worker_result_status_invalid")
         else:
-            data = _sanitize_report_payload(
-                normalize_phase_result(dict(envelope.get("result", {})))
+            canonical_data = normalize_phase_result(
+                dict(envelope.get("result", {})), phase=phase
             )
             gate_passed, gate_checks = evaluate_gate(
                 explicit_root,
                 phase,
-                data,
+                canonical_data,
                 change_class=change_class,
             )
+            data = _sanitize_report_payload(canonical_data)
             if not gate_passed:
                 failure_context = _failure_context_for_result(phase, data)
 
