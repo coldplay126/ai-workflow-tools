@@ -57,6 +57,7 @@ YAML_NON_STRING_SCALAR_RE = re.compile(
 )
 EXPECTED_SKILLS = {
     "analysis",
+    "lsp-worktree-setup",
     "multi-agent",
     "phase-approve",
     "phase-done",

@@ -14,6 +14,7 @@ from awf.commands.cmux import run_cmux_failures, run_cmux_runs, run_cmux_tail
 from awf.commands.config import run_config_show
 from awf.commands.dashboard import run_dashboard_command
 from awf.commands.doctor import run_doctor
+from awf.commands.lsp import run_lsp_materialize, run_lsp_setup, run_lsp_status
 from awf.commands.mcp import run_mcp_check, run_mcp_invoke, run_mcp_list, run_mcp_read
 from awf.commands.ready import run_ready
 from awf.commands.skills import run_skills_list
@@ -63,7 +64,7 @@ from awf.commands.wiki import (
 from awf.core.router import route_natural_language
 
 
-KNOWN_COMMANDS = {"agents", "chat", "analyze", "wf", "config", "skills", "mcp", "doctor", "ready", "scan", "init", "cmux", "wiki", "dashboard", "wt"}
+KNOWN_COMMANDS = {"agents", "chat", "analyze", "wf", "config", "skills", "mcp", "doctor", "lsp", "ready", "scan", "init", "cmux", "wiki", "dashboard", "wt"}
 
 
 def _positive_int(value: str) -> int:
@@ -607,6 +608,61 @@ def build_parser() -> argparse.ArgumentParser:
         help="Exit non-zero when the default provider is not ready for installed/configured checks; includes probe when --probe is set.",
     )
     doctor_parser.set_defaults(handler=run_doctor)
+
+    lsp_parser = subparsers.add_parser(
+        "lsp",
+        help="Prepare deterministic, local-only LSP profiles for Git worktrees.",
+    )
+    lsp_subparsers = lsp_parser.add_subparsers(dest="lsp_command", required=True)
+    lsp_setup_parser = lsp_subparsers.add_parser(
+        "setup",
+        help="Preview LSP setup; pass --apply to write the local profile and materialization hook.",
+    )
+    lsp_setup_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Persist the validated profile and local worktree setup instead of previewing it.",
+    )
+    lsp_setup_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to the current Git worktree.",
+    )
+    lsp_setup_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the versioned LSP setup result as JSON.",
+    )
+    lsp_setup_parser.set_defaults(handler=run_lsp_setup)
+
+    lsp_status_parser = lsp_subparsers.add_parser(
+        "status",
+        help="Show the exact shared-profile and local materialization state.",
+    )
+    lsp_status_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to the current Git worktree.",
+    )
+    lsp_status_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the versioned LSP status result as JSON.",
+    )
+    lsp_status_parser.set_defaults(handler=run_lsp_status)
+
+    lsp_materialize_parser = lsp_subparsers.add_parser(
+        "materialize",
+        help="Materialize the existing shared profile in this Git worktree.",
+    )
+    lsp_materialize_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to the current Git worktree.",
+    )
+    lsp_materialize_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the versioned LSP materialization result as JSON.",
+    )
+    lsp_materialize_parser.set_defaults(handler=run_lsp_materialize)
 
     ready_parser = subparsers.add_parser(
         "ready",

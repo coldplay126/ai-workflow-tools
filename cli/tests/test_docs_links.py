@@ -210,6 +210,14 @@ def test_docs_markdown_links_resolve_inside_repo() -> None:
 
     assert missing == []
 
+def test_readme_links_lsp_worktree_reference() -> None:
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    target = "docs/reference/lsp-worktree-setup.md"
+
+    assert (REPO_ROOT / target).is_file()
+    assert f"[LSP worktree 설정]({target})" in readme
+    assert f"[LSP worktree setup]({target})" in readme
+
 
 def test_markdown_json_fences_are_parseable_when_not_placeholders() -> None:
     invalid: list[str] = []

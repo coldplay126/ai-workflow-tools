@@ -46,6 +46,20 @@
 - Done/status가 redacted OMP provenance, cancellation/partial/checkpoint,
   patch-scope, follow-up lineage와 출처가 분리된 worker usage를 read-only로
   표시합니다.
+- `awf lsp setup|status|materialize`가 repository 언어와 local binary를 감지하고,
+  machine-readable preview 뒤 명시적 apply로 user OMP config, shared local profile,
+  Python `src` layout용 ignored `pyrightconfig.json`, Git common-dir exclude,
+  managed-worktree prepare와 safe OMP isolation을 구성합니다. Binary 설치와
+  repository `.gitignore` 변경은 수행하지 않습니다.
+
+### Documentation
+
+- `awf lsp`의 preview/apply, local-only profile, linked-worktree materialize,
+  OMP isolation fallback, fail-closed custom prepare 정책을 neutral reference와
+  installable skill로 문서화했습니다.
+- OMP 18.0.6 top-level main/managed worktree LSP 검증과, child tool inventory가
+  LSP를 노출하지 않을 때 parent 진단으로 전환하는 fallback을 문서화했습니다.
+  실제 local config는 Git에 커밋하지 않습니다.
 
 ### Changed
 

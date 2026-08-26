@@ -34,6 +34,7 @@ echo "[2/4] Claude Skills 설치 중..."
 
 SKILLS=(
   analysis
+  lsp-worktree-setup
   multi-agent
   phase-approve
   phase-done

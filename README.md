@@ -38,6 +38,7 @@ ai-workflow-tools/
 | OMP / `cmux-agent` / legacy Pi | OMP host-native `task`/`hub` 또는 `surface_preference=omp` NDJSON adapter, cmux worker runtime, legacy Pi adapter를 실행 surface로 제공 | `.workflow/artifacts/dispatch/omp-*.json`, OMP agent/history URI, `.agent/events.jsonl`, Pi smoke result | [Multi-Agent Architecture](docs/architecture/03-multi-agent.md), [cmux Quickstart](docs/manuals/cmux-agent-quickstart.md), [Pi 검증](docs/manuals/pi-field-validation.md) |
 | `awf wiki` | 작업 중 생긴 운영 evidence와 결정 기록을 프로젝트 로컬 wiki로 누적 | `.awf-operations/events/*.jsonl`, `wiki/decisions/*`, compiled operations pages | [CLI Architecture](docs/architecture/awf-cli-architecture.md) |
 | `awf wt` | Git worktree lease 생성·재사용, 순서가 보장된 staging PR 체인 promotion, 안전한 단건 정리와 stale merged lease GC를 수행 | worktree registry, managed lease, promotion PR, deployment health evidence | [release worktree CLI](cli/README.md#managed-release-worktrees-awf-wt) |
+| `awf lsp` | repo/worktree 언어 서버 profile을 preview/apply로 local-only 구성 | user profile, user OMP LSP config, common Git ignore, worktree link | [LSP worktree 설정](docs/reference/lsp-worktree-setup.md) |
 | Claude/Codex 통합 | Claude skills, Codex runner 규칙, snippets를 통해 같은 계약을 다른 agent 환경에서 사용 | `claude/skills/*`, `codex/*`, `snippets/*` | [Claude Code Setup](#claude-code-setup) |
 
 ### 작동 방식 요약
@@ -260,6 +261,7 @@ awf ready --repo-root .
 - [Analysis Pipeline](docs/reference/analysis-pipeline.md)
 - [.ai-context 사양](docs/specs/ai-context-specification.md)
 - [Multi-Agent Reference](docs/reference/multi-agent.md)
+- [LSP worktree 설정](docs/reference/lsp-worktree-setup.md)
 
 ### 운영 wiki
 
@@ -323,6 +325,7 @@ multi-agent review, dispatch surfaces, and local operating evidence.
 | OMP / `cmux-agent` / legacy Pi | Use OMP host-native `task`/`hub` or the `surface_preference=omp` NDJSON adapter, the cmux worker runtime, or the legacy Pi adapter | `.workflow/artifacts/dispatch/omp-*.json`, OMP agent/history URIs, `.agent/events.jsonl`, Pi smoke results | [Multi-Agent Architecture](docs/architecture/03-multi-agent.md), [cmux Quickstart](docs/manuals/cmux-agent-quickstart.md), [Pi validation](docs/manuals/pi-field-validation.md) |
 | `awf wiki` | Capture operating evidence and decisions in a local project wiki | `.awf-operations/events/*.jsonl`, `wiki/decisions/*`, compiled operations pages | [CLI Architecture](docs/architecture/awf-cli-architecture.md) |
 | `awf wt` | Create or reuse Git-worktree leases, promote ordered staging PR chains, finish one proven-safe lease, or garbage-collect stale merged leases | worktree registry, managed lease, promotion PR, deployment-health evidence | [release worktree CLI](cli/README.md#managed-release-worktrees-awf-wt) |
+| `awf lsp` | Set up a local-only language-server profile for a repo or worktree through preview/apply | user profile, user OMP LSP config, common Git ignore, worktree link | [LSP worktree setup](docs/reference/lsp-worktree-setup.md) |
 | Claude/Codex integration | Reuse the same contracts from Claude skills, Codex runner rules, and snippets | `claude/skills/*`, `codex/*`, `snippets/*` | [Claude Code Setup](#claude-code-setup) |
 
 ## How It Fits Together
@@ -507,6 +510,7 @@ Full guides:
 - [Analysis Pipeline](docs/reference/analysis-pipeline.md)
 - [.ai-context spec](docs/specs/ai-context-specification.md)
 - [Multi-Agent Reference](docs/reference/multi-agent.md)
+- [LSP worktree setup](docs/reference/lsp-worktree-setup.md)
 
 #### 첫 workflow 순서 (한국어 요약)
 

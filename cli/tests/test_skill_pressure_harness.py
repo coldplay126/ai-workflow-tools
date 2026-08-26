@@ -1808,8 +1808,8 @@ def test_all_selection_expands_to_exact_27_unique_pairs() -> None:
     selected = select_cases(MATRIX, None, select_all=True)
     identities = [(case.name, repetition) for case, repetition in expanded_runs(selected)]
 
-    assert len(identities) == 27
-    assert len(set(identities)) == 27
+    assert len(identities) == 28
+    assert len(set(identities)) == 28
     assert {name for name, _ in identities} == set(MATRIX.skills)
     assert {
         name for name in MATRIX.skills if sum(pair[0] == name for pair in identities) == 3
@@ -3508,7 +3508,7 @@ def test_source_bundle_requires_current_hashed_deterministic_and_install_reports
         )
 
 
-def test_evidence_matrix_contains_exactly_15_by_9_unique_cells() -> None:
+def test_evidence_matrix_contains_exactly_16_by_9_unique_cells() -> None:
     cells = pressure.build_evidence_matrix(
         MATRIX,
         deterministic_pass=True,
@@ -3517,8 +3517,8 @@ def test_evidence_matrix_contains_exactly_15_by_9_unique_cells() -> None:
         field=passing_field_records(MATRIX),
     )
     pressure.validate_evidence_matrix(MATRIX, cells)
-    assert len(cells) == 135
-    assert len({(cell.skill, cell.category) for cell in cells}) == 135
+    assert len(cells) == 144
+    assert len({(cell.skill, cell.category) for cell in cells}) == 144
 
 
 def test_evidence_matrix_rejects_missing_duplicate_and_unjustified_na() -> None:
@@ -3531,7 +3531,7 @@ def test_evidence_matrix_rejects_missing_duplicate_and_unjustified_na() -> None:
             field=passing_field_records(MATRIX),
         )
     )
-    with pytest.raises(pressure.EvidenceError, match="exactly 135"):
+    with pytest.raises(pressure.EvidenceError, match="exactly 144"):
         pressure.validate_evidence_matrix(MATRIX, cells[:-1])
     with pytest.raises(pressure.EvidenceError, match="duplicate"):
         pressure.validate_evidence_matrix(MATRIX, [*cells[:-1], cells[0]])
@@ -3665,7 +3665,7 @@ def test_evidence_builder_rejects_source_mutation_after_validation(
     assert "source hash mismatch" in capsys.readouterr().err
     assert deterministic.exists()
     assert install.exists()
-    assert len(fields) == 27
+    assert len(fields) == 28
 
 def test_evidence_builder_rechecks_canonical_skill_tree_before_construction(
     tmp_path: Path,
@@ -3916,7 +3916,7 @@ def test_evidence_builder_publishes_only_relative_current_source_references(
     captured = capsys.readouterr()
     assert captured.err == ""
     assert captured.out == (
-        f"{summary} verdict_counts={json.dumps({'PASS': 135}, sort_keys=True)}\n"
+        f"{summary} verdict_counts={json.dumps({'PASS': 144}, sort_keys=True)}\n"
     )
     serialized = json.loads(summary.read_text(encoding="utf-8"))
     source_references = [
@@ -4818,7 +4818,7 @@ def test_skill_discovery_claude_binds_native_registration_to_immutable_snapshot(
     report_text = result.discovery_report.read_text(encoding="utf-8")
     runner_source = Path(run_skill_discovery.__file__).read_text(encoding="utf-8")
 
-    assert len(claude_records) == len(expected) == len(fake.claude_init_events) == 15
+    assert len(claude_records) == len(expected) == len(fake.claude_init_events) == 16
     assert {record["elapsed_sec"] for record in result.discovery_records} == {0.01}
     assert all(record["verdict"] == "PASS" for record in claude_records)
     assert all(
@@ -4910,7 +4910,7 @@ def test_skill_discovery_returns_exact_source_fields_for_every_skill(
     )
 
     assert all(record["verdict"] == "PASS" for record in result.discovery_records)
-    assert len(expected) == 15
+    assert len(expected) == 16
     for record in result.discovery_records:
         source = expected[record["skill"]]
         assert record["source_name"] == source.name
@@ -4924,7 +4924,7 @@ def test_skill_discovery_all_emits_exactly_45_unique_runtime_skill_identities(
     result, _, _ = _run_fake_discovery(tmp_path, monkeypatch)
 
     identities = {(record["runtime"], record["skill"]) for record in result.discovery_records}
-    assert len(result.discovery_records) == 45
+    assert len(result.discovery_records) == 48
     assert identities == {
         (runtime, skill) for runtime in ("claude", "agent-skills", "omp") for skill in MATRIX.skills
     }
@@ -5024,7 +5024,7 @@ def test_skill_discovery_retains_a_nonpass_record_for_every_fake_failure(
 ) -> None:
     result, _, _ = _run_fake_discovery(tmp_path, monkeypatch, failure=failure)
 
-    assert len(result.discovery_records) == 45
+    assert len(result.discovery_records) == 48
     records = [
         record
         for record in result.discovery_records
@@ -5353,7 +5353,7 @@ def test_skill_discovery_persists_only_canonical_host_version_provenance(
     ]
     expected_marker = hashlib.sha256(raw_version.encode("utf-8")).hexdigest()
 
-    assert len(claude_records) == 15
+    assert len(claude_records) == 16
     assert {record["host_binary"] for record in claude_records} == {"claude"}
     assert {record["binary_version"] for record in claude_records} == {expected_marker}
     assert raw_binary not in report
@@ -5528,21 +5528,21 @@ def test_skill_discovery_removes_report_when_snapshot_changes_after_link(
     } == {("BLOCKED", "skill_snapshot_changed")}
 
 
-def test_skill_discovery_materializes_45_isolated_canonical_links_and_cleans_up(
+def test_skill_discovery_materializes_48_isolated_canonical_links_and_cleans_up(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     result, fake, _ = _run_fake_discovery(tmp_path, monkeypatch)
     install = json.loads(result.install_report.read_text())
 
     assert install["schema"] == "awf_skill_install_report_v1"
-    assert len(install["records"]) == 45
+    assert len(install["records"]) == 48
     assert {record["target_root"] for record in install["records"]} == {
         ".claude/skills",
         ".agents/skills",
         ".omp/skills",
     }
     install_calls = [(argv, cwd, env) for argv, cwd, env in fake.calls if argv[0] == "sh"]
-    assert len(install_calls) == 15
+    assert len(install_calls) == 16
     assert {cwd for _, cwd, _ in install_calls} == {result.repo_root}
     targets = {Path(target) for argv, _, _ in install_calls for target in argv[3:]}
     workspaces = {target.parents[1] for target in targets}
@@ -5694,7 +5694,7 @@ def test_skill_discovery_writes_current_batch_reports_after_install_failure(
     assert result.exit_code == 1
     assert result.install_report.is_file()
     assert result.discovery_report.is_file()
-    assert len(result.install_records) == len(result.discovery_records) == 45
+    assert len(result.install_records) == len(result.discovery_records) == 48
     blocked_skill = sorted(MATRIX.skills)[0]
     assert {
         record["verdict"]
@@ -5713,7 +5713,7 @@ def test_skill_discovery_missing_canonical_skill_file_still_writes_45_blocked_re
     assert result.exit_code == 1
     assert result.install_report.is_file()
     assert result.discovery_report.is_file()
-    assert len(result.install_records) == len(result.discovery_records) == 45
+    assert len(result.install_records) == len(result.discovery_records) == 48
     assert {
         record["status"]
         for record in result.install_records
