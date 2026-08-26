@@ -117,6 +117,23 @@ def test_git_client_rejects_non_repository(tmp_path: Path) -> None:
         GitClient(tmp_path).repository_root()
 
 
+def test_amend_commit_no_edit_bypasses_repository_hooks(tmp_path: Path) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    original_head = client.head_sha()
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    (repo / "recovery.txt").write_text("recovered\n", encoding="utf-8")
+    git(repo, "add", "recovery.txt")
+
+    amended_head = client.amend_commit_no_edit(repo)
+
+    assert amended_head != original_head
+    assert client.head_sha(repo) == amended_head
+    assert git(repo, "show", f"{amended_head}:recovery.txt") == "recovered"
+
+
 def test_git_client_reads_refs_and_nul_delimited_status(tmp_path: Path) -> None:
     repo = make_repository(tmp_path)
     client = GitClient(repo)
