@@ -1277,6 +1277,10 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "acquire",
         "link-pr",
         "promote",
+        "release_open",
+        "release_add",
+        "release_seal",
+        "release_publish",
         "out_of_order_promote",
         "out_of_order_resolution",
         "import",
@@ -1305,6 +1309,10 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
             "acquire": "review_then_apply_explicitly",
             "link_pr": "review_then_apply_explicitly",
             "promote": "review_then_apply_explicitly",
+            "release_open": "review_then_apply_explicitly",
+            "release_add": "review_then_apply_explicitly",
+            "release_seal": "review_then_apply_explicitly",
+            "release_publish": "review_then_apply_explicitly",
             "out_of_order_promote": "review_then_apply_explicitly",
             "out_of_order_resolution": "review_same_blocked_lease_then_apply_explicitly",
             "finish": "review_blockers_then_apply",
@@ -1315,6 +1323,10 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
             "acquire_apply": "use_or_report_returned_lease",
             "link_pr_apply": "restart_status_preflight_then_finish",
             "promote_apply": "use_or_report_returned_lease",
+            "release_open_apply": "use_or_report_returned_lease",
+            "release_add_apply": "use_or_report_returned_lease",
+            "release_seal_apply": "use_or_report_returned_lease",
+            "release_publish_apply": "use_or_report_returned_lease",
             "out_of_order_promote_apply": "use_or_report_returned_lease",
             "out_of_order_resolution_apply": "use_or_report_returned_lease",
         },
@@ -1499,7 +1511,9 @@ def test_out_of_order_promotion_docs_share_operator_contract() -> None:
         "only the conflicted files returned by awf",
         "same preview command",
         "same command with `--apply`",
-        "approval and successful checks on that exact production pr before merge",
+        "must pass successful checks on that exact pr before merge",
+        "requires approval only when the repository's branch policy requires one",
+        "a solo repository must not invent an unavailable reviewer",
         "staging squash commits are not production promotion inputs",
         "direct staging squash cherry-pick",
         "any direct cherry-pick is forbidden",
@@ -1571,7 +1585,7 @@ def test_release_worktree_lifecycle_skill_copies_are_byte_identical() -> None:
 def test_out_of_order_promotion_changelog_names_the_opt_in_safety_contract() -> None:
     changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8").lower()
 
-    assert "기본 exact promotion은 변경하지 않았고" in changelog
+    assert "exact promotion을 기본으로 유지하며" in changelog
     assert "`--out-of-order`" in changelog
     assert "`invalid_out_of_order_promotion`" in changelog
     assert "`unsupported_out_of_order_rename`" in changelog

@@ -117,6 +117,7 @@ awf wf seal-plan --repo-root . --json
 - `awf mcp read <name> <uri>`: MCP resource 읽기. 현재는 `stdio`, `http` transport 지원
 - `awf doctor [--probe] [--ci]`: provider readiness, dispatch runner 상태, `install_freshness`(글로벌 `awf`와 `cli/` source hash drift)를 출력한다. 기본 모드는 OMP/Pi 설치 및 버전을 확인하고, `--probe`는 OMP 실제 model/auth 호출과 가능한 provider subprocess probe를 수행한다. stale install에는 재설치 명령을 안내하며, `--ci`는 default provider readiness가 충분하지 않으면 non-zero exit를 반환한다
 - `awf wt status [--repo-root <path>] [--initiative <slug>] [--json]` / `awf wt doctor [--repo-root <path>] [--json]`: managed Git worktree lease 상태를 read-only로 조회하거나 registry와 local Git worktree 등록의 불일치를 보고한다. JSON 출력은 versioned result envelope 하나만 stdout에 쓴다.
+- `awf wt release open|add|seal|publish --release <id> [--to <branch>] [--repo-root <path>] [--apply] [--json]`: 처음부터 누적 여부를 선택하는 managed release bridge. `open` 후 staging merge 순서대로 `add`하고, `seal`의 prepare/production verify를 통과한 뒤 `publish`로 정확히 하나의 production PR을 연다.
 - `awf ready [--probe] [--gate inspect|analysis|workflow-init|workflow-run|operations]`: repo별 자동화 준비 상태를 read-only로 요약한다. `doctor`/heuristic `scan`/skill discovery/workflow/operations 상태를 한 보고서로 모아 automation level(L0 inspect → L3 workflow)과 다음 추천 명령을 출력한다. `--gate`는 `decision: allow|dry_run_only|block`을 JSON에 포함하고 `allow` 외에는 non-zero exit로 Claude/Codex entrypoint와 내부 실행 명령을 중단시킨다. `.workflow/`가 target repo의 `.gitignore`에 있으면 workflow state가 local-only라는 경고를 함께 표시한다
 - `awf init [--repo-root <path>] [--force]`: 대상 프로젝트에 `.awf.toml`을 초기화
 - `awf dashboard [--repo-root <path>] [--interval N]`: rich Live 2-panel TUI — workflow state + cmux broker health 동시 모니터. `awf-cli[tui]` extras 필수 (미설치 시 명확한 stderr + exit 2). 키 바인딩 `q`/`Q`/Ctrl+C 종료, `r`/`R` 즉시 refresh. interval 1~60 clamp (default 5). `awf wf status --watch`(D1)는 단일 텍스트 갱신, `awf dashboard`(D2)는 panel 분할 layout
@@ -194,13 +195,17 @@ provider-owned spawn specification을 사용한다. Claude Code의 `--effort`,
 ### Managed release worktrees (`awf wt`)
 
 `awf wt` is the CLI authority for leased Git worktrees. It keeps each managed
-worktree in a registry and requires explicit evidence before removing one. The
-nine subcommands are:
+worktree in a registry and requires explicit evidence before removing one. Its
+commands include:
 
 | Command | Purpose |
 |---------|---------|
 | `awf wt acquire` | Preview or create/reuse a feature, promotion, or scratch lease. |
 | `awf wt promote` | Preview or promote one or more ordered, approved/accepted, merged staging PR deltas to a production branch, with optional exact reviewed-path exclusions. |
+| `awf wt release open` | Preview or open/reuse an initially empty managed cumulative release bridge from the latest target. |
+| `awf wt release add` | Preview or append one next immutable, ordered staging PR source pin and reconstruct its managed bridge. |
+| `awf wt release seal` | Preview or lock source pins after target reconstruction, prepare, and production verification. |
+| `awf wt release publish` | Preview or publish a sealed bridge as exactly one managed production PR, rebuilding on target drift. |
 | `awf wt recover-promotion` | Preview or safely amend a blocked out-of-order promotion's committed manual resolution; publication remains a separate `wt promote` step. |
 | `awf wt finish` | Preview or remove one proven-safe managed lease for a merged PR. |
 | `awf wt gc` | Preview or remove stale, proven-safe merged leases; `--merged` is required. |
@@ -229,6 +234,7 @@ stderr:
   "status": "ok",
   "decision": "ready",
   "lease": {},
+  "release": null,
   "leases": [],
   "actions": [],
   "blockers": [],
@@ -264,7 +270,7 @@ default_base = "staging"
 production_branch = "main"
 
 [promotion]
-# Default: "approved". This opt-in also accepts a PR merged by its author.
+# Default: "approved". Solo repositories can accept PRs merged by their author.
 source_review_policy = "approved_or_self_merged"
 
 [prepare]
@@ -281,15 +287,21 @@ commands = [
 status_command = ["./scripts/deployment-status", "production"]
 ```
 
-`approved_or_self_merged` still requires a merged source PR, successful checks,
-the configured staging base, and exact promotion-delta verification. The
-self-merge alternative fails closed if either GitHub actor login is missing or
-malformed; an `APPROVED` source does not need identity data.
+`approved_or_self_merged` is the intended policy for a solo repository: it
+accepts either an approved source PR or a PR merged by its author, so AWF does
+not request an unavailable reviewer. The default `approved` policy remains
+available for teams. Both policies still require a merged source PR, successful
+checks, the configured staging base, and exact promotion-delta verification.
+The self-merge alternative fails closed if either GitHub actor login is missing
+or malformed; an `APPROVED` source does not need identity data.
 
-`--source-pr` is repeatable. Supply PRs in staging merge order; every previous
-PR merge SHA must equal the next PR base SHA or promotion stops with
-`source_pr_sequence_gap`. Preview JSON reports `source_prs` and each source
-base/head/merge SHA.
+`--source-pr` is repeatable. Supply PRs in staging merge order. Their base SHAs
+do not need to equal the preceding PR merge SHA: AWF reapplies only the ordered,
+reviewed PR deltas to one branch created from the latest production target.
+Intervening staging-only commits are not included. Preview JSON reports
+`source_prs` and each source base/head/merge SHA.
+Multi-source promotion requires every source merge SHA. Apply verifies staging
+merge order; reversed input stops with `source_pr_sequence_order`.
 
 `--exclude-path` is also repeatable. Each value must be a unique, exact,
 repository-relative path reviewed in at least one source PR. Unknown paths,
@@ -311,6 +323,42 @@ SHAs are unchanged, and the promotion branch is absent from `origin`. The
 rebuilt commit must pass the same exact path/blob and production checks before
 AWF publishes a pull request. A prepare command that leaves the worktree dirty
 is blocked. Other blocked promotion states remain fail-closed.
+
+#### Cumulative managed release bridge
+
+Use a release bridge when several staging PRs must accumulate before one
+production PR is published. `open` creates a `PROMOTE` lease and managed branch
+from the latest target but does not select any source. Add each source in its
+actual staging merge order, inspect every preview, then seal and publish:
+
+```bash
+awf wt release open --release august-hotfix --to main --repo-root . --json
+awf wt release open --release august-hotfix --to main --repo-root . --apply --json
+
+awf wt release add --release august-hotfix --source-pr 372 --repo-root . --json
+awf wt release add --release august-hotfix --source-pr 372 --repo-root . --apply --json
+awf wt release add --release august-hotfix --source-pr 381 --repo-root . --json
+awf wt release add --release august-hotfix --source-pr 381 --repo-root . --apply --json
+
+awf wt release seal --release august-hotfix --repo-root . --json
+awf wt release seal --release august-hotfix --repo-root . --apply --json
+awf wt release publish --release august-hotfix --repo-root . --json
+awf wt release publish --release august-hotfix --repo-root . --apply --json
+```
+
+`add` accepts only a merged, review-policy-compliant, checks-passing PR against
+the configured staging base. Each source persists immutable base, head, merge,
+and changed-path provenance. A duplicate pin cannot be appended, reversed
+staging order is blocked, and `add` is forbidden after `seal`. The bridge is
+reconstructed from only these ordered source deltas, so unrelated staging
+commits never enter the production branch.
+
+`seal` reconstructs from the latest target and requires configured prepare and
+production verification. `publish` rechecks immutable source provenance; when
+the target moved since sealing, it reconstructs the same managed worktree from
+the pinned deltas and reruns prepare and verification before it pushes or opens
+the single PR. Source-provenance drift, a dirty managed worktree, a failed
+verification, and a mismatched PR all fail closed and preserve the bridge.
 
 #### Out-of-order production promotion
 
@@ -387,10 +435,11 @@ verification before publish. A changed target remains blocked and the managed
 worktree is preserved.
 
 AWF stages, commits, verifies, pushes, and publishes the eligible result. The
-synthetic production PR requires approval and successful checks on that exact
-production PR before merge, including an automatic clean application. Staging
-squash commits are not production promotion inputs. A direct staging squash
-cherry-pick is forbidden.
+synthetic production PR must pass successful checks on that exact PR before
+merge, including an automatic clean application. It requires approval only
+when the repository's branch policy requires one; a solo repository must not
+invent an unavailable reviewer. Staging squash commits are not production
+promotion inputs. A direct staging squash cherry-pick is forbidden.
 
 #### Feature flow
 

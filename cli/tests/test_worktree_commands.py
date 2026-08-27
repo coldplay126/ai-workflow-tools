@@ -541,6 +541,91 @@ def test_wt_promote_parser_surface() -> None:
     assert args.handler.__name__ == "run_wt_promote"
 
 
+@pytest.mark.parametrize(
+    ("arguments", "method"),
+    [
+        (
+            [
+                "wt",
+                "release",
+                "open",
+                "--release",
+                "august-hotfix",
+                "--to",
+                "main",
+                "--repo-root",
+                "/repo",
+                "--apply",
+                "--json",
+            ],
+            "run_wt_release_open",
+        ),
+        (
+            [
+                "wt",
+                "release",
+                "add",
+                "--release",
+                "august-hotfix",
+                "--source-pr",
+                "372",
+                "--repo-root",
+                "/repo",
+                "--apply",
+                "--json",
+            ],
+            "run_wt_release_add",
+        ),
+        (
+            [
+                "wt",
+                "release",
+                "seal",
+                "--release",
+                "august-hotfix",
+                "--repo-root",
+                "/repo",
+                "--apply",
+                "--json",
+            ],
+            "run_wt_release_seal",
+        ),
+        (
+            [
+                "wt",
+                "release",
+                "publish",
+                "--release",
+                "august-hotfix",
+                "--repo-root",
+                "/repo",
+                "--apply",
+                "--json",
+            ],
+            "run_wt_release_publish",
+        ),
+    ],
+)
+def test_wt_release_parser_surface(
+    arguments: list[str],
+    method: str,
+) -> None:
+    args = build_parser().parse_args(arguments)
+
+    assert args.command == "wt"
+    assert args.wt_command == "release"
+    assert args.wt_release_command in {"open", "add", "seal", "publish"}
+    assert args.release == "august-hotfix"
+    assert args.repo_root == "/repo"
+    assert args.apply is True
+    assert args.json is True
+    assert args.handler.__name__ == method
+    if args.wt_release_command == "open":
+        assert args.to == "main"
+    if args.wt_release_command == "add":
+        assert args.source_pr == 372
+
+
 def test_wt_promote_forwards_out_of_order(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-import uuid
+import hashlib
+import json
 import re
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -49,8 +51,21 @@ class ResolutionState(str, Enum):
     MANUAL_REVIEWED = "manual_reviewed"
 
 
+class ReleaseState(str, Enum):
+    OPEN = "OPEN"
+    SEALED = "SEALED"
+    PUBLISHED = "PUBLISHED"
+    MERGED = "MERGED"
+    CLOSED_UNMERGED = "CLOSED_UNMERGED"
+    CLEANED = "CLEANED"
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+_GIT_OBJECT_ID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 @dataclass(frozen=True)
@@ -242,12 +257,164 @@ class CleanupReservation:
     created_at: str
 
 
+
+@dataclass(frozen=True)
+class ReleaseSource:
+    bridge_id: str
+    ordinal: int
+    source_pr: int
+    base_ref: str
+    base_sha: str
+    head_sha: str
+    merge_sha: str
+    changed_paths: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if self.ordinal < 0:
+            raise ValueError("release source ordinal must be non-negative")
+        if self.source_pr <= 0:
+            raise ValueError("release source pull request must be positive")
+        if not self.base_ref:
+            raise ValueError("release source base ref must be non-empty")
+        for name, value in (
+            ("base_sha", self.base_sha),
+            ("head_sha", self.head_sha),
+            ("merge_sha", self.merge_sha),
+        ):
+            if _GIT_OBJECT_ID.fullmatch(value) is None:
+                raise ValueError(f"release source {name} must be a Git object id")
+        Lease._validate_path_metadata("release source changed_paths", self.changed_paths)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ordinal": self.ordinal,
+            "source_pr": self.source_pr,
+            "base_ref": self.base_ref,
+            "base_sha": self.base_sha,
+            "head_sha": self.head_sha,
+            "merge_sha": self.merge_sha,
+            "changed_paths": list(self.changed_paths),
+        }
+
+
+def release_source_digest(sources: tuple[ReleaseSource, ...]) -> str:
+    """Return a stable fingerprint of the ordered immutable source pins."""
+    payload = [
+        {
+            "ordinal": source.ordinal,
+            "source_pr": source.source_pr,
+            "base_ref": source.base_ref,
+            "base_sha": source.base_sha,
+            "head_sha": source.head_sha,
+            "merge_sha": source.merge_sha,
+            "changed_paths": list(source.changed_paths),
+        }
+        for source in sources
+    ]
+    return hashlib.sha256(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
+@dataclass(frozen=True)
+class ReleaseBridge:
+    id: str
+    repository_id: str
+    repository_name: str
+    repository_root: Path
+    release_id: str
+    target_branch: str
+    lease_id: str
+    state: ReleaseState
+    source_digest: str
+    last_verified_target_sha: str | None
+    published_head_sha: str | None
+    target_pr: int | None
+    created_at: str
+    updated_at: str
+    version: int
+    sources: tuple[ReleaseSource, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.release_id:
+            raise ValueError("release id must be non-empty")
+        if not self.target_branch:
+            raise ValueError("release target branch must be non-empty")
+        if not self.lease_id:
+            raise ValueError("release lease id must be non-empty")
+        if _SHA256.fullmatch(self.source_digest) is None:
+            raise ValueError("release source digest must be a SHA-256 digest")
+        if self.sources != tuple(sorted(self.sources, key=lambda source: source.ordinal)):
+            raise ValueError("release sources must be ordered by ordinal")
+        if tuple(source.ordinal for source in self.sources) != tuple(
+            range(len(self.sources))
+        ):
+            raise ValueError("release source ordinals must be contiguous")
+        if len({source.source_pr for source in self.sources}) != len(self.sources):
+            raise ValueError("release source pull requests must be unique")
+        if any(source.bridge_id != self.id for source in self.sources):
+            raise ValueError("release source bridge id must match its bridge")
+        if self.source_digest != release_source_digest(self.sources):
+            raise ValueError("release source digest does not match immutable source pins")
+
+    @classmethod
+    def new(
+        cls,
+        *,
+        repository_id: str,
+        repository_name: str,
+        repository_root: Path,
+        release_id: str,
+        target_branch: str,
+        lease_id: str,
+    ) -> ReleaseBridge:
+        timestamp = now_iso()
+        return cls(
+            id=str(uuid.uuid4()),
+            repository_id=repository_id,
+            repository_name=repository_name,
+            repository_root=repository_root.resolve(),
+            release_id=release_id,
+            target_branch=target_branch,
+            lease_id=lease_id,
+            state=ReleaseState.OPEN,
+            source_digest=release_source_digest(()),
+            last_verified_target_sha=None,
+            published_head_sha=None,
+            target_pr=None,
+            created_at=timestamp,
+            updated_at=timestamp,
+            version=0,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "repository_id": self.repository_id,
+            "repository_name": self.repository_name,
+            "repository_root": str(self.repository_root),
+            "release_id": self.release_id,
+            "target_branch": self.target_branch,
+            "lease_id": self.lease_id,
+            "state": self.state.value,
+            "source_digest": self.source_digest,
+            "last_verified_target_sha": self.last_verified_target_sha,
+            "published_head_sha": self.published_head_sha,
+            "target_pr": self.target_pr,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "version": self.version,
+            "sources": [source.to_dict() for source in self.sources],
+        }
+
+
 @dataclass(frozen=True)
 class CommandResult:
     command: str
     status: str
     decision: str
     lease: Lease | None = None
+    release: ReleaseBridge | None = None
     leases: tuple[Lease, ...] = ()
     actions: tuple[dict[str, Any], ...] = ()
     blockers: tuple[dict[str, str], ...] = ()
@@ -310,6 +477,7 @@ class CommandResult:
             "status": self.status,
             "decision": self.decision,
             "lease": self.lease.to_dict() if self.lease else None,
+            "release": self.release.to_dict() if self.release else None,
             "leases": [item.to_dict() for item in self.leases],
             "actions": list(self.actions),
             "blockers": list(self.blockers),

@@ -92,6 +92,47 @@ class GitClient:
         completed = self._run("status", "--porcelain=v1", "-z", cwd=cwd)
         return _nul_records(completed.stdout)
 
+    def untracked_paths(self, cwd: Path) -> tuple[str, ...]:
+        return tuple(
+            sorted(
+                _nul_records(
+                    self._run(
+                        "ls-files",
+                        "--others",
+                        "--exclude-standard",
+                        "-z",
+                        cwd=cwd,
+                    ).stdout
+                )
+            )
+        )
+
+    def remove_untracked_paths(self, cwd: Path, paths: Sequence[str]) -> None:
+        requested = tuple(sorted(set(paths)))
+        if any(
+            not path
+            or Path(path).is_absolute()
+            or ".." in Path(path).parts
+            for path in requested
+        ):
+            raise GitError("untracked cleanup paths must be repository-relative")
+        current = set(self.untracked_paths(cwd))
+        if any(path not in current for path in requested):
+            raise GitError("untracked cleanup path changed before removal")
+        for path in requested:
+            candidate = cwd / path
+            try:
+                if candidate.is_symlink() or candidate.is_file():
+                    candidate.unlink()
+                else:
+                    raise GitError(
+                        f"untracked cleanup path {path!r} is not a file or symlink"
+                    )
+            except OSError as error:
+                raise GitError(
+                    f"unable to remove untracked cleanup path {path!r}: {error}"
+                ) from error
+
     def unmerged_paths(self, cwd: Path) -> tuple[str, ...]:
         completed = self._run(
             "diff", "--name-only", "--diff-filter=U", "-z", cwd=cwd
@@ -570,6 +611,22 @@ class GitClient:
     def push_branch(self, cwd: Path, branch: str) -> None:
         try:
             self._run("push", "-u", "origin", f"HEAD:refs/heads/{branch}", cwd=cwd)
+        except GitError as error:
+            raise GitRemoteError(str(error)) from error
+
+    def push_branch_if_at(
+        self, cwd: Path, branch: str, expected_remote_sha: str
+    ) -> None:
+        """Replace a managed remote branch only when it still has the expected head."""
+        try:
+            self._run(
+                "push",
+                "-u",
+                f"--force-with-lease=refs/heads/{branch}:{expected_remote_sha}",
+                "origin",
+                f"HEAD:refs/heads/{branch}",
+                cwd=cwd,
+            )
         except GitError as error:
             raise GitRemoteError(str(error)) from error
 

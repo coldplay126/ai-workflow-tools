@@ -4311,13 +4311,13 @@ def test_promote_preserves_single_source_without_merge_commit(
     assert result.lease.state is LeaseState.PR_OPEN
 
 
-def test_promote_rejects_gap_between_source_pull_requests(
+def test_promote_requires_merge_sha_for_every_multi_source(
     promotion_harness: PromotionHarness,
 ) -> None:
     source = promotion_harness.add_followup_source()
     promotion_harness.github.prs[source.number] = replace(
         source,
-        base_sha="f" * 40,
+        merge_commit_sha=None,
     )
 
     result = promotion_harness.service.promote(
@@ -4327,7 +4327,58 @@ def test_promote_rejects_gap_between_source_pull_requests(
     )
 
     assert result.status == "blocked"
-    assert result.blockers[0]["code"] == "source_pr_sequence_gap"
+    assert result.blockers[0]["code"] == "source_pr_invalid_oid"
+
+
+def test_promote_applies_ordered_sources_across_staging_history_gap(
+    promotion_harness: PromotionHarness,
+) -> None:
+    previous = promotion_harness.github.prs[372]
+    git_command(promotion_harness.repo, "checkout", "-q", "staging")
+    (promotion_harness.repo / "unpromoted.txt").write_text(
+        "staging only\n", encoding="utf-8"
+    )
+    git_command(promotion_harness.repo, "add", "unpromoted.txt")
+    git_command(
+        promotion_harness.repo,
+        "commit",
+        "-q",
+        "-m",
+        "unselected staging change",
+    )
+    git_command(promotion_harness.repo, "push", "-q", "origin", "staging")
+    source = promotion_harness.add_followup_source()
+    assert source.base_sha != previous.merge_commit_sha
+
+    result = promotion_harness.service.promote(
+        source_pr=(372, 373),
+        target_branch="main",
+        apply=True,
+    )
+
+    assert result.decision == "ready"
+    assert result.lease is not None
+    worktree = result.lease.worktree_path
+    assert (worktree / "feature.txt").read_text(encoding="utf-8") == (
+        "feature updated\n"
+    )
+    assert (worktree / "followup.txt").read_text(encoding="utf-8") == "followup\n"
+    assert not (worktree / "unpromoted.txt").exists()
+
+
+def test_promote_rejects_sources_outside_staging_merge_order(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.add_followup_source()
+
+    result = promotion_harness.service.promote(
+        source_pr=(373, 372),
+        target_branch="main",
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "source_pr_sequence_order"
 
 
 def test_promote_rejects_source_base_outside_reviewed_head_ancestry(
@@ -6162,7 +6213,7 @@ def test_promote_default_policy_rejects_unapproved_self_merge(
 
 
 @pytest.mark.parametrize("actor_login", ("steven", "dependabot[bot]"))
-def test_promote_opt_in_policy_accepts_unapproved_self_merge(
+def test_promote_self_merge_policy_accepts_unapproved_self_merge(
     promotion_harness: PromotionHarness,
     actor_login: str,
 ) -> None:
@@ -6186,7 +6237,7 @@ def test_promote_opt_in_policy_accepts_unapproved_self_merge(
     assert result.decision == "preview"
 
 
-def test_promote_opt_in_policy_accepts_approved_source_without_identities(
+def test_promote_self_merge_policy_accepts_approved_source_without_identities(
     promotion_harness: PromotionHarness,
 ) -> None:
     promotion_harness.configure(
@@ -6211,7 +6262,7 @@ def test_promote_opt_in_policy_accepts_approved_source_without_identities(
         ({"base_ref": "main"}, "source_pr_base_mismatch"),
     ),
 )
-def test_promote_opt_in_policy_retains_source_gates(
+def test_promote_self_merge_policy_retains_source_gates(
     promotion_harness: PromotionHarness,
     source_change: dict[str, object],
     blocker: str,
@@ -6248,7 +6299,7 @@ def test_promote_opt_in_policy_retains_source_gates(
         ("a" * 40, "a" * 40),
     ),
 )
-def test_promote_opt_in_policy_rejects_non_self_merged_source(
+def test_promote_self_merge_policy_rejects_non_self_merged_source(
     promotion_harness: PromotionHarness,
     author_login: str | None,
     merged_by_login: str | None,

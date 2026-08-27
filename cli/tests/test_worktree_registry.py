@@ -15,6 +15,9 @@ from awf.worktrees.models import (
     LeaseState,
     PromotionMode,
     Purpose,
+    ReleaseBridge,
+    ReleaseSource,
+    ReleaseState,
     ResolutionState,
 )
 from awf.worktrees.registry import WorktreeRegistry
@@ -48,6 +51,46 @@ def lease(
     )
 
 
+def release_bridge(tmp_path: Path, registry: WorktreeRegistry) -> ReleaseBridge:
+    promotion = Lease.new(
+        repository_id="repo-1",
+        repository_name="demo",
+        repository_root=tmp_path / "repo",
+        worktree_path=tmp_path / "cache" / "release",
+        initiative="release-august-hotfix",
+        purpose=Purpose.PROMOTE,
+        branch="awf/release-august-hotfix/promote",
+        base_ref="origin/main",
+        head_sha="a" * 40,
+        managed=True,
+        owner_kind="awf",
+    )
+    registry.create_lease(promotion)
+    return registry.create_release(
+        ReleaseBridge.new(
+            repository_id=promotion.repository_id,
+            repository_name=promotion.repository_name,
+            repository_root=promotion.repository_root,
+            release_id="august-hotfix",
+            target_branch="main",
+            lease_id=promotion.id,
+        )
+    )
+
+
+def release_source(bridge: ReleaseBridge, ordinal: int, source_pr: int) -> ReleaseSource:
+    return ReleaseSource(
+        bridge_id=bridge.id,
+        ordinal=ordinal,
+        source_pr=source_pr,
+        base_ref="staging",
+        base_sha="a" * 40,
+        head_sha="b" * 40,
+        merge_sha="c" * 40,
+        changed_paths=("src/release.py",),
+    )
+
+
 def test_registry_creates_and_round_trips_a_lease(tmp_path: Path) -> None:
     registry = WorktreeRegistry(tmp_path / "state" / "worktrees.sqlite3")
     created = registry.create_lease(lease(tmp_path))
@@ -57,6 +100,160 @@ def test_registry_creates_and_round_trips_a_lease(tmp_path: Path) -> None:
     assert loaded == created
     assert loaded.state is LeaseState.ACTIVE
     assert loaded.deployment_state is DeploymentState.NOT_REQUIRED
+
+
+def test_registry_persists_ordered_immutable_release_sources_with_cas(
+    tmp_path: Path,
+) -> None:
+    registry = WorktreeRegistry(tmp_path / "state" / "worktrees.sqlite3")
+    created = release_bridge(tmp_path, registry)
+
+    source = release_source(created, 0, 372)
+    staged = registry.stage_release_source(
+        source,
+        expected_version=created.version,
+    )
+    promotion = registry.get_lease(created.lease_id)
+    assert promotion is not None
+    promotion, first = registry.accept_release_source(
+        source,
+        expected_release_version=staged.version,
+        lease_id=promotion.id,
+        expected_lease_version=promotion.version,
+        head_sha="d" * 40,
+        target_base_sha="e" * 40,
+    )
+
+    assert first.state is ReleaseState.OPEN
+    assert first.version == created.version + 2
+    assert first.source_digest != created.source_digest
+    assert promotion.head_sha == "d" * 40
+    assert registry.find_release("repo-1", "august-hotfix") == first
+    assert first.to_dict()["sources"] == [
+        {
+            "ordinal": 0,
+            "source_pr": 372,
+            "base_ref": "staging",
+            "base_sha": "a" * 40,
+            "head_sha": "b" * 40,
+            "merge_sha": "c" * 40,
+            "changed_paths": ["src/release.py"],
+        }
+    ]
+
+    with pytest.raises(ValueError, match="already pinned"):
+        registry.stage_release_source(
+            release_source(first, 1, 372),
+            expected_version=first.version,
+        )
+    with pytest.raises(ValueError, match="ordinal must append"):
+        registry.stage_release_source(
+            release_source(first, 2, 373),
+            expected_version=first.version,
+        )
+    with pytest.raises(RuntimeError, match="changed concurrently"):
+        registry.stage_release_source(
+            release_source(first, 1, 373),
+            expected_version=created.version,
+        )
+
+    sealed = registry.transition_release(
+        first.id,
+        ReleaseState.SEALED,
+        expected_version=first.version,
+        last_verified_target_sha="d" * 40,
+    )
+    assert sealed.state is ReleaseState.SEALED
+    assert sealed.last_verified_target_sha == "d" * 40
+    with pytest.raises(ValueError, match="not open for sources"):
+        registry.stage_release_source(
+            release_source(sealed, 1, 373),
+            expected_version=sealed.version,
+        )
+
+
+def test_registry_blocks_seal_while_source_add_is_pending(tmp_path: Path) -> None:
+    registry = WorktreeRegistry(tmp_path / "state" / "worktrees.sqlite3")
+    created = release_bridge(tmp_path, registry)
+    source = release_source(created, 0, 372)
+    staged = registry.stage_release_source(
+        source,
+        expected_version=created.version,
+    )
+
+    with pytest.raises(ValueError, match="pending source"):
+        registry.transition_release(
+            staged.id,
+            ReleaseState.SEALED,
+            expected_version=staged.version,
+            last_verified_target_sha="d" * 40,
+        )
+
+
+def test_registry_publishes_release_and_lease_atomically(tmp_path: Path) -> None:
+    registry = WorktreeRegistry(tmp_path / "state" / "worktrees.sqlite3")
+    created = release_bridge(tmp_path, registry)
+    source = release_source(created, 0, 372)
+    staged = registry.stage_release_source(
+        source,
+        expected_version=created.version,
+    )
+    promotion = registry.get_lease(created.lease_id)
+    assert promotion is not None
+    promotion, accepted = registry.accept_release_source(
+        source,
+        expected_release_version=staged.version,
+        lease_id=promotion.id,
+        expected_lease_version=promotion.version,
+        head_sha="d" * 40,
+        target_base_sha="e" * 40,
+    )
+    sealed = registry.transition_release(
+        accepted.id,
+        ReleaseState.SEALED,
+        expected_version=accepted.version,
+        last_verified_target_sha="e" * 40,
+    )
+
+    with pytest.raises(RuntimeError, match="changed concurrently"):
+        registry.publish_release(
+            sealed.id,
+            promotion.id,
+            expected_release_version=accepted.version,
+            expected_lease_version=promotion.version,
+            target_pr=900,
+            head_sha=promotion.head_sha,
+            target_base_sha="e" * 40,
+        )
+    assert registry.get_lease(promotion.id).state is LeaseState.ACTIVE
+    assert registry.get_release(sealed.id).state is ReleaseState.SEALED
+
+    with pytest.raises(RuntimeError, match="changed concurrently"):
+        registry.publish_release(
+            sealed.id,
+            promotion.id,
+            expected_release_version=sealed.version,
+            expected_lease_version=promotion.version - 1,
+            target_pr=900,
+            head_sha=promotion.head_sha,
+            target_base_sha="e" * 40,
+        )
+    assert registry.get_lease(promotion.id).state is LeaseState.ACTIVE
+    assert registry.get_release(sealed.id).state is ReleaseState.SEALED
+
+    published_lease, published = registry.publish_release(
+        sealed.id,
+        promotion.id,
+        expected_release_version=sealed.version,
+        expected_lease_version=promotion.version,
+        target_pr=900,
+        head_sha=promotion.head_sha,
+        target_base_sha="e" * 40,
+    )
+    assert published_lease.state is LeaseState.PR_OPEN
+    assert published_lease.target_pr == 900
+    assert published.state is ReleaseState.PUBLISHED
+    assert published.target_pr == 900
 
 
 
