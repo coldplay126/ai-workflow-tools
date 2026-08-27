@@ -4540,6 +4540,38 @@ def test_promote_preserves_conflicted_worktree(
     assert promotion_harness.github.create_calls == []
 
 
+def test_promote_out_of_order_skips_path_already_at_reviewed_head(
+    tmp_path: Path,
+) -> None:
+    harness = PromotionHarness.create(tmp_path, aggregate=True)
+    git_command(harness.repo, "checkout", "-q", "main")
+    (harness.repo / "support.txt").write_text("support\n", encoding="utf-8")
+    git_command(harness.repo, "add", "support.txt")
+    git_command(harness.repo, "commit", "-q", "-m", "production support prerequisite")
+    git_command(harness.repo, "push", "-q", "origin", "main")
+    git_command(harness.repo, "checkout", "-q", "staging")
+
+    result = harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert result.decision == "ready"
+    assert result.lease is not None
+    assert (result.lease.worktree_path / "feature.txt").read_text(
+        encoding="utf-8"
+    ) == "feature\n"
+    assert (result.lease.worktree_path / "support.txt").read_text(
+        encoding="utf-8"
+    ) == "support\n"
+    assert harness.git.changed_paths(
+        result.lease.worktree_path,
+        result.lease.target_base_sha or "",
+    ) == ("feature.txt",)
+
+
 def test_promote_out_of_order_preserves_three_way_conflict_for_manual_resolution(
     promotion_harness: PromotionHarness,
 ) -> None:
@@ -6345,6 +6377,7 @@ def _blocked_clean_precommit_out_of_order_promotion(
     assert failed.status == "blocked"
     assert failed.blockers[0]["code"] == "promotion_apply_failed"
     assert failed.lease is not None
+
     assert failed.lease.state is LeaseState.BLOCKED
     assert failed.lease.resolution_state is ResolutionState.NONE
     assert promotion_harness.git.status_porcelain(failed.lease.worktree_path) == ()
@@ -6375,6 +6408,40 @@ def _advance_promotion_target(
     git_command(promotion_harness.repo, "push", "-q", "origin", "main")
     git_command(promotion_harness.repo, "checkout", "-q", "staging")
     return target_sha
+def test_promote_rebuilds_out_of_order_verification_failure_after_target_advances(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.configure(
+        verify_production=((sys.executable, "-c", "import sys; sys.exit(1)"),)
+    )
+    first = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+    assert first.status == "blocked"
+    assert first.blockers[0]["code"] == "promotion_apply_failed"
+    assert first.lease is not None
+
+    promotion_harness.configure(
+        verify_production=((sys.executable, "-c", "pass"),)
+    )
+    target_sha = _advance_promotion_target(promotion_harness)
+    second = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert second.decision == "ready", second.blockers
+    assert second.lease is not None
+    assert second.lease.target_base_sha == target_sha
+    assert promotion_harness.git.commit_parents(second.lease.head_sha) == (
+        target_sha,
+    )
+
 
 
 def test_promote_retries_clean_stale_precommit_out_of_order_lease_on_advanced_target(
@@ -6445,7 +6512,7 @@ def test_promote_preview_and_apply_share_stale_retry_identity(
     assert preview.actions[0]["path"] == str(applied.lease.worktree_path)
 
 
-def test_promote_does_not_retry_stale_precommit_lease_without_target_advance(
+def test_promote_retries_clean_precommit_lease_without_target_advance(
     promotion_harness: PromotionHarness,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6461,10 +6528,12 @@ def test_promote_does_not_retry_stale_precommit_lease_without_target_advance(
         apply=True,
     )
 
-    assert retried.status == "blocked"
-    assert retried.blockers[0]["code"] == "promotion_incomplete"
-    assert retried.lease == stale
-    assert len(promotion_harness.registry.list_leases()) == 1
+    assert retried.decision == "ready"
+    assert retried.lease is not None
+    assert retried.lease.id != stale.id
+    assert retried.lease.state is LeaseState.PR_OPEN
+    assert retried.lease.target_base_sha == stale.target_base_sha
+    assert len(promotion_harness.registry.list_leases()) == 2
 
 
 @pytest.mark.parametrize("state", ("dirty", "published"))
