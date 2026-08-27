@@ -16,9 +16,13 @@ from .models import (
     LeaseState,
     PromotionMode,
     Purpose,
+    ReleaseBridge,
+    ReleaseSource,
+    ReleaseState,
     ResolutionState,
     WorktreeEvent,
     now_iso,
+    release_source_digest,
 )
 
 
@@ -86,6 +90,50 @@ CREATE TABLE IF NOT EXISTS worktree_cleanup_reservations (
     reserved_version INTEGER NOT NULL,
     branch_sha TEXT NOT NULL,
     created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS release_bridges (
+    id TEXT PRIMARY KEY,
+    repository_id TEXT NOT NULL,
+    repository_name TEXT NOT NULL,
+    repository_root TEXT NOT NULL,
+    release_id TEXT NOT NULL,
+    target_branch TEXT NOT NULL,
+    lease_id TEXT NOT NULL UNIQUE REFERENCES worktree_leases(id),
+    state TEXT NOT NULL CHECK (state IN (
+        'OPEN','SEALED','PUBLISHED','MERGED','CLOSED_UNMERGED','CLEANED'
+    )),
+    source_digest TEXT NOT NULL,
+    last_verified_target_sha TEXT,
+    published_head_sha TEXT,
+    target_pr INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(repository_id, release_id)
+);
+CREATE INDEX IF NOT EXISTS idx_release_bridges_repository_state
+ON release_bridges(repository_id, state);
+CREATE TABLE IF NOT EXISTS release_bridge_sources (
+    bridge_id TEXT NOT NULL REFERENCES release_bridges(id) ON DELETE RESTRICT,
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    source_pr INTEGER NOT NULL CHECK (source_pr > 0),
+    base_ref TEXT NOT NULL,
+    base_sha TEXT NOT NULL,
+    head_sha TEXT NOT NULL,
+    merge_sha TEXT NOT NULL,
+    changed_paths TEXT NOT NULL,
+    PRIMARY KEY (bridge_id, ordinal),
+    UNIQUE (bridge_id, source_pr)
+);
+CREATE TABLE IF NOT EXISTS release_bridge_pending_sources (
+    bridge_id TEXT PRIMARY KEY REFERENCES release_bridges(id) ON DELETE RESTRICT,
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    source_pr INTEGER NOT NULL CHECK (source_pr > 0),
+    base_ref TEXT NOT NULL,
+    base_sha TEXT NOT NULL,
+    head_sha TEXT NOT NULL,
+    merge_sha TEXT NOT NULL,
+    changed_paths TEXT NOT NULL
 );
 """
 
@@ -215,6 +263,654 @@ class WorktreeRegistry:
                 "SELECT * FROM worktree_leases WHERE id = ?", (lease_id,)
             ).fetchone()
         return self._lease_from_row(row) if row is not None else None
+
+    def create_release(self, release: ReleaseBridge) -> ReleaseBridge:
+        """Persist an empty release bridge after its managed promotion lease exists."""
+        if release.sources:
+            raise ValueError("release bridges must be created without sources")
+        self.ensure()
+        try:
+            with closing(self._connect()) as connection, connection:
+                connection.execute(
+                    """
+                    INSERT INTO release_bridges (
+                        id, repository_id, repository_name, repository_root,
+                        release_id, target_branch, lease_id, state, source_digest,
+                        last_verified_target_sha, published_head_sha, target_pr,
+                        created_at, updated_at, version
+                    ) VALUES (
+                        :id, :repository_id, :repository_name, :repository_root,
+                        :release_id, :target_branch, :lease_id, :state, :source_digest,
+                        :last_verified_target_sha, :published_head_sha, :target_pr,
+                        :created_at, :updated_at, :version
+                    )
+                    """,
+                    self._release_parameters(release),
+                )
+        except sqlite3.IntegrityError as error:
+            if self.find_release(release.repository_id, release.release_id) is not None:
+                raise ValueError("release bridge already exists") from error
+            raise
+        return release
+
+    def create_release_with_lease(
+        self, lease: Lease, release: ReleaseBridge
+    ) -> tuple[Lease, ReleaseBridge]:
+        """Atomically register a new promotion lease and its empty release bridge."""
+        if release.sources:
+            raise ValueError("release bridges must be created without sources")
+        if release.lease_id != lease.id:
+            raise ValueError("release bridge lease id does not match")
+        self.ensure()
+        try:
+            with closing(self._connect()) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    """
+                    INSERT INTO worktree_leases (
+                        id, repository_id, repository_name, repository_root,
+                        worktree_path, initiative, purpose, branch, base_ref,
+                        head_sha, promotion_mode, managed, owner_kind, owner_id,
+                        state, source_pr, target_pr, resolution_state, source_base_sha,
+                        source_head_sha, target_base_sha, reviewed_paths,
+                        conflicted_paths, protected_index_entries, deployment_state, retain,
+                        created_at, last_used_at, updated_at, removed_at, version
+                    ) VALUES (
+                        :id, :repository_id, :repository_name, :repository_root,
+                        :worktree_path, :initiative, :purpose, :branch, :base_ref,
+                        :head_sha, :promotion_mode, :managed, :owner_kind, :owner_id,
+                        :state, :source_pr, :target_pr, :resolution_state,
+                        :source_base_sha, :source_head_sha, :target_base_sha,
+                        :reviewed_paths,
+                        :conflicted_paths, :protected_index_entries, :deployment_state, :retain,
+                        :created_at, :last_used_at, :updated_at, :removed_at, :version
+                    )
+                    """,
+                    self._lease_parameters(lease),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO release_bridges (
+                        id, repository_id, repository_name, repository_root,
+                        release_id, target_branch, lease_id, state, source_digest,
+                        last_verified_target_sha, published_head_sha, target_pr,
+                        created_at, updated_at, version
+                    ) VALUES (
+                        :id, :repository_id, :repository_name, :repository_root,
+                        :release_id, :target_branch, :lease_id, :state, :source_digest,
+                        :last_verified_target_sha, :published_head_sha, :target_pr,
+                        :created_at, :updated_at, :version
+                    )
+                    """,
+                    self._release_parameters(release),
+                )
+                connection.commit()
+        except sqlite3.IntegrityError as error:
+            if self.find_release(lease.repository_id, release.release_id) is not None:
+                raise ValueError("release bridge already exists") from error
+            if self.find_active(lease.repository_id, lease.initiative, lease.purpose):
+                raise ValueError("active lease already exists") from error
+            raise
+        return lease, release
+
+    def get_release(self, bridge_id: str) -> ReleaseBridge | None:
+        self.ensure()
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM release_bridges WHERE id = ?", (bridge_id,)
+            ).fetchone()
+            return self._release_from_row(connection, row) if row is not None else None
+
+    def get_release_read_only(self, bridge_id: str) -> ReleaseBridge | None:
+        if not self.db_path.is_file():
+            return None
+        with closing(self._connect_read_only()) as connection:
+            row = connection.execute(
+                "SELECT * FROM release_bridges WHERE id = ?", (bridge_id,)
+            ).fetchone()
+            return self._release_from_row(connection, row) if row is not None else None
+
+    def find_release(
+        self, repository_id: str, release_id: str
+    ) -> ReleaseBridge | None:
+        self.ensure()
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM release_bridges
+                WHERE repository_id = ? AND release_id = ?
+                """,
+                (repository_id, release_id),
+            ).fetchone()
+            return self._release_from_row(connection, row) if row is not None else None
+
+    def find_release_read_only(
+        self, repository_id: str, release_id: str
+    ) -> ReleaseBridge | None:
+        if not self.db_path.is_file():
+            return None
+        with closing(self._connect_read_only()) as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM release_bridges
+                WHERE repository_id = ? AND release_id = ?
+                """,
+                (repository_id, release_id),
+            ).fetchone()
+            return self._release_from_row(connection, row) if row is not None else None
+
+
+    def get_pending_release_source(
+        self, bridge_id: str
+    ) -> ReleaseSource | None:
+        if not self.db_path.is_file():
+            return None
+        with closing(self._connect_read_only()) as connection:
+            row = connection.execute(
+                "SELECT * FROM release_bridge_pending_sources WHERE bridge_id = ?",
+                (bridge_id,),
+            ).fetchone()
+        return self._release_source_from_row(row) if row is not None else None
+
+    def stage_release_source(
+        self,
+        source: ReleaseSource,
+        *,
+        expected_version: int,
+    ) -> ReleaseBridge:
+        """Durably record one pending source intent before mutating its worktree."""
+        self.ensure()
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM release_bridges WHERE id = ?", (source.bridge_id,)
+            ).fetchone()
+            if row is None or row["version"] != expected_version:
+                raise RuntimeError("release bridge changed concurrently")
+            if ReleaseState(row["state"]) is not ReleaseState.OPEN:
+                raise ValueError("release bridge is not open for sources")
+            existing = self._release_sources(connection, source.bridge_id)
+            if source.ordinal != len(existing):
+                raise ValueError("release source ordinal must append after existing sources")
+            if any(item.source_pr == source.source_pr for item in existing):
+                raise ValueError("release source pull request is already pinned")
+            pending_row = connection.execute(
+                "SELECT * FROM release_bridge_pending_sources WHERE bridge_id = ?",
+                (source.bridge_id,),
+            ).fetchone()
+            if pending_row is not None:
+                pending = self._release_source_from_row(pending_row)
+                if pending != source:
+                    raise ValueError("another release source add is pending")
+                release = self._release_from_row(connection, row)
+                connection.commit()
+                return release
+            connection.execute(
+                """
+                INSERT INTO release_bridge_pending_sources (
+                    bridge_id, ordinal, source_pr, base_ref, base_sha, head_sha,
+                    merge_sha, changed_paths
+                ) VALUES (
+                    :bridge_id, :ordinal, :source_pr, :base_ref, :base_sha, :head_sha,
+                    :merge_sha, :changed_paths
+                )
+                """,
+                self._release_source_parameters(source),
+            )
+            timestamp = now_iso()
+            cursor = connection.execute(
+                """
+                UPDATE release_bridges
+                SET updated_at = ?, version = ?
+                WHERE id = ? AND version = ?
+                """,
+                (
+                    timestamp,
+                    expected_version + 1,
+                    source.bridge_id,
+                    expected_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("release bridge changed concurrently")
+            row = connection.execute(
+                "SELECT * FROM release_bridges WHERE id = ?", (source.bridge_id,)
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("release bridge changed concurrently")
+            release = self._release_from_row(connection, row)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return release
+
+    def clear_pending_release_source(
+        self,
+        source: ReleaseSource,
+        *,
+        expected_version: int,
+    ) -> ReleaseBridge:
+        """Clear one exact pending source after a rejected add and keep the bridge open."""
+        self.ensure()
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM release_bridges WHERE id = ?", (source.bridge_id,)
+            ).fetchone()
+            pending_row = connection.execute(
+                "SELECT * FROM release_bridge_pending_sources WHERE bridge_id = ?",
+                (source.bridge_id,),
+            ).fetchone()
+            if row is None or row["version"] != expected_version:
+                raise RuntimeError("release bridge changed concurrently")
+            if pending_row is None or self._release_source_from_row(pending_row) != source:
+                raise ValueError("pending release source does not match")
+            connection.execute(
+                "DELETE FROM release_bridge_pending_sources WHERE bridge_id = ?",
+                (source.bridge_id,),
+            )
+            timestamp = now_iso()
+            cursor = connection.execute(
+                """
+                UPDATE release_bridges
+                SET updated_at = ?, version = ?
+                WHERE id = ? AND version = ?
+                """,
+                (
+                    timestamp,
+                    expected_version + 1,
+                    source.bridge_id,
+                    expected_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("release bridge changed concurrently")
+            row = connection.execute(
+                "SELECT * FROM release_bridges WHERE id = ?", (source.bridge_id,)
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("release bridge changed concurrently")
+            release = self._release_from_row(connection, row)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return release
+
+    def accept_release_source(
+        self,
+        source: ReleaseSource,
+        *,
+        expected_release_version: int,
+        lease_id: str,
+        expected_lease_version: int,
+        head_sha: str,
+        target_base_sha: str,
+    ) -> tuple[Lease, ReleaseBridge]:
+        """Atomically accept one rebuilt source pin and its resulting lease head."""
+        self.ensure()
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            release_row = connection.execute(
+                "SELECT * FROM release_bridges WHERE id = ?", (source.bridge_id,)
+            ).fetchone()
+            lease_row = connection.execute(
+                "SELECT * FROM worktree_leases WHERE id = ?", (lease_id,)
+            ).fetchone()
+            pending_row = connection.execute(
+                "SELECT * FROM release_bridge_pending_sources WHERE bridge_id = ?",
+                (source.bridge_id,),
+            ).fetchone()
+            if (
+                release_row is None
+                or release_row["version"] != expected_release_version
+                or lease_row is None
+                or lease_row["version"] != expected_lease_version
+            ):
+                raise RuntimeError("release source acceptance changed concurrently")
+            if release_row["lease_id"] != lease_id:
+                raise ValueError("release source lease does not match")
+            if ReleaseState(release_row["state"]) is not ReleaseState.OPEN:
+                raise ValueError("release bridge is not open for sources")
+            if (
+                pending_row is None
+                or self._release_source_from_row(pending_row) != source
+            ):
+                raise ValueError("pending release source does not match")
+            existing = self._release_sources(connection, source.bridge_id)
+            if source.ordinal != len(existing):
+                raise ValueError("release source ordinal must append after existing sources")
+            if any(item.source_pr == source.source_pr for item in existing):
+                raise ValueError("release source pull request is already pinned")
+            connection.execute(
+                """
+                INSERT INTO release_bridge_sources (
+                    bridge_id, ordinal, source_pr, base_ref, base_sha, head_sha,
+                    merge_sha, changed_paths
+                ) VALUES (
+                    :bridge_id, :ordinal, :source_pr, :base_ref, :base_sha, :head_sha,
+                    :merge_sha, :changed_paths
+                )
+                """,
+                self._release_source_parameters(source),
+            )
+            connection.execute(
+                "DELETE FROM release_bridge_pending_sources WHERE bridge_id = ?",
+                (source.bridge_id,),
+            )
+            timestamp = now_iso()
+            sources = (*existing, source)
+            release_cursor = connection.execute(
+                """
+                UPDATE release_bridges
+                SET source_digest = ?, updated_at = ?, version = ?
+                WHERE id = ? AND version = ?
+                """,
+                (
+                    release_source_digest(sources),
+                    timestamp,
+                    expected_release_version + 1,
+                    source.bridge_id,
+                    expected_release_version,
+                ),
+            )
+            lease_cursor = connection.execute(
+                """
+                UPDATE worktree_leases
+                SET head_sha = ?, target_base_sha = ?, updated_at = ?, version = ?
+                WHERE id = ? AND version = ?
+                """,
+                (
+                    head_sha,
+                    target_base_sha,
+                    timestamp,
+                    expected_lease_version + 1,
+                    lease_id,
+                    expected_lease_version,
+                ),
+            )
+            if release_cursor.rowcount != 1 or lease_cursor.rowcount != 1:
+                raise RuntimeError("release source acceptance changed concurrently")
+            connection.execute(
+                """
+                INSERT INTO worktree_events (
+                    lease_id, event_type, from_state, to_state, observed_head_sha,
+                    pr_number, summary, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    lease_id,
+                    "release_source_added",
+                    lease_row["state"],
+                    lease_row["state"],
+                    head_sha,
+                    source.source_pr,
+                    self._bound_summary(
+                        f"release source PR #{source.source_pr} accepted"
+                    ),
+                    timestamp,
+                ),
+            )
+            lease_row = connection.execute(
+                "SELECT * FROM worktree_leases WHERE id = ?", (lease_id,)
+            ).fetchone()
+            release_row = connection.execute(
+                "SELECT * FROM release_bridges WHERE id = ?", (source.bridge_id,)
+            ).fetchone()
+            if lease_row is None or release_row is None:
+                raise RuntimeError("release source acceptance changed concurrently")
+            lease = self._lease_from_row(lease_row)
+            release = self._release_from_row(connection, release_row)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return lease, release
+
+
+    def transition_release(
+        self,
+        bridge_id: str,
+        state: ReleaseState,
+        *,
+        expected_version: int,
+        last_verified_target_sha: str | None = None,
+        published_head_sha: str | None = None,
+        target_pr: int | None = None,
+    ) -> ReleaseBridge:
+        """CAS-update release state and observed verified/publication provenance."""
+        self.ensure()
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM release_bridges WHERE id = ?", (bridge_id,)
+            ).fetchone()
+            if row is None or row["version"] != expected_version:
+                raise RuntimeError("release bridge changed concurrently")
+            current = ReleaseState(row["state"])
+            if not self._valid_release_transition(current, state):
+                raise ValueError(
+                    f"invalid release state transition {current.value} -> {state.value}"
+                )
+            if state is ReleaseState.SEALED:
+                pending = connection.execute(
+                    """
+                    SELECT 1 FROM release_bridge_pending_sources
+                    WHERE bridge_id = ?
+                    """,
+                    (bridge_id,),
+                ).fetchone()
+                if pending is not None:
+                    raise ValueError("release bridge has a pending source add")
+            timestamp = now_iso()
+            values: dict[str, Any] = {
+                "state": state.value,
+                "updated_at": timestamp,
+                "version": expected_version + 1,
+            }
+            if last_verified_target_sha is not None:
+                values["last_verified_target_sha"] = last_verified_target_sha
+            if published_head_sha is not None:
+                values["published_head_sha"] = published_head_sha
+            if target_pr is not None:
+                values["target_pr"] = target_pr
+            assignments = ", ".join(f"{column} = ?" for column in values)
+            cursor = connection.execute(
+                f"UPDATE release_bridges SET {assignments} "
+                "WHERE id = ? AND version = ?",
+                (*values.values(), bridge_id, expected_version),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("release bridge changed concurrently")
+            row = connection.execute(
+                "SELECT * FROM release_bridges WHERE id = ?", (bridge_id,)
+            ).fetchone()
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        if row is None:
+            raise RuntimeError("release bridge changed concurrently")
+        with closing(self._connect()) as connection:
+            return self._release_from_row(connection, row)
+
+    def publish_release(
+        self,
+        bridge_id: str,
+        lease_id: str,
+        *,
+        expected_release_version: int,
+        expected_lease_version: int,
+        target_pr: int,
+        head_sha: str,
+        target_base_sha: str,
+    ) -> tuple[Lease, ReleaseBridge]:
+        """Atomically bind one published PR to its release and promotion lease."""
+        self.ensure()
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            release_row = connection.execute(
+                "SELECT * FROM release_bridges WHERE id = ?", (bridge_id,)
+            ).fetchone()
+            lease_row = connection.execute(
+                "SELECT * FROM worktree_leases WHERE id = ?", (lease_id,)
+            ).fetchone()
+            if (
+                release_row is None
+                or release_row["version"] != expected_release_version
+                or lease_row is None
+                or lease_row["version"] != expected_lease_version
+            ):
+                raise RuntimeError("release publication changed concurrently")
+            if release_row["lease_id"] != lease_id:
+                raise ValueError("release publication lease does not match")
+            if ReleaseState(release_row["state"]) is not ReleaseState.SEALED:
+                raise ValueError("release bridge is not sealed")
+            current_lease = self._lease_from_row(lease_row)
+            if current_lease.state not in {LeaseState.ACTIVE, LeaseState.PR_OPEN}:
+                raise ValueError("release promotion lease is not publishable")
+            if (
+                current_lease.state is LeaseState.PR_OPEN
+                and current_lease.target_pr not in {None, target_pr}
+            ):
+                raise ValueError("release promotion lease already targets another PR")
+            timestamp = now_iso()
+            lease_cursor = connection.execute(
+                """
+                UPDATE worktree_leases
+                SET state = ?, target_pr = ?, head_sha = ?, target_base_sha = ?,
+                    updated_at = ?, version = ?
+                WHERE id = ? AND version = ?
+                """,
+                (
+                    LeaseState.PR_OPEN.value,
+                    target_pr,
+                    head_sha,
+                    target_base_sha,
+                    timestamp,
+                    expected_lease_version + 1,
+                    lease_id,
+                    expected_lease_version,
+                ),
+            )
+            release_cursor = connection.execute(
+                """
+                UPDATE release_bridges
+                SET state = ?, last_verified_target_sha = ?,
+                    published_head_sha = ?, target_pr = ?, updated_at = ?, version = ?
+                WHERE id = ? AND version = ?
+                """,
+                (
+                    ReleaseState.PUBLISHED.value,
+                    target_base_sha,
+                    head_sha,
+                    target_pr,
+                    timestamp,
+                    expected_release_version + 1,
+                    bridge_id,
+                    expected_release_version,
+                ),
+            )
+            if lease_cursor.rowcount != 1 or release_cursor.rowcount != 1:
+                raise RuntimeError("release publication changed concurrently")
+            connection.execute(
+                """
+                INSERT INTO worktree_events (
+                    lease_id, event_type, from_state, to_state, observed_head_sha,
+                    pr_number, summary, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    lease_id,
+                    "release_pr_open",
+                    current_lease.state.value,
+                    LeaseState.PR_OPEN.value,
+                    head_sha,
+                    target_pr,
+                    self._bound_summary(
+                        f"release {release_row['release_id']} PR #{target_pr} opened"
+                    ),
+                    timestamp,
+                ),
+            )
+            lease_row = connection.execute(
+                "SELECT * FROM worktree_leases WHERE id = ?", (lease_id,)
+            ).fetchone()
+            release_row = connection.execute(
+                "SELECT * FROM release_bridges WHERE id = ?", (bridge_id,)
+            ).fetchone()
+            if lease_row is None or release_row is None:
+                raise RuntimeError("release publication changed concurrently")
+            lease = self._lease_from_row(lease_row)
+            release = self._release_from_row(connection, release_row)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return lease, release
+
+    def sync_release_state_for_lease(
+        self, lease_id: str, state: ReleaseState
+    ) -> ReleaseBridge | None:
+        """Best-effort CAS state synchronization from an observed PR lease."""
+        self.ensure()
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM release_bridges WHERE lease_id = ?", (lease_id,)
+            ).fetchone()
+            if row is None:
+                connection.commit()
+                return None
+            current = ReleaseState(row["state"])
+            if current is state:
+                connection.commit()
+                return self._release_from_row(connection, row)
+            if not self._valid_release_transition(current, state):
+                raise ValueError(
+                    f"invalid release state transition {current.value} -> {state.value}"
+                )
+            timestamp = now_iso()
+            cursor = connection.execute(
+                """
+                UPDATE release_bridges
+                SET state = ?, updated_at = ?, version = version + 1
+                WHERE id = ? AND version = ?
+                """,
+                (state.value, timestamp, row["id"], row["version"]),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("release bridge changed concurrently")
+            row = connection.execute(
+                "SELECT * FROM release_bridges WHERE id = ?", (row["id"],)
+            ).fetchone()
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        if row is None:
+            raise RuntimeError("release bridge changed concurrently")
+        with closing(self._connect()) as connection:
+            return self._release_from_row(connection, row)
 
     def find_active(
         self, repository_id: str, initiative: str, purpose: Purpose
@@ -565,6 +1261,34 @@ class WorktreeRegistry:
             )
             if cursor.rowcount != 1:
                 raise RuntimeError("lease changed concurrently")
+            release_row = connection.execute(
+                "SELECT * FROM release_bridges WHERE lease_id = ?",
+                (lease_id,),
+            ).fetchone()
+            if release_row is not None:
+                release_state = ReleaseState(release_row["state"])
+                if release_state not in {
+                    ReleaseState.PUBLISHED,
+                    ReleaseState.MERGED,
+                }:
+                    raise ValueError(
+                        "release bridge is not eligible for completed cleanup"
+                    )
+                release_cursor = connection.execute(
+                    """
+                    UPDATE release_bridges
+                    SET state = ?, updated_at = ?, version = version + 1
+                    WHERE id = ? AND version = ?
+                    """,
+                    (
+                        ReleaseState.CLEANED.value,
+                        timestamp,
+                        release_row["id"],
+                        release_row["version"],
+                    ),
+                )
+                if release_cursor.rowcount != 1:
+                    raise RuntimeError("release bridge changed concurrently")
             connection.execute(
                 """
                 INSERT INTO worktree_events (
@@ -734,6 +1458,111 @@ class WorktreeRegistry:
             )
             for row in rows
         ]
+
+    @staticmethod
+    def _valid_release_transition(
+        current: ReleaseState, target: ReleaseState
+    ) -> bool:
+        if current is target:
+            return True
+        return target in {
+            ReleaseState.OPEN: {ReleaseState.SEALED},
+            ReleaseState.SEALED: {ReleaseState.PUBLISHED},
+            ReleaseState.PUBLISHED: {
+                ReleaseState.MERGED,
+                ReleaseState.CLOSED_UNMERGED,
+            },
+            ReleaseState.MERGED: {ReleaseState.CLEANED},
+            ReleaseState.CLOSED_UNMERGED: set(),
+            ReleaseState.CLEANED: set(),
+        }[current]
+
+    @staticmethod
+    def _release_parameters(release: ReleaseBridge) -> dict[str, Any]:
+        return {
+            "id": release.id,
+            "repository_id": release.repository_id,
+            "repository_name": release.repository_name,
+            "repository_root": str(release.repository_root),
+            "release_id": release.release_id,
+            "target_branch": release.target_branch,
+            "lease_id": release.lease_id,
+            "state": release.state.value,
+            "source_digest": release.source_digest,
+            "last_verified_target_sha": release.last_verified_target_sha,
+            "published_head_sha": release.published_head_sha,
+            "target_pr": release.target_pr,
+            "created_at": release.created_at,
+            "updated_at": release.updated_at,
+            "version": release.version,
+        }
+
+    @staticmethod
+    def _release_source_parameters(source: ReleaseSource) -> dict[str, Any]:
+        return {
+            "bridge_id": source.bridge_id,
+            "ordinal": source.ordinal,
+            "source_pr": source.source_pr,
+            "base_ref": source.base_ref,
+            "base_sha": source.base_sha,
+            "head_sha": source.head_sha,
+            "merge_sha": source.merge_sha,
+            "changed_paths": WorktreeRegistry._path_metadata_to_json(
+                source.changed_paths,
+                name="release source changed_paths",
+            ),
+        }
+
+    @staticmethod
+    def _release_source_from_row(row: sqlite3.Row) -> ReleaseSource:
+        return ReleaseSource(
+            bridge_id=row["bridge_id"],
+            ordinal=row["ordinal"],
+            source_pr=row["source_pr"],
+            base_ref=row["base_ref"],
+            base_sha=row["base_sha"],
+            head_sha=row["head_sha"],
+            merge_sha=row["merge_sha"],
+            changed_paths=WorktreeRegistry._path_metadata_from_json(
+                row["changed_paths"],
+                name="release source changed_paths",
+            ),
+        )
+
+    def _release_sources(
+        self, connection: sqlite3.Connection, bridge_id: str
+    ) -> tuple[ReleaseSource, ...]:
+        rows = connection.execute(
+            """
+            SELECT * FROM release_bridge_sources
+            WHERE bridge_id = ?
+            ORDER BY ordinal
+            """,
+            (bridge_id,),
+        ).fetchall()
+        return tuple(self._release_source_from_row(row) for row in rows)
+
+    def _release_from_row(
+        self, connection: sqlite3.Connection, row: sqlite3.Row
+    ) -> ReleaseBridge:
+        return ReleaseBridge(
+            id=row["id"],
+            repository_id=row["repository_id"],
+            repository_name=row["repository_name"],
+            repository_root=Path(row["repository_root"]),
+            release_id=row["release_id"],
+            target_branch=row["target_branch"],
+            lease_id=row["lease_id"],
+            state=ReleaseState(row["state"]),
+            source_digest=row["source_digest"],
+            last_verified_target_sha=row["last_verified_target_sha"],
+            published_head_sha=row["published_head_sha"],
+            target_pr=row["target_pr"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            version=row["version"],
+            sources=self._release_sources(connection, row["id"]),
+        )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(str(self.db_path))

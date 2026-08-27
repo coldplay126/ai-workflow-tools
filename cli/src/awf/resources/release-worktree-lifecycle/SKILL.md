@@ -1,7 +1,7 @@
 ---
 name: release-worktree-lifecycle
-version: 1.1.0
-description: Use whenever handling deploy, production release, staging-to-main or staging-to-master promotion, release PR creation or merge, managed feature PR linkage, deployment worktree creation/reuse, or merged branch/worktree cleanup. Requires awf wt status/acquire/link-pr/promote/finish/gc and forbids bypassing CLI safety blockers.
+version: 1.2.0
+description: Use whenever handling deploy, production release, staging-to-main or staging-to-master promotion, release PR creation or merge, managed feature PR linkage, managed deployment worktree creation or reuse, or merged branch/worktree cleanup. Requires awf wt status/acquire/link-pr/promote/release/finish/gc and forbids bypassing CLI safety blockers.
 type: deployment-safety
 conditions:
   trigger:
@@ -18,7 +18,7 @@ The `awf wt` CLI is authoritative; this skill defines the operator procedure onl
 
 ## Required preflight
 
-Before acquiring, linking, promoting, finishing, or collecting a worktree, MUST run:
+Before acquiring, linking, opening or publishing a release bridge, promoting, finishing, or collecting a worktree, MUST run:
 
 ```sh
 awf wt status --repo-root <repo-root> --refresh --json
@@ -94,8 +94,10 @@ awf wt finish --repo-root <repo-root> --pr <merged-pr> --apply --json
 
 A production promotion MUST contain only the ordered source PR deltas, never
 the entire staging branch. `--source-pr` is repeatable and MUST follow staging
-merge order. Every previous PR merge SHA MUST equal the next PR base SHA; a gap
-is `blocked`.
+merge order. A source PR base MAY differ from the preceding PR merge SHA; AWF
+reapplies the explicitly listed deltas to one branch based on the latest target.
+Multi-source promotion MUST require every source merge SHA. Apply MUST verify
+staging merge order; reversed input is `blocked` with `source_pr_sequence_order`.
 
 `--exclude-path` is repeatable. Every excluded value MUST be a unique, exact,
 repository-relative path reviewed in the source PRs, and at least one reviewed
@@ -113,8 +115,13 @@ Confirm the ordered `source_prs`, each source base/head/merge SHA, excluded
 paths, and target branch in the JSON result. Each source MUST satisfy the
 configured review policy, checks, and staging base. The promotion MUST pass the
 configured prepare and production verification commands; a prepare command
-that leaves the worktree dirty is `blocked`. Only then explicitly create the
-managed promotion PR:
+that leaves the worktree dirty is `blocked`.
+
+When `promotion.source_review_policy` is `approved_or_self_merged`, a source PR
+merged by its author satisfies the review policy; MUST NOT request an
+unavailable external reviewer. The merged state, successful checks, staging
+base, prepare, and production verification gates remain required. Only then
+explicitly create the managed promotion PR:
 
 ```sh
 awf wt promote --source-pr <number> --to <branch> --repo-root <repo-root> --apply --json
@@ -124,6 +131,66 @@ If `promote --apply` returns `ready`, MUST use or report the returned lease and
 MUST NOT repeat `--apply`. A blocked promotion is resumable only through the
 CLI's verified prepare, verification, or publication recovery paths; MUST NOT
 manually repair or recreate its lease.
+
+## Cumulative managed release bridge
+
+Use `awf wt release` when source PRs must accumulate over time before one
+production pull request is published. It is not a staging-wide merge and does
+not replace exact `wt promote`; it reconstructs only the persisted ordered
+source deltas on one managed `PROMOTE` lease.
+
+After the required status preflight, first inspect and then apply `open`:
+
+```sh
+awf wt release open --release <id> --to <branch> --repo-root <repo-root> --json
+awf wt release open --release <id> --to <branch> --repo-root <repo-root> --apply --json
+```
+
+`open` creates or reuses the exact bridge from the latest target with no source
+selected. On `reuse`, use the returned lease and branch; MUST NOT create a
+second bridge or manually mutate the branch.
+
+For each merged staging PR, inspect and apply one `add` in actual staging merge
+order:
+
+```sh
+awf wt release add --release <id> --source-pr <number> --repo-root <repo-root> --json
+awf wt release add --release <id> --source-pr <number> --repo-root <repo-root> --apply --json
+```
+
+Every source MUST pass the existing merged, review-policy, checks, and
+configured staging-base gates. AWF pins immutable base, head, merge, and path
+provenance; all multi-source pins require a merge SHA. A source cannot be
+duplicated or reordered. `source_pr_sequence_order`,
+`source_provenance_changed`, and `source_delta_mismatch` are stop conditions:
+preserve the managed worktree and report the blocker. Unrelated staging commits
+MUST NOT enter the bridge.
+
+After all sources are present, inspect and apply `seal`:
+
+```sh
+awf wt release seal --release <id> --repo-root <repo-root> --json
+awf wt release seal --release <id> --repo-root <repo-root> --apply --json
+```
+
+`seal` locks the source list. It reconstructs pinned deltas on the latest
+target, requires the configured prepare and production-verification commands,
+and blocks if prepare leaves the worktree dirty. After `SEALED`, `add` is
+forbidden; MUST NOT add a source by changing Git, SQLite, or a branch manually.
+
+Finally inspect and apply `publish`:
+
+```sh
+awf wt release publish --release <id> --repo-root <repo-root> --json
+awf wt release publish --release <id> --repo-root <repo-root> --apply --json
+```
+
+Before publication, AWF rechecks every immutable source pin. If production
+target drifted after sealing, AWF rebuilds the pinned deltas in the same managed
+worktree and reruns prepare and production verification. It then pushes and
+opens or reuses exactly one PR for the managed branch. Source drift, target PR
+mismatch, verification failure, or a dirty worktree is `blocked`; preserve the
+bridge and do not recreate, rebase, force-push, or manually publish it.
 
 ## Out-of-order production promotion
 
@@ -201,8 +268,9 @@ verification before publish. A changed target remains blocked and the managed
 worktree is preserved.
 
 AWF stages, commits, verifies, pushes, and publishes the eligible resolution.
-The synthetic production PR requires approval and successful checks on that
-exact production PR before merge, even after an automatic clean application.
+The synthetic production PR MUST pass successful checks on that exact PR before
+merge. It requires approval only when the repository's branch policy requires
+one; a solo repository MUST NOT invent an unavailable reviewer.
 Staging squash commits are not production promotion inputs. A direct staging
 squash cherry-pick is forbidden.
 
@@ -305,6 +373,14 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
     "link_pr_apply": "awf wt link-pr --lease <id> --pr <merged-pr> --apply --json",
     "promote_preview": "awf wt promote --source-pr <number> --to <branch> --repo-root <repo-root> --json",
     "promote_apply": "awf wt promote --source-pr <number> --to <branch> --repo-root <repo-root> --apply --json",
+    "release_open_preview": "awf wt release open --release <id> --to <branch> --repo-root <repo-root> --json",
+    "release_open_apply": "awf wt release open --release <id> --to <branch> --repo-root <repo-root> --apply --json",
+    "release_add_preview": "awf wt release add --release <id> --source-pr <number> --repo-root <repo-root> --json",
+    "release_add_apply": "awf wt release add --release <id> --source-pr <number> --repo-root <repo-root> --apply --json",
+    "release_seal_preview": "awf wt release seal --release <id> --repo-root <repo-root> --json",
+    "release_seal_apply": "awf wt release seal --release <id> --repo-root <repo-root> --apply --json",
+    "release_publish_preview": "awf wt release publish --release <id> --repo-root <repo-root> --json",
+    "release_publish_apply": "awf wt release publish --release <id> --repo-root <repo-root> --apply --json",
     "out_of_order_promote_preview": "awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --json",
     "out_of_order_promote_apply": "awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --apply --json",
     "out_of_order_resolution_preview": "awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --json",
@@ -318,6 +394,12 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
     "preflight": "required_non_destructive_status_refresh",
     "lease_reuse": "exact",
     "promotion_scope": "source_pr_delta_only",
+    "release_bridge": {
+      "source_pins": "ordered_immutable_base_head_merge_paths",
+      "source_add_after_seal": "forbidden",
+      "target_drift": "rebuild_same_managed_worktree_then_reverify",
+      "publication": "one_managed_pull_request"
+    },
     "deployment_health": "repository_rollout_evidence",
     "blocked_action": "preserve_worktree_report_code_message",
     "out_of_order": {
@@ -384,6 +466,10 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
       "acquire",
       "link-pr",
       "promote",
+      "release_open",
+      "release_add",
+      "release_seal",
+      "release_publish",
       "out_of_order_promote",
       "out_of_order_resolution",
       "import",
@@ -413,6 +499,10 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
       "acquire": "review_then_apply_explicitly",
       "link_pr": "review_then_apply_explicitly",
       "promote": "review_then_apply_explicitly",
+      "release_open": "review_then_apply_explicitly",
+      "release_add": "review_then_apply_explicitly",
+      "release_seal": "review_then_apply_explicitly",
+      "release_publish": "review_then_apply_explicitly",
       "out_of_order_promote": "review_then_apply_explicitly",
       "out_of_order_resolution": "review_same_blocked_lease_then_apply_explicitly",
       "finish": "review_blockers_then_apply",
@@ -423,6 +513,10 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
       "acquire_apply": "use_or_report_returned_lease",
       "link_pr_apply": "restart_status_preflight_then_finish",
       "promote_apply": "use_or_report_returned_lease",
+      "release_open_apply": "use_or_report_returned_lease",
+      "release_add_apply": "use_or_report_returned_lease",
+      "release_seal_apply": "use_or_report_returned_lease",
+      "release_publish_apply": "use_or_report_returned_lease",
       "out_of_order_promote_apply": "use_or_report_returned_lease",
       "out_of_order_resolution_apply": "use_or_report_returned_lease"
     },

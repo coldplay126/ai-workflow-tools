@@ -16,6 +16,13 @@
 
 ### Added
 
+- `awf wt release open|add|seal|publish`로 처음부터 누적 release bridge를
+  관리합니다. `open`은 최신 production 기준 `PROMOTE` lease를 만들고, `add`는
+  staging merge 순서의 immutable source base/head/merge/path pin만 누적합니다.
+  `seal`은 latest-target 재구성과 prepare/production verify 뒤 source를 잠그며,
+  `publish`는 target drift 시 같은 managed worktree에서 pin delta를 재구성·재검증한
+  뒤 정확히 하나의 production PR을 열거나 재사용합니다. duplicate/reordered
+  source, sealed 이후 add, provenance drift, verify/PR mismatch는 fail-closed입니다.
 - Plan phase now records material, recommendation-first design choices in the
   canonical `.workflow/artifacts/planning-options.json` artifact. A required
   unselected option routes G1 through `user_decision`/`deciding`; users select
@@ -63,7 +70,15 @@
 
 ### Changed
 
-- 기본 exact promotion은 변경하지 않았고, 선행 staging 변경 A를 production에
+- 단독으로 관리하는 `ai-workflow-tools`는 source PR review 정책을
+  `approved_or_self_merged`로 설정해 별도 리뷰어 없이 작성자 본인의 staging
+  PR을 승격할 수 있습니다. source checks와 production verification은 유지합니다.
+- 다중 production promotion은 더 이상 이전 PR merge SHA와 다음 PR base SHA의
+  완전 일치를 요구하지 않습니다. 모든 source merge SHA와 staging merge 순서는
+  계속 검증합니다. 명시한 PR delta만 최신 production 기준 단일 브랜치에 적용하며,
+  사이의 staging-only commit은 제외합니다.
+
+- exact promotion을 기본으로 유지하며, 선행 staging 변경 A를 production에
   포함할 수 없는 단일 merged PR B에는 opt-in `--out-of-order`를 추가했습니다.
   이 경로는 하나의 `--source-pr`만 받고 `--exclude-path`를 허용하지 않으며,
   위반 시 `invalid_out_of_order_promotion`, rename이면

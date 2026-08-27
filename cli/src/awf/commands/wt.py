@@ -139,6 +139,52 @@ def run_wt_promote(args: argparse.Namespace) -> int:
     )
 
 
+def run_wt_release_open(args: argparse.Namespace) -> int:
+    return _run(
+        args,
+        "wt.release.open",
+        lambda service: service.release_open(
+            release_id=args.release,
+            target_branch=args.to,
+            apply=args.apply,
+        ),
+    )
+
+
+def run_wt_release_add(args: argparse.Namespace) -> int:
+    return _run(
+        args,
+        "wt.release.add",
+        lambda service: service.release_add(
+            release_id=args.release,
+            source_pr=args.source_pr,
+            apply=args.apply,
+        ),
+    )
+
+
+def run_wt_release_seal(args: argparse.Namespace) -> int:
+    return _run(
+        args,
+        "wt.release.seal",
+        lambda service: service.release_seal(
+            release_id=args.release,
+            apply=args.apply,
+        ),
+    )
+
+
+def run_wt_release_publish(args: argparse.Namespace) -> int:
+    return _run(
+        args,
+        "wt.release.publish",
+        lambda service: service.release_publish(
+            release_id=args.release,
+            apply=args.apply,
+        ),
+    )
+
+
 def run_wt_recover_promotion(args: argparse.Namespace) -> int:
     return _run(
         args,

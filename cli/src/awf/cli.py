@@ -30,6 +30,10 @@ from awf.commands.wt import (
     run_wt_import,
     run_wt_status,
     run_wt_promote,
+    run_wt_release_add,
+    run_wt_release_open,
+    run_wt_release_publish,
+    run_wt_release_seal,
     run_wt_recover_promotion,
     run_wt_finish,
     run_wt_gc,
@@ -958,6 +962,126 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print a versioned JSON result.",
     )
     wt_promote_parser.set_defaults(handler=run_wt_promote)
+
+    wt_release_parser = wt_subparsers.add_parser(
+        "release",
+        help="Accumulate ordered reviewed staging deltas into one managed release bridge.",
+    )
+    wt_release_subparsers = wt_release_parser.add_subparsers(
+        dest="wt_release_command",
+        required=True,
+    )
+
+    wt_release_open_parser = wt_release_subparsers.add_parser(
+        "open",
+        help="Open or reuse a managed release bridge based on the latest target.",
+    )
+    wt_release_open_parser.add_argument(
+        "--release",
+        required=True,
+        help="Stable lowercase release identifier.",
+    )
+    wt_release_open_parser.add_argument(
+        "--to",
+        required=True,
+        help="Production branch (main or master).",
+    )
+    wt_release_open_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to current or parent directories.",
+    )
+    wt_release_open_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Create the managed release worktree instead of previewing it.",
+    )
+    wt_release_open_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_release_open_parser.set_defaults(handler=run_wt_release_open)
+
+    wt_release_add_parser = wt_release_subparsers.add_parser(
+        "add",
+        help="Pin and reconstruct one next staging pull request delta.",
+    )
+    wt_release_add_parser.add_argument(
+        "--release",
+        required=True,
+        help="Existing stable release identifier.",
+    )
+    wt_release_add_parser.add_argument(
+        "--source-pr",
+        required=True,
+        type=_positive_int,
+        help="Merged staging pull request number in staging merge order.",
+    )
+    wt_release_add_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to current or parent directories.",
+    )
+    wt_release_add_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Persist the immutable source pin and rebuild the bridge.",
+    )
+    wt_release_add_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_release_add_parser.set_defaults(handler=run_wt_release_add)
+
+    wt_release_seal_parser = wt_release_subparsers.add_parser(
+        "seal",
+        help="Lock release sources after reconstruction, prepare, and production verification.",
+    )
+    wt_release_seal_parser.add_argument(
+        "--release",
+        required=True,
+        help="Existing stable release identifier.",
+    )
+    wt_release_seal_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to current or parent directories.",
+    )
+    wt_release_seal_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Seal the release after prepare and production verification.",
+    )
+    wt_release_seal_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_release_seal_parser.set_defaults(handler=run_wt_release_seal)
+
+    wt_release_publish_parser = wt_release_subparsers.add_parser(
+        "publish",
+        help="Publish the sealed release bridge as exactly one production pull request.",
+    )
+    wt_release_publish_parser.add_argument(
+        "--release",
+        required=True,
+        help="Existing sealed release identifier.",
+    )
+    wt_release_publish_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to current or parent directories.",
+    )
+    wt_release_publish_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Push and open the one managed release pull request.",
+    )
+    wt_release_publish_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_release_publish_parser.set_defaults(handler=run_wt_release_publish)
 
     wt_recover_promotion_parser = wt_subparsers.add_parser(
         "recover-promotion",

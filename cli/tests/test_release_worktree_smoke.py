@@ -8,13 +8,14 @@ from pathlib import Path
 import pytest
 
 from awf.worktrees.config import WorktreeConfig
-from awf.worktrees.git import GitClient
-from awf.worktrees.github import PullRequest
+from awf.worktrees.git import GitClient, GitError
+from awf.worktrees.github import ExternalServiceError, PullRequest
 from awf.worktrees.models import (
     DeploymentState,
     LeaseState,
     PromotionMode,
     Purpose,
+    ReleaseState,
     ResolutionState,
 )
 from awf.worktrees.registry import WorktreeRegistry
@@ -36,6 +37,27 @@ class FakeGitHub:
     def find_open_pr(self, *, head: str, base: str) -> PullRequest | None:
         return self.open_prs.get((head, base))
 
+    def find_pr(self, *, head: str, base: str) -> PullRequest | None:
+        matches = [
+            pull_request
+            for pull_request in self.prs.values()
+            if pull_request.head_ref == head and pull_request.base_ref == base
+        ]
+        if len(matches) > 1:
+            raise ExternalServiceError("multiple pull requests for release branch")
+        if not matches:
+            return None
+        pull_request = matches[0]
+        if pull_request.state == "OPEN":
+            pull_request = replace(
+                pull_request,
+                base_sha=GitClient(self.repository_root).resolve_ref(base),
+                head_sha=GitClient(self.repository_root).resolve_ref(head),
+            )
+            self.prs[pull_request.number] = pull_request
+            self.open_prs[(head, base)] = pull_request
+        return pull_request
+
     def create_pr(
         self, *, base: str, head: str, title: str, body: str
     ) -> PullRequest:
@@ -44,7 +66,7 @@ class FakeGitHub:
             number=900,
             state="OPEN",
             base_ref=base,
-            base_sha="target-base",
+            base_sha=GitClient(self.repository_root).resolve_ref(base),
             head_ref=head,
             head_sha=GitClient(self.repository_root).resolve_ref(head),
             merge_commit_sha=None,
@@ -253,6 +275,45 @@ class SmokeHarness:
             review_decision="APPROVED",
             checks_passed=True,
             changed_paths=("out-of-order.txt",),
+            url=f"https://github.example/acme/repo/pull/{number}",
+        )
+        self.github.prs[number] = source
+        return source
+
+    def add_independent_followup(self, *, number: int = 373) -> PullRequest:
+        branch = f"feature/pr-{number}"
+        path = f"independent-{number}.txt"
+        git_command(self.repo, "checkout", "-q", "staging")
+        base_sha = self.git.head_sha(self.repo)
+        git_command(self.repo, "checkout", "-q", "-b", branch)
+        (self.repo / path).write_text("independent\n", encoding="utf-8")
+        git_command(self.repo, "add", path)
+        git_command(self.repo, "commit", "-q", "-m", "independent follow-up")
+        head_sha = self.git.head_sha(self.repo)
+        git_command(self.repo, "push", "-q", "-u", "origin", branch)
+        git_command(self.repo, "checkout", "-q", "staging")
+        git_command(
+            self.repo,
+            "merge",
+            "--no-ff",
+            "-q",
+            branch,
+            "-m",
+            "merge independent follow-up",
+        )
+        merge_sha = self.git.head_sha(self.repo)
+        git_command(self.repo, "push", "-q", "origin", "staging")
+        source = PullRequest(
+            number=number,
+            state="MERGED",
+            base_ref="staging",
+            base_sha=base_sha,
+            head_ref=branch,
+            head_sha=head_sha,
+            merge_commit_sha=merge_sha,
+            review_decision="APPROVED",
+            checks_passed=True,
+            changed_paths=(path,),
             url=f"https://github.example/acme/repo/pull/{number}",
         )
         self.github.prs[number] = source
@@ -552,3 +613,581 @@ def test_imported_worktree_pr_cleanup_lifecycle_smoke(smoke: SmokeHarness) -> No
         )
         == unrelated_branch
     )
+
+
+def test_cumulative_release_bridge_rebuilds_only_pinned_sources(
+    smoke: SmokeHarness,
+) -> None:
+    git_command(smoke.repo, "checkout", "-q", "staging")
+    second_base_sha = smoke.git.head_sha(smoke.repo)
+    git_command(smoke.repo, "checkout", "-q", "-b", "feature/pr-373")
+    (smoke.repo / "second-feature.txt").write_text("second\n", encoding="utf-8")
+    git_command(smoke.repo, "add", "second-feature.txt")
+    git_command(smoke.repo, "commit", "-q", "-m", "second source feature")
+    second_head_sha = smoke.git.head_sha(smoke.repo)
+    git_command(smoke.repo, "push", "-q", "-u", "origin", "feature/pr-373")
+    git_command(smoke.repo, "checkout", "-q", "staging")
+    git_command(
+        smoke.repo,
+        "merge",
+        "--no-ff",
+        "-q",
+        "feature/pr-373",
+        "-m",
+        "merge second source",
+    )
+    second_merge_sha = smoke.git.head_sha(smoke.repo)
+    git_command(smoke.repo, "push", "-q", "origin", "staging")
+    smoke.github.prs[373] = PullRequest(
+        number=373,
+        state="MERGED",
+        base_ref="staging",
+        base_sha=second_base_sha,
+        head_ref="feature/pr-373",
+        head_sha=second_head_sha,
+        merge_commit_sha=second_merge_sha,
+        review_decision="APPROVED",
+        checks_passed=True,
+        changed_paths=("second-feature.txt",),
+        url="https://github.example/acme/repo/pull/373",
+    )
+
+    opened = smoke.service.release_open(
+        release_id="august-hotfix",
+        target_branch="main",
+        apply=True,
+    )
+    assert opened.decision == "ready"
+    assert opened.release is not None
+    assert opened.lease is not None
+
+    reopened = smoke.service.release_open(
+        release_id="august-hotfix",
+        target_branch="main",
+        apply=True,
+    )
+    assert reopened.decision == "reuse"
+    assert reopened.release == opened.release
+
+    first_added = smoke.service.release_add(
+        release_id="august-hotfix",
+        source_pr=372,
+        apply=True,
+    )
+    assert first_added.decision == "ready", first_added.blockers
+    assert first_added.release is not None
+    assert [source.source_pr for source in first_added.release.sources] == [372]
+
+    duplicate = smoke.service.release_add(
+        release_id="august-hotfix",
+        source_pr=372,
+        apply=True,
+    )
+    assert duplicate.decision == "reuse"
+
+    second_added = smoke.service.release_add(
+        release_id="august-hotfix",
+        source_pr=373,
+        apply=True,
+    )
+    assert second_added.decision == "ready", second_added.blockers
+    assert second_added.release is not None
+    assert [source.source_pr for source in second_added.release.sources] == [372, 373]
+    assert second_added.lease is not None
+    assert (second_added.lease.worktree_path / "feature.txt").read_text(
+        encoding="utf-8"
+    ) == "feature\n"
+    assert (second_added.lease.worktree_path / "second-feature.txt").read_text(
+        encoding="utf-8"
+    ) == "second\n"
+    assert not (second_added.lease.worktree_path / "team.txt").exists()
+
+    sealed = smoke.service.release_seal(release_id="august-hotfix", apply=True)
+    assert sealed.decision == "ready", sealed.blockers
+    assert sealed.release is not None
+    assert sealed.release.state is ReleaseState.SEALED
+
+    sealed_add = smoke.service.release_add(
+        release_id="august-hotfix",
+        source_pr=373,
+        apply=True,
+    )
+    assert sealed_add.blockers[0]["code"] == "release_not_open"
+
+    git_command(smoke.repo, "checkout", "-q", "main")
+    (smoke.repo / "main-only.txt").write_text("production\n", encoding="utf-8")
+    git_command(smoke.repo, "add", "main-only.txt")
+    git_command(smoke.repo, "commit", "-q", "-m", "target drift")
+    git_command(smoke.repo, "push", "-q", "origin", "main")
+    git_command(smoke.repo, "checkout", "-q", "staging")
+
+    published = smoke.service.release_publish(
+        release_id="august-hotfix",
+        apply=True,
+    )
+    assert published.decision == "ready", published.blockers
+    assert published.release is not None
+    assert published.release.state is ReleaseState.PUBLISHED
+    assert published.lease is not None
+    assert published.lease.target_pr == 900
+    assert (published.lease.worktree_path / "main-only.txt").read_text(
+        encoding="utf-8"
+    ) == "production\n"
+    assert len(smoke.github.created_pr_bodies) == 1
+    assert len(smoke.github.open_prs) == 1
+
+    republished = smoke.service.release_publish(
+        release_id="august-hotfix",
+        apply=True,
+    )
+    assert republished.decision == "reuse"
+    assert len(smoke.github.created_pr_bodies) == 1
+    smoke.merge_target_pr(deployment=DeploymentState.HEALTHY)
+    removed = smoke.service.finish(pr_number=900, apply=True)
+    assert removed.decision == "removed"
+    assert not published.lease.worktree_path.exists()
+    cleaned = smoke.registry.find_release(
+        published.release.repository_id,
+        published.release.release_id,
+    )
+    assert cleaned is not None
+    assert cleaned.state is ReleaseState.CLEANED
+
+
+
+def test_cumulative_release_bridge_blocks_source_provenance_drift(
+    smoke: SmokeHarness,
+) -> None:
+    assert smoke.service.release_open(
+        release_id="provenance-drift",
+        target_branch="main",
+        apply=True,
+    ).decision == "ready"
+    assert smoke.service.release_add(
+        release_id="provenance-drift",
+        source_pr=372,
+        apply=True,
+    ).decision == "ready"
+    smoke.github.prs[372] = replace(
+        smoke.github.prs[372],
+        head_sha="f" * 40,
+    )
+
+    sealed = smoke.service.release_seal(
+        release_id="provenance-drift",
+        apply=True,
+    )
+
+    assert sealed.blockers[0]["code"] == "source_provenance_changed"
+
+
+def test_cumulative_release_bridge_blocks_reverse_staging_order(
+    smoke: SmokeHarness,
+) -> None:
+    second_source = smoke.add_independent_followup()
+    assert smoke.service.release_open(
+        release_id="reverse-order",
+        target_branch="main",
+        apply=True,
+    ).decision == "ready"
+    assert smoke.service.release_add(
+        release_id="reverse-order",
+        source_pr=second_source.number,
+        apply=True,
+    ).decision == "ready"
+
+    reversed_source = smoke.service.release_add(
+        release_id="reverse-order",
+        source_pr=372,
+        apply=True,
+    )
+
+    assert reversed_source.blockers[0]["code"] == "source_pr_sequence_order"
+
+
+def test_cumulative_release_bridge_rolls_back_rejected_source(
+    smoke: SmokeHarness,
+) -> None:
+    dependent_source = smoke.add_divergent_same_file_followup()
+    assert smoke.service.release_open(
+        release_id="rejected-source",
+        target_branch="main",
+        apply=True,
+    ).decision == "ready"
+
+    rejected = smoke.service.release_add(
+        release_id="rejected-source",
+        source_pr=dependent_source.number,
+        apply=True,
+    )
+
+    assert rejected.status == "blocked"
+    assert rejected.release is not None
+    assert rejected.release.sources == ()
+    accepted = smoke.service.release_add(
+        release_id="rejected-source",
+        source_pr=372,
+        apply=True,
+    )
+    assert accepted.decision == "ready"
+
+
+def test_cumulative_release_bridge_preserves_failed_verification(
+    smoke: SmokeHarness,
+) -> None:
+    assert smoke.service.release_open(
+        release_id="verify-failure",
+        target_branch="main",
+        apply=True,
+    ).decision == "ready"
+    assert smoke.service.release_add(
+        release_id="verify-failure",
+        source_pr=372,
+        apply=True,
+    ).decision == "ready"
+    smoke.config = replace(
+        smoke.config,
+        verify_production=((sys.executable, "-c", "raise SystemExit(1)"),),
+    )
+    smoke._rebuild_service()
+
+    sealed = smoke.service.release_seal(release_id="verify-failure", apply=True)
+
+    assert sealed.blockers[0]["code"] == "release_verification_failed"
+    assert sealed.release is not None
+    assert sealed.release.state is ReleaseState.OPEN
+    assert sealed.lease is not None
+    assert sealed.lease.worktree_path.exists()
+
+
+def test_release_open_resumes_durable_intent_after_worktree_failure(
+    smoke: SmokeHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = smoke.git.add_worktree
+
+    def fail_once(*args: object, **kwargs: object) -> None:
+        raise GitError("injected worktree failure")
+
+    monkeypatch.setattr(smoke.git, "add_worktree", fail_once)
+    first = smoke.service.release_open(
+        release_id="open-recovery",
+        target_branch="main",
+        apply=True,
+    )
+    assert first.blockers[0]["code"] == "release_worktree_create_failed"
+    assert first.release is not None
+    assert smoke.registry.find_release(
+        first.release.repository_id,
+        first.release.release_id,
+    ) is not None
+
+    monkeypatch.setattr(smoke.git, "add_worktree", original)
+    recovered = smoke.service.release_open(
+        release_id="open-recovery",
+        target_branch="main",
+        apply=True,
+    )
+    assert recovered.decision == "ready"
+    assert recovered.lease is not None
+    assert recovered.lease.worktree_path.exists()
+
+
+def test_release_add_recovers_pending_candidate_after_registry_failure(
+    smoke: SmokeHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert smoke.service.release_open(
+        release_id="add-recovery",
+        target_branch="main",
+        apply=True,
+    ).decision == "ready"
+    original = smoke.registry.accept_release_source
+
+    def fail_accept(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("injected accept failure")
+
+    monkeypatch.setattr(smoke.registry, "accept_release_source", fail_accept)
+    first = smoke.service.release_add(
+        release_id="add-recovery",
+        source_pr=372,
+        apply=True,
+    )
+    assert first.blockers[0]["code"] == "registry_conflict"
+    assert first.release is not None
+    assert smoke.registry.get_pending_release_source(first.release.id) is not None
+
+    monkeypatch.setattr(smoke.registry, "accept_release_source", original)
+    recovered = smoke.service.release_add(
+        release_id="add-recovery",
+        source_pr=372,
+        apply=True,
+    )
+    assert recovered.decision == "ready"
+    assert recovered.release is not None
+    assert [item.source_pr for item in recovered.release.sources] == [372]
+    assert smoke.registry.get_pending_release_source(recovered.release.id) is None
+
+
+def test_release_seal_cleans_untracked_verifier_failure_for_retry(
+    smoke: SmokeHarness,
+) -> None:
+    assert smoke.service.release_open(
+        release_id="verify-cleanup",
+        target_branch="main",
+        apply=True,
+    ).decision == "ready"
+    assert smoke.service.release_add(
+        release_id="verify-cleanup",
+        source_pr=372,
+        apply=True,
+    ).decision == "ready"
+    smoke.config = replace(
+        smoke.config,
+        verify_production=(
+            (
+                sys.executable,
+                "-c",
+                (
+                    "from pathlib import Path; "
+                    "Path('verify-leak.txt').write_text('leak'); "
+                    "raise SystemExit(1)"
+                ),
+            ),
+        ),
+    )
+    smoke._rebuild_service()
+    failed = smoke.service.release_seal(
+        release_id="verify-cleanup",
+        apply=True,
+    )
+    assert failed.blockers[0]["code"] == "release_verification_failed"
+    assert failed.lease is not None
+    assert not (failed.lease.worktree_path / "verify-leak.txt").exists()
+    assert smoke.git.status_porcelain(failed.lease.worktree_path) == ()
+
+    smoke.enable_verify_success()
+    retried = smoke.service.release_seal(
+        release_id="verify-cleanup",
+        apply=True,
+    )
+    assert retried.decision == "ready"
+
+
+def test_release_publish_recovers_same_pr_after_db_failure_and_target_drift(
+    smoke: SmokeHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert smoke.service.release_open(
+        release_id="publish-recovery",
+        target_branch="main",
+        apply=True,
+    ).decision == "ready"
+    assert smoke.service.release_add(
+        release_id="publish-recovery",
+        source_pr=372,
+        apply=True,
+    ).decision == "ready"
+    assert smoke.service.release_seal(
+        release_id="publish-recovery",
+        apply=True,
+    ).decision == "ready"
+    original = smoke.registry.publish_release
+
+    def fail_publish(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("injected publication failure")
+
+    monkeypatch.setattr(smoke.registry, "publish_release", fail_publish)
+    first = smoke.service.release_publish(
+        release_id="publish-recovery",
+        apply=True,
+    )
+    assert first.blockers[0]["code"] == "registry_conflict"
+    assert len(smoke.github.created_pr_bodies) == 1
+
+    monkeypatch.setattr(smoke.registry, "publish_release", original)
+    git_command(smoke.repo, "checkout", "-q", "main")
+    (smoke.repo / "target-drift.txt").write_text("drift\n", encoding="utf-8")
+    git_command(smoke.repo, "add", "target-drift.txt")
+    git_command(smoke.repo, "commit", "-q", "-m", "target drift")
+    git_command(smoke.repo, "push", "-q", "origin", "main")
+    git_command(smoke.repo, "checkout", "-q", "staging")
+
+    recovered = smoke.service.release_publish(
+        release_id="publish-recovery",
+        apply=True,
+    )
+    assert recovered.decision == "ready", recovered.blockers
+    assert recovered.release is not None
+    assert recovered.release.target_pr == 900
+    assert len(smoke.github.created_pr_bodies) == 1
+
+
+def test_release_publish_does_not_replace_closed_partial_pr(
+    smoke: SmokeHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert smoke.service.release_open(
+        release_id="closed-partial-pr",
+        target_branch="main",
+        apply=True,
+    ).decision == "ready"
+    assert smoke.service.release_add(
+        release_id="closed-partial-pr",
+        source_pr=372,
+        apply=True,
+    ).decision == "ready"
+    assert smoke.service.release_seal(
+        release_id="closed-partial-pr",
+        apply=True,
+    ).decision == "ready"
+    original = smoke.registry.publish_release
+    monkeypatch.setattr(
+        smoke.registry,
+        "publish_release",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("injected publication failure")
+        ),
+    )
+    assert smoke.service.release_publish(
+        release_id="closed-partial-pr",
+        apply=True,
+    ).blockers[0]["code"] == "registry_conflict"
+    monkeypatch.setattr(smoke.registry, "publish_release", original)
+    smoke.github.prs[900] = replace(smoke.github.prs[900], state="CLOSED")
+    smoke.github.open_prs.clear()
+
+    retried = smoke.service.release_publish(
+        release_id="closed-partial-pr",
+        apply=True,
+    )
+    assert retried.blockers[0]["code"] == "release_pr_closed"
+    assert len(smoke.github.created_pr_bodies) == 1
+
+
+def test_release_publish_recovers_pr_merged_before_registry_record(
+    smoke: SmokeHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert smoke.service.release_open(
+        release_id="merged-partial-pr",
+        target_branch="main",
+        apply=True,
+    ).decision == "ready"
+    assert smoke.service.release_add(
+        release_id="merged-partial-pr",
+        source_pr=372,
+        apply=True,
+    ).decision == "ready"
+    sealed = smoke.service.release_seal(
+        release_id="merged-partial-pr",
+        apply=True,
+    )
+    assert sealed.decision == "ready"
+    original = smoke.registry.publish_release
+    monkeypatch.setattr(
+        smoke.registry,
+        "publish_release",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("injected publication failure")
+        ),
+    )
+    assert smoke.service.release_publish(
+        release_id="merged-partial-pr",
+        apply=True,
+    ).blockers[0]["code"] == "registry_conflict"
+    monkeypatch.setattr(smoke.registry, "publish_release", original)
+
+    target_pr = smoke.github.prs[900]
+    git_command(smoke.repo, "checkout", "-q", "main")
+    git_command(
+        smoke.repo,
+        "merge",
+        "--no-ff",
+        "-q",
+        target_pr.head_ref,
+        "-m",
+        "merge release PR",
+    )
+    merge_sha = smoke.git.head_sha(smoke.repo)
+    git_command(smoke.repo, "push", "-q", "origin", "main")
+    git_command(smoke.repo, "checkout", "-q", "staging")
+    smoke.github.prs[900] = replace(
+        target_pr,
+        state="MERGED",
+        merge_commit_sha=merge_sha,
+    )
+    smoke.github.open_prs.clear()
+
+    recovered = smoke.service.release_publish(
+        release_id="merged-partial-pr",
+        apply=True,
+    )
+    assert recovered.decision == "ready", recovered.blockers
+    assert recovered.release is not None
+    assert recovered.release.state is ReleaseState.PUBLISHED
+    assert recovered.release.target_pr == 900
+    assert len(smoke.github.created_pr_bodies) == 1
+
+
+def test_release_open_blocks_clean_committed_worktree_drift(
+    smoke: SmokeHarness,
+) -> None:
+    opened = smoke.service.release_open(
+        release_id="open-head-drift",
+        target_branch="main",
+        apply=True,
+    )
+    assert opened.decision == "ready"
+    assert opened.lease is not None
+    (opened.lease.worktree_path / "unexpected.txt").write_text(
+        "unexpected\n",
+        encoding="utf-8",
+    )
+    git_command(opened.lease.worktree_path, "add", "unexpected.txt")
+    git_command(
+        opened.lease.worktree_path,
+        "commit",
+        "-q",
+        "-m",
+        "unexpected clean commit",
+    )
+    unexpected_head = smoke.git.head_sha(opened.lease.worktree_path)
+
+    reused = smoke.service.release_open(
+        release_id="open-head-drift",
+        target_branch="main",
+        apply=True,
+    )
+    assert reused.blockers[0]["code"] == "release_lease_mismatch"
+    assert smoke.git.head_sha(opened.lease.worktree_path) == unexpected_head
+
+
+def test_published_release_reuse_blocks_closed_pr(smoke: SmokeHarness) -> None:
+    assert smoke.service.release_open(
+        release_id="published-closed",
+        target_branch="main",
+        apply=True,
+    ).decision == "ready"
+    assert smoke.service.release_add(
+        release_id="published-closed",
+        source_pr=372,
+        apply=True,
+    ).decision == "ready"
+    assert smoke.service.release_seal(
+        release_id="published-closed",
+        apply=True,
+    ).decision == "ready"
+    published = smoke.service.release_publish(
+        release_id="published-closed",
+        apply=True,
+    )
+    assert published.decision == "ready"
+    smoke.github.prs[900] = replace(smoke.github.prs[900], state="CLOSED")
+    smoke.github.open_prs.clear()
+
+    reused = smoke.service.release_publish(
+        release_id="published-closed",
+        apply=True,
+    )
+    assert reused.blockers[0]["code"] == "release_pr_closed"

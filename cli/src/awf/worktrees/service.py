@@ -27,8 +27,12 @@ from .models import (
     LeaseState,
     PromotionMode,
     Purpose,
+    ReleaseBridge,
+    ReleaseSource,
+    ReleaseState,
     ResolutionState,
     now_iso,
+    release_source_digest,
 )
 from .registry import WorktreeRegistry
 
@@ -289,7 +293,7 @@ class WorktreeService:
             )
         for source in sources:
             invalid_oid = self._invalid_promotion_oid(
-                source, require_merge=bool(excluded_paths)
+                source, require_merge=bool(excluded_paths) or len(sources) > 1
             )
             if invalid_oid is not None:
                 return self._promotion_blocked(
@@ -475,12 +479,13 @@ class WorktreeService:
                 expected_blob_heads: dict[str, str] | None = (
                     {} if promotion_mode is PromotionMode.EXACT else None
                 )
+                previous_source_merge_sha: str | None = None
                 for source in sources:
                     source_base_sha = self.git.fetch_ref(source.base_sha)
                     source_head_sha = self.git.fetch_ref(source.head_sha)
                     source_merge_sha: str | None = None
-                    if excluded_paths:
-                        if source.merge_commit_sha is None:
+                    if source.merge_commit_sha is None:
+                        if excluded_paths:
                             return self._promotion_blocked(
                                 "source_pr_invalid_oid",
                                 (
@@ -488,6 +493,7 @@ class WorktreeService:
                                     " an invalid merge SHA"
                                 ),
                             )
+                    else:
                         source_merge_sha = self.git.fetch_ref(
                             source.merge_commit_sha
                         )
@@ -542,6 +548,23 @@ class WorktreeService:
                                 " is not in the configured staging history"
                             ),
                         )
+                    if (
+                        previous_source_merge_sha is not None
+                        and source_merge_sha is not None
+                        and self.git.merge_base(
+                            previous_source_merge_sha, source_merge_sha
+                        )
+                        != previous_source_merge_sha
+                    ):
+                        return self._promotion_blocked(
+                            "source_pr_sequence_order",
+                            (
+                                f"source pull request #{source.number} was not"
+                                " merged after the preceding source pull request"
+                            ),
+                        )
+                    if source_merge_sha is not None:
+                        previous_source_merge_sha = source_merge_sha
                     expected_source_paths = tuple(sorted(source.changed_paths))
                     if not patch:
                         return self._promotion_blocked(
@@ -857,6 +880,923 @@ class WorktreeService:
                 lease=lease,
                 actions=verification_actions,
             )
+
+    def release_open(
+        self,
+        *,
+        release_id: str,
+        target_branch: str,
+        apply: bool,
+    ) -> CommandResult:
+        command = "wt.release.open"
+        try:
+            release_slug = _initiative_slug(release_id)
+            target_ref = self._promotion_target_ref(target_branch)
+        except (ConfigError, ValueError) as error:
+            return self._release_blocked(command, "invalid_release", str(error))
+        repository_id = self.git.repository_id()
+        if not apply:
+            try:
+                existing = self.registry.find_release_read_only(
+                    repository_id, release_slug
+                )
+            except sqlite3.Error as error:
+                return self._release_blocked(command, "registry_conflict", str(error))
+            if existing is not None:
+                return self._release_reuse(
+                    command,
+                    existing,
+                    target_branch=target_branch,
+                    lease=self.registry.get_lease_read_only(existing.lease_id),
+                    apply=False,
+                )
+            try:
+                target_sha = self.git.resolve_ref(target_ref)
+            except GitError as error:
+                return self._release_blocked(
+                    command, "target_ref_unavailable", str(error)
+                )
+            lease = self._new_release_lease(
+                release_slug, target_ref, target_sha
+            )
+            release = ReleaseBridge.new(
+                repository_id=repository_id,
+                repository_name=self.git.repository_name(),
+                repository_root=self.git.repository_root(),
+                release_id=release_slug,
+                target_branch=target_branch,
+                lease_id=lease.id,
+            )
+            return CommandResult.ok(
+                command,
+                decision="preview",
+                release=release,
+                actions=(
+                    {
+                        "kind": "create_worktree",
+                        "path": str(lease.worktree_path),
+                        "branch": lease.branch,
+                        "target_branch": target_branch,
+                        "target_base_sha": target_sha,
+                    },
+                ),
+            )
+
+        with repository_lock(self.lock_dir / f"{repository_id}.lock"):
+            try:
+                existing = self.registry.find_release(repository_id, release_slug)
+            except sqlite3.Error as error:
+                return self._release_blocked(command, "registry_conflict", str(error))
+            if existing is not None:
+                return self._release_reuse(
+                    command,
+                    existing,
+                    target_branch=target_branch,
+                    lease=self.registry.get_lease(existing.lease_id),
+                    apply=True,
+                )
+            try:
+                target_sha = self.git.fetch_ref(target_branch)
+            except GitRemoteError as error:
+                return self._release_external(
+                    command, "target_ref_unavailable", str(error)
+                )
+            except GitError as error:
+                return self._release_blocked(
+                    command, "target_ref_unavailable", str(error)
+                )
+            lease = self._new_release_lease(release_slug, target_ref, target_sha)
+            active = self.registry.find_active(
+                repository_id, lease.initiative, Purpose.PROMOTE
+            )
+            if active is not None:
+                return self._release_blocked(
+                    command,
+                    "release_lease_conflict",
+                    (
+                        f"managed promotion lease {active.id} already owns release "
+                        f"initiative {lease.initiative!r}"
+                    ),
+                    lease=active,
+                )
+            branch_conflict = self._branch_conflict(lease.branch)
+            if branch_conflict is not None:
+                return self._release_blocked(
+                    command,
+                    "branch_conflict",
+                    f"branch {lease.branch!r} is already checked out at {branch_conflict}",
+                    lease=lease,
+                )
+            release = ReleaseBridge.new(
+                repository_id=repository_id,
+                repository_name=self.git.repository_name(),
+                repository_root=self.git.repository_root(),
+                release_id=release_slug,
+                target_branch=target_branch,
+                lease_id=lease.id,
+            )
+            try:
+                lease, release = self.registry.create_release_with_lease(
+                    lease,
+                    release,
+                )
+            except (RuntimeError, ValueError, sqlite3.Error) as error:
+                return self._release_blocked(
+                    command,
+                    "registry_conflict",
+                    str(error),
+                    lease=lease,
+                    release=release,
+                )
+            try:
+                self.git.add_worktree(
+                    lease.worktree_path,
+                    lease.branch,
+                    target_sha,
+                    reuse_exact_branch=True,
+                )
+            except (GitError, OSError) as error:
+                return self._release_blocked(
+                    command,
+                    "release_worktree_create_failed",
+                    str(error),
+                    lease=lease,
+                    release=release,
+                )
+            return CommandResult.ok(
+                command, decision="ready", lease=lease, release=release
+            )
+
+    def release_add(
+        self,
+        *,
+        release_id: str,
+        source_pr: int,
+        apply: bool,
+    ) -> CommandResult:
+        command = "wt.release.add"
+        try:
+            release_slug = _initiative_slug(release_id)
+            source_number = self._promotion_source_numbers(source_pr)[0]
+        except ValueError as error:
+            return self._release_blocked(command, "invalid_release_source", str(error))
+        repository_id = self.git.repository_id()
+        if not apply:
+            try:
+                release = self.registry.find_release_read_only(
+                    repository_id, release_slug
+                )
+            except sqlite3.Error as error:
+                return self._release_blocked(command, "registry_conflict", str(error))
+            if release is None:
+                return self._release_blocked(
+                    command,
+                    "unknown_release",
+                    f"release {release_slug!r} does not exist",
+                )
+            lease = self.registry.get_lease_read_only(release.lease_id)
+            validation = self._release_add_validation(
+                command, release, source_number
+            )
+            if isinstance(validation, CommandResult):
+                return validation
+            source = validation
+            return CommandResult.ok(
+                command,
+                decision="preview",
+                lease=lease,
+                release=release,
+                actions=(
+                    {
+                        "kind": "append_source",
+                        "source_pr": source.source_pr,
+                        "ordinal": source.ordinal,
+                        "base_sha": source.base_sha,
+                        "head_sha": source.head_sha,
+                        "merge_sha": source.merge_sha,
+                        "changed_paths": list(source.changed_paths),
+                    },
+                    {
+                        "kind": "rebuild_release_bridge",
+                        "target_branch": release.target_branch,
+                        "source_prs": [
+                            *[item.source_pr for item in release.sources],
+                            source.source_pr,
+                        ],
+                    },
+                ),
+            )
+
+        with repository_lock(self.lock_dir / f"{repository_id}.lock"):
+            try:
+                release = self.registry.find_release(repository_id, release_slug)
+            except sqlite3.Error as error:
+                return self._release_blocked(command, "registry_conflict", str(error))
+            if release is None:
+                return self._release_blocked(
+                    command,
+                    "unknown_release",
+                    f"release {release_slug!r} does not exist",
+                )
+            validation = self._release_add_validation(command, release, source_number)
+            if isinstance(validation, CommandResult):
+                if validation.status != "ok" or validation.decision != "reuse":
+                    return validation
+                try:
+                    lease = self._release_lease(command, release)
+                    rebuilt = self._rebuild_release_bridge(
+                        command,
+                        release,
+                        lease,
+                        verify=False,
+                    )
+                except (RuntimeError, ValueError, sqlite3.Error) as error:
+                    return self._release_blocked(
+                        command,
+                        "registry_conflict",
+                        str(error),
+                        release=release,
+                    )
+                if isinstance(rebuilt, CommandResult):
+                    return rebuilt
+                lease, _target_sha, _actions = rebuilt
+                return CommandResult.ok(
+                    command,
+                    decision="reuse",
+                    lease=lease,
+                    release=release,
+                )
+            source = validation
+            lease = self._release_lease(command, release)
+            try:
+                pending_source = self.registry.get_pending_release_source(release.id)
+                if pending_source is not None and pending_source != source:
+                    return self._release_blocked(
+                        command,
+                        "release_source_pending",
+                        "another release source add is pending recovery",
+                        lease=lease,
+                        release=release,
+                    )
+                release = self.registry.stage_release_source(
+                    source,
+                    expected_version=release.version,
+                )
+                if (
+                    pending_source is not None
+                    and self.git.status_porcelain(lease.worktree_path)
+                ):
+                    return self._release_blocked(
+                        command,
+                        "release_worktree_dirty",
+                        "pending source recovery found a dirty release worktree",
+                        lease=lease,
+                        release=release,
+                    )
+            except (GitError, RuntimeError, ValueError, sqlite3.Error) as error:
+                return self._release_blocked(
+                    command,
+                    "registry_conflict",
+                    str(error),
+                    lease=lease,
+                    release=release,
+                )
+            candidate_sources = (*release.sources, source)
+            candidate_release = replace(
+                release,
+                sources=candidate_sources,
+                source_digest=release_source_digest(candidate_sources),
+            )
+            if (
+                pending_source is not None
+                and self.git.head_sha(lease.worktree_path) != lease.head_sha
+            ):
+                recovered = self._recover_pending_release_candidate(
+                    command,
+                    candidate_release,
+                    lease,
+                )
+                if isinstance(recovered, CommandResult):
+                    return recovered
+                rebuilt_lease, target_sha = recovered
+            else:
+                rebuilt = self._rebuild_release_bridge(
+                    command,
+                    candidate_release,
+                    lease,
+                    verify=False,
+                    record=False,
+                )
+                if isinstance(rebuilt, CommandResult):
+                    try:
+                        release = self.registry.clear_pending_release_source(
+                            source,
+                            expected_version=release.version,
+                        )
+                    except (RuntimeError, ValueError, sqlite3.Error) as rollback_error:
+                        return self._release_blocked(
+                            command,
+                            "release_rollback_failed",
+                            str(rollback_error),
+                            lease=lease,
+                            release=release,
+                        )
+                    return replace(rebuilt, release=release)
+                rebuilt_lease, target_sha, _actions = rebuilt
+            try:
+                lease, release = self.registry.accept_release_source(
+                    source,
+                    expected_release_version=release.version,
+                    lease_id=lease.id,
+                    expected_lease_version=lease.version,
+                    head_sha=rebuilt_lease.head_sha,
+                    target_base_sha=target_sha,
+                )
+            except (RuntimeError, ValueError, sqlite3.Error) as error:
+                return self._release_blocked(
+                    command,
+                    "registry_conflict",
+                    str(error),
+                    lease=lease,
+                    release=release,
+                )
+            return CommandResult.ok(
+                command,
+                decision="ready",
+                lease=lease,
+                release=release,
+            )
+
+    def release_seal(self, *, release_id: str, apply: bool) -> CommandResult:
+        command = "wt.release.seal"
+        try:
+            release_slug = _initiative_slug(release_id)
+        except ValueError as error:
+            return self._release_blocked(command, "invalid_release", str(error))
+        repository_id = self.git.repository_id()
+        getter = (
+            self.registry.find_release
+            if apply
+            else self.registry.find_release_read_only
+        )
+        try:
+            release = getter(repository_id, release_slug)
+        except sqlite3.Error as error:
+            return self._release_blocked(command, "registry_conflict", str(error))
+        if release is None:
+            return self._release_blocked(
+                command, "unknown_release", f"release {release_slug!r} does not exist"
+            )
+        lease = (
+            self.registry.get_lease(release.lease_id)
+            if apply
+            else self.registry.get_lease_read_only(release.lease_id)
+        )
+        try:
+            pending_source = self.registry.get_pending_release_source(release.id)
+        except sqlite3.Error as error:
+            return self._release_blocked(
+                command,
+                "registry_conflict",
+                str(error),
+                lease=lease,
+                release=release,
+            )
+        if pending_source is not None:
+            return self._release_blocked(
+                command,
+                "release_source_pending",
+                (
+                    f"source pull request #{pending_source.source_pr} add is "
+                    "pending recovery"
+                ),
+                lease=lease,
+                release=release,
+            )
+        if release.state is ReleaseState.SEALED:
+            return CommandResult.ok(
+                command, decision="reuse", lease=lease, release=release
+            )
+        if release.state is not ReleaseState.OPEN:
+            return self._release_blocked(
+                command,
+                "release_not_open",
+                f"release {release.release_id!r} is {release.state.value}",
+                lease=lease,
+                release=release,
+            )
+        if not release.sources:
+            return self._release_blocked(
+                command,
+                "release_empty",
+                "release must contain at least one pinned source before sealing",
+                lease=lease,
+                release=release,
+            )
+        if not self.config.verify_production:
+            return self._release_blocked(
+                command,
+                "production_verify_missing",
+                "verify.production.commands must configure at least one command",
+                lease=lease,
+                release=release,
+            )
+        if not apply:
+            try:
+                target_ref = self._promotion_target_ref(release.target_branch)
+            except ConfigError as error:
+                return self._release_blocked(
+                    command,
+                    "invalid_target_branch",
+                    str(error),
+                    lease=lease,
+                    release=release,
+                )
+            source_validation = self._release_live_sources(
+                command,
+                release,
+                target_ref,
+            )
+            if isinstance(source_validation, CommandResult):
+                return source_validation
+            return CommandResult.ok(
+                command,
+                decision="preview",
+                lease=lease,
+                release=release,
+                actions=(
+                    {
+                        "kind": "rebuild_release_bridge",
+                        "target_branch": release.target_branch,
+                        "source_prs": [source.source_pr for source in release.sources],
+                    },
+                    {"kind": "prepare_release"},
+                    *(
+                        {
+                            "kind": "verify_production",
+                            "argv": list(item),
+                        }
+                        for item in self.config.verify_production
+                    ),
+                ),
+            )
+        with repository_lock(self.lock_dir / f"{repository_id}.lock"):
+            release = self.registry.find_release(repository_id, release_slug)
+            if release is None:
+                return self._release_blocked(
+                    command,
+                    "unknown_release",
+                    f"release {release_slug!r} does not exist",
+                )
+            lease = self._release_lease(command, release)
+            if release.state is ReleaseState.SEALED:
+                return CommandResult.ok(
+                    command, decision="reuse", lease=lease, release=release
+                )
+            if release.state is not ReleaseState.OPEN:
+                return self._release_blocked(
+                    command,
+                    "release_not_open",
+                    f"release {release.release_id!r} is {release.state.value}",
+                    lease=lease,
+                    release=release,
+                )
+            verified = self._verify_release_bridge_live(
+                command,
+                release,
+                lease,
+            )
+            if isinstance(verified, CommandResult):
+                return verified
+            lease, target_sha, verification_actions = verified
+            try:
+                release = self.registry.transition_release(
+                    release.id,
+                    ReleaseState.SEALED,
+                    expected_version=release.version,
+                    last_verified_target_sha=target_sha,
+                )
+            except (RuntimeError, ValueError, sqlite3.Error) as error:
+                return self._release_blocked(
+                    command,
+                    "registry_conflict",
+                    str(error),
+                    lease=lease,
+                    release=release,
+                )
+            return CommandResult.ok(
+                command,
+                decision="ready",
+                lease=lease,
+                release=release,
+                actions=verification_actions,
+            )
+
+    def release_publish(self, *, release_id: str, apply: bool) -> CommandResult:
+        command = "wt.release.publish"
+        try:
+            release_slug = _initiative_slug(release_id)
+        except ValueError as error:
+            return self._release_blocked(command, "invalid_release", str(error))
+        repository_id = self.git.repository_id()
+        getter = (
+            self.registry.find_release
+            if apply
+            else self.registry.find_release_read_only
+        )
+        try:
+            release = getter(repository_id, release_slug)
+        except sqlite3.Error as error:
+            return self._release_blocked(command, "registry_conflict", str(error))
+        if release is None:
+            return self._release_blocked(
+                command, "unknown_release", f"release {release_slug!r} does not exist"
+            )
+        lease = (
+            self.registry.get_lease(release.lease_id)
+            if apply
+            else self.registry.get_lease_read_only(release.lease_id)
+        )
+        if release.state is ReleaseState.PUBLISHED:
+            return self._release_published_reuse(command, release, lease)
+        if release.state is not ReleaseState.SEALED:
+            return self._release_blocked(
+                command,
+                "release_not_sealed",
+                f"release {release.release_id!r} is {release.state.value}",
+                lease=lease,
+                release=release,
+            )
+        if not apply:
+            try:
+                target_ref = self._promotion_target_ref(release.target_branch)
+                target_sha = self.git.resolve_ref(target_ref)
+            except (ConfigError, GitError) as error:
+                return self._release_blocked(
+                    command,
+                    "target_ref_unavailable",
+                    str(error),
+                    lease=lease,
+                    release=release,
+                )
+            source_validation = self._release_live_sources(
+                command,
+                release,
+                target_ref,
+            )
+            if isinstance(source_validation, CommandResult):
+                return source_validation
+            actions: tuple[dict[str, object], ...] = (
+                (
+                    {
+                        "kind": "rebuild_release_bridge",
+                        "target_branch": release.target_branch,
+                        "target_base_sha": target_sha,
+                    },
+                )
+                if target_sha != release.last_verified_target_sha
+                else ()
+            )
+            return CommandResult.ok(
+                command,
+                decision="preview",
+                lease=lease,
+                release=release,
+                actions=(
+                    *actions,
+                    {"kind": "push_branch", "branch": lease.branch if lease else ""},
+                    {"kind": "open_pull_request", "target_branch": release.target_branch},
+                ),
+            )
+
+        with repository_lock(self.lock_dir / f"{repository_id}.lock"):
+            release = self.registry.find_release(repository_id, release_slug)
+            if release is None:
+                return self._release_blocked(
+                    command,
+                    "unknown_release",
+                    f"release {release_slug!r} does not exist",
+                )
+            lease = self._release_lease(command, release)
+            if release.state is ReleaseState.PUBLISHED:
+                return self._release_published_reuse(command, release, lease)
+            if release.state is not ReleaseState.SEALED:
+                return self._release_blocked(
+                    command,
+                    "release_not_sealed",
+                    f"release {release.release_id!r} is {release.state.value}",
+                    lease=lease,
+                    release=release,
+                )
+            try:
+                remote_release_sha = self.git.remote_branch_sha(lease.branch)
+            except GitRemoteError as error:
+                return self._release_external(
+                    command,
+                    "release_publish_failed",
+                    str(error),
+                    lease=lease,
+                    release=release,
+                )
+            if (
+                remote_release_sha is not None
+                and remote_release_sha != lease.head_sha
+            ):
+                return self._release_blocked(
+                    command,
+                    "release_branch_changed",
+                    "remote release branch no longer matches its registered head",
+                    lease=lease,
+                    release=release,
+                )
+            try:
+                target_ref = self._promotion_target_ref(release.target_branch)
+                target_sha = self.git.fetch_ref(release.target_branch)
+            except ConfigError as error:
+                return self._release_blocked(
+                    command,
+                    "invalid_target_branch",
+                    str(error),
+                    lease=lease,
+                    release=release,
+                )
+            except GitRemoteError as error:
+                return self._release_external(
+                    command,
+                    "target_ref_unavailable",
+                    str(error),
+                    lease=lease,
+                    release=release,
+                )
+            except GitError as error:
+                return self._release_blocked(
+                    command,
+                    "target_ref_unavailable",
+                    str(error),
+                    lease=lease,
+                    release=release,
+                )
+            source_validation = self._release_live_sources(command, release, target_ref)
+            if isinstance(source_validation, CommandResult):
+                return source_validation
+            try:
+                github = self.github or GhClient(self.git.repository_root())
+                existing_target_pr = github.find_pr(
+                    head=lease.branch,
+                    base=release.target_branch,
+                )
+            except (ExternalServiceError, ValueError) as error:
+                return self._release_external(
+                    command,
+                    "release_pr_unavailable",
+                    str(error),
+                    lease=lease,
+                    release=release,
+                )
+            if (
+                existing_target_pr is not None
+                and existing_target_pr.state not in {"OPEN", "MERGED"}
+            ):
+                return self._release_blocked(
+                    command,
+                    "release_pr_closed",
+                    (
+                        f"release PR #{existing_target_pr.number} is "
+                        f"{existing_target_pr.state}"
+                    ),
+                    lease=lease,
+                    release=release,
+                )
+            if (
+                existing_target_pr is not None
+                and existing_target_pr.state == "MERGED"
+            ):
+                if (
+                    existing_target_pr.base_ref != release.target_branch
+                    or existing_target_pr.base_sha
+                    != release.last_verified_target_sha
+                    or existing_target_pr.head_ref != lease.branch
+                    or existing_target_pr.head_sha != lease.head_sha
+                    or existing_target_pr.merge_commit_sha is None
+                ):
+                    return self._release_blocked(
+                        command,
+                        "target_pr_mismatch",
+                        "merged release PR does not match sealed release provenance",
+                        lease=lease,
+                        release=release,
+                    )
+                try:
+                    merge_sha = self.git.fetch_ref(
+                        existing_target_pr.merge_commit_sha
+                    )
+                except (GitRemoteError, GitError) as error:
+                    return self._release_external(
+                        command,
+                        "release_pr_unavailable",
+                        str(error),
+                        lease=lease,
+                        release=release,
+                    )
+                if (
+                    merge_sha != existing_target_pr.merge_commit_sha
+                    or self.git.merge_base(merge_sha, target_sha) != merge_sha
+                ):
+                    return self._release_blocked(
+                        command,
+                        "target_pr_mismatch",
+                        "merged release PR is not in target branch history",
+                        lease=lease,
+                        release=release,
+                    )
+                try:
+                    lease, release = self.registry.publish_release(
+                        release.id,
+                        lease.id,
+                        expected_release_version=release.version,
+                        expected_lease_version=lease.version,
+                        target_pr=existing_target_pr.number,
+                        head_sha=lease.head_sha,
+                        target_base_sha=existing_target_pr.base_sha,
+                    )
+                except (RuntimeError, ValueError, sqlite3.Error) as error:
+                    return self._release_blocked(
+                        command,
+                        "registry_conflict",
+                        str(error),
+                        lease=lease,
+                        release=release,
+                    )
+                return CommandResult.ok(
+                    command,
+                    decision="ready",
+                    lease=lease,
+                    release=release,
+                )
+            verification_actions: tuple[dict[str, object], ...] = ()
+            if target_sha != release.last_verified_target_sha:
+                verified = self._verify_release_bridge_live(
+                    command,
+                    release,
+                    lease,
+                    target_sha=target_sha,
+                    sources=source_validation,
+                )
+                if isinstance(verified, CommandResult):
+                    return verified
+                lease, target_sha, verification_actions = verified
+                try:
+                    release = self.registry.transition_release(
+                        release.id,
+                        ReleaseState.SEALED,
+                        expected_version=release.version,
+                        last_verified_target_sha=target_sha,
+                    )
+                except (RuntimeError, ValueError, sqlite3.Error) as error:
+                    return self._release_blocked(
+                        command,
+                        "registry_conflict",
+                        str(error),
+                        lease=lease,
+                        release=release,
+                    )
+            else:
+                try:
+                    worktree_matches = (
+                        self.git.head_sha(lease.worktree_path) == lease.head_sha
+                        and not self.git.status_porcelain(lease.worktree_path)
+                    )
+                except GitError as error:
+                    return self._release_blocked(
+                        command,
+                        "release_worktree_unavailable",
+                        str(error),
+                        lease=lease,
+                        release=release,
+                    )
+                if not worktree_matches:
+                    return self._release_blocked(
+                        command,
+                        "release_worktree_mismatch",
+                        "sealed release worktree no longer matches its recorded clean head",
+                        lease=lease,
+                        release=release,
+                    )
+            try:
+                live_target_sha = self.git.remote_branch_sha(release.target_branch)
+            except GitRemoteError as error:
+                return self._release_external(
+                    command,
+                    "target_ref_unavailable",
+                    str(error),
+                    lease=lease,
+                    release=release,
+                )
+            if live_target_sha != target_sha:
+                return self._release_blocked(
+                    command,
+                    "release_target_changed",
+                    (
+                        f"target branch {release.target_branch!r} changed after "
+                        "release verification"
+                    ),
+                    lease=lease,
+                    release=release,
+                )
+            source_recheck = self._release_live_sources(
+                command,
+                release,
+                target_ref,
+            )
+            if isinstance(source_recheck, CommandResult):
+                return source_recheck
+            try:
+                if remote_release_sha is None:
+                    self.git.push_branch(lease.worktree_path, lease.branch)
+                elif remote_release_sha != lease.head_sha:
+                    self.git.push_branch_if_at(
+                        lease.worktree_path,
+                        lease.branch,
+                        remote_release_sha,
+                    )
+                github = self.github or GhClient(self.git.repository_root())
+                target_pull_request = github.find_pr(
+                    head=lease.branch,
+                    base=release.target_branch,
+                )
+                if target_pull_request is None:
+                    target_pull_request = github.create_pr(
+                        base=release.target_branch,
+                        head=lease.branch,
+                        title=self._release_title(release),
+                        body=self._release_body(release, target_sha, lease),
+                    )
+            except (GitRemoteError, ExternalServiceError) as error:
+                return self._release_external(
+                    command,
+                    "release_publish_failed",
+                    str(error),
+                    lease=lease,
+                    release=release,
+                )
+            except (GitError, ValueError) as error:
+                return self._release_blocked(
+                    command,
+                    "release_publish_failed",
+                    str(error),
+                    lease=lease,
+                    release=release,
+                )
+            if target_pull_request.state not in {"OPEN", "MERGED"}:
+                return self._release_blocked(
+                    command,
+                    "release_pr_closed",
+                    (
+                        f"release PR #{target_pull_request.number} is "
+                        f"{target_pull_request.state}"
+                    ),
+                    lease=lease,
+                    release=release,
+                )
+            if (
+                target_pull_request.base_ref != release.target_branch
+                or target_pull_request.base_sha != target_sha
+                or target_pull_request.head_ref != lease.branch
+                or target_pull_request.head_sha != lease.head_sha
+            ):
+                return self._release_blocked(
+                    command,
+                    "target_pr_mismatch",
+                    "GitHub did not return the exact release pull request",
+                    lease=lease,
+                    release=release,
+                )
+            try:
+                lease, release = self.registry.publish_release(
+                    release.id,
+                    lease.id,
+                    expected_release_version=release.version,
+                    expected_lease_version=lease.version,
+                    target_pr=target_pull_request.number,
+                    head_sha=lease.head_sha,
+                    target_base_sha=target_sha,
+                )
+            except (RuntimeError, ValueError, sqlite3.Error) as error:
+                return self._release_blocked(
+                    command,
+                    "registry_conflict",
+                    str(error),
+                    lease=lease,
+                    release=release,
+                )
+            return CommandResult.ok(
+                command,
+                decision="ready",
+                lease=lease,
+                release=release,
+                actions=verification_actions,
+            )
+
 
     def recover_promotion(
         self, lease_id: str, *, apply: bool = False
@@ -2387,6 +3327,10 @@ class WorktreeService:
             elif self._is_completed_pr(pull_request):
                 if current.purpose is Purpose.PROMOTE:
                     self._refresh_promotion(lease.id, pull_request, warnings)
+                    self.registry.sync_release_state_for_lease(
+                        lease.id,
+                        ReleaseState.MERGED,
+                    )
                 else:
                     self._transition_refresh(
                         lease.id,
@@ -2400,6 +3344,10 @@ class WorktreeService:
                     pull_request,
                     LeaseState.CLOSED_UNMERGED,
                     deployment_state=None,
+                )
+                self.registry.sync_release_state_for_lease(
+                    lease.id,
+                    ReleaseState.CLOSED_UNMERGED,
                 )
             else:
                 raise ExternalServiceError("unsupported pull request state")
@@ -3405,6 +4353,1084 @@ class WorktreeService:
             lease=lease,
         )
 
+    def _new_release_lease(
+        self,
+        release_id: str,
+        target_ref: str,
+        target_sha: str,
+    ) -> Lease:
+        initiative = f"release-{release_id}"
+        lease = Lease.new(
+            repository_id=self.git.repository_id(),
+            repository_name=self.git.repository_name(),
+            repository_root=self.git.repository_root(),
+            worktree_path=self.cache_dir / self.git.repository_name(),
+            initiative=initiative,
+            purpose=Purpose.PROMOTE,
+            branch=f"awf/{initiative}/promote",
+            base_ref=target_ref,
+            head_sha=target_sha,
+            managed=True,
+            owner_kind="awf",
+        )
+        return replace(
+            lease,
+            worktree_path=self.cache_dir / lease.repository_name / lease.id,
+        )
+
+    def _release_reuse(
+        self,
+        command: str,
+        release: ReleaseBridge,
+        *,
+        target_branch: str,
+        lease: Lease | None,
+        apply: bool,
+    ) -> CommandResult:
+        if release.target_branch != target_branch:
+            return self._release_blocked(
+                command,
+                "release_target_mismatch",
+                (
+                    f"release {release.release_id!r} targets "
+                    f"{release.target_branch!r}, not {target_branch!r}"
+                ),
+                lease=lease,
+                release=release,
+            )
+        if lease is None:
+            return self._release_blocked(
+                command,
+                "release_lease_missing",
+                f"release {release.release_id!r} has no registered promotion lease",
+                release=release,
+            )
+        if release.state in {
+            ReleaseState.CLOSED_UNMERGED,
+            ReleaseState.CLEANED,
+        }:
+            return self._release_blocked(
+                command,
+                "release_terminal",
+                f"release {release.release_id!r} is {release.state.value}",
+                lease=lease,
+                release=release,
+            )
+        try:
+            target_ref = self._promotion_target_ref(release.target_branch)
+        except ConfigError as error:
+            return self._release_blocked(
+                command,
+                "release_lease_mismatch",
+                str(error),
+                lease=lease,
+                release=release,
+            )
+        expected_initiative = f"release-{release.release_id}"
+        expected_branch = f"awf/{expected_initiative}/promote"
+        if (
+            lease.purpose is not Purpose.PROMOTE
+            or not lease.managed
+            or lease.repository_id != release.repository_id
+            or lease.initiative != expected_initiative
+            or lease.branch != expected_branch
+            or lease.base_ref != target_ref
+            or lease.state
+            in {
+                LeaseState.REMOVED,
+                LeaseState.DIRTY,
+                LeaseState.ORPHANED,
+                LeaseState.CLOSED_UNMERGED,
+                LeaseState.BLOCKED,
+            }
+        ):
+            return self._release_blocked(
+                command,
+                "release_lease_mismatch",
+                "release lease no longer matches its registered provenance",
+                lease=lease,
+                release=release,
+            )
+        try:
+            worktree = self._registered_worktree(lease)
+        except GitError as error:
+            return self._release_blocked(
+                command,
+                "release_lease_mismatch",
+                str(error),
+                lease=lease,
+                release=release,
+            )
+        recovered = False
+        if worktree is None:
+            if (
+                release.state is not ReleaseState.OPEN
+                or release.sources
+                or lease.state is not LeaseState.ACTIVE
+            ):
+                return self._release_blocked(
+                    command,
+                    "release_lease_mismatch",
+                    "non-empty release bridge lost its managed worktree",
+                    lease=lease,
+                    release=release,
+                )
+            try:
+                remote_head = self.git.remote_branch_sha(lease.branch)
+            except GitRemoteError as error:
+                return self._release_external(
+                    command,
+                    "release_worktree_create_failed",
+                    str(error),
+                    lease=lease,
+                    release=release,
+                )
+            if remote_head is not None:
+                return self._release_blocked(
+                    command,
+                    "release_branch_changed",
+                    "incomplete release branch was unexpectedly published",
+                    lease=lease,
+                    release=release,
+                )
+            if not apply:
+                return CommandResult.ok(
+                    command,
+                    decision="preview",
+                    lease=lease,
+                    release=release,
+                    actions=(
+                        {
+                            "kind": "create_worktree",
+                            "path": str(lease.worktree_path),
+                            "branch": lease.branch,
+                            "target_branch": release.target_branch,
+                            "target_base_sha": lease.head_sha,
+                        },
+                    ),
+                )
+            try:
+                self.git.add_worktree(
+                    lease.worktree_path,
+                    lease.branch,
+                    lease.head_sha,
+                    reuse_exact_branch=True,
+                )
+                worktree = self._registered_worktree(lease)
+                recovered = True
+            except GitError as error:
+                return self._release_blocked(
+                    command,
+                    "release_worktree_create_failed",
+                    str(error),
+                    lease=lease,
+                    release=release,
+                )
+        try:
+            actual_head_sha = self.git.head_sha(lease.worktree_path)
+            dirty = self.git.status_porcelain(lease.worktree_path)
+        except GitError as error:
+            return self._release_blocked(
+                command,
+                "release_lease_mismatch",
+                str(error),
+                lease=lease,
+                release=release,
+            )
+        if (
+            worktree is None
+            or worktree.branch != lease.branch
+            or worktree.detached
+            or worktree.bare
+            or actual_head_sha != lease.head_sha
+            or dirty
+        ):
+            return self._release_blocked(
+                command,
+                "release_lease_mismatch",
+                "release worktree no longer matches its registered provenance",
+                lease=lease,
+                release=release,
+            )
+        return CommandResult.ok(
+            command,
+            decision="ready" if recovered else "reuse",
+            lease=lease,
+            release=release,
+        )
+
+    def _release_published_reuse(
+        self,
+        command: str,
+        release: ReleaseBridge,
+        lease: Lease | None,
+    ) -> CommandResult:
+        if (
+            lease is None
+            or release.target_pr is None
+            or lease.target_pr != release.target_pr
+            or release.published_head_sha is None
+            or lease.head_sha != release.published_head_sha
+        ):
+            return self._release_blocked(
+                command,
+                "release_publication_mismatch",
+                "published release registry provenance is incomplete or inconsistent",
+                lease=lease,
+                release=release,
+            )
+        try:
+            target_ref = self._promotion_target_ref(release.target_branch)
+        except ConfigError as error:
+            return self._release_blocked(
+                command,
+                "invalid_target_branch",
+                str(error),
+                lease=lease,
+                release=release,
+            )
+        source_validation = self._release_live_sources(command, release, target_ref)
+        if isinstance(source_validation, CommandResult):
+            return source_validation
+        try:
+            github = self.github or GhClient(self.git.repository_root())
+            target_pull_request = github.view_pr(release.target_pr)
+        except ExternalServiceError as error:
+            return self._release_external(
+                command,
+                "release_pr_unavailable",
+                str(error),
+                lease=lease,
+                release=release,
+            )
+        if (
+            target_pull_request.base_ref != release.target_branch
+            or target_pull_request.base_sha
+            != release.last_verified_target_sha
+            or target_pull_request.head_ref != lease.branch
+            or target_pull_request.head_sha != release.published_head_sha
+        ):
+            return self._release_blocked(
+                command,
+                "target_pr_mismatch",
+                "published release PR no longer matches its exact branch and head",
+                lease=lease,
+                release=release,
+            )
+        if target_pull_request.state not in {"OPEN", "MERGED"}:
+            return self._release_blocked(
+                command,
+                "release_pr_closed",
+                f"published release PR #{release.target_pr} is {target_pull_request.state}",
+                lease=lease,
+                release=release,
+            )
+        if target_pull_request.state == "OPEN":
+            try:
+                remote_head = self.git.remote_branch_sha(lease.branch)
+            except GitRemoteError as error:
+                return self._release_external(
+                    command,
+                    "release_publish_failed",
+                    str(error),
+                    lease=lease,
+                    release=release,
+                )
+            if remote_head != release.published_head_sha:
+                return self._release_blocked(
+                    command,
+                    "release_branch_changed",
+                    "published release branch no longer matches its recorded head",
+                    lease=lease,
+                    release=release,
+                )
+        return CommandResult.ok(
+            command,
+            decision="reuse",
+            lease=lease,
+            release=release,
+        )
+    def _release_add_validation(
+        self,
+        command: str,
+        release: ReleaseBridge,
+        source_pr: int,
+    ) -> ReleaseSource | CommandResult:
+        lease = self.registry.get_lease_read_only(release.lease_id)
+        if release.state is not ReleaseState.OPEN:
+            return self._release_blocked(
+                command,
+                "release_not_open",
+                f"release {release.release_id!r} is {release.state.value}",
+                lease=lease,
+                release=release,
+            )
+        try:
+            target_ref = self._promotion_target_ref(release.target_branch)
+        except ConfigError as error:
+            return self._release_blocked(
+                command,
+                "invalid_target_branch",
+                str(error),
+
+                lease=lease,
+                release=release,
+            )
+        live_sources = self._release_live_sources(command, release, target_ref)
+        if isinstance(live_sources, CommandResult):
+            return live_sources
+        if any(source.source_pr == source_pr for source in release.sources):
+            return CommandResult.ok(
+                command,
+                decision="reuse",
+                lease=lease,
+                release=release,
+            )
+        try:
+            github = self.github or GhClient(self.git.repository_root())
+            source = github.view_pr(source_pr)
+        except ExternalServiceError as error:
+            return self._release_external(
+                command,
+                "source_pr_unavailable",
+                str(error),
+                lease=lease,
+                release=release,
+            )
+        return self._release_source_from_pull(
+            command,
+            release,
+            source,
+            target_ref,
+            ordinal=len(release.sources),
+            lease=lease,
+        )
+
+    def _release_live_sources(
+        self,
+        command: str,
+        release: ReleaseBridge,
+        target_ref: str,
+    ) -> tuple[PullRequest, ...] | CommandResult:
+        lease = self.registry.get_lease_read_only(release.lease_id)
+        try:
+            github = self.github or GhClient(self.git.repository_root())
+            sources = tuple(
+                github.view_pr(source.source_pr) for source in release.sources
+            )
+        except ExternalServiceError as error:
+            return self._release_external(
+                command,
+                "source_pr_unavailable",
+                str(error),
+                lease=lease,
+                release=release,
+            )
+        for source, pinned in zip(sources, release.sources, strict=True):
+            if (
+                source.base_ref != pinned.base_ref
+                or source.base_sha != pinned.base_sha
+                or source.head_sha != pinned.head_sha
+                or source.merge_commit_sha != pinned.merge_sha
+                or tuple(sorted(source.changed_paths)) != pinned.changed_paths
+            ):
+                return self._release_blocked(
+                    command,
+                    "source_provenance_changed",
+                    (
+                        f"source pull request #{pinned.source_pr} no longer matches "
+                        "its immutable release pin"
+                    ),
+                    lease=lease,
+                    release=release,
+                )
+            source_gate = self._promotion_source_blocker(source, target_ref)
+            if source_gate is not None:
+                blocker = source_gate.blockers[0]
+                return self._release_blocked(
+                    command,
+                    blocker["code"],
+                    blocker["message"],
+                    lease=lease,
+                    release=release,
+                )
+            invalid_oid = self._invalid_promotion_oid(source, require_merge=True)
+            if invalid_oid is not None:
+                return self._release_blocked(
+                    command,
+                    "source_pr_invalid_oid",
+                    (
+                        f"source pull request #{source.number} has an invalid "
+                        f"{invalid_oid}"
+                    ),
+                    lease=lease,
+                    release=release,
+                )
+        return sources
+
+    def _release_source_from_pull(
+        self,
+        command: str,
+        release: ReleaseBridge,
+        source: PullRequest,
+        target_ref: str,
+        *,
+        ordinal: int,
+        lease: Lease | None,
+    ) -> ReleaseSource | CommandResult:
+        source_gate = self._promotion_source_blocker(source, target_ref)
+        if source_gate is not None:
+            blocker = source_gate.blockers[0]
+            return self._release_blocked(
+                command,
+                blocker["code"],
+                blocker["message"],
+                lease=lease,
+                release=release,
+            )
+        invalid_oid = self._invalid_promotion_oid(source, require_merge=True)
+        if invalid_oid is not None:
+            return self._release_blocked(
+                command,
+                "source_pr_invalid_oid",
+                f"source pull request #{source.number} has an invalid {invalid_oid}",
+                lease=lease,
+                release=release,
+            )
+        if not source.changed_paths:
+            return self._release_blocked(
+                command,
+                "source_pr_empty_delta",
+                f"source pull request #{source.number} has no reviewed paths",
+                lease=lease,
+                release=release,
+            )
+        assert source.merge_commit_sha is not None
+        try:
+            return ReleaseSource(
+                bridge_id=release.id,
+                ordinal=ordinal,
+                source_pr=source.number,
+                base_ref=source.base_ref,
+                base_sha=source.base_sha,
+                head_sha=source.head_sha,
+                merge_sha=source.merge_commit_sha,
+                changed_paths=tuple(sorted(source.changed_paths)),
+            )
+        except ValueError as error:
+            return self._release_blocked(
+                command,
+                "source_pr_invalid_metadata",
+                str(error),
+                lease=lease,
+                release=release,
+            )
+
+    def _release_lease(self, command: str, release: ReleaseBridge) -> Lease:
+        lease = self.registry.get_lease(release.lease_id)
+        if lease is None:
+            raise ValueError(
+                f"{command}: release {release.release_id!r} has no registered promotion lease"
+            )
+        if (
+            lease.purpose is not Purpose.PROMOTE
+            or not lease.managed
+            or lease.repository_id != release.repository_id
+        ):
+            raise ValueError(
+                f"{command}: release {release.release_id!r} lease provenance is invalid"
+            )
+        return lease
+
+
+    def _verify_release_bridge_live(
+        self,
+        command: str,
+        release: ReleaseBridge,
+        lease: Lease,
+        *,
+        target_sha: str | None = None,
+        sources: tuple[PullRequest, ...] | None = None,
+    ) -> tuple[Lease, str, tuple[dict[str, object], ...]] | CommandResult:
+        next_target_sha = target_sha
+        for attempt in range(2):
+            rebuilt = self._rebuild_release_bridge(
+                command,
+                release,
+                lease,
+                verify=True,
+                target_sha=next_target_sha,
+                sources=sources,
+            )
+            if isinstance(rebuilt, CommandResult):
+                return rebuilt
+            lease, verified_target_sha, actions = rebuilt
+            try:
+                live_target_sha = self.git.remote_branch_sha(
+                    release.target_branch
+                )
+            except GitRemoteError as error:
+                return self._release_external(
+                    command,
+                    "target_ref_unavailable",
+                    str(error),
+                    lease=lease,
+                    release=release,
+                )
+            if live_target_sha is None:
+                return self._release_blocked(
+                    command,
+                    "target_ref_unavailable",
+                    f"target branch {release.target_branch!r} is unavailable on origin",
+                    lease=lease,
+                    release=release,
+                )
+            if live_target_sha == verified_target_sha:
+                return lease, verified_target_sha, actions
+            if attempt == 1:
+                break
+            try:
+                next_target_sha = self.git.fetch_ref(release.target_branch)
+            except GitRemoteError as error:
+                return self._release_external(
+                    command,
+                    "target_ref_unavailable",
+                    str(error),
+                    lease=lease,
+                    release=release,
+                )
+            except GitError as error:
+                return self._release_blocked(
+                    command,
+                    "target_ref_unavailable",
+                    str(error),
+                    lease=lease,
+                    release=release,
+                )
+        return self._release_blocked(
+            command,
+            "release_target_changed",
+            (
+                f"target branch {release.target_branch!r} kept changing during "
+                "release verification"
+            ),
+            lease=lease,
+            release=release,
+        )
+
+    def _recover_pending_release_candidate(
+        self,
+        command: str,
+        release: ReleaseBridge,
+        lease: Lease,
+    ) -> tuple[Lease, str] | CommandResult:
+        try:
+            actual_head_sha = self.git.head_sha(lease.worktree_path)
+            message = self.git.commit_message(lease.worktree_path)
+            lines = message.splitlines()
+            target_prefix = "AWF-Target-Base: "
+            if (
+                len(lines) < 2
+                or not lines[-2].startswith(target_prefix)
+                or lines[-1] != f"AWF-Lease-ID: {lease.id}"
+            ):
+                raise ValueError("pending release candidate trailers do not match")
+            target_sha = lines[-2][len(target_prefix) :]
+            if _GIT_OBJECT_ID.fullmatch(target_sha) is None:
+                raise ValueError("pending release candidate target is invalid")
+            if message != self._release_message(release, target_sha, lease):
+                raise ValueError("pending release candidate message does not match")
+            if self.git.commit_parents(actual_head_sha) != (target_sha,):
+                raise ValueError("pending release candidate parent does not match")
+            expected_blob_heads: dict[str, str] = {}
+            for source in release.sources:
+                source_head_sha = self.git.fetch_ref(source.head_sha)
+                if source_head_sha != source.head_sha:
+                    raise ValueError("pending release source head changed")
+                for path in source.changed_paths:
+                    expected_blob_heads[path] = source_head_sha
+            expected_blobs = self._promotion_net_blobs(
+                expected_blob_heads,
+                target_sha,
+            )
+            expected_paths = tuple(sorted(expected_blobs))
+            if (
+                not expected_paths
+                or self.git.changed_paths(
+                    lease.worktree_path,
+                    target_sha,
+                    actual_head_sha,
+                    find_renames=True,
+                )
+                != expected_paths
+                or any(
+                    expected_blobs[path]
+                    != self.git.path_blob(actual_head_sha, path)
+                    for path in expected_paths
+                )
+            ):
+                raise ValueError("pending release candidate content does not match")
+        except (GitError, GitRemoteError, ValueError) as error:
+            return self._release_blocked(
+                command,
+                "release_worktree_mismatch",
+                str(error),
+                lease=lease,
+                release=release,
+            )
+        return (
+            replace(
+                lease,
+                head_sha=actual_head_sha,
+                target_base_sha=target_sha,
+            ),
+            target_sha,
+        )
+
+    def _release_gate_blocked(
+        self,
+        command: str,
+        code: str,
+        message: str,
+        *,
+        lease: Lease,
+        release: ReleaseBridge,
+    ) -> CommandResult:
+        try:
+            untracked = self.git.untracked_paths(lease.worktree_path)
+            self.git.reset_hard(lease.worktree_path, lease.head_sha)
+            self.git.remove_untracked_paths(lease.worktree_path, untracked)
+            if self.git.status_porcelain(lease.worktree_path):
+                raise GitError("release worktree remained dirty after gate rollback")
+        except GitError as error:
+            return self._release_blocked(
+                command,
+                "release_rollback_failed",
+                str(error),
+                lease=lease,
+                release=release,
+            )
+        return self._release_blocked(
+            command,
+            code,
+            message,
+            lease=lease,
+            release=release,
+        )
+
+    def _rebuild_release_bridge(
+        self,
+        command: str,
+        release: ReleaseBridge,
+        lease: Lease,
+        *,
+        verify: bool,
+        target_sha: str | None = None,
+        sources: tuple[PullRequest, ...] | None = None,
+        record: bool = True,
+    ) -> tuple[Lease, str, tuple[dict[str, object], ...]] | CommandResult:
+        if not release.sources:
+            return self._release_blocked(
+                command,
+                "release_empty",
+                "release must contain at least one pinned source",
+                lease=lease,
+                release=release,
+            )
+        if lease.state not in {LeaseState.ACTIVE, LeaseState.PR_OPEN}:
+            return self._release_blocked(
+                command,
+                "release_lease_not_active",
+                f"release lease {lease.id} is {lease.state.value}",
+                lease=lease,
+                release=release,
+            )
+        try:
+            target_ref = self._promotion_target_ref(release.target_branch)
+        except ConfigError as error:
+            return self._release_blocked(
+                command,
+                "invalid_target_branch",
+                str(error),
+                lease=lease,
+                release=release,
+            )
+        try:
+            dirty = self.git.status_porcelain(lease.worktree_path)
+        except GitError as error:
+            return self._release_blocked(
+                command,
+                "release_worktree_unavailable",
+                str(error),
+                lease=lease,
+                release=release,
+            )
+        if dirty:
+            return self._release_blocked(
+                command,
+                "release_worktree_dirty",
+                "managed release worktree has uncommitted changes",
+                lease=lease,
+                release=release,
+            )
+        try:
+            actual_head_sha = self.git.head_sha(lease.worktree_path)
+        except GitError as error:
+            return self._release_blocked(
+                command,
+                "release_worktree_unavailable",
+                str(error),
+                lease=lease,
+                release=release,
+            )
+        if actual_head_sha != lease.head_sha:
+            return self._release_blocked(
+                command,
+                "release_worktree_mismatch",
+                "managed release worktree head does not match its registered head",
+                lease=lease,
+                release=release,
+            )
+        if verify and not self.config.verify_production:
+            return self._release_blocked(
+                command,
+                "production_verify_missing",
+                "verify.production.commands must configure at least one command",
+                lease=lease,
+                release=release,
+            )
+        if sources is None:
+            sources = self._release_live_sources(command, release, target_ref)
+            if isinstance(sources, CommandResult):
+                return sources
+        original_head_sha = lease.head_sha
+        mutated = False
+        try:
+            actual_target_sha = (
+                target_sha
+                if target_sha is not None
+                else self.git.fetch_ref(release.target_branch)
+            )
+            staging_sha = self.git.fetch_ref(self.config.default_base or "")
+            deltas: list[bytes] = []
+            expected_blob_heads: dict[str, str] = {}
+            previous_merge_sha: str | None = None
+            for source, pinned in zip(sources, release.sources, strict=True):
+                source_base_sha = self.git.fetch_ref(pinned.base_sha)
+                source_head_sha = self.git.fetch_ref(pinned.head_sha)
+                source_merge_sha = self.git.fetch_ref(pinned.merge_sha)
+                if (
+                    source_base_sha != pinned.base_sha
+                    or source_head_sha != pinned.head_sha
+                    or source_merge_sha != pinned.merge_sha
+                ):
+                    return self._release_blocked(
+                        command,
+                        "source_sha_mismatch",
+                        (
+                            f"fetched source pull request #{pinned.source_pr} refs "
+                            "do not match its immutable release pin"
+                        ),
+                        lease=lease,
+                        release=release,
+                    )
+                merge_base = self.git.merge_base(source_base_sha, source_head_sha)
+                patch = self.git.binary_diff(merge_base, source_head_sha)
+                source_paths = self.git.changed_paths(
+                    self.git.repository_root(),
+                    merge_base,
+                    source_head_sha,
+                    find_renames=True,
+                )
+                if not patch:
+                    return self._release_blocked(
+                        command,
+                        "source_pr_empty_delta",
+                        (
+                            f"source pull request #{pinned.source_pr} has no changes "
+                            "after its merge base"
+                        ),
+                        lease=lease,
+                        release=release,
+                    )
+                if source_paths != pinned.changed_paths:
+                    return self._release_blocked(
+                        command,
+                        "source_delta_mismatch",
+                        (
+                            f"source pull request #{pinned.source_pr} paths do not "
+                            "match its immutable reviewed Git delta"
+                        ),
+                        lease=lease,
+                        release=release,
+                    )
+                if (
+                    self.git.merge_base(source_base_sha, source_merge_sha)
+                    != source_base_sha
+                    or self.git.merge_base(source_merge_sha, staging_sha)
+                    != source_merge_sha
+                ):
+                    return self._release_blocked(
+                        command,
+                        "source_merge_not_in_staging",
+                        (
+                            f"source pull request #{pinned.source_pr} merge commit "
+                            "is not in configured staging history"
+                        ),
+                        lease=lease,
+                        release=release,
+                    )
+                if (
+                    previous_merge_sha is not None
+                    and self.git.merge_base(previous_merge_sha, source_merge_sha)
+                    != previous_merge_sha
+                ):
+                    return self._release_blocked(
+                        command,
+                        "source_pr_sequence_order",
+                        (
+                            f"source pull request #{pinned.source_pr} was not merged "
+                            "after the preceding release source"
+                        ),
+                        lease=lease,
+                        release=release,
+                    )
+                previous_merge_sha = source_merge_sha
+                deltas.append(patch)
+                for path in pinned.changed_paths:
+                    expected_blob_heads[path] = source_head_sha
+            expected_blobs = self._promotion_net_blobs(
+                expected_blob_heads, actual_target_sha
+            )
+            expected_paths = tuple(sorted(expected_blobs))
+            if not expected_paths:
+                return self._release_blocked(
+                    command,
+                    "release_empty_delta",
+                    "pinned release sources do not change the latest target",
+                    lease=lease,
+                    release=release,
+                )
+            self.git.reset_hard(lease.worktree_path, actual_target_sha)
+            mutated = True
+            for patch in deltas:
+                self.git.apply_indexed_patch(lease.worktree_path, patch)
+            promotion_head = self.git.commit(
+                lease.worktree_path,
+                self._release_message(release, actual_target_sha, lease),
+            )
+            promoted_paths = self.git.changed_paths(
+                lease.worktree_path,
+                actual_target_sha,
+                promotion_head,
+                find_renames=True,
+            )
+            if promoted_paths != expected_paths or any(
+                expected_blobs[path] != self.git.path_blob(promotion_head, path)
+                for path in expected_paths
+            ):
+                try:
+                    self.git.reset_hard(lease.worktree_path, original_head_sha)
+                except GitError as rollback_error:
+                    return self._release_blocked(
+                        command,
+                        "release_rollback_failed",
+                        str(rollback_error),
+                        lease=lease,
+                        release=release,
+                    )
+                mutated = False
+                return self._release_blocked(
+                    command,
+                    "release_content_mismatch",
+                    "release paths or blobs do not exactly match pinned source deltas",
+                    lease=lease,
+                    release=release,
+                )
+            if record:
+                lease = self.registry.transition(
+                    lease.id,
+                    lease.state,
+                    expected_version=lease.version,
+                    event_type="release_rebuilt",
+                    summary=(
+                        f"release {release.release_id} reconstructed from "
+                        f"{len(release.sources)} pinned sources"
+                    ),
+                    observed_head_sha=promotion_head,
+                    head_sha=promotion_head,
+                    target_base_sha=actual_target_sha,
+                )
+            else:
+                lease = replace(
+                    lease,
+                    head_sha=promotion_head,
+                    target_base_sha=actual_target_sha,
+                )
+            actions: tuple[dict[str, object], ...] = ()
+            if verify:
+                prepare_error = self._prepare(lease, force=True)
+                if prepare_error is not None:
+                    return self._release_gate_blocked(
+                        command,
+                        "release_prepare_failed",
+                        prepare_error,
+                        lease=lease,
+                        release=release,
+                    )
+                if self.git.status_porcelain(lease.worktree_path):
+                    return self._release_gate_blocked(
+                        command,
+                        "release_prepare_dirty",
+                        "release prepare command left uncommitted changes",
+                        lease=lease,
+                        release=release,
+                    )
+                try:
+                    actions = self._verify_promotion(lease.worktree_path)
+                except RuntimeError as error:
+                    return self._release_gate_blocked(
+                        command,
+                        "release_verification_failed",
+                        str(error),
+                        lease=lease,
+                        release=release,
+                    )
+                if self.git.status_porcelain(lease.worktree_path):
+                    return self._release_gate_blocked(
+                        command,
+                        "release_verification_dirty",
+                        "release verification left uncommitted changes",
+                        lease=lease,
+                        release=release,
+                    )
+            return lease, actual_target_sha, actions
+        except GitRemoteError as error:
+            return self._release_external(
+                command,
+                "source_delta_unavailable",
+                str(error),
+                lease=lease,
+                release=release,
+            )
+        except GitPatchConflict as error:
+            if mutated:
+                try:
+                    self.git.reset_hard(lease.worktree_path, original_head_sha)
+                except GitError as rollback_error:
+                    return self._release_blocked(
+                        command,
+                        "release_rollback_failed",
+                        str(rollback_error),
+                        lease=lease,
+                        release=release,
+                    )
+            return self._release_blocked(
+                command,
+                "release_apply_failed",
+                str(error),
+                lease=lease,
+                release=release,
+            )
+        except (
+            GitError,
+            OSError,
+            RuntimeError,
+            sqlite3.Error,
+            subprocess.SubprocessError,
+        ) as error:
+            if mutated:
+                try:
+                    self.git.reset_hard(lease.worktree_path, original_head_sha)
+                except GitError as rollback_error:
+                    return self._release_blocked(
+                        command,
+                        "release_rollback_failed",
+                        str(rollback_error),
+                        lease=lease,
+                        release=release,
+                    )
+            return self._release_blocked(
+                command,
+                "release_apply_failed",
+                str(error),
+                lease=lease,
+                release=release,
+            )
+
+    @staticmethod
+    def _release_title(release: ReleaseBridge) -> str:
+        return f"Release {release.release_id} to {release.target_branch}"
+
+    @staticmethod
+    def _release_trailers(
+        release: ReleaseBridge, target_sha: str, lease: Lease
+    ) -> tuple[str, ...]:
+        return (
+            f"AWF-Release-ID: {release.release_id}",
+            *(
+                trailer
+                for source in release.sources
+                for trailer in (
+                    f"AWF-Source-PR: {source.source_pr}",
+                    f"AWF-Source-Base: {source.base_sha}",
+                    f"AWF-Source-Head: {source.head_sha}",
+                    f"AWF-Source-Merge: {source.merge_sha}",
+                )
+            ),
+            f"AWF-Target-Base: {target_sha}",
+            f"AWF-Lease-ID: {lease.id}",
+        )
+
+    def _release_message(
+        self, release: ReleaseBridge, target_sha: str, lease: Lease
+    ) -> str:
+        return "\n".join(
+            (
+                self._release_title(release),
+                "",
+                *self._release_trailers(release, target_sha, lease),
+            )
+        )
+
+    def _release_body(
+        self, release: ReleaseBridge, target_sha: str, lease: Lease
+    ) -> str:
+        return "\n".join(self._release_trailers(release, target_sha, lease))
+
+    @staticmethod
+    def _release_blocked(
+        command: str,
+        code: str,
+        message: str,
+        *,
+        lease: Lease | None = None,
+        release: ReleaseBridge | None = None,
+    ) -> CommandResult:
+        return CommandResult.blocked(
+            command,
+            blockers=({"code": code, "message": message},),
+            lease=lease,
+            release=release,
+        )
+
+    @staticmethod
+    def _release_external(
+        command: str,
+        code: str,
+        message: str,
+        *,
+        lease: Lease | None = None,
+        release: ReleaseBridge | None = None,
+    ) -> CommandResult:
+        return CommandResult.external_error(
+            command,
+            code=code,
+            message=message,
+            lease=lease,
+            release=release,
+        )
+
     @staticmethod
     def _promotion_source_numbers(
         source_pr: int | Sequence[int],
@@ -3500,18 +5526,6 @@ class WorktreeService:
             blocker = self._promotion_source_blocker(source, target_ref)
             if blocker is not None:
                 return blocker
-        for previous, current in zip(sources, sources[1:]):
-            if (
-                previous.merge_commit_sha is None
-                or previous.merge_commit_sha != current.base_sha
-            ):
-                return self._promotion_blocked(
-                    "source_pr_sequence_gap",
-                    (
-                        f"source pull request #{current.number} base does not match"
-                        f" merged pull request #{previous.number}"
-                    ),
-                )
         return None
 
     def _promotion_source_blocker(
