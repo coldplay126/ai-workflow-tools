@@ -149,8 +149,33 @@ class GitClient:
             raise GitError(f"git symbolic-ref returned an invalid origin HEAD: {ref}")
         return ref[len(prefix) :]
 
-    def add_worktree(self, path: Path, branch: str, start_sha: str) -> None:
-        self._run("worktree", "add", "-b", branch, str(path), start_sha)
+    def add_worktree(
+        self,
+        path: Path,
+        branch: str,
+        start_sha: str,
+        *,
+        reuse_exact_branch: bool = False,
+    ) -> None:
+        try:
+            self._run("worktree", "add", "-b", branch, str(path), start_sha)
+            return
+        except GitError as creation_error:
+            if not reuse_exact_branch:
+                raise
+            try:
+                existing_sha = self._text(
+                    self._run(
+                        "rev-parse",
+                        "--verify",
+                        f"refs/heads/{branch}",
+                    ).stdout
+                ).strip()
+            except GitError:
+                raise creation_error
+            if existing_sha != start_sha:
+                raise creation_error
+        self._run("worktree", "add", str(path), branch)
 
     def remove_worktree(self, path: Path) -> None:
         self._run("worktree", "remove", str(path))
@@ -521,10 +546,19 @@ class GitClient:
         )
         return _nul_records(completed.stdout)
 
-    def commit(self, cwd: Path, message: str, *, allow_empty: bool = False) -> str:
+    def commit(
+        self,
+        cwd: Path,
+        message: str,
+        *,
+        allow_empty: bool = False,
+        no_verify: bool = False,
+    ) -> str:
         arguments = ["commit"]
         if allow_empty:
             arguments.append("--allow-empty")
+        if no_verify:
+            arguments.append("--no-verify")
         arguments.extend(("-m", message))
         self._run(*arguments, cwd=cwd)
         return self.head_sha(cwd)

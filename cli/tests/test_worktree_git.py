@@ -241,6 +241,28 @@ def test_git_client_adds_and_removes_worktrees(tmp_path: Path) -> None:
     client.remove_worktree(worktree)
     assert not worktree.exists()
 
+def test_git_client_recovers_exact_orphan_branch_when_adding_worktree(
+    tmp_path: Path,
+) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    start_sha = client.head_sha()
+    git(repo, "branch", "awf/orphan", start_sha)
+    worktree = tmp_path / "recovered-worktree"
+
+    with pytest.raises(GitError):
+        client.add_worktree(worktree, "awf/orphan", start_sha)
+    client.add_worktree(
+        worktree,
+        "awf/orphan",
+        start_sha,
+        reuse_exact_branch=True,
+    )
+
+    registered = {item.path: item for item in client.list_worktrees()}
+    assert registered[worktree.resolve()].branch == "awf/orphan"
+    assert client.head_sha(worktree) == start_sha
+
 
 def test_git_client_hard_resets_worktree_to_ref_and_clears_tracked_changes(
     tmp_path: Path,

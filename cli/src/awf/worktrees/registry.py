@@ -312,6 +312,7 @@ class WorktreeRegistry:
         pr_number: int | None = None,
         head_sha: str | None = None,
         deployment_state: DeploymentState | None = None,
+        target_base_sha: str | None = None,
         retain: bool | None = None,
         managed: bool | None = None,
         resolution_state: ResolutionState | None = None,
@@ -344,6 +345,8 @@ class WorktreeRegistry:
                 update_values["target_pr"] = pr_number
             if head_sha is not None:
                 update_values["head_sha"] = head_sha
+            if target_base_sha is not None:
+                update_values["target_base_sha"] = target_base_sha
             if deployment_state is not None:
                 update_values["deployment_state"] = deployment_state.value
             if retain is not None:

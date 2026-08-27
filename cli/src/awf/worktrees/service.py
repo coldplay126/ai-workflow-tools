@@ -596,6 +596,11 @@ class WorktreeService:
                         path
                         for path in expected_source_paths
                         if path not in excluded_paths
+                        and (
+                            promotion_mode is not PromotionMode.OUT_OF_ORDER
+                            or self.git.path_blob(target_sha, path)
+                            != self.git.path_blob(source_head_sha, path)
+                        )
                     )
                     if included_source_paths:
                         included_patch = (
@@ -649,7 +654,12 @@ class WorktreeService:
                     lease=lease,
                 )
             try:
-                self.git.add_worktree(lease.worktree_path, lease.branch, target_sha)
+                self.git.add_worktree(
+                    lease.worktree_path,
+                    lease.branch,
+                    target_sha,
+                    reuse_exact_branch=True,
+                )
             except GitError as error:
                 return self._promotion_blocked(
                     "worktree_conflict", str(error), lease=lease
@@ -3693,7 +3703,6 @@ class WorktreeService:
             or lease.source_pr != source_pr
             or lease.base_ref != target_ref
             or lease.branch != expected_branch
-            or lease.head_sha == live_target_sha
             or _GIT_OBJECT_ID.fullmatch(lease.head_sha) is None
             or _GIT_OBJECT_ID.fullmatch(live_target_sha) is None
         ):
@@ -4755,6 +4764,44 @@ class WorktreeService:
                 f"lease {lease.id} does not have exact promotion provenance",
                 lease=lease,
             )
+        if (
+            lease.promotion_mode is PromotionMode.OUT_OF_ORDER
+            and lease.state is LeaseState.BLOCKED
+            and lease.target_base_sha == target_base_sha
+        ):
+            try:
+                retry_events = self.registry.list_events(lease.id)
+                live_target_sha = self.git.fetch_ref(target_branch)
+            except GitRemoteError as error:
+                return self._external_error(
+                    "wt.promote", "promotion_recovery_failed", str(error), lease=lease
+                )
+            except (GitError, sqlite3.Error) as error:
+                return self._promotion_blocked(
+                    "promotion_recovery_failed", str(error), lease=lease
+                )
+            latest_retry_event = retry_events[-1] if retry_events else None
+            if (
+                live_target_sha != target_base_sha
+                and latest_retry_event is not None
+                and latest_retry_event.event_type == "promotion_blocked"
+                and latest_retry_event.summary.startswith(
+                    (
+                        "promotion_apply_failed: production verification failed",
+                        "promotion_recovery_failed: production verification failed",
+                        "promotion_verification_failed:",
+                    )
+                )
+            ):
+                return self._rebuild_content_mismatch_promotion(
+                    lease,
+                    github=github,
+                    sources=sources,
+                    excluded_paths=excluded_paths,
+                    recorded_target_sha=target_base_sha,
+                    recorded_source_base_shas=recorded_source_base_shas,
+                    target_branch=target_branch,
+                )
         if lease.promotion_mode is PromotionMode.OUT_OF_ORDER and (
             lease.source_base_sha != sources[0].base_sha
             or lease.source_head_sha != sources[0].head_sha
@@ -5017,6 +5064,7 @@ class WorktreeService:
                     target_branch=target_branch,
                 ),
                 allow_empty=True,
+                no_verify=True,
             )
             lease = self.registry.transition(
                 lease.id,
@@ -5029,6 +5077,7 @@ class WorktreeService:
                 ),
                 observed_head_sha=old_head,
                 head_sha=promotion_head,
+                target_base_sha=current_target_sha,
             )
         except (GitError, OSError, RuntimeError, sqlite3.Error) as error:
             try:
