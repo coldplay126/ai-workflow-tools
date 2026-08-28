@@ -118,6 +118,7 @@ awf wf seal-plan --repo-root . --json
 - `awf doctor [--probe] [--ci]`: provider readiness, dispatch runner 상태, `install_freshness`(글로벌 `awf`와 `cli/` source hash drift)를 출력한다. 기본 모드는 OMP/Pi 설치 및 버전을 확인하고, `--probe`는 OMP 실제 model/auth 호출과 가능한 provider subprocess probe를 수행한다. stale install에는 재설치 명령을 안내하며, `--ci`는 default provider readiness가 충분하지 않으면 non-zero exit를 반환한다
 - `awf wt status [--repo-root <path>] [--initiative <slug>] [--json]` / `awf wt doctor [--repo-root <path>] [--json]`: managed Git worktree lease 상태를 read-only로 조회하거나 registry와 local Git worktree 등록의 불일치를 보고한다. JSON 출력은 versioned result envelope 하나만 stdout에 쓴다.
 - `awf wt release open|add|seal|publish --release <id> [--to <branch>] [--repo-root <path>] [--apply] [--json]`: 처음부터 누적 여부를 선택하는 managed release bridge. `open` 후 staging merge 순서대로 `add`하고, `seal`의 prepare/production verify를 통과한 뒤 `publish`로 정확히 하나의 production PR을 연다.
+- `awf wt compact --repo-root <path> [--lease <id>] --path <relative>... --older-than <duration> [--dry-run|--apply] --json`: lifecycle, branch, registry를 바꾸지 않고 eligible AWF worktree의 ignored dependency/cache path만 preview/apply로 제거한다. Preview와 apply JSON action은 `lease_id`, `worktree_path`, `path`, 실제 allocated `bytes`, `entry_count`를 포함한다.
 - `awf ready [--probe] [--gate inspect|analysis|workflow-init|workflow-run|operations]`: repo별 자동화 준비 상태를 read-only로 요약한다. `doctor`/heuristic `scan`/skill discovery/workflow/operations 상태를 한 보고서로 모아 automation level(L0 inspect → L3 workflow)과 다음 추천 명령을 출력한다. `--gate`는 `decision: allow|dry_run_only|block`을 JSON에 포함하고 `allow` 외에는 non-zero exit로 Claude/Codex entrypoint와 내부 실행 명령을 중단시킨다. `.workflow/`가 target repo의 `.gitignore`에 있으면 workflow state가 local-only라는 경고를 함께 표시한다
 - `awf init [--repo-root <path>] [--force]`: 대상 프로젝트에 `.awf.toml`을 초기화
 - `awf dashboard [--repo-root <path>] [--interval N]`: rich Live 2-panel TUI — workflow state + cmux broker health 동시 모니터. `awf-cli[tui]` extras 필수 (미설치 시 명확한 stderr + exit 2). 키 바인딩 `q`/`Q`/Ctrl+C 종료, `r`/`R` 즉시 refresh. interval 1~60 clamp (default 5). `awf wf status --watch`(D1)는 단일 텍스트 갱신, `awf dashboard`(D2)는 panel 분할 layout
@@ -209,6 +210,7 @@ commands include:
 | `awf wt recover-promotion` | Preview or safely amend a blocked out-of-order promotion's committed manual resolution; publication remains a separate `wt promote` step. |
 | `awf wt finish` | Preview or remove one proven-safe managed lease for a merged PR. |
 | `awf wt gc` | Preview or remove stale, proven-safe merged leases; `--merged` is required. |
+| `awf wt compact` | Preview or remove only ignored, untracked dependency/cache paths from eligible managed worktrees without changing lease, registry, branch, or worktree state. |
 | `awf wt import` | Inventory existing direct-child repository worktrees and optionally register them as imported leases. |
 | `awf wt adopt` | Preview or link a clean imported lease to an explicitly supplied, already-merged PR. |
 | `awf wt link-pr` | Preview or link an active managed feature lease to its exact already-merged PR. |
@@ -359,6 +361,33 @@ the target moved since sealing, it reconstructs the same managed worktree from
 the pinned deltas and reruns prepare and verification before it pushes or opens
 the single PR. Source-provenance drift, a dirty managed worktree, a failed
 verification, and a mismatched PR all fail closed and preserve the bridge.
+
+#### Safe ignored-path compaction
+
+`compact` removes disk-heavy ignored paths such as `node_modules` without
+removing a worktree, its branch, or any lifecycle record. It requires one or
+more unique normalized repository-relative `--path` values and a positive
+`--older-than` threshold. Omit `--lease` to bulk-select only stale
+`PR_OPEN`, `DEPLOYING`, `DEPLOYED`, and `CLEANABLE` leases for the exact
+repository; pass `--lease` to inspect one exact lease.
+
+```bash
+awf wt compact --repo-root . --path node_modules --older-than 7d --dry-run --json
+awf wt compact --repo-root . --path node_modules --older-than 7d --apply --json
+```
+
+Every selected lease must be AWF-managed, registered at its expected
+non-bare/non-detached branch, clean, and at its recorded HEAD; it must not have
+a cleanup reservation. Every path must exist under that worktree with no
+symlinked ancestor or leaf, be ignored by Git, and have no tracked descendants.
+Preview is read-only. Apply takes the repository's nonblocking lock, reloads,
+and fully revalidates every candidate and path before deleting any of them.
+Any preflight blocker leaves every selected path in place. Result actions use
+`kind: "remove_ignored_path"` and report `bytes` from allocated disk blocks
+plus `entry_count`; apply leaves the lease row/version/state/events, Git HEAD,
+Git status, branch, and worktree registration unchanged. If filesystem removal
+fails after deletion starts, `compact_remove_failed` reports only actions that
+completed before the failure.
 
 #### Out-of-order production promotion
 

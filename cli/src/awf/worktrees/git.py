@@ -5,11 +5,13 @@ from contextlib import contextmanager
 
 import hashlib
 import os
-import signal
 import re
+import shutil
+import signal
 import subprocess
+import stat
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 class GitError(RuntimeError):
@@ -61,6 +63,12 @@ class GitWorktree:
     prunable: str | None = None
 
 
+@dataclass(frozen=True)
+class GitPathUsage:
+    allocated_bytes: int
+    entry_count: int
+
+
 class GitClient:
     def __init__(self, cwd: Path, *, timeout: float = 30.0) -> None:
         if timeout <= 0:
@@ -91,6 +99,97 @@ class GitClient:
     def status_porcelain(self, cwd: Path | None = None) -> tuple[str, ...]:
         completed = self._run("status", "--porcelain=v1", "-z", cwd=cwd)
         return _nul_records(completed.stdout)
+
+    def path_is_ignored(self, cwd: Path, path: str) -> bool:
+        """Return whether one literal repository-relative path is ignored."""
+        self._compact_path_candidate(cwd, path)
+        try:
+            self._run(
+                "check-ignore",
+                "--stdin",
+                "-z",
+                cwd=cwd,
+                input_bytes=os.fsencode(path) + b"\0",
+            )
+        except GitError as error:
+            if error.returncode == 1:
+                return False
+            raise
+        return True
+
+    def tracked_paths(self, cwd: Path, path: str) -> tuple[str, ...]:
+        """Return tracked descendants using conservative case-insensitive matching."""
+        self._compact_path_candidate(cwd, path)
+        target_parts = tuple(part.casefold() for part in PurePosixPath(path).parts)
+        tracked = _nul_records(self._run("ls-files", "-z", cwd=cwd).stdout)
+        return tuple(
+            sorted(
+                candidate
+                for candidate in tracked
+                if len(PurePosixPath(candidate).parts) >= len(target_parts)
+                and tuple(
+                    part.casefold()
+                    for part in PurePosixPath(candidate).parts[: len(target_parts)]
+                )
+                == target_parts
+            )
+        )
+
+    def compact_path_usage(self, cwd: Path, path: str) -> GitPathUsage:
+        """Measure allocated disk blocks and entries without following symlinks."""
+        candidate = self._compact_path_candidate(cwd, path)
+        return _allocated_tree_usage(candidate)
+
+    def remove_ignored_path(self, cwd: Path, path: str) -> None:
+        """Remove a revalidated ignored file or tree without touching Git state."""
+        candidate = self._compact_path_candidate(cwd, path)
+        if not self.path_is_ignored(cwd, path):
+            raise GitError(f"compact path {path!r} is no longer ignored")
+        if self.tracked_paths(cwd, path):
+            raise GitError(f"compact path {path!r} contains tracked descendants")
+        try:
+            if stat.S_ISDIR(candidate.lstat().st_mode):
+                shutil.rmtree(candidate)
+            else:
+                candidate.unlink()
+        except OSError as error:
+            raise GitError(f"unable to remove compact path {path!r}: {error}") from error
+
+    @staticmethod
+    def _compact_path_candidate(cwd: Path, path: str) -> Path:
+        if (
+            not isinstance(path, str)
+            or not path
+            or "\0" in path
+            or Path(path).is_absolute()
+            or ".." in Path(path).parts
+        ):
+            raise GitError("compact paths must be repository-relative")
+        root = cwd.resolve()
+        candidate = root / path
+        try:
+            candidate.relative_to(root)
+        except ValueError as error:
+            raise GitError("compact paths must stay within the worktree") from error
+        current = root
+        try:
+            for part in ("", *Path(path).parts):
+                if part:
+                    current /= part
+                if current.is_symlink():
+                    raise GitError(f"compact path {path!r} has a symlinked ancestor")
+                current.lstat()
+        except FileNotFoundError as error:
+            raise GitError(f"compact path {path!r} does not exist") from error
+        except OSError as error:
+            raise GitError(f"unable to inspect compact path {path!r}: {error}") from error
+        try:
+            candidate.resolve(strict=True).relative_to(root)
+        except ValueError as error:
+            raise GitError(f"compact path {path!r} escapes the worktree") from error
+        except OSError as error:
+            raise GitError(f"unable to resolve compact path {path!r}: {error}") from error
+        return candidate
 
     def untracked_paths(self, cwd: Path) -> tuple[str, ...]:
         return tuple(
@@ -671,6 +770,36 @@ class GitClient:
     @staticmethod
     def _text(value: bytes) -> str:
         return value.decode("utf-8", errors="replace").strip()
+
+
+def _allocated_tree_usage(path: Path) -> GitPathUsage:
+    """Count directory entries and allocated blocks without traversing symlinks."""
+    allocated_bytes = 0
+    entry_count = 0
+    accounted_inodes: set[tuple[int, int]] = set()
+    pending = [path]
+    while pending:
+        current = pending.pop()
+        try:
+            metadata = current.lstat()
+        except OSError as error:
+            raise GitError(f"unable to inspect compact path {path!r}: {error}") from error
+        entry_count += 1
+        inode = (metadata.st_dev, metadata.st_ino)
+        if inode not in accounted_inodes:
+            accounted_inodes.add(inode)
+            allocated_bytes += metadata.st_blocks * 512
+        if not stat.S_ISDIR(metadata.st_mode):
+            continue
+        try:
+            with os.scandir(current) as entries:
+                pending.extend(Path(entry.path) for entry in entries)
+        except OSError as error:
+            raise GitError(f"unable to inspect compact path {path!r}: {error}") from error
+    return GitPathUsage(
+        allocated_bytes=allocated_bytes,
+        entry_count=entry_count,
+    )
 
 
 _HTTP_URL_USERINFO = re.compile(

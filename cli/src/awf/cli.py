@@ -25,6 +25,7 @@ from awf.commands.wf_pr import run_wf_pr
 from awf.commands.wt import (
     run_wt_acquire,
     run_wt_adopt,
+    run_wt_compact,
     run_wt_link_pr,
     run_wt_doctor,
     run_wt_import,
@@ -1172,6 +1173,47 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print a versioned JSON result.",
     )
     wt_gc_parser.set_defaults(handler=run_wt_gc)
+
+    wt_compact_parser = wt_subparsers.add_parser(
+        "compact",
+        help="Preview or remove ignored dependency/cache paths from safe worktrees.",
+    )
+    wt_compact_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to current or parent directories.",
+    )
+    wt_compact_parser.add_argument(
+        "--lease",
+        help="One exact managed lease. Omit to compact every eligible lease.",
+    )
+    wt_compact_parser.add_argument(
+        "--path",
+        action="append",
+        required=True,
+        help="Unique normalized ignored path relative to each selected worktree.",
+    )
+    wt_compact_parser.add_argument(
+        "--older-than",
+        required=True,
+        help="Positive age threshold using s, m, h, or d (for example: 7d).",
+    )
+    wt_compact_mode = wt_compact_parser.add_mutually_exclusive_group()
+    wt_compact_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview compact actions without mutations (the default).",
+    )
+    wt_compact_mode.add_argument(
+        "--apply",
+        action="store_true",
+        help="Remove every revalidated ignored path.",
+    )
+    wt_compact_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_compact_parser.set_defaults(handler=run_wt_compact)
 
     wt_import_parser = wt_subparsers.add_parser(
         "import",

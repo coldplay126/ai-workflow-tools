@@ -1247,3 +1247,51 @@ def test_binary_patch_preserves_rename_mode_and_gitlink_delta(tmp_path: Path) ->
             ("160000", client.path_blob(target_head, "submodule")),
         ),
     )
+
+
+def test_git_compact_helpers_measure_and_remove_only_ignored_paths(
+    tmp_path: Path,
+) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    (repo / ".gitignore").write_text("/node_modules/\n", encoding="utf-8")
+    git(repo, "add", ".gitignore")
+    git(repo, "commit", "-q", "-m", "ignore dependencies")
+    dependency = repo / "node_modules" / "pkg"
+    dependency.mkdir(parents=True)
+    (dependency / "index.js").write_bytes(b"x" * 8192)
+
+    assert client.path_is_ignored(repo, "node_modules")
+    assert client.tracked_paths(repo, "node_modules") == ()
+    usage = client.compact_path_usage(repo, "node_modules")
+
+    assert usage.entry_count == 3
+    assert usage.allocated_bytes > 0
+
+    client.remove_ignored_path(repo, "node_modules")
+
+    assert not (repo / "node_modules").exists()
+
+
+def test_git_compact_helpers_block_case_variant_tracked_descendants(
+    tmp_path: Path,
+) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    tracked = repo / "node_modules" / "pkg" / "keep.js"
+    tracked.parent.mkdir(parents=True)
+    tracked.write_text("tracked\n", encoding="utf-8")
+    (repo / ".gitignore").write_text("/node_modules/\n", encoding="utf-8")
+    git(repo, "add", ".gitignore")
+    git(repo, "add", "-f", "node_modules/pkg/keep.js")
+    git(repo, "commit", "-q", "-m", "track ignored dependency")
+    if not (repo / "Node_Modules").exists():
+        pytest.skip("case-sensitive filesystem")
+
+    assert client.path_is_ignored(repo, "Node_Modules")
+    assert client.tracked_paths(repo, "Node_Modules") == (
+        "node_modules/pkg/keep.js",
+    )
+    with pytest.raises(GitError, match="tracked descendants"):
+        client.remove_ignored_path(repo, "Node_Modules")
+    assert tracked.exists()

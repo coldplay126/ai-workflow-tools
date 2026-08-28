@@ -1157,6 +1157,8 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "finish_apply": ("wt", "finish"),
         "gc_preview": ("wt", "gc"),
         "gc_apply": ("wt", "gc"),
+        "compact_preview": ("wt", "compact"),
+        "compact_apply": ("wt", "compact"),
     }
     parser = build_parser()
     for name, expected in expected_commands.items():
@@ -1202,6 +1204,10 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
     assert "--older-than 7d" in commands["gc_preview"]
     assert "--apply" not in commands["gc_preview"]
     assert "--apply" in commands["gc_apply"]
+    assert "--path node_modules" in commands["compact_preview"]
+    assert "--older-than 7d" in commands["compact_preview"]
+    assert "--dry-run" in commands["compact_preview"]
+    assert "--apply" in commands["compact_apply"]
 
     safety = contract["safety"]
     assert safety["preflight"] == "required_non_destructive_status_refresh"
@@ -1287,6 +1293,7 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "adopt",
         "finish",
         "gc",
+        "compact",
     ]
     assert safety["stop_conditions"] == [
         "deployment_health_unknown",
@@ -1317,6 +1324,7 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
             "out_of_order_resolution": "review_same_blocked_lease_then_apply_explicitly",
             "finish": "review_blockers_then_apply",
             "gc": "review_blockers_then_apply",
+            "compact": "review_every_action_then_apply_explicitly",
         },
         "ready": {
             "status": "inspect_select_lifecycle_action",

@@ -345,6 +345,35 @@ A `preview` GC result means review every candidate and blocker, then apply only 
 awf wt gc --repo-root <repo-root> --merged --older-than 7d --apply --json
 ```
 
+## Safe ignored-path compaction
+
+Use `compact` only to reclaim ignored dependency or cache data from a live
+managed worktree; it does not remove a worktree, branch, lease, registry row,
+or event. Preview before any apply:
+
+```sh
+awf wt compact --repo-root <repo-root> --path node_modules --older-than 7d --dry-run --json
+awf wt compact --repo-root <repo-root> --path node_modules --older-than 7d --apply --json
+```
+
+Omit `--lease` only when every eligible lease in the exact repository may be
+considered. Eligible leases are AWF-managed `PR_OPEN`, `DEPLOYING`, `DEPLOYED`,
+or `CLEANABLE` leases older than the supplied threshold. Use `--lease <id>` to
+inspect one lease. Each `--path` MUST be unique, normalized, repository
+relative, present within the worktree, Git-ignored, and have no tracked
+descendants; it and every ancestor MUST NOT be a symlink.
+
+Before deletion, apply takes the repository's nonblocking lock and fully
+revalidates every candidate: exact repository provenance, managed owner, clean
+status, registered non-bare/non-detached branch, exact HEAD, no cleanup
+reservation, age, and every requested path. Any preflight blocker stops the
+entire apply before any path is deleted. Review every `remove_ignored_path`
+action's `lease_id`, `worktree_path`, `path`, allocated `bytes`, and
+`entry_count`. The result leaves lease/registry state and events, Git
+HEAD/status, branch, and worktree registration unchanged. A filesystem failure
+after deletion starts is `compact_remove_failed`; its actions contain only
+paths that completed before the failure.
+
 ## Blocker response
 
 For `blocked`, MUST report the result code, message, command, and deployment/PR evidence available. MUST preserve the worktree and branch. Resolve the reported condition through the managed lifecycle, then restart at preflight.
@@ -388,7 +417,9 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
     "finish_preview": "awf wt finish --repo-root <repo-root> --pr <merged-pr> --json",
     "finish_apply": "awf wt finish --repo-root <repo-root> --pr <merged-pr> --apply --json",
     "gc_preview": "awf wt gc --repo-root <repo-root> --merged --older-than 7d --dry-run --json",
-    "gc_apply": "awf wt gc --repo-root <repo-root> --merged --older-than 7d --apply --json"
+    "gc_apply": "awf wt gc --repo-root <repo-root> --merged --older-than 7d --apply --json",
+    "compact_preview": "awf wt compact --repo-root <repo-root> --path node_modules --older-than 7d --dry-run --json",
+    "compact_apply": "awf wt compact --repo-root <repo-root> --path node_modules --older-than 7d --apply --json"
   },
   "safety": {
     "preflight": "required_non_destructive_status_refresh",
@@ -402,6 +433,14 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
     },
     "deployment_health": "repository_rollout_evidence",
     "blocked_action": "preserve_worktree_report_code_message",
+    "compact": {
+      "scope": "ignored_untracked_paths_only",
+      "eligible_states": ["PR_OPEN", "DEPLOYING", "DEPLOYED", "CLEANABLE"],
+      "bulk": "exact_repository_eligible_leases_only",
+      "apply": "nonblocking_lock_full_revalidation_before_any_deletion",
+      "invariants": "lease_registry_events_git_head_status_branch_worktree_unchanged",
+      "action_fields": ["lease_id", "worktree_path", "path", "bytes", "entry_count"]
+    },
     "out_of_order": {
       "mode": "explicit_opt_in",
       "exact_mode": "default",
@@ -475,7 +514,8 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
       "import",
       "adopt",
       "finish",
-      "gc"
+      "gc",
+      "compact"
     ],
     "stop_conditions": [
       "deployment_health_unknown",
@@ -506,7 +546,8 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
       "out_of_order_promote": "review_then_apply_explicitly",
       "out_of_order_resolution": "review_same_blocked_lease_then_apply_explicitly",
       "finish": "review_blockers_then_apply",
-      "gc": "review_blockers_then_apply"
+      "gc": "review_blockers_then_apply",
+      "compact": "review_every_action_then_apply_explicitly"
     },
     "ready": {
       "status": "inspect_select_lifecycle_action",

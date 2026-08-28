@@ -203,6 +203,113 @@ def test_wt_status_parser_surface() -> None:
     assert args.refresh is True
 
 
+
+def test_wt_compact_parser_surface() -> None:
+    args = build_parser().parse_args(
+        [
+            "wt",
+            "compact",
+            "--repo-root",
+            "/repo",
+            "--lease",
+            "lease-1",
+            "--path",
+            "node_modules",
+            "--path",
+            ".cache",
+            "--older-than",
+            "7d",
+            "--dry-run",
+            "--json",
+        ]
+    )
+
+    assert args.command == "wt"
+    assert args.wt_command == "compact"
+    assert args.repo_root == "/repo"
+    assert args.lease == "lease-1"
+    assert args.path == ["node_modules", ".cache"]
+    assert args.older_than == "7d"
+    assert args.apply is False
+    assert args.dry_run is True
+    assert args.json is True
+
+
+def test_wt_compact_maps_cli_arguments_to_versioned_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = make_repository(tmp_path)
+    observed: dict[str, object] = {}
+
+    def compact(
+        _service: object,
+        *,
+        lease_id: str | None,
+        paths: object,
+        older_than: str,
+        apply: bool,
+    ) -> CommandResult:
+        observed.update(
+            lease_id=lease_id,
+            paths=paths,
+            older_than=older_than,
+            apply=apply,
+        )
+        return CommandResult.ok(
+            "wt.compact",
+            decision="preview",
+            actions=(
+                {
+                    "kind": "remove_ignored_path",
+                    "lease_id": "lease-1",
+                    "worktree_path": "/worktree",
+                    "path": "node_modules",
+                    "bytes": 8192,
+                    "entry_count": 3,
+                },
+            ),
+        )
+
+    monkeypatch.setattr("awf.commands.wt.WorktreeService.compact", compact)
+
+    rc, stdout, stderr = capture_main(
+        [
+            "wt",
+            "compact",
+            "--repo-root",
+            str(repo),
+            "--lease",
+            "lease-1",
+            "--path",
+            "node_modules",
+            "--older-than",
+            "7d",
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    assert stderr == ""
+    assert observed == {
+        "lease_id": "lease-1",
+        "paths": ["node_modules"],
+        "older_than": "7d",
+        "apply": False,
+    }
+    payload = json.loads(stdout)
+    assert payload["command"] == "wt.compact"
+    assert payload["actions"] == [
+        {
+            "kind": "remove_ignored_path",
+            "lease_id": "lease-1",
+            "worktree_path": "/worktree",
+            "path": "node_modules",
+            "bytes": 8192,
+            "entry_count": 3,
+        }
+    ]
+
 def test_wt_human_output_emits_refresh_warning_to_stderr(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
