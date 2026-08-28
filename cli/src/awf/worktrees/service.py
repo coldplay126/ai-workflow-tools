@@ -16,7 +16,14 @@ from pathlib import Path, PurePosixPath
 from datetime import datetime, timedelta, timezone
 
 from .config import ConfigError, WorktreeConfig, load_worktree_config
-from .git import GitClient, GitError, GitPatchConflict, GitRemoteError, GitWorktree
+from .git import (
+    GitClient,
+    GitError,
+    GitPatchConflict,
+    GitPathUsage,
+    GitRemoteError,
+    GitWorktree,
+)
 from .github import ExternalServiceError, GhClient, PullRequest
 from .locking import repository_lock
 from .models import (
@@ -79,6 +86,12 @@ class _PromotionRetryIdentity:
     branch: str
     worktree_path: Path
 
+
+
+@dataclass(frozen=True)
+class _CompactCandidate:
+    lease: Lease
+    usages: tuple[tuple[str, GitPathUsage], ...]
 
 
 
@@ -2339,6 +2352,563 @@ class WorktreeService:
             actions=tuple(actions),
             warnings=tuple(warnings),
         )
+
+    def compact(
+        self,
+        *,
+        lease_id: str | None,
+        paths: Sequence[str],
+        older_than: str,
+        apply: bool = False,
+    ) -> CommandResult:
+        """Remove only proven-safe ignored paths while preserving every lease."""
+        command = "wt.compact"
+        try:
+            normalized_paths = self._compact_paths(paths)
+        except ValueError as error:
+            return self._compact_blocked(command, "invalid_compact_path", str(error))
+        try:
+            threshold = self._parse_age_threshold(older_than)
+        except ValueError as error:
+            return self._compact_blocked(command, "invalid_age_threshold", str(error))
+        try:
+            repository_id = self.git.repository_id()
+            repository_root = self.git.repository_root()
+        except GitError as error:
+            return self._compact_blocked(
+                command, "repository_unavailable", str(error)
+            )
+        try:
+            if lease_id is not None:
+                lease = self.registry.get_lease_read_only(lease_id)
+                if lease is None:
+                    return self._compact_blocked(
+                        command,
+                        "unknown_lease",
+                        f"lease {lease_id} does not exist",
+                    )
+                leases = (lease,)
+            else:
+                now = datetime.now(timezone.utc)
+                leases = tuple(
+                    lease
+                    for lease in self.registry.list_leases_read_only(
+                        include_removed=False,
+                        repository_id=repository_id,
+                    )
+                    if lease.state
+                    in {
+                        LeaseState.PR_OPEN,
+                        LeaseState.DEPLOYING,
+                        LeaseState.DEPLOYED,
+                        LeaseState.CLEANABLE,
+                    }
+                    and lease.managed
+                    and lease.owner_kind == "awf"
+                    and self._lease_is_older_than(lease, threshold, now)
+                )
+        except sqlite3.Error as error:
+            return self._compact_blocked(command, "registry_conflict", str(error))
+
+        plans, blockers = self._compact_candidates(
+            leases,
+            paths=normalized_paths,
+            threshold=threshold,
+            repository_id=repository_id,
+            repository_root=repository_root,
+        )
+        actions = self._compact_actions(plans)
+        if blockers:
+            return CommandResult.blocked(
+                command,
+                blockers=tuple(blockers),
+                leases=leases,
+                actions=actions,
+            )
+        if not plans:
+            return CommandResult.ok(command, decision="no_op")
+        if not apply:
+            return CommandResult.ok(
+                command,
+                decision="preview",
+                leases=leases,
+                actions=actions,
+            )
+
+        original_leases = {lease.id: lease for lease in leases}
+        try:
+            with repository_lock(
+                self.lock_dir / f"{repository_id}.lock",
+                blocking=False,
+            ):
+                try:
+                    current_repository_id = self.git.repository_id()
+                    current_repository_root = self.git.repository_root()
+                except GitError as error:
+                    return self._compact_blocked(
+                        command,
+                        "repository_unavailable",
+                        str(error),
+                        leases=leases,
+                        actions=actions,
+                    )
+                if current_repository_id != repository_id:
+                    return self._compact_blocked(
+                        command,
+                        "repository_changed",
+                        "repository identity changed before compact could be applied",
+                        leases=leases,
+                        actions=actions,
+                    )
+                try:
+                    if lease_id is not None:
+                        current = self.registry.get_lease(lease_id)
+                        current_leases = (current,) if current is not None else ()
+                    else:
+                        now = datetime.now(timezone.utc)
+                        current_leases = tuple(
+                            lease
+                            for lease in self.registry.list_leases(
+                                include_removed=False,
+                                repository_id=repository_id,
+                            )
+                            if lease.state
+                            in {
+                                LeaseState.PR_OPEN,
+                                LeaseState.DEPLOYING,
+                                LeaseState.DEPLOYED,
+                                LeaseState.CLEANABLE,
+                            }
+                            and lease.managed
+                            and lease.owner_kind == "awf"
+                            and self._lease_is_older_than(lease, threshold, now)
+                        )
+                except sqlite3.Error as error:
+                    return self._compact_blocked(
+                        command,
+                        "registry_conflict",
+                        str(error),
+                        leases=leases,
+                        actions=actions,
+                    )
+                if tuple(lease.id for lease in current_leases) != tuple(
+                    original_leases
+                ):
+                    return self._compact_blocked(
+                        command,
+                        "candidate_set_changed",
+                        "eligible compact leases changed before apply",
+                        leases=leases,
+                        actions=actions,
+                    )
+                if any(
+                    current.version != original_leases[current.id].version
+                    for current in current_leases
+                ):
+                    return self._compact_blocked(
+                        command,
+                        "lease_changed",
+                        "a compact lease changed before apply",
+                        leases=current_leases,
+                        actions=actions,
+                    )
+                locked_plans, locked_blockers = self._compact_candidates(
+                    current_leases,
+                    paths=normalized_paths,
+                    threshold=threshold,
+                    repository_id=repository_id,
+                    repository_root=current_repository_root,
+                )
+                locked_actions = self._compact_actions(locked_plans)
+                if locked_blockers:
+                    return CommandResult.blocked(
+                        command,
+                        blockers=tuple(locked_blockers),
+                        leases=current_leases,
+                        actions=locked_actions,
+                    )
+                completed_actions: list[dict[str, object]] = []
+                action_lookup = {
+                    (action["lease_id"], action["path"]): action
+                    for action in locked_actions
+                }
+                try:
+                    for plan in locked_plans:
+                        self._prepare_marker_path(plan.lease.id).unlink(
+                            missing_ok=True
+                        )
+                        for path, _usage in plan.usages:
+                            self.git.remove_ignored_path(
+                                plan.lease.worktree_path,
+                                path,
+                            )
+                            completed_actions.append(
+                                action_lookup[(plan.lease.id, path)]
+                            )
+                except (GitError, OSError) as error:
+                    return self._compact_blocked(
+                        command,
+                        "compact_remove_failed",
+                        str(error),
+                        leases=current_leases,
+                        actions=tuple(completed_actions),
+                    )
+        except OSError as error:
+            return self._compact_blocked(
+                command,
+                "repository_locked",
+                f"repository lock is unavailable: {error}",
+                leases=leases,
+                actions=actions,
+            )
+        return CommandResult.ok(
+            command,
+            decision="removed",
+            leases=tuple(plan.lease for plan in locked_plans),
+            actions=locked_actions,
+        )
+
+    def _compact_candidates(
+        self,
+        leases: Sequence[Lease],
+        *,
+        paths: tuple[str, ...],
+        threshold: timedelta,
+        repository_id: str,
+        repository_root: Path,
+    ) -> tuple[list[_CompactCandidate], list[dict[str, str]]]:
+        try:
+            worktrees = self.git.list_worktrees()
+        except GitError as error:
+            return [], [
+                {
+                    "code": "worktree_inspection_failed",
+                    "message": f"Unable to inspect registered worktrees: {error}",
+                }
+            ]
+        now = datetime.now(timezone.utc)
+        plans: list[_CompactCandidate] = []
+        blockers: list[dict[str, str]] = []
+        for lease in leases:
+            candidate, candidate_blockers = self._compact_candidate(
+                lease,
+                paths=paths,
+                threshold=threshold,
+                now=now,
+                repository_id=repository_id,
+                repository_root=repository_root,
+                worktrees=worktrees,
+            )
+            blockers.extend(candidate_blockers)
+            if candidate is not None:
+                plans.append(candidate)
+        return plans, blockers
+
+    def _compact_candidate(
+        self,
+        lease: Lease,
+        *,
+        paths: tuple[str, ...],
+        threshold: timedelta,
+        now: datetime,
+        repository_id: str,
+        repository_root: Path,
+        worktrees: tuple[GitWorktree, ...],
+    ) -> tuple[_CompactCandidate | None, list[dict[str, str]]]:
+        blockers: list[dict[str, str]] = []
+        allowed_states = {
+            LeaseState.PR_OPEN,
+            LeaseState.DEPLOYING,
+            LeaseState.DEPLOYED,
+            LeaseState.CLEANABLE,
+        }
+        if lease.state not in allowed_states:
+            blockers.append(
+                self._compact_lease_blocker(
+                    lease,
+                    "ineligible_state",
+                    f"state {lease.state.value} is not eligible for compact",
+                )
+            )
+        if not lease.managed or lease.owner_kind != "awf":
+            blockers.append(
+                self._compact_lease_blocker(
+                    lease,
+                    "unmanaged_lease",
+                    "compact requires an AWF-managed lease",
+                )
+            )
+        if (
+            lease.repository_id != repository_id
+            or lease.repository_root != repository_root
+        ):
+            blockers.append(
+                self._compact_lease_blocker(
+                    lease,
+                    "repository_mismatch",
+                    "lease does not belong to this exact repository",
+                )
+            )
+        if not self._lease_is_older_than(lease, threshold, now):
+            blockers.append(
+                self._compact_lease_blocker(
+                    lease,
+                    "age_threshold_not_met",
+                    "lease has not reached the requested compact age threshold",
+                )
+            )
+        try:
+            reservation = self.registry.get_cleanup_reservation(lease.id)
+        except sqlite3.Error as error:
+            blockers.append(
+                self._compact_lease_blocker(
+                    lease,
+                    "registry_conflict",
+                    f"unable to inspect cleanup reservation: {error}",
+                )
+            )
+        else:
+            if reservation is not None:
+                blockers.append(
+                    self._compact_lease_blocker(
+                        lease,
+                        "cleanup_reserved",
+                        "lease is reserved for cleanup",
+                    )
+                )
+        registered = tuple(
+            worktree
+            for worktree in worktrees
+            if worktree.path.resolve() == lease.worktree_path
+        )
+        if len(registered) != 1 or not lease.worktree_path.is_dir():
+            blockers.append(
+                self._compact_lease_blocker(
+                    lease,
+                    "unregistered_worktree",
+                    "lease worktree is not registered at its expected path",
+                )
+            )
+        elif (
+            registered[0].bare
+            or registered[0].detached
+            or registered[0].branch != lease.branch
+        ):
+            blockers.append(
+                self._compact_lease_blocker(
+                    lease,
+                    "branch_mismatch",
+                    "lease is not checked out on its registered non-detached branch",
+                )
+            )
+        if blockers:
+            return None, blockers
+        for path in paths:
+            location_blocker = self._compact_path_location_blocker(lease, path)
+            if location_blocker is not None:
+                blockers.append(location_blocker)
+        if blockers:
+            return None, blockers
+        try:
+            if self.git.status_porcelain(lease.worktree_path):
+                blockers.append(
+                    self._compact_lease_blocker(
+                        lease,
+                        "dirty_worktree",
+                        "lease has uncommitted changes",
+                    )
+                )
+            actual_head = self.git.head_sha(lease.worktree_path)
+        except GitError as error:
+            blockers.append(
+                self._compact_lease_blocker(
+                    lease,
+                    "worktree_inspection_failed",
+                    str(error),
+                )
+            )
+            return None, blockers
+        if (
+            actual_head != lease.head_sha
+            or registered[0].head_sha != lease.head_sha
+        ):
+            blockers.append(
+                self._compact_lease_blocker(
+                    lease,
+                    "head_mismatch",
+                    "registered worktree HEAD does not exactly match the lease",
+                )
+            )
+        if blockers:
+            return None, blockers
+
+        usages: list[tuple[str, GitPathUsage]] = []
+        for path in paths:
+            try:
+                if not self.git.path_is_ignored(lease.worktree_path, path):
+                    blockers.append(
+                        self._compact_lease_blocker(
+                            lease,
+                            "compact_path_not_ignored",
+                            f"path {path!r} is not ignored",
+                        )
+                    )
+                    continue
+                tracked_paths = self.git.tracked_paths(lease.worktree_path, path)
+                if tracked_paths:
+                    blockers.append(
+                        self._compact_lease_blocker(
+                            lease,
+                            "tracked_descendants",
+                            f"path {path!r} contains tracked descendants",
+                        )
+                    )
+                    continue
+                usages.append(
+                    (path, self.git.compact_path_usage(lease.worktree_path, path))
+                )
+            except GitError as error:
+                blockers.append(
+                    self._compact_lease_blocker(
+                        lease,
+                        "worktree_inspection_failed",
+                        str(error),
+                    )
+                )
+        if blockers:
+            return None, blockers
+        return _CompactCandidate(lease=lease, usages=tuple(usages)), blockers
+
+    @staticmethod
+    def _compact_paths(paths: Sequence[str]) -> tuple[str, ...]:
+        error_message = (
+            "paths must be a non-empty sequence of unique normalized "
+            "repository-relative paths"
+        )
+        if isinstance(paths, (str, bytes)) or not isinstance(paths, Sequence):
+            raise ValueError(error_message)
+        values = tuple(paths)
+        if not values or any(not isinstance(path, str) for path in values):
+            raise ValueError(error_message)
+        if len(set(values)) != len(values):
+            raise ValueError(error_message)
+        parsed_values = tuple(PurePosixPath(path) for path in values)
+        for path, parsed in zip(values, parsed_values, strict=True):
+            if (
+                not path
+                or "\0" in path
+                or path.splitlines() != [path]
+                or parsed.is_absolute()
+                or ".." in parsed.parts
+                or str(parsed) != path
+                or not parsed.parts
+                or any(part.casefold() == ".git" for part in parsed.parts)
+            ):
+                raise ValueError(error_message)
+        canonical_parts = tuple(
+            tuple(part.casefold() for part in parsed.parts)
+            for parsed in parsed_values
+        )
+        if len(set(canonical_parts)) != len(canonical_parts):
+            raise ValueError(
+                "compact paths must be unique on case-insensitive filesystems"
+            )
+        for parent_parts in canonical_parts:
+            for child_parts in canonical_parts:
+                if (
+                    len(parent_parts) < len(child_parts)
+                    and child_parts[: len(parent_parts)] == parent_parts
+                ):
+                    raise ValueError(
+                        "compact paths must not overlap or contain one another"
+                    )
+        return tuple(sorted(values))
+
+    @staticmethod
+    def _compact_actions(
+        candidates: Sequence[_CompactCandidate],
+    ) -> tuple[dict[str, object], ...]:
+        return tuple(
+            {
+                "kind": "remove_ignored_path",
+                "lease_id": candidate.lease.id,
+                "worktree_path": str(candidate.lease.worktree_path),
+                "path": path,
+                "bytes": usage.allocated_bytes,
+                "entry_count": usage.entry_count,
+            }
+            for candidate in candidates
+            for path, usage in candidate.usages
+        )
+
+    @staticmethod
+    def _compact_lease_blocker(
+        lease: Lease,
+        code: str,
+        message: str,
+    ) -> dict[str, str]:
+        return {"code": code, "message": f"Lease {lease.id}: {message}"}
+
+    @staticmethod
+    def _compact_blocked(
+        command: str,
+        code: str,
+        message: str,
+        *,
+        leases: Sequence[Lease] = (),
+        actions: tuple[dict[str, object], ...] = (),
+    ) -> CommandResult:
+        return CommandResult.blocked(
+            command,
+            blockers=({"code": code, "message": message},),
+            leases=tuple(leases),
+            actions=actions,
+        )
+
+    def _compact_path_location_blocker(
+        self,
+        lease: Lease,
+        path: str,
+    ) -> dict[str, str] | None:
+        root = lease.worktree_path
+        current = root
+        try:
+            root.lstat()
+            if root.is_symlink():
+                return self._compact_lease_blocker(
+                    lease,
+                    "unsafe_compact_path",
+                    "worktree root is symlinked",
+                )
+            for part in PurePosixPath(path).parts:
+                current /= part
+                current.lstat()
+                if current.is_symlink():
+                    return self._compact_lease_blocker(
+                        lease,
+                        "unsafe_compact_path",
+                        f"path {path!r} has a symlinked ancestor or leaf",
+                    )
+            current.resolve(strict=True).relative_to(root.resolve(strict=True))
+        except FileNotFoundError:
+            return self._compact_lease_blocker(
+                lease,
+                "compact_path_missing",
+                f"path {path!r} does not exist",
+            )
+        except ValueError:
+            return self._compact_lease_blocker(
+                lease,
+                "unsafe_compact_path",
+                f"path {path!r} escapes the worktree",
+            )
+        except OSError as error:
+            return self._compact_lease_blocker(
+                lease,
+                "unsafe_compact_path",
+                f"path {path!r} could not be safely inspected: {error}",
+            )
+        return None
 
     def _finish_lease(
         self,

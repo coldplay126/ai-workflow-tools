@@ -325,6 +325,79 @@ def smoke(tmp_path: Path) -> SmokeHarness:
     return SmokeHarness.create(tmp_path)
 
 
+def _prepare_counter_script(path: Path) -> str:
+    return (
+        "import sys\n"
+        "from pathlib import Path\n"
+        f"counter = Path({str(path)!r})\n"
+        "if '--version' not in sys.argv:\n"
+        "    count = int(counter.read_text(encoding='utf-8')) if counter.exists() else 0\n"
+        "    counter.write_text(str(count + 1), encoding='utf-8')\n"
+    )
+
+
+def test_release_open_add_are_lazy_and_seal_prepares_once(
+    smoke: SmokeHarness,
+    tmp_path: Path,
+) -> None:
+    counter = tmp_path / "release-prepare-count.txt"
+    smoke.config = replace(
+        smoke.config,
+        prepare_command=(sys.executable, "-c", _prepare_counter_script(counter)),
+    )
+    smoke._rebuild_service()
+
+    assert smoke.service.release_open(
+        release_id="lazy-release",
+        target_branch="main",
+        apply=True,
+    ).decision == "ready"
+    assert smoke.service.release_add(
+        release_id="lazy-release",
+        source_pr=372,
+        apply=True,
+    ).decision == "ready"
+    assert not counter.exists()
+
+    sealed = smoke.service.release_seal(release_id="lazy-release", apply=True)
+
+    assert sealed.decision == "ready"
+    assert counter.read_text(encoding="utf-8") == "1"
+
+
+def test_invalid_exact_promote_skips_prepare_and_valid_promote_prepares_once(
+    smoke: SmokeHarness,
+    tmp_path: Path,
+) -> None:
+    counter = tmp_path / "promotion-prepare-count.txt"
+    smoke.config = replace(
+        smoke.config,
+        prepare_command=(sys.executable, "-c", _prepare_counter_script(counter)),
+    )
+    smoke._rebuild_service()
+    source = smoke.github.prs[372]
+    smoke.github.prs[372] = replace(source, checks_passed=False)
+
+    invalid = smoke.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert invalid.decision == "blocked"
+    assert not counter.exists()
+    smoke.github.prs[372] = source
+
+    valid = smoke.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert valid.decision == "ready"
+    assert counter.read_text(encoding="utf-8") == "1"
+
+
 def test_release_worktree_lifecycle_smoke(smoke: SmokeHarness) -> None:
     acquired = smoke.service.acquire(
         initiative="reward-widget",

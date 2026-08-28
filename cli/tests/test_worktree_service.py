@@ -8698,3 +8698,310 @@ def test_gc_propagates_nested_finish_external_error_after_completed_removal(
     )
     assert not removed_lease.worktree_path.exists()
     assert failed_lease.worktree_path.exists()
+
+
+def _enable_compact_fixture(harness: Harness) -> None:
+    (harness.repo / ".gitignore").write_text(
+        "/node_modules/\n",
+        encoding="utf-8",
+    )
+    git_command(harness.repo, "add", ".gitignore")
+    git_command(harness.repo, "commit", "-q", "-m", "ignore dependencies")
+    git_command(harness.repo, "push", "-q", "origin", "staging")
+
+
+def _stale_compact_lease(
+    harness: Harness,
+    initiative: str,
+    state: LeaseState,
+) -> Lease:
+    acquired = harness.acquire(initiative)
+    assert acquired.lease is not None
+    lease = acquired.lease
+    if state is not LeaseState.ACTIVE:
+        lease = harness.registry.transition(
+            lease.id,
+            state,
+            expected_version=lease.version,
+        )
+    dependency = lease.worktree_path / "node_modules" / "pkg"
+    dependency.mkdir(parents=True)
+    (dependency / "index.js").write_bytes(b"x" * 8192)
+    stale_at = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat(
+        timespec="seconds"
+    )
+    with sqlite3.connect(harness.registry.db_path) as connection:
+        connection.execute(
+            """
+            UPDATE worktree_leases
+            SET created_at = ?, last_used_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (stale_at, stale_at, stale_at, lease.id),
+        )
+    current = harness.registry.get_lease(lease.id)
+    assert current is not None
+    return current
+
+
+def test_compact_bulk_removes_ignored_dependencies_without_lifecycle_mutation(
+    harness: Harness,
+) -> None:
+    _enable_compact_fixture(harness)
+    deployable = _stale_compact_lease(
+        harness,
+        "blip-server",
+        LeaseState.DEPLOYING,
+    )
+    active = _stale_compact_lease(harness, "active", LeaseState.ACTIVE)
+    dirty = _stale_compact_lease(harness, "dirty", LeaseState.DIRTY)
+    blocked = _stale_compact_lease(harness, "blocked", LeaseState.BLOCKED)
+    before = harness.registry.get_lease(deployable.id)
+    assert before is not None
+    before_events = harness.registry.list_events(deployable.id)
+    before_head = harness.git.head_sha(deployable.worktree_path)
+    before_status = harness.git.status_porcelain(deployable.worktree_path)
+    expected_usage = harness.git.compact_path_usage(
+        deployable.worktree_path,
+        "node_modules",
+    )
+    marker = harness.service._prepare_marker_path(deployable.id)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text('{"key":"prepared"}', encoding="utf-8")
+
+    preview = harness.service.compact(
+        lease_id=None,
+        paths=("node_modules",),
+        older_than="7d",
+    )
+
+    assert preview.decision == "preview"
+    assert [action["lease_id"] for action in preview.actions] == [deployable.id]
+    assert preview.actions[0]["bytes"] == expected_usage.allocated_bytes
+    assert preview.actions[0]["entry_count"] == expected_usage.entry_count
+
+    applied = harness.service.compact(
+        lease_id=None,
+        paths=("node_modules",),
+        older_than="7d",
+        apply=True,
+    )
+
+    assert applied.decision == "removed"
+    assert not (deployable.worktree_path / "node_modules").exists()
+    assert not marker.exists()
+    assert harness.registry.get_lease(deployable.id) == before
+    assert harness.registry.list_events(deployable.id) == before_events
+    assert harness.git.head_sha(deployable.worktree_path) == before_head
+    assert harness.git.status_porcelain(deployable.worktree_path) == before_status
+    for lease in (active, dirty, blocked):
+        assert (lease.worktree_path / "node_modules").exists()
+
+
+def test_compact_rejects_invalid_duration_path_state_and_reservation(
+    harness: Harness,
+) -> None:
+    _enable_compact_fixture(harness)
+    active = _stale_compact_lease(harness, "active", LeaseState.ACTIVE)
+    deployable = _stale_compact_lease(
+        harness,
+        "deployable",
+        LeaseState.DEPLOYING,
+    )
+
+    invalid_duration = harness.service.compact(
+        lease_id=deployable.id,
+        paths=("node_modules",),
+        older_than="0d",
+    )
+    invalid_path = harness.service.compact(
+        lease_id=deployable.id,
+        paths=("node_modules", "node_modules"),
+        older_than="7d",
+    )
+    ineligible = harness.service.compact(
+        lease_id=active.id,
+        paths=("node_modules",),
+        older_than="7d",
+    )
+    harness.registry.reserve_cleanup(
+        deployable.id,
+        expected_version=deployable.version,
+        branch_sha=deployable.head_sha,
+    )
+    reserved = harness.service.compact(
+        lease_id=deployable.id,
+        paths=("node_modules",),
+        older_than="7d",
+    )
+
+    assert invalid_duration.blockers[0]["code"] == "invalid_age_threshold"
+    assert invalid_path.blockers[0]["code"] == "invalid_compact_path"
+    assert ineligible.blockers[0]["code"] == "ineligible_state"
+    assert reserved.blockers[0]["code"] == "cleanup_reserved"
+    assert (deployable.worktree_path / "node_modules").exists()
+
+
+@pytest.mark.parametrize(
+    "paths",
+    (
+        (".",),
+        (".git",),
+        ("node_modules", "node_modules/pkg"),
+        ("Node_Modules", "node_modules/pkg"),
+        ("Node_Modules", "node_modules"),
+        ("nested/.git/cache",),
+    ),
+)
+def test_compact_rejects_root_git_and_overlapping_paths(
+    harness: Harness,
+    paths: tuple[str, ...],
+) -> None:
+    _enable_compact_fixture(harness)
+    lease = _stale_compact_lease(harness, "invalid-paths", LeaseState.DEPLOYING)
+
+    result = harness.service.compact(
+        lease_id=lease.id,
+        paths=paths,
+        older_than="7d",
+    )
+
+    assert result.blockers[0]["code"] == "invalid_compact_path"
+    assert (lease.worktree_path / "node_modules").exists()
+
+
+def test_compact_apply_revalidates_every_candidate_before_any_removal(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_compact_fixture(harness)
+    first = _stale_compact_lease(harness, "first", LeaseState.PR_OPEN)
+    second = _stale_compact_lease(harness, "second", LeaseState.DEPLOYED)
+    original_candidates = harness.service._compact_candidates
+    calls = 0
+
+    def dirty_before_locked_revalidation(*args: object, **kwargs: object):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            (second.worktree_path / "changed.txt").write_text(
+                "dirty\n",
+                encoding="utf-8",
+            )
+        return original_candidates(*args, **kwargs)
+
+    monkeypatch.setattr(
+        harness.service,
+        "_compact_candidates",
+        dirty_before_locked_revalidation,
+    )
+
+    result = harness.service.compact(
+        lease_id=None,
+        paths=("node_modules",),
+        older_than="7d",
+        apply=True,
+    )
+
+    assert result.decision == "blocked"
+    assert {blocker["code"] for blocker in result.blockers} == {"dirty_worktree"}
+    assert (first.worktree_path / "node_modules").exists()
+    assert (second.worktree_path / "node_modules").exists()
+
+
+def test_compact_reports_only_completed_actions_after_remove_failure(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_compact_fixture(harness)
+    first = _stale_compact_lease(harness, "remove-first", LeaseState.DEPLOYED)
+    second = _stale_compact_lease(harness, "remove-second", LeaseState.DEPLOYED)
+    original_remove = harness.git.remove_ignored_path
+    calls = 0
+
+    def fail_second_remove(cwd: Path, path: str) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise GitError("injected compact removal failure")
+        original_remove(cwd, path)
+
+    monkeypatch.setattr(harness.git, "remove_ignored_path", fail_second_remove)
+    result = harness.service.compact(
+        lease_id=None,
+        paths=("node_modules",),
+        older_than="7d",
+        apply=True,
+    )
+
+    assert result.blockers[0]["code"] == "compact_remove_failed"
+    completed_id = result.actions[0]["lease_id"]
+    assert completed_id in {first.id, second.id}
+    completed = first if completed_id == first.id else second
+    pending = second if completed_id == first.id else first
+    assert not (completed.worktree_path / "node_modules").exists()
+    assert (pending.worktree_path / "node_modules").exists()
+
+
+def test_compact_apply_stops_when_repository_lock_is_unavailable(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_compact_fixture(harness)
+    lease = _stale_compact_lease(harness, "locked", LeaseState.DEPLOYED)
+
+    @contextmanager
+    def unavailable_lock(*_args: object, **_kwargs: object):
+        raise BlockingIOError("lock held")
+        yield
+
+    monkeypatch.setattr(service_module, "repository_lock", unavailable_lock)
+
+    result = harness.service.compact(
+        lease_id=lease.id,
+        paths=("node_modules",),
+        older_than="7d",
+        apply=True,
+    )
+
+    assert result.decision == "blocked"
+    assert result.blockers[0]["code"] == "repository_locked"
+    assert (lease.worktree_path / "node_modules").exists()
+
+
+def test_compact_rejects_foreign_provenance_and_symlinked_path(
+    harness: Harness,
+) -> None:
+    _enable_compact_fixture(harness)
+    lease = _stale_compact_lease(harness, "provenance", LeaseState.DEPLOYED)
+    with sqlite3.connect(harness.registry.db_path) as connection:
+        connection.execute(
+            "UPDATE worktree_leases SET repository_id = ? WHERE id = ?",
+            ("foreign-repository", lease.id),
+        )
+
+    foreign = harness.service.compact(
+        lease_id=lease.id,
+        paths=("node_modules",),
+        older_than="7d",
+    )
+
+    assert foreign.blockers[0]["code"] == "repository_mismatch"
+    with sqlite3.connect(harness.registry.db_path) as connection:
+        connection.execute(
+            "UPDATE worktree_leases SET repository_id = ? WHERE id = ?",
+            (harness.git.repository_id(), lease.id),
+        )
+    dependency = lease.worktree_path / "node_modules"
+    external = harness.repo.parent / "external-node-modules"
+    dependency.rename(external)
+    dependency.symlink_to(external, target_is_directory=True)
+
+    symlinked = harness.service.compact(
+        lease_id=lease.id,
+        paths=("node_modules",),
+        older_than="7d",
+    )
+
+    assert symlinked.blockers[0]["code"] == "unsafe_compact_path"
+    assert external.exists()

@@ -15,6 +15,11 @@
   또는 grounded conflict evidence를 fail-closed로 판정합니다.
 
 ### Added
+- `awf wt compact` adds preview-first, all-or-nothing ignored-path compaction for
+  stale AWF `PR_OPEN`/`DEPLOYING`/`DEPLOYED`/`CLEANABLE` worktrees. It reports
+  allocated bytes and entry counts, takes a nonblocking repository lock, fully
+  revalidates all candidates before deletion, and preserves all lease/registry,
+  branch, worktree, Git HEAD, and Git status lifecycle state.
 
 - `awf wt release open|add|seal|publish`로 처음부터 누적 release bridge를
   관리합니다. `open`은 최신 production 기준 `PROMOTE` lease를 만들고, `add`는

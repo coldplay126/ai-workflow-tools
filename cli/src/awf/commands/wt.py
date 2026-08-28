@@ -216,6 +216,19 @@ def run_wt_gc(args: argparse.Namespace) -> int:
     )
 
 
+def run_wt_compact(args: argparse.Namespace) -> int:
+    return _run(
+        args,
+        "wt.compact",
+        lambda service: service.compact(
+            lease_id=args.lease,
+            paths=args.path,
+            older_than=args.older_than,
+            apply=args.apply,
+        ),
+    )
+
+
 def run_wt_import(
     args: argparse.Namespace,
     *,
