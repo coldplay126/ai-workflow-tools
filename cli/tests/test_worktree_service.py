@@ -3582,7 +3582,6 @@ def promotion_harness(tmp_path: Path) -> PromotionHarness:
 @pytest.mark.parametrize(
     ("source_pr", "exclude_paths"),
     [
-        ((372, 373), ()),
         (372, ("feature.txt",)),
         (372, ("feature.txt", "feature.txt")),
         (372, ("/absolute.txt",)),
@@ -3669,6 +3668,101 @@ def test_promote_records_out_of_order_lease_provenance(
     assert persisted.reviewed_paths == source.changed_paths
 
 
+def test_promote_persists_ordered_out_of_order_source_pins(
+    promotion_harness: PromotionHarness,
+) -> None:
+    second = promotion_harness.add_followup_source()
+
+    result = promotion_harness.service.promote(
+        source_pr=(372, second.number),
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert result.decision == "ready"
+    assert result.lease is not None
+    assert [
+        source.to_dict()
+        for source in promotion_harness.registry.get_promotion_sources(result.lease.id)
+    ] == [
+        {
+            "ordinal": ordinal,
+            "source_pr": source.number,
+            "base_ref": source.base_ref,
+            "base_sha": source.base_sha,
+            "head_sha": source.head_sha,
+            "merge_sha": source.merge_commit_sha,
+            "changed_paths": list(source.changed_paths),
+        }
+        for ordinal, source in enumerate(
+            (promotion_harness.github.prs[372], second)
+        )
+    ]
+    assert (result.lease.worktree_path / "feature.txt").read_text(
+        encoding="utf-8"
+    ) == "feature updated\n"
+    assert (result.lease.worktree_path / "followup.txt").read_text(
+        encoding="utf-8"
+    ) == "followup\n"
+
+
+def test_promote_out_of_order_preview_uses_first_source_scalar_provenance(
+    promotion_harness: PromotionHarness,
+) -> None:
+    first = promotion_harness.github.prs[372]
+    second = promotion_harness.add_followup_source()
+
+    result = promotion_harness.service.promote(
+        source_pr=(first.number, second.number),
+        target_branch="main",
+        out_of_order=True,
+        apply=False,
+    )
+
+    assert result.decision == "preview"
+    action = result.actions[0]
+    assert action["source_pr"] == first.number
+    assert action["source_base_sha"] == first.base_sha
+    assert action["source_head_sha"] == first.head_sha
+    assert action["sources"][1]["head_sha"] == second.head_sha
+
+
+def test_promote_out_of_order_rejects_reversed_source_sequence(
+    promotion_harness: PromotionHarness,
+) -> None:
+    second = promotion_harness.add_followup_source()
+
+    result = promotion_harness.service.promote(
+        source_pr=(second.number, 372),
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "source_pr_sequence_order"
+
+
+def test_promote_out_of_order_requires_merge_for_every_source(
+    promotion_harness: PromotionHarness,
+) -> None:
+    second = promotion_harness.add_followup_source()
+    promotion_harness.github.prs[second.number] = replace(
+        second, merge_commit_sha=None
+    )
+
+    result = promotion_harness.service.promote(
+        source_pr=(372, second.number),
+        target_branch="main",
+        out_of_order=True,
+        apply=False,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "source_pr_invalid_oid"
+
+
 def test_promote_persists_out_of_order_provenance_before_patch_application(
     promotion_harness: PromotionHarness,
     monkeypatch: pytest.MonkeyPatch,
@@ -3730,6 +3824,226 @@ def test_promote_exact_blocks_divergent_same_file_followup(
     assert promotion_harness.github.create_calls == []
 
 
+
+
+def test_promote_out_of_order_reuse_blocks_middle_source_pin_drift(
+    promotion_harness: PromotionHarness,
+) -> None:
+    second = promotion_harness.add_followup_source()
+    third = promotion_harness.add_followup_source(
+        374,
+        feature_text="feature final\n",
+        include_followup=False,
+    )
+    first = promotion_harness.service.promote(
+        source_pr=(372, second.number, third.number),
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert first.decision == "ready"
+    promotion_harness.github.prs[second.number] = replace(
+        second,
+        changed_paths=("followup.txt",),
+    )
+    reused = promotion_harness.service.promote(
+        source_pr=(372, second.number, third.number),
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert reused.status == "blocked"
+    assert reused.blockers[0]["code"] == "promotion_provenance_changed"
+
+
+def test_promote_out_of_order_recovers_conflict_with_all_source_pins(
+    promotion_harness: PromotionHarness,
+) -> None:
+    second = promotion_harness.add_followup_source(
+        change_feature=False,
+        include_followup=True,
+    )
+    third = promotion_harness.add_followup_source(
+        374,
+        feature_text="feature final\n",
+        include_followup=False,
+    )
+    git_command(promotion_harness.repo, "checkout", "-q", "main")
+    (promotion_harness.repo / "followup.txt").write_text(
+        "target followup\n",
+        encoding="utf-8",
+    )
+    git_command(promotion_harness.repo, "add", "followup.txt")
+    git_command(promotion_harness.repo, "commit", "-q", "-m", "target followup")
+    git_command(promotion_harness.repo, "push", "-q", "origin", "main")
+    git_command(promotion_harness.repo, "checkout", "-q", "staging")
+
+    blocked = promotion_harness.service.promote(
+        source_pr=(372, second.number, third.number),
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert blocked.status == "blocked"
+    assert blocked.blockers[0]["code"] == "out_of_order_conflict"
+    assert blocked.lease is not None
+    assert blocked.lease.conflict_source_ordinal == 1
+    assert blocked.lease.source_pr == 372
+    assert blocked.lease.source_base_sha == (
+        promotion_harness.github.prs[372].base_sha
+    )
+    assert blocked.lease.source_head_sha == (
+        promotion_harness.github.prs[372].head_sha
+    )
+    assert [
+        source.source_pr
+        for source in promotion_harness.registry.get_promotion_sources(
+            blocked.lease.id
+        )
+    ] == [372, second.number, third.number]
+    (blocked.lease.worktree_path / "followup.txt").write_text(
+        "resolved followup\n",
+        encoding="utf-8",
+    )
+
+    resumed = promotion_harness.service.promote(
+        source_pr=(372, second.number, third.number),
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert resumed.decision == "ready"
+    assert resumed.lease is not None
+    assert (resumed.lease.worktree_path / "feature.txt").read_text(
+        encoding="utf-8"
+    ) == "feature final\n"
+    message = promotion_harness.git.commit_message(resumed.lease.worktree_path)
+    for source in (promotion_harness.github.prs[372], second, third):
+        assert f"AWF-Source-PR: {source.number}" in message
+        assert f"AWF-Source-Merge: {source.merge_commit_sha}" in message
+
+
+def test_promote_out_of_order_recovers_consecutive_source_conflicts(
+    promotion_harness: PromotionHarness,
+) -> None:
+    second = promotion_harness.add_followup_source(
+        change_feature=False,
+        include_followup=True,
+    )
+    third = promotion_harness.add_followup_source(
+        374,
+        change_feature=False,
+        include_followup=False,
+        team_text="staging team\n",
+    )
+    git_command(promotion_harness.repo, "checkout", "-q", "main")
+    (promotion_harness.repo / "followup.txt").write_text(
+        "target followup\n", encoding="utf-8"
+    )
+    (promotion_harness.repo / "team.txt").write_text(
+        "target team\n", encoding="utf-8"
+    )
+    git_command(promotion_harness.repo, "add", "followup.txt", "team.txt")
+    git_command(promotion_harness.repo, "commit", "-q", "-m", "target conflicts")
+    git_command(promotion_harness.repo, "push", "-q", "origin", "main")
+    git_command(promotion_harness.repo, "checkout", "-q", "staging")
+
+    first_conflict = promotion_harness.service.promote(
+        source_pr=(372, second.number, third.number),
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert first_conflict.lease is not None
+    assert first_conflict.lease.conflict_source_ordinal == 1
+    (first_conflict.lease.worktree_path / "followup.txt").write_text(
+        "resolved followup\n", encoding="utf-8"
+    )
+    second_conflict = promotion_harness.service.promote(
+        source_pr=(372, second.number, third.number),
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert second_conflict.status == "blocked"
+    assert second_conflict.blockers[0]["code"] == "out_of_order_conflict"
+    assert second_conflict.lease is not None
+    assert second_conflict.lease.conflict_source_ordinal == 2
+    assert second_conflict.lease.conflicted_paths == ("team.txt",)
+    assert promotion_harness.github.create_calls == []
+    (second_conflict.lease.worktree_path / "team.txt").write_text(
+        "resolved team\n", encoding="utf-8"
+    )
+    promoted = promotion_harness.service.promote(
+        source_pr=(372, second.number, third.number),
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert promoted.decision == "ready"
+    assert promoted.lease is not None
+    assert promoted.lease.conflict_source_ordinal is None
+    assert (promoted.lease.worktree_path / "followup.txt").read_text(
+        encoding="utf-8"
+    ) == "resolved followup\n"
+    assert (promoted.lease.worktree_path / "team.txt").read_text(
+        encoding="utf-8"
+    ) == "resolved team\n"
+    message = promotion_harness.git.commit_message(promoted.lease.worktree_path)
+    assert message.count("AWF-Source-PR:") == 3
+
+
+def test_promote_lazily_backfills_verified_legacy_single_source_pins(
+    promotion_harness: PromotionHarness,
+) -> None:
+    source = promotion_harness.add_divergent_same_file_non_overlapping_source()
+    first = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert first.decision == "ready"
+    assert first.lease is not None
+    with sqlite3.connect(promotion_harness.registry.db_path) as connection:
+        connection.execute(
+            "DELETE FROM promotion_lease_sources WHERE lease_id = ?",
+            (first.lease.id,),
+        )
+    preview = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        out_of_order=True,
+        apply=False,
+    )
+
+    assert preview.decision == "preview"
+    assert promotion_harness.registry.get_promotion_sources_read_only(
+        first.lease.id
+    ) == ()
+    reused = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert reused.decision == "reuse"
+    assert promotion_harness.registry.get_promotion_sources(
+        first.lease.id
+    ) == promotion_harness.service._promotion_source_pins(
+        first.lease, (source,)
+    )
+
+
 def test_promote_out_of_order_synthesizes_divergent_same_file_followup(
     promotion_harness: PromotionHarness,
 ) -> None:
@@ -3771,6 +4085,7 @@ def test_promote_out_of_order_synthesizes_divergent_same_file_followup(
             "AWF-Source-PR: 373",
             f"AWF-Source-Base: {source.base_sha}",
             f"AWF-Source-Head: {source.head_sha}",
+            f"AWF-Source-Merge: {source.merge_commit_sha}",
             f"AWF-Target-Base: {result.lease.target_base_sha}",
             f"AWF-Lease-ID: {result.lease.id}",
             "AWF-Promotion-Mode: out-of-order",
@@ -3887,11 +4202,13 @@ def test_promote_out_of_order_reuse_blocks_legacy_rename_leases(
         lease.branch,
         target_sha,
     )
-    lease = promotion_harness.registry.create_lease(
-        replace(
-            lease,
-            head_sha=promotion_harness.git.head_sha(lease.worktree_path),
-        )
+    lease = replace(
+        lease,
+        head_sha=promotion_harness.git.head_sha(lease.worktree_path),
+    )
+    lease = promotion_harness.registry.create_promotion_lease(
+        lease,
+        promotion_harness.service._promotion_source_pins(lease, (source,)),
     )
     if state is not LeaseState.ACTIVE:
         lease = promotion_harness.registry.transition(
@@ -4732,11 +5049,13 @@ def test_promote_out_of_order_preserves_three_way_conflict_for_manual_resolution
     assert result.lease.state is LeaseState.BLOCKED
     assert result.lease.resolution_state is ResolutionState.PENDING
     assert result.lease.conflicted_paths == ("feature.txt",)
+    assert result.lease.conflict_source_ordinal == 0
     persisted = promotion_harness.registry.get_lease(result.lease.id)
     assert persisted is not None
     assert persisted.state is LeaseState.BLOCKED
     assert persisted.resolution_state is ResolutionState.PENDING
     assert persisted.conflicted_paths == ("feature.txt",)
+    assert persisted.conflict_source_ordinal == 0
     events = promotion_harness.registry.list_events(persisted.id)
     assert [event.event_type for event in events] == ["promotion_blocked"]
     assert events[0].summary.startswith(
@@ -4783,6 +5102,8 @@ def test_promote_out_of_order_preview_reports_pending_manual_resolution_without_
             "conflicted_paths": ["feature.txt"],
             "reviewed_paths": ["feature.txt"],
             "current_changed_paths": ["feature.txt"],
+            "conflict_source_ordinal": 0,
+            "remaining_source_prs": [],
         },
         {"kind": "stage_paths", "paths": ["feature.txt"]},
         {
@@ -4869,6 +5190,10 @@ def test_promote_out_of_order_applies_manual_resolution_and_opens_one_pr(
                     "AWF-Source-PR: 372",
                     f"AWF-Source-Base: {promotion_harness.source_base_sha}",
                     f"AWF-Source-Head: {promotion_harness.source_head_sha}",
+                    (
+                        "AWF-Source-Merge: "
+                        f"{promotion_harness.github.prs[372].merge_commit_sha}"
+                    ),
                     f"AWF-Target-Base: {first.lease.target_base_sha}",
                     f"AWF-Lease-ID: {first.lease.id}",
                     "AWF-Promotion-Mode: out-of-order",
@@ -4971,6 +5296,85 @@ def test_recover_promotion_previews_allowed_post_commit_resolution(
     assert promotion_harness.registry.get_lease(lease.id) == before
     assert promotion_harness.registry.list_events(lease.id) == before_events
     assert promotion_harness.github.create_calls == []
+
+
+def test_recover_promotion_lazily_backfills_verified_legacy_source_pin(
+    promotion_harness: PromotionHarness,
+) -> None:
+    lease = _manual_reviewed_out_of_order_conflict(promotion_harness)
+    with sqlite3.connect(promotion_harness.registry.db_path) as connection:
+        connection.execute(
+            "DELETE FROM promotion_lease_sources WHERE lease_id = ?", (lease.id,)
+        )
+    (lease.worktree_path / "feature.txt").write_text(
+        "amended legacy resolution\n", encoding="utf-8"
+    )
+
+    preview = promotion_harness.service.recover_promotion(lease.id)
+
+    assert preview.decision == "preview"
+    assert promotion_harness.registry.get_promotion_sources_read_only(lease.id) == ()
+    recovered = promotion_harness.service.recover_promotion(lease.id, apply=True)
+    assert recovered.decision == "recovered"
+    assert promotion_harness.registry.get_promotion_sources(lease.id) == (
+        promotion_harness.service._promotion_source_pins(
+            lease, (promotion_harness.github.prs[372],)
+        )
+    )
+
+
+def test_recover_promotion_accepts_verified_legacy_three_trailer_commit(
+    promotion_harness: PromotionHarness,
+) -> None:
+    lease = _manual_reviewed_out_of_order_conflict(promotion_harness)
+    source = promotion_harness.github.prs[372]
+    legacy_message = promotion_harness.service._promotion_message(
+        sources=(source,),
+        excluded_paths=(),
+        target_sha=lease.target_base_sha or "",
+        lease=lease,
+        target_branch="main",
+        resolution_state=ResolutionState.MANUAL_REVIEWED,
+        include_source_merge=False,
+    )
+    with sqlite3.connect(promotion_harness.registry.db_path) as connection:
+        connection.execute(
+            "DELETE FROM promotion_lease_sources WHERE lease_id = ?", (lease.id,)
+        )
+    git_command(
+        lease.worktree_path,
+        "commit",
+        "--amend",
+        "-q",
+        "-m",
+        legacy_message,
+    )
+
+    preview = promotion_harness.service.recover_promotion(lease.id)
+
+    assert preview.decision == "preview"
+    assert preview.actions[0]["kind"] == "reconcile_promotion_head"
+    assert promotion_harness.registry.get_promotion_sources_read_only(lease.id) == ()
+    recovered = promotion_harness.service.recover_promotion(lease.id, apply=True)
+    assert recovered.decision == "reconciled"
+    assert recovered.lease is not None
+    assert recovered.lease.legacy_source_trailers is True
+    assert recovered.lease.conflict_source_ordinal is None
+    assert promotion_harness.git.commit_message(recovered.lease.worktree_path) == (
+        legacy_message
+    )
+    assert promotion_harness.registry.get_promotion_sources(lease.id) == (
+        promotion_harness.service._promotion_source_pins(lease, (source,))
+    )
+    resumed = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+    assert resumed.decision == "ready"
+    assert resumed.lease is not None
+    assert resumed.lease.legacy_source_trailers is True
 
 
 def test_recover_promotion_amends_without_publication_then_promotes(
@@ -6135,6 +6539,65 @@ def test_promote_out_of_order_reconciles_manual_commit_after_transition_failure(
     assert resumed.lease.resolution_state is ResolutionState.MANUAL_REVIEWED
     assert len(commit_messages) == 1
     assert len(promotion_harness.github.create_calls) == 1
+
+
+def test_promote_out_of_order_reconciles_remaining_sources_after_transition_failure(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    second = promotion_harness.add_followup_source(change_feature=False)
+    promotion_harness.make_target_conflict()
+    first = promotion_harness.service.promote(
+        source_pr=(372, second.number),
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert first.lease is not None
+    assert first.lease.conflict_source_ordinal == 0
+    (first.lease.worktree_path / "feature.txt").write_text(
+        "manually resolved\n", encoding="utf-8"
+    )
+    original_transition = promotion_harness.registry.transition
+    failures = 0
+
+    def transition(*args: object, **kwargs: object) -> Lease:
+        nonlocal failures
+        if (
+            kwargs.get("event_type") == "promotion_manual_resolution_committed"
+            and failures == 0
+        ):
+            failures += 1
+            raise RuntimeError("registry temporarily unavailable")
+        return original_transition(*args, **kwargs)
+
+    monkeypatch.setattr(promotion_harness.registry, "transition", transition)
+    failed = promotion_harness.service.promote(
+        source_pr=(372, second.number),
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert failed.status == "blocked"
+    assert failed.lease is not None
+    assert failed.lease.resolution_state is ResolutionState.PENDING
+    resumed = promotion_harness.service.promote(
+        source_pr=(372, second.number),
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert resumed.decision == "ready"
+    assert resumed.lease is not None
+    assert resumed.lease.conflict_source_ordinal is None
+    assert resumed.lease.protected_index_entries == (
+        promotion_harness.git.index_entry_snapshot(
+            resumed.lease.worktree_path, ("followup.txt",)
+        )
+    )
 
 
 def test_promote_out_of_order_blocks_immutable_marker_commit(

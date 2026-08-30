@@ -226,36 +226,48 @@ bridge and do not recreate, rebase, force-push, or manually publish it.
 
 ## Out-of-order production promotion
 
-Use this opt-in path only when one reviewed staging PR must reach production
-without an earlier staging change. It is not a fallback from exact promotion.
+Use this opt-in path only when one or more reviewed staging PRs must reach
+production without unrelated earlier staging changes. It is not a fallback from
+exact promotion.
 
 | Situation | Required workflow |
 | --- | --- |
 | A code may ship but must remain inactive | Preserve staging promotion order and gate A at runtime with a feature flag or equivalent. |
-| A code must stay out of production; B applies cleanly | Use the single-source `--out-of-order` promotion below. |
+| A code must stay out of production; B applies cleanly | Use the ordered `--out-of-order` promotion below for B. |
 | A code must stay out; B has a mechanical patch conflict | Resolve only in the managed promotion worktree, then replay preview/apply. |
-| B requires A's API, schema, or behavior | Stop. Out-of-order promotion is invalid until the dependency is removed or a compatible prerequisite is promoted. |
+| B requires A's API, schema, or behavior | Include A then B in the ordered source list; if A cannot ship, stop. |
 
-`--out-of-order` requires exactly one `--source-pr` and MUST NOT use
-`--exclude-path`. The source PR must be merged into the configured staging
-branch and still satisfy the configured source review and checks policy.
-Multiple sources or exclusions stop with `invalid_out_of_order_promotion`.
-Renamed source paths are unsupported and stop with
-`unsupported_out_of_order_rename`. A source dependency on A is a stop
-condition; a clean patch does not prove that B is independent.
+`--out-of-order` accepts one or more repeated `--source-pr` values in staging
+merge order and MUST NOT use `--exclude-path`. Every source PR must be merged
+into the configured staging branch and still satisfy the configured source
+review and checks policy. AWF atomically pins each source's ordinal, PR number,
+base ref, base SHA, head SHA, merge SHA, and reviewed paths in the promotion
+lease. The source pins, rather than scalar lease provenance fields, are
+authoritative across preview, apply, retry, manual recovery, and publication.
 
-Preview the code-isolated synthetic production result. Initial preview exposes
-`source_base_sha`, `source_head_sha`, `target_base_sha`, and `reviewed_paths`.
-Inspect those fields with the promotion mode and verification actions before
-explicitly applying it:
+Every source merge SHA must be in the configured staging history, every source
+base must be an ancestor of its reviewed head, and each later source merge SHA
+must descend from the preceding source merge SHA. Duplicate source PRs, missing
+merge SHAs, reversed merge order, source drift, or a source outside staging
+stop before publication. Renamed source paths are unsupported and stop with
+`unsupported_out_of_order_rename`. The ordered list may contain a dependent
+pair such as #527 followed by #530; a prerequisite outside that list is a stop
+condition.
+
+Preview the code-isolated synthetic production result. It exposes the ordered
+`sources` pins plus `source_base_sha`, `source_head_sha`, `target_base_sha`, and
+the reviewed-path union. AWF applies the ordered source patches into one
+synthetic commit. The final delta must be a non-empty subset of the ordered
+source reviewed-path union. Inspect those fields with the promotion mode and
+verification actions before explicitly applying:
 
 ```sh
-# Initial preview and apply.
-awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --json
-awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --apply --json
-# After an AWF-reported conflict, replay the same preview and apply commands.
-awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --json
-awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --apply --json
+# Initial preview and apply; repeat --source-pr in staging merge order.
+awf wt promote --source-pr <first> --source-pr <second> --to <branch> --out-of-order --repo-root <repo-root> --json
+awf wt promote --source-pr <first> --source-pr <second> --to <branch> --out-of-order --repo-root <repo-root> --apply --json
+# After an AWF-reported conflict, replay the same ordered preview and apply commands.
+awf wt promote --source-pr <first> --source-pr <second> --to <branch> --out-of-order --repo-root <repo-root> --json
+awf wt promote --source-pr <first> --source-pr <second> --to <branch> --out-of-order --repo-root <repo-root> --apply --json
 ```
 
 When the replayed preview finds a pending conflict, it lists the work AWF
@@ -264,47 +276,48 @@ would perform. The action order is `resolve_out_of_order_conflict`,
 `open_pull_request`.
 
 A failed three-way apply stops with `out_of_order_conflict`. AWF preserves an
-unpublished managed worktree with pending source, target, reviewed-path, and
-conflicted-path provenance. The operator may edit only the conflicted files
-returned by AWF. MUST NOT use `git add`, `git commit`, `git reset`,
-`git cherry-pick`, or `git push`.
+unpublished managed worktree with the complete ordered source pins, target,
+reviewed-path union, and conflicted-path provenance. The operator may edit only
+the conflicted files returned by AWF. MUST NOT use `git add`, `git commit`,
+`git reset`, `git cherry-pick`, or `git push`.
 
 Operator's unstaged edits and unmerged paths must be a subset of
 `conflicted_paths`. AWF clean-applied staged `protected_index_entries` may
 remain outside `conflicted_paths`. Their mode+OID pin is exact across preview,
-apply, and retry. Final indexed and committed paths must be a subset of
-`reviewed_paths`.
+apply, and retry. Final indexed and committed paths must be a non-empty subset
+of the ordered source reviewed-path union.
 
 Direct `git add` tampering or chmod/file-type mode tampering returns
-`promotion_resolution_scope_mismatch`.
+`promotion_resolution_scope_mismatch`. Any direct cherry-pick is forbidden for
+production promotion. AWF reconstructs reviewed PR deltas only through
+`awf wt promote`.
 
-Any direct cherry-pick is forbidden for production promotion. AWF reconstructs
-reviewed PR deltas only through `awf wt promote`.
-
-After editing, replay the same preview command. It reports the blocked lease,
-conflicted paths, and current changed paths. Replay the same command with
-`--apply` only when source and target provenance are unchanged. An operator
-unstaged edit or unmerged path outside `conflicted_paths` returns
+After editing, replay the same ordered preview command. It reports the blocked
+lease, conflicted paths, and current changed paths. Replay the same command
+with `--apply` only when every source pin and target provenance are unchanged.
+An operator unstaged edit or unmerged path outside `conflicted_paths` returns
 `promotion_resolution_scope_mismatch`. AWF stages the allowed conflict files;
 an unmerged index entry that remains after staging returns
 `promotion_resolution_unmerged`.
 
 All conflict markers must be removed before apply. If a marker remains, AWF
-does not publish and preserves the worktree. If either reviewed source SHA or
-the target SHA changes, stop with `promotion_provenance_changed`; preserve the
-worktree rather than transplanting a resolution.
+does not publish and preserves the worktree. If any source base, head, merge,
+reviewed path, order, or the target SHA changes, stop with
+`promotion_provenance_changed`; preserve the worktree rather than transplanting
+a resolution. Commit and PR trailers record each source PR/base/head/merge in
+the exact input sequence.
 
 The guard checks conflict markers only; trailing whitespace is not prohibited
-by this policy. For a clean automatic apply, AWF rechecks the live target after
-verification before publish. A changed target remains blocked and the managed
-worktree is preserved.
+by this policy. For a clean automatic apply, AWF rechecks every source pin and
+the live target after verification before publish. A changed source or target
+remains blocked and the managed worktree is preserved.
 
 AWF stages, commits, verifies, pushes, and publishes the eligible resolution.
 The synthetic production PR MUST pass successful checks on that exact PR before
 merge. It requires approval only when the repository's branch policy requires
-one; a solo repository MUST NOT invent an unavailable reviewer.
-Staging squash commits are not production promotion inputs. A direct staging
-squash cherry-pick is forbidden.
+one; a solo repository MUST NOT invent an unavailable reviewer. Staging squash
+commits are not production promotion inputs. A direct staging squash
+cherry-pick is forbidden.
 
 ## Deployment verification
 
@@ -444,10 +457,10 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
     "release_seal_apply": "awf wt release seal --release <id> --repo-root <repo-root> --apply --json",
     "release_publish_preview": "awf wt release publish --release <id> --repo-root <repo-root> --json",
     "release_publish_apply": "awf wt release publish --release <id> --repo-root <repo-root> --apply --json",
-    "out_of_order_promote_preview": "awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --json",
-    "out_of_order_promote_apply": "awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --apply --json",
-    "out_of_order_resolution_preview": "awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --json",
-    "out_of_order_resolution_apply": "awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --apply --json",
+    "out_of_order_promote_preview": "awf wt promote --source-pr <first> --source-pr <second> --to <branch> --out-of-order --repo-root <repo-root> --json",
+    "out_of_order_promote_apply": "awf wt promote --source-pr <first> --source-pr <second> --to <branch> --out-of-order --repo-root <repo-root> --apply --json",
+    "out_of_order_resolution_preview": "awf wt promote --source-pr <first> --source-pr <second> --to <branch> --out-of-order --repo-root <repo-root> --json",
+    "out_of_order_resolution_apply": "awf wt promote --source-pr <first> --source-pr <second> --to <branch> --out-of-order --repo-root <repo-root> --apply --json",
     "finish_preview": "awf wt finish --repo-root <repo-root> --pr <merged-pr> --json",
     "finish_apply": "awf wt finish --repo-root <repo-root> --pr <merged-pr> --apply --json",
     "gc_preview": "awf wt gc --repo-root <repo-root> --merged --older-than 7d --dry-run --json",
@@ -485,16 +498,19 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
     "out_of_order": {
       "mode": "explicit_opt_in",
       "exact_mode": "default",
-      "single_source": true,
+      "source_order": "one_or_more_unique_sources_in_staging_merge_order",
+      "source_pins": "ordered_immutable_ordinal_pr_base_ref_base_head_merge_paths",
       "exclude_paths": "forbidden",
       "production_pr_review": "required",
       "production_pr_checks": "required",
       "direct_cherry_pick": "forbidden",
       "staging_squash_input": "forbidden",
-      "conflict_resolution": "managed_conflicted_files_only_replay_same_command",
-      "dependency_conflict": "blocked",
+      "conflict_resolution": "durable_source_ordinal_then_remaining_ordered_sources_before_single_synthetic_commit",
+      "legacy_single_source_pins": "verified_live_scalar_provenance_and_exact_three_trailer_message_backfilled_on_apply_only",
+      "dependency": "allowed_when_prerequisite_precedes_dependent_source",
       "rename": "unsupported",
       "initial_preview_fields": [
+        "sources",
         "source_base_sha",
         "source_head_sha",
         "target_base_sha",
@@ -509,9 +525,9 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
         "open_pull_request"
       ],
       "operator_edit_scope": "unstaged_unmerged_subset_of_conflicted_paths",
-      "final_indexed_delta": "non_empty_reviewed_paths_subset",
+      "final_indexed_delta": "non_empty_ordered_reviewed_path_union_subset",
       "conflict_marker_policy": "markers_only_trailing_whitespace_allowed",
-      "live_target_recheck": "after_verification_before_publish",
+      "live_target_recheck": "all_source_pins_and_target_after_verification_before_publish",
       "protected_index_entries": {
         "paths": "clean_applied_reviewed_paths_outside_conflicted_paths",
         "entry": "stage_zero_mode_blob_oid_or_null",

@@ -962,8 +962,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--out-of-order",
         action="store_true",
         help=(
-            "Reconstruct one reviewed staging PR on production without earlier "
-            "staging changes. Requires separate production review."
+            "Reconstruct ordered reviewed staging PR deltas on production without "
+            "earlier staging changes. Repeat --source-pr in staging merge order; "
+            "cannot be combined with --exclude-path."
         ),
     )
     wt_promote_parser.add_argument(
