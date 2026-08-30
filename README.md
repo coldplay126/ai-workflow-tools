@@ -108,6 +108,12 @@ worktree는 `awf wt adopt`하기 전까지 unmanaged 상태입니다.
 있습니다. `--exclude-path`도 반복할 수 있지만, source PR에서 review된 정확한
 repository-relative 경로만 허용되며 전체 reviewed delta를 제외할 수는 없습니다.
 
+`awf wt sync --from main --to staging`은 configured production-only delta를
+latest staging에 재적용합니다. Preview 뒤 apply하며, no-op은 PR을 만들지 않고
+clean 3-way merge는 staging-only 변경과 Git mode를 보존합니다. 충돌·remote
+drift·검증 실패는 managed worktree를 보존합니다. 생성 PR의 reserved branch와
+`AWF-No-Promote: true` provenance는 이후 `promote`/`release add` 순환을 막습니다.
+
 stale merged lease의 일괄 정리는 `awf wt gc --merged --older-than 7d`로
 수행합니다. `--dry-run --json`으로 먼저 확인한 뒤 `--apply --json`을
 명시해야 하며, merged PR·clean worktree·deployment health 증거가 부족한 lease는
@@ -388,6 +394,13 @@ until `awf wt adopt`.
 order. Repeated `--exclude-path` arguments may name only exact,
 repository-relative paths reviewed in those source PRs, and at least one
 reviewed path must remain in the promotion.
+
+`awf wt sync --from main --to staging` reapplies only the configured
+production-only delta onto the latest staging branch. It is preview-first,
+creates no PR for a no-op, and preserves staging-only clean three-way results
+and Git modes. Conflicts, drift, and verification failures remain in the
+managed worktree. Its reserved branch shape and `AWF-No-Promote: true`
+provenance make promotion and release-add reject the synchronization PR.
 
 Bulk cleanup uses `awf wt gc --merged --older-than 7d`. Preview with
 `--dry-run --json`, then pass `--apply --json` explicitly. Leases without

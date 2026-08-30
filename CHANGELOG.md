@@ -15,6 +15,14 @@
   또는 grounded conflict evidence를 fail-closed로 판정합니다.
 
 ### Added
+- `awf wt sync --from <production> --to <staging>`가 configured production의
+  source-only delta를 latest staging에 preview/apply하고, clean 3-way 결과와 Git
+  mode를 보존합니다. Prepare/production verify와 publication 전후 remote SHA를
+  재검증하며, 중단된 clean publication은 같은 verified lease로 재개합니다. 이미
+  포함된 내용은 `noop`, 충돌은 preserved worktree입니다. Sync PR의 reserved
+  branch 및 `AWF-No-Promote: true` provenance는 `wt promote`와 `wt release
+  add`에서 거부됩니다. Exact promotion의 누락 delta는
+  `staging_missing_main_delta`와 경로·sync 명령으로 진단됩니다.
 - `awf wt compact` adds preview-first, all-or-nothing ignored-path compaction for
   stale AWF `PR_OPEN`/`DEPLOYING`/`DEPLOYED`/`CLEANABLE` worktrees. It reports
   allocated bytes and entry counts, takes a nonblocking repository lock, fully

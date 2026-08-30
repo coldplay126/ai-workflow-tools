@@ -30,6 +30,7 @@ from awf.commands.wt import (
     run_wt_doctor,
     run_wt_import,
     run_wt_status,
+    run_wt_sync,
     run_wt_promote,
     run_wt_release_add,
     run_wt_release_open,
@@ -914,6 +915,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print a versioned JSON result.",
     )
     wt_acquire_parser.set_defaults(handler=run_wt_acquire)
+
+    wt_sync_parser = wt_subparsers.add_parser(
+        "sync",
+        help="Reapply production-only branch changes to the configured staging branch.",
+    )
+    wt_sync_parser.add_argument(
+        "--from",
+        dest="from_branch",
+        required=True,
+        help="Configured production source branch.",
+    )
+    wt_sync_parser.add_argument(
+        "--to",
+        required=True,
+        help="Configured staging target branch.",
+    )
+    wt_sync_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to current or parent directories.",
+    )
+    wt_sync_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Create, verify, push, and open the branch synchronization pull request.",
+    )
+    wt_sync_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_sync_parser.set_defaults(handler=run_wt_sync)
 
     wt_promote_parser = wt_subparsers.add_parser(
         "promote",

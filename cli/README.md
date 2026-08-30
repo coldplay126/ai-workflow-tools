@@ -117,6 +117,7 @@ awf wf seal-plan --repo-root . --json
 - `awf mcp read <name> <uri>`: MCP resource 읽기. 현재는 `stdio`, `http` transport 지원
 - `awf doctor [--probe] [--ci]`: provider readiness, dispatch runner 상태, `install_freshness`(글로벌 `awf`와 `cli/` source hash drift)를 출력한다. 기본 모드는 OMP/Pi 설치 및 버전을 확인하고, `--probe`는 OMP 실제 model/auth 호출과 가능한 provider subprocess probe를 수행한다. stale install에는 재설치 명령을 안내하며, `--ci`는 default provider readiness가 충분하지 않으면 non-zero exit를 반환한다
 - `awf wt status [--repo-root <path>] [--initiative <slug>] [--json]` / `awf wt doctor [--repo-root <path>] [--json]`: managed Git worktree lease 상태를 read-only로 조회하거나 registry와 local Git worktree 등록의 불일치를 보고한다. JSON 출력은 versioned result envelope 하나만 stdout에 쓴다.
+- `awf wt sync --from <production> --to <staging> [--repo-root <path>] [--apply] [--json]`: configured production-only delta를 live merge base부터 latest staging에 exact하게 재적용한다. No-op은 lease/PR을 만들지 않고, clean 3-way merge는 staging-only 변경과 Git mode를 보존한다. 충돌·source/target drift·prepare/production verify 실패는 worktree를 보존하며 clean publication 중단은 같은 verified lease로 재개한다. Reserved sync branch와 `AWF-No-Promote: true`는 promotion/release 재유입을 차단한다.
 - `awf wt release open|add|seal|publish --release <id> [--to <branch>] [--repo-root <path>] [--apply] [--json]`: 처음부터 누적 여부를 선택하는 managed release bridge. `open` 후 staging merge 순서대로 `add`하고, `seal`의 prepare/production verify를 통과한 뒤 `publish`로 정확히 하나의 production PR을 연다.
 - `awf wt compact --repo-root <path> [--lease <id>] --path <relative>... --older-than <duration> [--dry-run|--apply] --json`: lifecycle, branch, registry를 바꾸지 않고 eligible AWF worktree의 ignored dependency/cache path만 preview/apply로 제거한다. Preview와 apply JSON action은 `lease_id`, `worktree_path`, `path`, 실제 allocated `bytes`, `entry_count`를 포함한다.
 - `awf ready [--probe] [--gate inspect|analysis|workflow-init|workflow-run|operations]`: repo별 자동화 준비 상태를 read-only로 요약한다. `doctor`/heuristic `scan`/skill discovery/workflow/operations 상태를 한 보고서로 모아 automation level(L0 inspect → L3 workflow)과 다음 추천 명령을 출력한다. `--gate`는 `decision: allow|dry_run_only|block`을 JSON에 포함하고 `allow` 외에는 non-zero exit로 Claude/Codex entrypoint와 내부 실행 명령을 중단시킨다. `.workflow/`가 target repo의 `.gitignore`에 있으면 workflow state가 local-only라는 경고를 함께 표시한다
@@ -202,6 +203,7 @@ commands include:
 | Command | Purpose |
 |---------|---------|
 | `awf wt acquire` | Preview or create/reuse a feature, promotion, or scratch lease. |
+| `awf wt sync` | Preview or reapply the configured production-only delta to latest staging as a managed, non-promotable PR. |
 | `awf wt promote` | Preview or promote one or more ordered, approved/accepted, merged staging PR deltas to a production branch, with optional exact reviewed-path exclusions. |
 | `awf wt release open` | Preview or open/reuse an initially empty managed cumulative release bridge from the latest target. |
 | `awf wt release add` | Preview or append one next immutable, ordered staging PR source pin and reconstruct its managed bridge. |
@@ -316,11 +318,12 @@ Promotion runs the configured `prepare.command` and
 `wt promote --apply` may resume only a verified prepare, production-verification,
 or publication failure when the managed worktree is clean and its promotion
 commit still has the exact source chain, exclusions, target, lease, and reviewed
-delta provenance. It can rebuild a `promotion_content_mismatch` lease only when
-the latest registry event type is `promotion_blocked` and its summary starts
-with `promotion_content_mismatch:`, the registered worktree is clean and retains
-its recorded head with the recorded target SHA as its sole parent, the current
-target SHA differs from the recorded target SHA, the reviewed source base/head
+delta provenance. It can rebuild a `staging_missing_main_delta` lease (or a
+legacy `promotion_content_mismatch` lease) only when the latest registry event
+type is `promotion_blocked` and its summary starts with the corresponding code,
+the registered worktree is clean and retains its recorded head with the recorded
+target SHA as its sole parent, the current target SHA differs from that pin,
+the reviewed source base/head
 SHAs are unchanged, and the promotion branch is absent from `origin`. The
 rebuilt commit must pass the same exact path/blob and production checks before
 AWF publishes a pull request. A prepare command that leaves the worktree dirty

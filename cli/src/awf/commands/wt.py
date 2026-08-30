@@ -124,6 +124,18 @@ def run_wt_acquire(args: argparse.Namespace) -> int:
         ),
     )
 
+def run_wt_sync(args: argparse.Namespace) -> int:
+    return _run(
+        args,
+        "wt.sync",
+        lambda service: service.sync(
+            source_branch=args.from_branch,
+            target_branch=args.to,
+            apply=args.apply,
+        ),
+    )
+
+
 
 def run_wt_promote(args: argparse.Namespace) -> int:
     return _run(

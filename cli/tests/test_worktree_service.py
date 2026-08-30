@@ -58,6 +58,17 @@ class FakeGitHub:
         self.find_calls.append((head, base))
         return self.open_prs.get((head, base))
 
+    def find_open_prs_by_prefix(
+        self, *, base: str, head_prefix: str
+    ) -> tuple[PullRequest, ...]:
+        return tuple(
+            pull_request
+            for pull_request in self.open_prs.values()
+            if pull_request.state == "OPEN"
+            and pull_request.base_ref == base
+            and pull_request.head_ref.startswith(head_prefix)
+        )
+
     def create_pr(
         self, *, base: str, head: str, title: str, body: str
     ) -> PullRequest:
@@ -70,7 +81,13 @@ class FakeGitHub:
             number=900,
             state="OPEN",
             base_ref=base,
-            base_sha="target-base",
+            base_sha=(
+                GitClient(self.repository_root).resolve_ref(
+                    f"refs/remotes/origin/{base}"
+                )
+                if self.repository_root is not None
+                else "target-base"
+            ),
             head_ref=head,
             head_sha=(
                 self.created_head_sha
@@ -86,6 +103,7 @@ class FakeGitHub:
             checks_passed=True,
             changed_paths=(),
             url="https://github.example/acme/repo/pull/900",
+            body=body,
         )
         self.prs[pull_request.number] = pull_request
         self.open_prs[(head, base)] = pull_request
@@ -735,6 +753,7 @@ def test_github_client_marks_checks_passed_only_for_completed_successes(
                     ],
                     "files": [{"path": "README.txt"}],
                     "url": "https://github.example/acme/repo/pull/42",
+                    "body": "AWF-No-Promote: true",
                 }
             ),
             "",
@@ -752,7 +771,8 @@ def test_github_client_marks_checks_passed_only_for_completed_successes(
                 "--json",
                 (
                     "number,state,baseRefName,baseRefOid,headRefName,headRefOid,"
-                    "mergeCommit,reviewDecision,statusCheckRollup,files,url,author,mergedBy"
+                    "mergeCommit,reviewDecision,statusCheckRollup,files,url,author,"
+                    "mergedBy,body"
                 ),
             ],
             {
@@ -769,6 +789,7 @@ def test_github_client_marks_checks_passed_only_for_completed_successes(
     assert pr.changed_paths == ("README.txt",)
     assert pr.author_login == "source-author"
     assert pr.merged_by_login == "source-merger"
+    assert pr.body == "AWF-No-Promote: true"
 
 
 def test_github_client_finds_exact_open_pr_by_head_and_base(
@@ -822,6 +843,76 @@ def test_github_client_finds_exact_open_pr_by_head_and_base(
         "--head",
         "awf/pr-372-to-main/promote",
     ]
+
+
+def test_github_client_fails_closed_when_open_pr_scan_reaches_limit(
+    harness: Harness,
+) -> None:
+    from awf.worktrees.github import GhClient
+
+    calls: list[list[str]] = []
+
+    def runner(
+        command: list[str], **_: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            json.dumps([{}] * 1000),
+            "",
+        )
+
+    with pytest.raises(ExternalServiceError, match="fail-closed"):
+        GhClient(harness.repo, command_runner=runner).find_open_prs_by_prefix(
+            base="staging",
+            head_prefix="awf/sync-",
+        )
+
+    assert calls[0][-2:] == ["--limit", "1000"]
+
+
+def test_github_client_prefix_scan_ignores_unrelated_malformed_body_and_keeps_unicode(
+    harness: Harness,
+) -> None:
+    from awf.worktrees.github import GhClient
+
+    body = "한" * 65536
+    payload = [
+        {
+            "baseRefName": "staging",
+            "headRefName": "user/unrelated",
+            "body": {"malformed": True},
+        },
+        {
+            "number": 42,
+            "state": "OPEN",
+            "baseRefName": "staging",
+            "baseRefOid": "base-sha",
+            "headRefName": "awf/sync-0123456789abcdef-0123456789ab/feature",
+            "headRefOid": "head-sha",
+            "mergeCommit": None,
+            "reviewDecision": "",
+            "statusCheckRollup": [],
+            "files": [],
+            "url": "https://github.example/acme/repo/pull/42",
+            "author": {"login": "source-author"},
+            "mergedBy": None,
+            "body": body,
+        },
+    ]
+
+    def runner(
+        command: list[str], **_: object
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+    matches = GhClient(
+        harness.repo, command_runner=runner
+    ).find_open_prs_by_prefix(base="staging", head_prefix="awf/sync-")
+
+    assert len(matches) == 1
+    assert matches[0].body == body
 
 
 @pytest.mark.parametrize(
@@ -3635,7 +3726,7 @@ def test_promote_exact_blocks_divergent_same_file_followup(
     )
 
     assert result.status == "blocked"
-    assert result.blockers[0]["code"] == "promotion_content_mismatch"
+    assert result.blockers[0]["code"] == "staging_missing_main_delta"
     assert promotion_harness.github.create_calls == []
 
 
@@ -6637,7 +6728,7 @@ def test_promote_rebuilds_content_mismatch_after_target_advances(
         apply=True,
     )
     assert first.status == "blocked"
-    assert first.blockers[0]["code"] == "promotion_content_mismatch"
+    assert first.blockers[0]["code"] == "staging_missing_main_delta"
     assert first.lease is not None
     blocked_head = first.lease.head_sha
     target_sha = promotion_harness.advance_target_prerequisite()
@@ -6726,7 +6817,7 @@ def test_promote_recovers_content_mismatch_reviewed_rename_when_disabled(
         apply=True,
     )
     assert first.status == "blocked"
-    assert first.blockers[0]["code"] == "promotion_content_mismatch"
+    assert first.blockers[0]["code"] == "staging_missing_main_delta"
     assert first.lease is not None
     target_sha = promotion_harness.advance_target_prerequisite()
 
@@ -6752,7 +6843,7 @@ def test_promote_does_not_rebuild_content_mismatch_without_target_advance(
     )
 
     assert first.status == "blocked"
-    assert first.blockers[0]["code"] == "promotion_content_mismatch"
+    assert first.blockers[0]["code"] == "staging_missing_main_delta"
     assert first.lease is not None
     blocked_head = first.lease.head_sha
     assert any(
@@ -6793,7 +6884,7 @@ def test_promote_does_not_rebuild_dirty_content_mismatch_after_target_advances(
     )
 
     assert first.status == "blocked"
-    assert first.blockers[0]["code"] == "promotion_content_mismatch"
+    assert first.blockers[0]["code"] == "staging_missing_main_delta"
     assert first.lease is not None
     blocked_head = first.lease.head_sha
     recorded_target_sha = promotion_harness.git.commit_parents(blocked_head)[0]
@@ -6840,7 +6931,7 @@ def test_promote_does_not_rebuild_content_mismatch_with_published_branch(
     )
 
     assert first.status == "blocked"
-    assert first.blockers[0]["code"] == "promotion_content_mismatch"
+    assert first.blockers[0]["code"] == "staging_missing_main_delta"
     assert first.lease is not None
     blocked_head = first.lease.head_sha
     promotion_harness.advance_target_prerequisite()
@@ -6881,7 +6972,7 @@ def test_promote_does_not_rebuild_content_mismatch_with_forged_parent(
     )
 
     assert first.status == "blocked"
-    assert first.blockers[0]["code"] == "promotion_content_mismatch"
+    assert first.blockers[0]["code"] == "staging_missing_main_delta"
     assert first.lease is not None
     original_message = promotion_harness.git.commit_message(first.lease.worktree_path)
     recorded_target_sha = promotion_harness.git.commit_parents(first.lease.head_sha)[
@@ -6958,7 +7049,7 @@ def test_promote_does_not_rebuild_content_mismatch_after_source_provenance_chang
     )
 
     assert first.status == "blocked"
-    assert first.blockers[0]["code"] == "promotion_content_mismatch"
+    assert first.blockers[0]["code"] == "staging_missing_main_delta"
     assert first.lease is not None
     blocked_head = first.lease.head_sha
     promotion_harness.advance_target_prerequisite()
@@ -7030,7 +7121,7 @@ def test_promote_recovers_content_mismatch_with_fully_excluded_source(
         apply=True,
     )
     assert first.status == "blocked"
-    assert first.blockers[0]["code"] == "promotion_content_mismatch"
+    assert first.blockers[0]["code"] == "staging_missing_main_delta"
     assert first.lease is not None
     target_sha = promotion_harness.advance_target_prerequisite()
 
@@ -9005,3 +9096,383 @@ def test_compact_rejects_foreign_provenance_and_symlinked_path(
 
     assert symlinked.blockers[0]["code"] == "unsafe_compact_path"
     assert external.exists()
+
+
+def _add_main_only_change(
+    harness: PromotionHarness,
+    *,
+    path: str = "production.txt",
+    content: str = "production\n",
+) -> str:
+    git_command(harness.repo, "checkout", "-q", "main")
+    (harness.repo / path).write_text(content, encoding="utf-8")
+    git_command(harness.repo, "add", path)
+    git_command(harness.repo, "commit", "-q", "-m", "production-only change")
+    source_sha = git_command(harness.repo, "rev-parse", "HEAD")
+    git_command(harness.repo, "push", "-q", "origin", "main")
+    git_command(harness.repo, "checkout", "-q", "staging")
+    return source_sha
+
+
+def test_sync_preview_and_apply_preserve_staging_only_changes(
+    promotion_harness: PromotionHarness,
+) -> None:
+    source_sha = _add_main_only_change(promotion_harness)
+    target_sha = git_command(
+        promotion_harness.repo, "rev-parse", "refs/remotes/origin/staging"
+    )
+
+    preview = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=False,
+    )
+
+    assert preview.decision == "preview"
+    assert preview.actions[0]["source_head_sha"] == source_sha
+    assert preview.actions[0]["target_base_sha"] == target_sha
+    assert preview.actions[0]["changed_paths"] == ["production.txt"]
+    assert promotion_harness.registry.list_leases() == []
+    assert promotion_harness.github.create_calls == []
+
+    result = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+
+    assert result.decision == "ready"
+    assert result.lease is not None
+    lease = result.lease
+    assert lease.purpose is Purpose.FEATURE
+    assert lease.state is LeaseState.PR_OPEN
+    assert lease.deployment_state is DeploymentState.NOT_REQUIRED
+    assert lease.source_head_sha == source_sha
+    assert lease.target_base_sha == target_sha
+    assert lease.reviewed_paths == ("production.txt",)
+    assert (lease.worktree_path / "production.txt").read_text(encoding="utf-8") == (
+        "production\n"
+    )
+    assert (lease.worktree_path / "team.txt").read_text(encoding="utf-8") == "team\n"
+    assert (lease.worktree_path / "feature.txt").read_text(encoding="utf-8") == (
+        "feature\n"
+    )
+    assert promotion_harness.git.changed_paths(
+        lease.worktree_path,
+        target_sha,
+        lease.head_sha,
+        find_renames=False,
+    ) == ("production.txt",)
+    assert len(promotion_harness.github.create_calls) == 1
+    body = promotion_harness.github.create_calls[0]["body"]
+    assert body.splitlines() == [
+        "AWF-Sync-From: main",
+        "AWF-Sync-To: staging",
+        f"AWF-Sync-Base: {lease.source_base_sha}",
+        f"AWF-Sync-Head: {source_sha}",
+        f"AWF-Sync-Target: {target_sha}",
+        f"AWF-Lease: {lease.id}",
+        "AWF-No-Promote: true",
+    ]
+    assert promotion_harness.git.commit_message(lease.worktree_path).endswith(body)
+
+
+def test_sync_is_noop_when_staging_contains_main(
+    promotion_harness: PromotionHarness,
+) -> None:
+    preview = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=False,
+    )
+    applied = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+
+    assert preview.decision == "noop"
+    assert applied.decision == "noop"
+    assert preview.actions[0]["kind"] == "no_sync_required"
+    assert promotion_harness.registry.list_leases() == []
+    assert promotion_harness.github.create_calls == []
+
+
+def test_sync_preserves_source_file_mode_changes(
+    promotion_harness: PromotionHarness,
+) -> None:
+    git_command(promotion_harness.repo, "checkout", "-q", "main")
+    git_command(
+        promotion_harness.repo,
+        "update-index",
+        "--chmod=+x",
+        "README.txt",
+    )
+    (promotion_harness.repo / "README.txt").chmod(0o755)
+    git_command(promotion_harness.repo, "commit", "-q", "-m", "make readme executable")
+    git_command(promotion_harness.repo, "push", "-q", "origin", "main")
+    git_command(promotion_harness.repo, "checkout", "-q", "staging")
+
+    result = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+
+    assert result.decision == "ready"
+    assert result.lease is not None
+    assert result.lease.reviewed_paths == ("README.txt",)
+    assert promotion_harness.git.path_entry(
+        result.lease.head_sha, "README.txt"
+    ) == promotion_harness.git.path_entry(
+        "refs/remotes/origin/main", "README.txt"
+    )
+
+
+def test_sync_preserves_conflicted_worktree_without_opening_pr(
+    promotion_harness: PromotionHarness,
+) -> None:
+    (promotion_harness.repo / "README.txt").write_text(
+        "staging version\n", encoding="utf-8"
+    )
+    git_command(promotion_harness.repo, "add", "README.txt")
+    git_command(promotion_harness.repo, "commit", "-q", "-m", "staging readme")
+    git_command(promotion_harness.repo, "push", "-q", "origin", "staging")
+    _add_main_only_change(
+        promotion_harness,
+        path="README.txt",
+        content="production version\n",
+    )
+
+    result = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+
+    assert result.decision == "blocked"
+    assert result.blockers[0]["code"] == "sync_target_conflict"
+    assert result.lease is not None
+    assert result.lease.state is LeaseState.BLOCKED
+    assert result.lease.worktree_path.exists()
+    assert promotion_harness.github.create_calls == []
+
+
+def test_sync_pr_cannot_be_added_to_promotion_or_release(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.github.prs[372] = replace(
+        promotion_harness.github.prs[372],
+        body="AWF-Sync-From: main\nAWF-No-Promote: true",
+    )
+
+    promotion = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=False,
+    )
+    opened = promotion_harness.service.release_open(
+        release_id="no-sync-loop",
+        target_branch="main",
+        apply=True,
+    )
+    release = promotion_harness.service.release_add(
+        release_id="no-sync-loop",
+        source_pr=372,
+        apply=False,
+    )
+
+    assert promotion.blockers[0]["code"] == "source_pr_not_promotable"
+    assert opened.decision == "ready"
+    assert release.blockers[0]["code"] == "source_pr_not_promotable"
+
+
+@pytest.mark.parametrize(
+    ("drifted_branch", "blocker_code"),
+    (("main", "sync_source_changed"), ("staging", "sync_target_changed")),
+)
+def test_sync_blocks_remote_drift_before_publish(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    drifted_branch: str,
+    blocker_code: str,
+) -> None:
+    _add_main_only_change(promotion_harness)
+    remote_branch_sha = promotion_harness.git.remote_branch_sha
+
+    def drifted_remote_sha(branch: str) -> str | None:
+        if branch == drifted_branch:
+            return "f" * 40
+        return remote_branch_sha(branch)
+    monkeypatch.setattr(
+        promotion_harness.git,
+        "remote_branch_sha",
+        drifted_remote_sha,
+    )
+
+    result = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+
+    assert result.decision == "blocked"
+    assert result.blockers[0]["code"] == blocker_code
+    assert result.lease is not None
+    assert result.lease.state is LeaseState.BLOCKED
+    assert promotion_harness.github.create_calls == []
+
+
+
+def test_sync_allows_clean_three_way_merge_with_staging_changes(
+    promotion_harness: PromotionHarness,
+) -> None:
+    git_command(promotion_harness.repo, "checkout", "-q", "main")
+    (promotion_harness.repo / "shared.txt").write_text(
+        "production=old\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nstaging=old\n",
+    )
+    git_command(promotion_harness.repo, "add", "shared.txt")
+    git_command(promotion_harness.repo, "commit", "-q", "-m", "shared baseline")
+    git_command(promotion_harness.repo, "push", "-q", "origin", "main")
+    git_command(promotion_harness.repo, "checkout", "-q", "staging")
+    git_command(
+        promotion_harness.repo,
+        "merge",
+        "--no-ff",
+        "-q",
+        "main",
+        "-m",
+        "merge shared baseline",
+    )
+    (promotion_harness.repo / "shared.txt").write_text(
+        "production=old\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nstaging=new\n",
+    )
+    git_command(promotion_harness.repo, "add", "shared.txt")
+    git_command(promotion_harness.repo, "commit", "-q", "-m", "staging shared change")
+    git_command(promotion_harness.repo, "push", "-q", "origin", "staging")
+    git_command(promotion_harness.repo, "checkout", "-q", "main")
+    (promotion_harness.repo / "shared.txt").write_text(
+        "production=new\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nstaging=old\n",
+    )
+    git_command(promotion_harness.repo, "add", "shared.txt")
+    git_command(promotion_harness.repo, "commit", "-q", "-m", "production shared change")
+    git_command(promotion_harness.repo, "push", "-q", "origin", "main")
+    git_command(promotion_harness.repo, "checkout", "-q", "staging")
+
+    result = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+
+    assert result.decision == "ready", result.to_dict()
+    assert result.lease is not None
+    assert (result.lease.worktree_path / "shared.txt").read_text(
+        encoding="utf-8"
+    ) == (
+        "production=new\nstable-1\nstable-2\nstable-3\nstable-4\nstable-5\nstaging=new\n"
+    )
+
+
+def test_sync_refuses_unowned_remote_branch(
+    promotion_harness: PromotionHarness,
+) -> None:
+    source_sha = _add_main_only_change(promotion_harness)
+    initiative = promotion_harness.service._sync_initiative("main", "staging")
+    branch = promotion_harness.service._sync_branch(initiative, source_sha)
+    staging_sha = promotion_harness.git.resolve_ref("refs/remotes/origin/staging")
+    git_command(
+        promotion_harness.repo,
+        "push",
+        "-q",
+        "origin",
+        f"staging:refs/heads/{branch}",
+    )
+
+    result = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+
+    assert result.decision == "blocked"
+    assert result.blockers[0]["code"] == "sync_branch_exists"
+    assert promotion_harness.git.remote_branch_sha(branch) == staging_sha
+    assert promotion_harness.registry.list_leases() == []
+
+
+def test_sync_resumes_publication_after_github_failure(
+    promotion_harness: PromotionHarness,
+) -> None:
+    _add_main_only_change(promotion_harness)
+    promotion_harness.github.create_error = ExternalServiceError("temporary outage")
+
+    first = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+
+    assert first.exit_code == 4
+    assert first.lease is not None
+    persisted = promotion_harness.registry.get_lease(first.lease.id)
+    assert persisted is not None
+    assert persisted.state is LeaseState.ACTIVE
+    promotion_harness.github.create_error = None
+
+    resumed = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+
+    assert resumed.decision == "ready"
+    assert resumed.lease is not None
+    assert resumed.lease.id == first.lease.id
+    assert resumed.lease.state is LeaseState.PR_OPEN
+
+
+def test_sync_resume_rejects_amended_commit_with_extra_path(
+    promotion_harness: PromotionHarness,
+) -> None:
+    _add_main_only_change(promotion_harness)
+    promotion_harness.github.create_error = ExternalServiceError("temporary outage")
+    first = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+    assert first.lease is not None
+    worktree_path = first.lease.worktree_path
+    (worktree_path / "extra.txt").write_text("unexpected\n", encoding="utf-8")
+    git_command(worktree_path, "add", "extra.txt")
+    git_command(worktree_path, "commit", "-q", "--amend", "--no-edit")
+    promotion_harness.github.create_error = None
+
+    resumed = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+
+    assert resumed.decision == "blocked"
+    assert resumed.blockers[0]["code"] == "sync_delta_mismatch"
+
+
+def test_sync_branch_identity_remains_non_promotable_after_body_edit(
+    promotion_harness: PromotionHarness,
+) -> None:
+    source = promotion_harness.github.prs[372]
+    promotion_harness.github.prs[372] = replace(
+        source,
+        head_ref="awf/sync-deadbeefdeadbeef-0123456789ab/feature",
+        body="marker removed",
+    )
+
+    result = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=False,
+    )
+
+    assert result.blockers[0]["code"] == "source_pr_not_promotable"

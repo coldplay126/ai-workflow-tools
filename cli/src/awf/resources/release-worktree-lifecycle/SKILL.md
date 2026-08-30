@@ -90,6 +90,38 @@ awf wt finish --repo-root <repo-root> --pr <merged-pr> --json
 awf wt finish --repo-root <repo-root> --pr <merged-pr> --apply --json
 ```
 
+## Production-to-staging branch synchronization
+
+Use `awf wt sync` after production receives content that is absent from the
+configured staging branch. It accepts only the configured
+`worktree.production_branch` as `--from` and `worktree.default_base` as `--to`.
+It reconstructs the source-only delta since the live merge base on the latest
+target; it MUST NOT merge either branch wholesale.
+
+After the required status preflight, inspect and then apply:
+
+```sh
+awf wt sync --from main --to staging --repo-root <repo-root> --json
+awf wt sync --from main --to staging --repo-root <repo-root> --apply --json
+```
+
+A `noop` result means staging already contains the production content and MUST
+NOT create a worktree, branch, or PR. Apply pins both live branch SHAs, uses a
+managed feature lease, preserves clean staging-only three-way merge results
+(including Git modes), requires configured prepare and production verification,
+then rechecks both remote SHAs before and after publication. It refuses an
+existing sync PR, a pre-existing remote sync branch, and an incomplete open-PR
+scan. An interrupted clean publication resumes the same verified lease; a true
+source/target conflict, drift, dirty prepare, or failed verification is
+`blocked` and preserves the managed worktree and branch.
+
+Every sync commit and PR carries `AWF-No-Promote: true`, and every generated
+branch uses the permanently reserved `awf/sync-<pair>-<source>/feature` shape.
+`wt promote` and `wt release add` MUST reject either identity with
+`source_pr_not_promotable`, avoiding a production↔staging loop. Merge the sync
+PR only after repository checks and review policy pass; the command does not
+bypass or invent those gates.
+
 ## Production promotion
 
 A production promotion MUST contain only the ordered source PR deltas, never
@@ -400,6 +432,8 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
     "acquire_apply": "awf wt acquire --initiative <initiative> --purpose feature --repo-root <repo-root> --apply --json",
     "link_pr_preview": "awf wt link-pr --lease <id> --pr <merged-pr> --json",
     "link_pr_apply": "awf wt link-pr --lease <id> --pr <merged-pr> --apply --json",
+    "sync_preview": "awf wt sync --from main --to staging --repo-root <repo-root> --json",
+    "sync_apply": "awf wt sync --from main --to staging --repo-root <repo-root> --apply --json",
     "promote_preview": "awf wt promote --source-pr <number> --to <branch> --repo-root <repo-root> --json",
     "promote_apply": "awf wt promote --source-pr <number> --to <branch> --repo-root <repo-root> --apply --json",
     "release_open_preview": "awf wt release open --release <id> --to <branch> --repo-root <repo-root> --json",
@@ -425,6 +459,13 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
     "preflight": "required_non_destructive_status_refresh",
     "lease_reuse": "exact",
     "promotion_scope": "source_pr_delta_only",
+    "branch_sync": {
+      "direction": "configured_production_to_staging_only",
+      "scope": "source_only_delta_since_live_merge_base",
+      "provenance": "pinned_source_target_reserved_branch_and_no_promote_marker",
+      "remote_drift": "blocked_before_and_after_publish",
+      "promotion_loop": "source_pr_not_promotable"
+    },
     "release_bridge": {
       "source_pins": "ordered_immutable_base_head_merge_paths",
       "source_add_after_seal": "forbidden",
@@ -504,6 +545,7 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
     "preview_before_apply": [
       "acquire",
       "link-pr",
+      "sync",
       "promote",
       "release_open",
       "release_add",
@@ -538,6 +580,7 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
     "preview": {
       "acquire": "review_then_apply_explicitly",
       "link_pr": "review_then_apply_explicitly",
+      "sync": "review_then_apply_explicitly",
       "promote": "review_then_apply_explicitly",
       "release_open": "review_then_apply_explicitly",
       "release_add": "review_then_apply_explicitly",
@@ -553,6 +596,7 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
       "status": "inspect_select_lifecycle_action",
       "acquire_apply": "use_or_report_returned_lease",
       "link_pr_apply": "restart_status_preflight_then_finish",
+      "sync_apply": "use_or_report_returned_lease",
       "promote_apply": "use_or_report_returned_lease",
       "release_open_apply": "use_or_report_returned_lease",
       "release_add_apply": "use_or_report_returned_lease",
