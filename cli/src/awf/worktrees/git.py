@@ -441,7 +441,7 @@ class GitClient:
         return completed.stdout.decode("utf-8", errors="replace").rstrip("\n")
 
 
-    def path_blob(self, ref: str, path: str) -> str | None:
+    def path_entry(self, ref: str, path: str) -> tuple[str, str] | None:
         completed = self._run("ls-tree", "-z", ref, "--", path)
         if not completed.stdout:
             return None
@@ -450,7 +450,18 @@ class GitClient:
         fields = metadata.split()
         if not separator or len(fields) != 3:
             raise GitError("git ls-tree returned an invalid path record")
-        return fields[2].decode("ascii", errors="strict")
+        mode = fields[0].decode("ascii", errors="strict")
+        object_id = fields[2].decode("ascii", errors="strict")
+        if (
+            mode not in {"100644", "100755", "120000", "160000"}
+            or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", object_id) is None
+        ):
+            raise GitError("git ls-tree returned invalid path metadata")
+        return mode, object_id
+
+    def path_blob(self, ref: str, path: str) -> str | None:
+        entry = self.path_entry(ref, path)
+        return entry[1] if entry is not None else None
 
     def binary_diff(
         self,

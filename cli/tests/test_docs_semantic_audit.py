@@ -1147,6 +1147,8 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "acquire_apply": ("wt", "acquire"),
         "link_pr_preview": ("wt", "link-pr"),
         "link_pr_apply": ("wt", "link-pr"),
+        "sync_preview": ("wt", "sync"),
+        "sync_apply": ("wt", "sync"),
         "promote_preview": ("wt", "promote"),
         "promote_apply": ("wt", "promote"),
         "out_of_order_promote_preview": ("wt", "promote"),
@@ -1183,6 +1185,12 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
     assert "--lease" in commands["link_pr_apply"]
     assert "--pr" in commands["link_pr_apply"]
     assert "--apply" in commands["link_pr_apply"]
+    assert "--from main" in commands["sync_preview"]
+    assert "--to staging" in commands["sync_preview"]
+    assert "--apply" not in commands["sync_preview"]
+    assert "--from main" in commands["sync_apply"]
+    assert "--to staging" in commands["sync_apply"]
+    assert "--apply" in commands["sync_apply"]
     assert "--apply" not in commands["promote_preview"]
     assert "--apply" in commands["promote_apply"]
 
@@ -1213,6 +1221,13 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
     assert safety["preflight"] == "required_non_destructive_status_refresh"
     assert safety["lease_reuse"] == "exact"
     assert safety["promotion_scope"] == "source_pr_delta_only"
+    assert safety["branch_sync"] == {
+        "direction": "configured_production_to_staging_only",
+        "scope": "source_only_delta_since_live_merge_base",
+        "provenance": "pinned_source_target_reserved_branch_and_no_promote_marker",
+        "remote_drift": "blocked_before_and_after_publish",
+        "promotion_loop": "source_pr_not_promotable",
+    }
     assert safety["deployment_health"] == "repository_rollout_evidence"
     assert safety["blocked_action"] == "preserve_worktree_report_code_message"
     assert safety["out_of_order"] == {
@@ -1282,6 +1297,7 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
     assert safety["preview_before_apply"] == [
         "acquire",
         "link-pr",
+        "sync",
         "promote",
         "release_open",
         "release_add",
@@ -1315,6 +1331,7 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "preview": {
             "acquire": "review_then_apply_explicitly",
             "link_pr": "review_then_apply_explicitly",
+            "sync": "review_then_apply_explicitly",
             "promote": "review_then_apply_explicitly",
             "release_open": "review_then_apply_explicitly",
             "release_add": "review_then_apply_explicitly",
@@ -1330,6 +1347,7 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
             "status": "inspect_select_lifecycle_action",
             "acquire_apply": "use_or_report_returned_lease",
             "link_pr_apply": "restart_status_preflight_then_finish",
+            "sync_apply": "use_or_report_returned_lease",
             "promote_apply": "use_or_report_returned_lease",
             "release_open_apply": "use_or_report_returned_lease",
             "release_add_apply": "use_or_report_returned_lease",

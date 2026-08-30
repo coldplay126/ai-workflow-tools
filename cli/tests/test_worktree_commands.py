@@ -610,6 +610,32 @@ def test_wt_acquire_parser_surface() -> None:
     assert args.json is True
 
 
+def test_wt_sync_parser_surface() -> None:
+    args = build_parser().parse_args(
+        [
+            "wt",
+            "sync",
+            "--from",
+            "main",
+            "--to",
+            "staging",
+            "--repo-root",
+            "/repo",
+            "--apply",
+            "--json",
+        ]
+    )
+
+    assert args.command == "wt"
+    assert args.wt_command == "sync"
+    assert args.from_branch == "main"
+    assert args.to == "staging"
+    assert args.repo_root == "/repo"
+    assert args.apply is True
+    assert args.json is True
+    assert args.handler.__name__ == "run_wt_sync"
+
+
 def test_wt_promote_parser_surface() -> None:
     args = build_parser().parse_args(
         [
@@ -731,6 +757,46 @@ def test_wt_release_parser_surface(
         assert args.to == "main"
     if args.wt_release_command == "add":
         assert args.source_pr == 372
+
+
+def test_wt_sync_forwards_branches_and_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = make_repository(tmp_path)
+    received: dict[str, object] = {}
+
+    def record_sync(*_args: object, **kwargs: object) -> CommandResult:
+        received.update(kwargs)
+        return CommandResult.ok("wt.sync", decision="preview")
+
+    monkeypatch.setattr(
+        "awf.commands.wt.WorktreeService.sync",
+        record_sync,
+    )
+
+    rc, stdout, stderr = capture_main(
+        [
+            "wt",
+            "sync",
+            "--from",
+            "main",
+            "--to",
+            "staging",
+            "--repo-root",
+            str(repo),
+            "--apply",
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    assert stderr == ""
+    assert json.loads(stdout)["command"] == "wt.sync"
+    assert received == {
+        "source_branch": "main",
+        "target_branch": "staging",
+        "apply": True,
+    }
 
 
 def test_wt_promote_forwards_out_of_order(

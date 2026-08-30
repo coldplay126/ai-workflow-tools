@@ -11,12 +11,14 @@ from typing import Any
 
 _GH_VIEW_FIELDS = (
     "number,state,baseRefName,baseRefOid,headRefName,headRefOid,mergeCommit,"
-    "reviewDecision,statusCheckRollup,files,url,author,mergedBy"
+    "reviewDecision,statusCheckRollup,files,url,author,mergedBy,body"
 )
 _ALLOWED_CHECK_CONCLUSIONS = frozenset({"SUCCESS", "SKIPPED", "NEUTRAL"})
 _MAX_CHANGED_PATHS = 256
 _MAX_CHANGED_PATH_BYTES = 1024
 _MAX_FIELD_BYTES = 2048
+_MAX_BODY_CHARACTERS = 65536
+_MAX_OPEN_PULL_REQUESTS = 1000
 _MAX_STDERR_BYTES = 512
 _HTTP_URL_USERINFO = re.compile(r"(?P<scheme>https?://)(?P<userinfo>[^/@\s]*@)", re.IGNORECASE)
 _SECRET = re.compile(
@@ -44,6 +46,7 @@ class PullRequest:
     url: str
     author_login: str | None = None
     merged_by_login: str | None = None
+    body: str = ""
 
 
 class GhClient:
@@ -100,6 +103,53 @@ class GhClient:
                 "gh pr list returned multiple open pull requests for the branch"
             )
         return matches[0] if matches else None
+
+    def find_open_prs_by_prefix(
+        self, *, base: str, head_prefix: str
+    ) -> tuple[PullRequest, ...]:
+        if (
+            not isinstance(base, str)
+            or not base
+            or not isinstance(head_prefix, str)
+            or not head_prefix
+        ):
+            raise ValueError("pull request base and head prefix must be non-empty strings")
+        completed = self._run(
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--base",
+            base,
+            "--json",
+            _GH_VIEW_FIELDS,
+            "--limit",
+            str(_MAX_OPEN_PULL_REQUESTS),
+        )
+        try:
+            payload = json.loads(completed.stdout)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ExternalServiceError("gh pr list returned malformed JSON") from error
+        if not isinstance(payload, list):
+            raise ExternalServiceError("gh pr list returned an invalid pull request list")
+        if len(payload) >= _MAX_OPEN_PULL_REQUESTS:
+            raise ExternalServiceError(
+                "gh pr list reached the fail-closed open pull request limit"
+            )
+        matches: list[PullRequest] = []
+        for item in payload:
+            if (
+                not isinstance(item, dict)
+                or item.get("baseRefName") != base
+                or not isinstance(item.get("headRefName"), str)
+                or not item["headRefName"].startswith(head_prefix)
+            ):
+                continue
+            pull_request = _pull_request_from_json(json.dumps(item))
+            if pull_request.state == "OPEN":
+                matches.append(pull_request)
+        return tuple(matches)
+
 
     def find_pr(self, *, head: str, base: str) -> PullRequest | None:
         if not isinstance(head, str) or not head or not isinstance(base, str) or not base:
@@ -193,6 +243,7 @@ def _pull_request_from_json(value: str) -> PullRequest:
         url = _required_string(payload, "url")
         author_login = _optional_login(payload.get("author"), "author")
         merged_by_login = _optional_login(payload.get("mergedBy"), "mergedBy")
+        body = _optional_body(payload.get("body"))
     except (TypeError, ValueError) as error:
         raise ExternalServiceError("gh pr view returned an invalid pull request") from error
     return PullRequest(
@@ -209,6 +260,7 @@ def _pull_request_from_json(value: str) -> PullRequest:
         url=url,
         author_login=author_login,
         merged_by_login=merged_by_login,
+        body=body,
     )
 
 
@@ -251,6 +303,14 @@ def _optional_string(value: object) -> str:
     if not isinstance(value, str) or len(value.encode("utf-8")) > _MAX_FIELD_BYTES:
         raise ValueError("string")
     return value
+
+
+def _optional_body(value: object) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError("body")
+    return value[:_MAX_BODY_CHARACTERS]
 
 
 def _merge_commit_sha(value: object) -> str | None:

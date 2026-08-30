@@ -71,6 +71,7 @@ _GITHUB_ACTOR_LOGIN = re.compile(
     r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}(?:\[bot\])?"
 )
 _GIT_OBJECT_ID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+_SYNC_BRANCH = re.compile(r"awf/sync-[0-9a-f]{16}-[0-9a-f]{12}/feature")
 
 
 
@@ -240,6 +241,396 @@ class WorktreeService:
             if prepare_error is not None:
                 return self._block_prepare_failure(lease, prepare_error)
             return CommandResult.ok("wt.acquire", decision="ready", lease=lease)
+
+    def sync(
+        self,
+        *,
+        source_branch: str,
+        target_branch: str,
+        apply: bool,
+    ) -> CommandResult:
+        command = "wt.sync"
+        try:
+            source_ref, target_ref = self._sync_refs(source_branch, target_branch)
+        except ConfigError as error:
+            return self._sync_blocked("invalid_sync_branches", str(error))
+        if not self.config.verify_production:
+            return self._sync_blocked(
+                "sync_verify_missing",
+                "verify.production.commands must configure at least one command",
+            )
+
+        repository_id = self.git.repository_id()
+        initiative = self._sync_initiative(source_branch, target_branch)
+        if not apply:
+            try:
+                source_sha = self.git.resolve_ref(source_ref)
+                target_sha = self.git.resolve_ref(target_ref)
+                merge_base, expected_blobs = self._sync_expected_blobs(
+                    source_sha, target_sha
+                )
+            except GitError as error:
+                return self._sync_blocked("sync_ref_unavailable", str(error))
+            if not expected_blobs:
+                return self._sync_noop(
+                    source_branch,
+                    target_branch,
+                    source_sha,
+                    target_sha,
+                    merge_base,
+                )
+            branch = self._sync_branch(initiative, source_sha)
+            lease = self._new_sync_lease(
+                initiative=initiative,
+                branch=branch,
+                source_ref=source_ref,
+                target_ref=target_ref,
+                source_sha=source_sha,
+                target_sha=target_sha,
+                merge_base=merge_base,
+                reviewed_paths=tuple(expected_blobs),
+            )
+            try:
+                active = self.registry.find_active_read_only(
+                    repository_id, initiative, Purpose.FEATURE
+                )
+            except sqlite3.Error as error:
+                return self._sync_blocked("registry_conflict", str(error))
+            if active is not None:
+                return self._reuse_sync(active, expected=lease)
+            return CommandResult.ok(
+                command,
+                decision="preview",
+                actions=(
+                    {
+                        "kind": "create_worktree",
+                        "path": str(lease.worktree_path),
+                        "branch": lease.branch,
+                        "source_branch": source_branch,
+                        "source_base_sha": merge_base,
+                        "source_head_sha": source_sha,
+                        "target_branch": target_branch,
+                        "target_base_sha": target_sha,
+                        "changed_paths": list(lease.reviewed_paths),
+                    },
+                    {
+                        "kind": "apply_source_delta",
+                        "from": source_branch,
+                        "to": target_branch,
+                        "paths": list(lease.reviewed_paths),
+                    },
+                    *(
+                        {
+                            "kind": "verify_production",
+                            "argv": list(verification_command),
+                        }
+                        for verification_command in self.config.verify_production
+                    ),
+                    {
+                        "kind": "open_pull_request",
+                        "base": target_branch,
+                        "head": lease.branch,
+                    },
+                ),
+            )
+
+        with repository_lock(self.lock_dir / f"{repository_id}.lock"):
+            try:
+                source_sha = self.git.fetch_ref(source_branch)
+                target_sha = self.git.fetch_ref(target_branch)
+                merge_base, expected_blobs = self._sync_expected_blobs(
+                    source_sha, target_sha
+                )
+            except GitRemoteError as error:
+                return self._external_error(
+                    command, "sync_ref_unavailable", str(error)
+                )
+            except GitError as error:
+                return self._sync_blocked("sync_ref_unavailable", str(error))
+            if not expected_blobs:
+                return self._sync_noop(
+                    source_branch,
+                    target_branch,
+                    source_sha,
+                    target_sha,
+                    merge_base,
+                )
+
+            branch = self._sync_branch(initiative, source_sha)
+            lease = self._new_sync_lease(
+                initiative=initiative,
+                branch=branch,
+                source_ref=source_ref,
+                target_ref=target_ref,
+                source_sha=source_sha,
+                target_sha=target_sha,
+                merge_base=merge_base,
+                reviewed_paths=tuple(expected_blobs),
+            )
+            github = self.github or GhClient(self.git.repository_root())
+            active = self.registry.find_active(
+                repository_id, initiative, Purpose.FEATURE
+            )
+            if active is not None:
+                return self._resume_sync_publication(
+                    active,
+                    expected=lease,
+                    github=github,
+                    source_branch=source_branch,
+                    target_branch=target_branch,
+                )
+            branch_conflict = self._branch_conflict(branch)
+            if branch_conflict is not None:
+                return self._sync_blocked(
+                    "branch_conflict",
+                    f"branch {branch!r} is already checked out at {branch_conflict}",
+                    lease=lease,
+                )
+
+            sync_head_prefix = f"awf/{initiative}-"
+            try:
+                existing_pull_requests = github.find_open_prs_by_prefix(
+                    base=target_branch,
+                    head_prefix=sync_head_prefix,
+                )
+                remote_branch_sha = self.git.remote_branch_sha(branch)
+            except (ExternalServiceError, GitRemoteError) as error:
+                return self._external_error(
+                    command, "sync_publish_failed", str(error), lease=lease
+                )
+            if existing_pull_requests:
+                pull_request_numbers = ", ".join(
+                    f"#{pull_request.number}"
+                    for pull_request in existing_pull_requests
+                )
+                return self._sync_blocked(
+                    "sync_pr_open",
+                    (
+                        f"sync pull request {pull_request_numbers} is already open "
+                        f"for {source_branch!r} to {target_branch!r}"
+                    ),
+                    lease=lease,
+                )
+            if remote_branch_sha is not None:
+                return self._sync_blocked(
+                    "sync_branch_exists",
+                    (
+                        f"remote branch {branch!r} already exists without an "
+                        "active managed synchronization lease"
+                    ),
+                    lease=lease,
+                )
+
+            try:
+                self.git.add_worktree(
+                    lease.worktree_path,
+                    lease.branch,
+                    target_sha,
+                    reuse_exact_branch=True,
+                )
+            except GitError as error:
+                return self._sync_blocked(
+                    "worktree_conflict", str(error), lease=lease
+                )
+            try:
+                lease = replace(
+                    lease, head_sha=self.git.head_sha(lease.worktree_path)
+                )
+                lease = self.registry.create_lease(lease)
+            except (GitError, OSError, RuntimeError, ValueError, sqlite3.Error) as error:
+                result = self._handle_creation_failure(lease, error, target_sha)
+                return replace(result, command=command)
+
+            try:
+                patch = self.git.binary_diff(
+                    merge_base,
+                    source_sha,
+                    paths=lease.reviewed_paths,
+                )
+                if not patch:
+                    return self._block_sync_lease(
+                        lease,
+                        "sync_delta_mismatch",
+                        "source-only paths produced an empty synchronization delta",
+                    )
+                self.git.apply_indexed_patch(lease.worktree_path, patch)
+                sync_head = self.git.commit(
+                    lease.worktree_path,
+                    self._sync_message(
+                        source_branch=source_branch,
+                        target_branch=target_branch,
+                        merge_base=merge_base,
+                        source_sha=source_sha,
+                        target_sha=target_sha,
+                        lease=lease,
+                    ),
+                )
+                synced_paths = tuple(
+                    sorted(
+                        self.git.changed_paths(
+                            lease.worktree_path,
+                            target_sha,
+                            sync_head,
+                            find_renames=False,
+                        )
+                    )
+                )
+                if synced_paths != lease.reviewed_paths:
+                    return self._block_sync_lease(
+                        lease,
+                        "sync_delta_mismatch",
+                        "synchronization paths do not exactly match the source-only delta",
+                    )
+                prepare_error = self._prepare(lease, force=True)
+                if prepare_error is not None:
+                    return self._block_sync_lease(
+                        lease, "sync_prepare_failed", prepare_error
+                    )
+                if self.git.status_porcelain(lease.worktree_path):
+                    return self._block_sync_lease(
+                        lease,
+                        "sync_prepare_dirty",
+                        "sync prepare command left uncommitted changes",
+                    )
+                verification_actions = self._verify_promotion(lease.worktree_path)
+            except GitPatchConflict as error:
+                return self._block_sync_lease(
+                    lease,
+                    "sync_target_conflict",
+                    "source-only delta conflicts with target paths: "
+                    + ", ".join(error.paths),
+                )
+            except (GitError, OSError, RuntimeError, subprocess.SubprocessError) as error:
+                return self._block_sync_lease(
+                    lease, "sync_apply_failed", str(error)
+                )
+
+            try:
+                live_source_sha = self.git.remote_branch_sha(source_branch)
+                live_target_sha = self.git.remote_branch_sha(target_branch)
+            except GitRemoteError as error:
+                return self._external_error(
+                    command, "sync_publish_failed", str(error), lease=lease
+                )
+            if live_source_sha != source_sha:
+                return self._block_sync_lease(
+                    lease,
+                    "sync_source_changed",
+                    f"source branch {source_branch!r} changed after verification",
+                )
+            if live_target_sha != target_sha:
+                return self._block_sync_lease(
+                    lease,
+                    "sync_target_changed",
+                    f"target branch {target_branch!r} changed after verification",
+                )
+            try:
+                lease = self.registry.transition(
+                    lease.id,
+                    LeaseState.ACTIVE,
+                    expected_version=lease.version,
+                    event_type="sync_publish_pending",
+                    summary="branch synchronization verified; publication pending",
+                    observed_head_sha=sync_head,
+                    head_sha=sync_head,
+                )
+            except (RuntimeError, sqlite3.Error) as error:
+                return self._sync_blocked(
+                    "registry_conflict", str(error), lease=lease
+                )
+            try:
+                self.git.push_branch(lease.worktree_path, lease.branch)
+            except GitError as error:
+                return self._external_error(
+                    command, "sync_publish_failed", str(error), lease=lease
+                )
+            drift_blocker = self._sync_remote_drift_blocker(
+                lease=lease,
+                source_branch=source_branch,
+                target_branch=target_branch,
+                source_sha=source_sha,
+                target_sha=target_sha,
+            )
+            if drift_blocker is not None:
+                return drift_blocker
+            try:
+                target_pull_request = github.find_open_pr(
+                    head=lease.branch, base=target_branch
+                )
+                if target_pull_request is None:
+                    target_pull_request = github.create_pr(
+                        base=target_branch,
+                        head=lease.branch,
+                        title=f"Sync {source_branch} to {target_branch}",
+                        body=self._sync_body(
+                            source_branch=source_branch,
+                            target_branch=target_branch,
+                            merge_base=merge_base,
+                            source_sha=source_sha,
+                            target_sha=target_sha,
+                            lease=lease,
+                        ),
+                    )
+            except ExternalServiceError as error:
+                return self._external_error(
+                    command, "sync_publish_failed", str(error), lease=lease
+                )
+            expected_body = self._sync_body(
+                source_branch=source_branch,
+                target_branch=target_branch,
+                merge_base=merge_base,
+                source_sha=source_sha,
+                target_sha=target_sha,
+                lease=lease,
+            )
+            if (
+                target_pull_request.state != "OPEN"
+                or target_pull_request.base_ref != target_branch
+                or target_pull_request.head_ref != lease.branch
+                or target_pull_request.body != expected_body
+                or target_pull_request.base_sha != target_sha
+            ):
+                return self._block_sync_lease(
+                    lease,
+                    "sync_pr_mismatch",
+                    "GitHub did not return the exact open synchronization pull request",
+                )
+            if target_pull_request.head_sha != sync_head:
+                return self._block_sync_lease(
+                    lease,
+                    "sync_pr_head_mismatch",
+                    "GitHub synchronization pull request head does not match verification",
+                )
+            drift_blocker = self._sync_remote_drift_blocker(
+                lease=lease,
+                source_branch=source_branch,
+                target_branch=target_branch,
+                source_sha=source_sha,
+                target_sha=target_sha,
+            )
+            if drift_blocker is not None:
+                return drift_blocker
+            try:
+                lease = self.registry.transition(
+                    lease.id,
+                    LeaseState.PR_OPEN,
+                    expected_version=lease.version,
+                    event_type="sync_pr_open",
+                    summary=f"sync PR #{target_pull_request.number} opened",
+                    observed_head_sha=sync_head,
+                    pr_number=target_pull_request.number,
+                    head_sha=sync_head,
+                )
+            except (RuntimeError, sqlite3.Error) as error:
+                return self._sync_blocked(
+                    "registry_conflict", str(error), lease=lease
+                )
+            return CommandResult.ok(
+                command,
+                decision="ready",
+                lease=lease,
+                actions=verification_actions,
+            )
 
     def promote(
         self,
@@ -740,17 +1131,38 @@ class WorktreeService:
                                 " pull requests"
                             ),
                         )
-                    if any(
-                        expected_blobs[path]
-                        != self.git.path_blob(promotion_head, path)
+                    mismatched_paths = tuple(
+                        path
                         for path in expected_paths
-                    ):
+                        if expected_blobs[path]
+                        != self.git.path_blob(promotion_head, path)
+                    )
+                    if mismatched_paths:
+                        staging_branch = self.config.default_base or sources[0].base_ref
+                        if self.config.production_branch is None:
+                            recommendation = (
+                                "configure worktree.production_branch, then run "
+                                "`awf wt sync` from production to staging"
+                            )
+                        else:
+                            repository_root = json.dumps(
+                                str(self.git.repository_root())
+                            )
+                            recommendation = (
+                                "synchronize it with "
+                                f"`awf wt sync --from {self.config.production_branch} "
+                                f"--to {staging_branch} --repo-root {repository_root} "
+                                "--apply --json`"
+                            )
                         return self._block_promotion_lease(
                             lease,
-                            "promotion_content_mismatch",
+                            "staging_missing_main_delta",
                             (
-                                "promotion contents do not exactly match the ordered"
-                                " reviewed pull requests"
+                                "configured staging is missing production-branch "
+                                "content on reviewed paths: "
+                                + ", ".join(mismatched_paths)
+                                + "; "
+                                + recommendation
                             ),
                         )
                 elif not promoted_paths or not all(
@@ -6062,6 +6474,521 @@ class WorktreeService:
                 raise ValueError(error_message)
         return tuple(sorted(values))
 
+    @staticmethod
+    def _sync_initiative(source_branch: str, target_branch: str) -> str:
+        digest = hashlib.sha256(
+            f"{source_branch}\0{target_branch}".encode("utf-8")
+        ).hexdigest()[:16]
+        return f"sync-{digest}"
+
+    @staticmethod
+    def _sync_branch(initiative: str, source_sha: str) -> str:
+        if _GIT_OBJECT_ID.fullmatch(source_sha) is None:
+            raise ValueError("sync source SHA is invalid")
+        return f"awf/{initiative}-{source_sha[:12]}/feature"
+
+    def _sync_remote_drift_blocker(
+        self,
+        *,
+        lease: Lease,
+        source_branch: str,
+        target_branch: str,
+        source_sha: str,
+        target_sha: str,
+    ) -> CommandResult | None:
+        try:
+            live_source_sha = self.git.remote_branch_sha(source_branch)
+            live_target_sha = self.git.remote_branch_sha(target_branch)
+        except GitRemoteError as error:
+            return self._external_error(
+                "wt.sync", "sync_publish_failed", str(error), lease=lease
+            )
+        if live_source_sha != source_sha:
+            return self._block_sync_lease(
+                lease,
+                "sync_source_changed",
+                f"source branch {source_branch!r} changed after verification",
+            )
+        if live_target_sha != target_sha:
+            return self._block_sync_lease(
+                lease,
+                "sync_target_changed",
+                f"target branch {target_branch!r} changed after verification",
+            )
+        return None
+
+    def _sync_refs(
+        self, source_branch: str, target_branch: str
+    ) -> tuple[str, str]:
+        if not isinstance(source_branch, str) or not source_branch:
+            raise ConfigError("sync source branch must be a non-empty string")
+        if not isinstance(target_branch, str) or not target_branch:
+            raise ConfigError("sync target branch must be a non-empty string")
+        source_ref = self._remote_base_ref(source_branch)
+        target_ref = self._remote_base_ref(target_branch)
+        if source_ref != f"origin/{source_branch}":
+            raise ConfigError("sync source branch must not include a ref prefix")
+        if target_ref != f"origin/{target_branch}":
+            raise ConfigError("sync target branch must not include a ref prefix")
+        if source_ref == target_ref:
+            raise ConfigError("sync source and target branches must differ")
+        if self.config.production_branch is None:
+            raise ConfigError(
+                "worktree.production_branch must identify the production branch"
+            )
+        if self.config.default_base is None:
+            raise ConfigError("worktree.default_base must identify the staging branch")
+        configured_source = self._remote_base_ref(self.config.production_branch)
+        configured_target = self._remote_base_ref(self.config.default_base)
+        if source_ref != configured_source:
+            raise ConfigError(
+                "sync source branch must match configured production branch "
+                f"{self.config.production_branch!r}"
+            )
+        if target_ref != configured_target:
+            raise ConfigError(
+                "sync target branch must match configured staging branch "
+                f"{self.config.default_base!r}"
+            )
+        return source_ref, target_ref
+
+    def _sync_expected_blobs(
+        self, source_sha: str, target_sha: str
+    ) -> tuple[str, dict[str, tuple[str, str] | None]]:
+        merge_base = self.git.merge_base(source_sha, target_sha)
+        source_paths = tuple(
+            sorted(
+                self.git.changed_path_endpoints(
+                    self.git.repository_root(),
+                    merge_base,
+                    source_sha,
+                )
+            )
+        )
+        expected_entries = {
+            path: source_entry
+            for path in source_paths
+            if (source_entry := self.git.path_entry(source_sha, path))
+            != self.git.path_entry(target_sha, path)
+        }
+        return merge_base, expected_entries
+
+    def _new_sync_lease(
+        self,
+        *,
+        initiative: str,
+        branch: str,
+        source_ref: str,
+        target_ref: str,
+        source_sha: str,
+        target_sha: str,
+        merge_base: str,
+        reviewed_paths: tuple[str, ...],
+    ) -> Lease:
+        lease = Lease.new(
+            repository_id=self.git.repository_id(),
+            repository_name=self.git.repository_name(),
+            repository_root=self.git.repository_root(),
+            worktree_path=self.cache_dir / self.git.repository_name(),
+            initiative=initiative,
+            purpose=Purpose.FEATURE,
+            branch=branch,
+            base_ref=target_ref,
+            head_sha=target_sha,
+            managed=True,
+            owner_kind="awf",
+            source_base_sha=merge_base,
+            source_head_sha=source_sha,
+            target_base_sha=target_sha,
+            reviewed_paths=reviewed_paths,
+        )
+        return replace(
+            lease,
+            worktree_path=self.cache_dir / lease.repository_name / lease.id,
+        )
+
+    def _reuse_sync(self, lease: Lease, *, expected: Lease) -> CommandResult:
+        if (
+            lease.purpose is not Purpose.FEATURE
+            or lease.branch != expected.branch
+            or lease.base_ref != expected.base_ref
+        ):
+            return self._sync_blocked(
+                "sync_lease_conflict",
+                f"lease {lease.id} does not match the requested branch synchronization",
+                lease=lease,
+            )
+        if (
+            lease.source_base_sha != expected.source_base_sha
+            or lease.source_head_sha != expected.source_head_sha
+            or lease.target_base_sha != expected.target_base_sha
+            or lease.reviewed_paths != expected.reviewed_paths
+        ):
+            return self._sync_blocked(
+                "sync_lease_stale",
+                (
+                    f"lease {lease.id} pins an older source or target; finish its "
+                    "pull request before starting another synchronization"
+                ),
+                lease=lease,
+            )
+        if lease.state is not LeaseState.PR_OPEN or lease.target_pr is None:
+            return self._sync_blocked(
+                "sync_lease_incomplete",
+                f"lease {lease.id} is {lease.state.value}; preserve it for recovery",
+                lease=lease,
+            )
+        worktree = self._registered_worktree(lease)
+        if (
+            worktree is None
+            or worktree.branch != lease.branch
+            or worktree.detached
+            or worktree.bare
+        ):
+            return self._sync_blocked(
+                "orphaned_sync_lease",
+                f"lease {lease.id} is not registered as its managed Git worktree",
+                lease=lease,
+            )
+        if self.git.status_porcelain(lease.worktree_path):
+            return self._sync_blocked(
+                "dirty_sync_lease",
+                f"lease {lease.id} has uncommitted changes",
+                lease=lease,
+            )
+        if self.git.head_sha(lease.worktree_path) != lease.head_sha:
+            return self._sync_blocked(
+                "sync_lease_head_mismatch",
+                f"lease {lease.id} worktree head changed",
+                lease=lease,
+            )
+        return CommandResult.ok("wt.sync", decision="reuse", lease=lease)
+
+    def _resume_sync_publication(
+        self,
+        lease: Lease,
+        *,
+        expected: Lease,
+        github: GhClient,
+        source_branch: str,
+        target_branch: str,
+    ) -> CommandResult:
+        if lease.state is LeaseState.PR_OPEN:
+            return self._reuse_sync(lease, expected=expected)
+        if (
+            lease.purpose is not Purpose.FEATURE
+            or lease.branch != expected.branch
+            or lease.base_ref != expected.base_ref
+            or lease.source_base_sha != expected.source_base_sha
+            or lease.source_head_sha != expected.source_head_sha
+            or lease.target_base_sha != expected.target_base_sha
+            or lease.reviewed_paths != expected.reviewed_paths
+        ):
+            return self._sync_blocked(
+                "sync_lease_stale",
+                (
+                    f"lease {lease.id} does not match the current source and target "
+                    "provenance"
+                ),
+                lease=lease,
+            )
+        if lease.state not in {LeaseState.ACTIVE, LeaseState.BLOCKED}:
+            return self._sync_blocked(
+                "sync_lease_incomplete",
+                f"lease {lease.id} is {lease.state.value}; preserve it for recovery",
+                lease=lease,
+            )
+        worktree = self._registered_worktree(lease)
+        if (
+            worktree is None
+            or worktree.branch != lease.branch
+            or worktree.detached
+            or worktree.bare
+        ):
+            return self._sync_blocked(
+                "orphaned_sync_lease",
+                f"lease {lease.id} is not registered as its managed Git worktree",
+                lease=lease,
+            )
+        if self.git.status_porcelain(lease.worktree_path):
+            return self._sync_blocked(
+                "dirty_sync_lease",
+                f"lease {lease.id} has uncommitted changes",
+                lease=lease,
+            )
+        actual_head = self.git.head_sha(lease.worktree_path)
+        assert lease.source_base_sha is not None
+        assert lease.source_head_sha is not None
+        assert lease.target_base_sha is not None
+        expected_message = self._sync_message(
+            source_branch=source_branch,
+            target_branch=target_branch,
+            merge_base=lease.source_base_sha,
+            source_sha=lease.source_head_sha,
+            target_sha=lease.target_base_sha,
+            lease=lease,
+        )
+        if (
+            actual_head == lease.target_base_sha
+            or self.git.commit_parents(actual_head) != (lease.target_base_sha,)
+            or self.git.commit_message(lease.worktree_path) != expected_message
+        ):
+            return self._sync_blocked(
+                "sync_lease_head_mismatch",
+                f"lease {lease.id} does not retain its verified synchronization commit",
+                lease=lease,
+            )
+        synced_paths = tuple(
+            sorted(
+                self.git.changed_path_endpoints(
+                    lease.worktree_path,
+                    lease.target_base_sha,
+                    actual_head,
+                )
+            )
+        )
+        if synced_paths != lease.reviewed_paths:
+            return self._block_sync_lease(
+                lease,
+                "sync_delta_mismatch",
+                "synchronization commit changed paths outside the source-only delta",
+            )
+        if actual_head != lease.head_sha:
+            try:
+                lease = self.registry.transition(
+                    lease.id,
+                    LeaseState.ACTIVE,
+                    expected_version=lease.version,
+                    event_type="sync_publish_pending",
+                    summary="synchronization commit reconciled; publication pending",
+                    observed_head_sha=actual_head,
+                    head_sha=actual_head,
+                )
+            except (RuntimeError, sqlite3.Error) as error:
+                return self._sync_blocked(
+                    "registry_conflict", str(error), lease=lease
+                )
+        prepare_error = self._prepare(lease, force=False)
+        if prepare_error is not None:
+            return self._block_sync_lease(
+                lease, "sync_prepare_failed", prepare_error
+            )
+        if self.git.status_porcelain(lease.worktree_path):
+            return self._block_sync_lease(
+                lease,
+                "sync_prepare_dirty",
+                "sync prepare command left uncommitted changes",
+            )
+        try:
+            verification_actions = self._verify_promotion(lease.worktree_path)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+            return self._block_sync_lease(
+                lease, "sync_apply_failed", str(error)
+            )
+        drift_blocker = self._sync_remote_drift_blocker(
+            lease=lease,
+            source_branch=source_branch,
+            target_branch=target_branch,
+            source_sha=lease.source_head_sha,
+            target_sha=lease.target_base_sha,
+        )
+        if drift_blocker is not None:
+            return drift_blocker
+        try:
+            remote_sync_sha = self.git.remote_branch_sha(lease.branch)
+            if remote_sync_sha is None:
+                self.git.push_branch(lease.worktree_path, lease.branch)
+            elif remote_sync_sha != actual_head:
+                return self._block_sync_lease(
+                    lease,
+                    "sync_branch_changed",
+                    f"remote sync branch {lease.branch!r} changed",
+                )
+            target_pull_request = github.find_open_pr(
+                head=lease.branch, base=target_branch
+            )
+            expected_body = self._sync_body(
+                source_branch=source_branch,
+                target_branch=target_branch,
+                merge_base=lease.source_base_sha,
+                source_sha=lease.source_head_sha,
+                target_sha=lease.target_base_sha,
+                lease=lease,
+            )
+            if target_pull_request is None:
+                target_pull_request = github.create_pr(
+                    base=target_branch,
+                    head=lease.branch,
+                    title=f"Sync {source_branch} to {target_branch}",
+                    body=expected_body,
+                )
+        except (ExternalServiceError, GitRemoteError) as error:
+            return self._external_error(
+                "wt.sync", "sync_publish_failed", str(error), lease=lease
+            )
+        if (
+            target_pull_request.state != "OPEN"
+            or target_pull_request.base_ref != target_branch
+            or target_pull_request.base_sha != lease.target_base_sha
+            or target_pull_request.head_ref != lease.branch
+            or target_pull_request.head_sha != actual_head
+            or target_pull_request.body != expected_body
+        ):
+            return self._block_sync_lease(
+                lease,
+                "sync_pr_mismatch",
+                "GitHub did not return the exact open synchronization pull request",
+            )
+        drift_blocker = self._sync_remote_drift_blocker(
+            lease=lease,
+            source_branch=source_branch,
+            target_branch=target_branch,
+            source_sha=lease.source_head_sha,
+            target_sha=lease.target_base_sha,
+        )
+        if drift_blocker is not None:
+            return drift_blocker
+        try:
+            lease = self.registry.transition(
+                lease.id,
+                LeaseState.PR_OPEN,
+                expected_version=lease.version,
+                event_type="sync_pr_reconciled",
+                summary=f"sync PR #{target_pull_request.number} reconciled",
+                observed_head_sha=actual_head,
+                pr_number=target_pull_request.number,
+                head_sha=actual_head,
+            )
+        except (RuntimeError, sqlite3.Error) as error:
+            return self._sync_blocked(
+                "registry_conflict", str(error), lease=lease
+            )
+        return CommandResult.ok(
+            "wt.sync",
+            decision="ready",
+            lease=lease,
+            actions=verification_actions,
+        )
+
+    @staticmethod
+    def _sync_noop(
+        source_branch: str,
+        target_branch: str,
+        source_sha: str,
+        target_sha: str,
+        merge_base: str,
+    ) -> CommandResult:
+        return CommandResult.ok(
+            "wt.sync",
+            decision="noop",
+            actions=(
+                {
+                    "kind": "no_sync_required",
+                    "source_branch": source_branch,
+                    "source_head_sha": source_sha,
+                    "target_branch": target_branch,
+                    "target_head_sha": target_sha,
+                    "merge_base_sha": merge_base,
+                },
+            ),
+        )
+
+    @staticmethod
+    def _sync_trailers(
+        *,
+        source_branch: str,
+        target_branch: str,
+        merge_base: str,
+        source_sha: str,
+        target_sha: str,
+        lease: Lease,
+    ) -> tuple[str, ...]:
+        return (
+            f"AWF-Sync-From: {source_branch}",
+            f"AWF-Sync-To: {target_branch}",
+            f"AWF-Sync-Base: {merge_base}",
+            f"AWF-Sync-Head: {source_sha}",
+            f"AWF-Sync-Target: {target_sha}",
+            f"AWF-Lease: {lease.id}",
+            "AWF-No-Promote: true",
+        )
+
+    def _sync_message(
+        self,
+        *,
+        source_branch: str,
+        target_branch: str,
+        merge_base: str,
+        source_sha: str,
+        target_sha: str,
+        lease: Lease,
+    ) -> str:
+        return "\n".join(
+            (
+                f"Sync {source_branch} to {target_branch}",
+                "",
+                *self._sync_trailers(
+                    source_branch=source_branch,
+                    target_branch=target_branch,
+                    merge_base=merge_base,
+                    source_sha=source_sha,
+                    target_sha=target_sha,
+                    lease=lease,
+                ),
+            )
+        )
+
+    def _sync_body(
+        self,
+        *,
+        source_branch: str,
+        target_branch: str,
+        merge_base: str,
+        source_sha: str,
+        target_sha: str,
+        lease: Lease,
+    ) -> str:
+        return "\n".join(
+            self._sync_trailers(
+                source_branch=source_branch,
+                target_branch=target_branch,
+                merge_base=merge_base,
+                source_sha=source_sha,
+                target_sha=target_sha,
+                lease=lease,
+            )
+        )
+
+    def _block_sync_lease(
+        self, lease: Lease, code: str, message: str
+    ) -> CommandResult:
+        try:
+            current = self.registry.get_lease(lease.id)
+            if current is not None and current.state is not LeaseState.BLOCKED:
+                lease = self.registry.transition(
+                    current.id,
+                    LeaseState.BLOCKED,
+                    expected_version=current.version,
+                    event_type="sync_blocked",
+                    summary=f"{code}: {message}",
+                    observed_head_sha=self.git.head_sha(current.worktree_path),
+                )
+            elif current is not None:
+                lease = current
+        except (GitError, OSError, RuntimeError, sqlite3.Error):
+            pass
+        return self._sync_blocked(code, message, lease=lease)
+
+    @staticmethod
+    def _sync_blocked(
+        code: str, message: str, *, lease: Lease | None = None
+    ) -> CommandResult:
+        return CommandResult.blocked(
+            "wt.sync",
+            blockers=({"code": code, "message": message},),
+            lease=lease,
+        )
+
     def _promotion_net_blobs(
         self,
         expected_blob_heads: Mapping[str, str],
@@ -6101,6 +7028,18 @@ class WorktreeService:
     def _promotion_source_blocker(
         self, source: PullRequest, target_ref: str
     ) -> CommandResult | None:
+        sync_branch = _SYNC_BRANCH.fullmatch(source.head_ref) is not None
+        if sync_branch or any(
+            line.strip() == "AWF-No-Promote: true"
+            for line in source.body.splitlines()
+        ):
+            return self._promotion_blocked(
+                "source_pr_not_promotable",
+                (
+                    f"source pull request #{source.number} is a branch "
+                    "synchronization and must not be promoted"
+                ),
+            )
         if source.state != "MERGED":
             return self._promotion_blocked(
                 "source_pr_not_merged",
@@ -7421,7 +8360,9 @@ class WorktreeService:
             if (
                 latest is not None
                 and latest.event_type == "promotion_blocked"
-                and latest.summary.startswith("promotion_content_mismatch:")
+                and latest.summary.startswith(
+                    ("promotion_content_mismatch:", "staging_missing_main_delta:")
+                )
             ):
                 return self._rebuild_content_mismatch_promotion(
                     lease,
