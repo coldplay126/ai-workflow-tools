@@ -460,6 +460,22 @@ class WorktreeService:
                     self.git.index_tree_sha(lease.worktree_path)
                     == self.git.commit_tree_sha(target_sha, lease.worktree_path)
                 ):
+                    try:
+                        lease = self.registry.transition(
+                            lease.id,
+                            LeaseState.ACTIVE,
+                            expected_version=lease.version,
+                            event_type="sync_noop_pending",
+                            summary=(
+                                "source-only patch left the synchronization index "
+                                "equal to the target tree"
+                            ),
+                            observed_head_sha=target_sha,
+                        )
+                    except (RuntimeError, sqlite3.Error) as error:
+                        return self._sync_blocked(
+                            "registry_conflict", str(error), lease=lease
+                        )
                     return self._finalize_sync_noop(
                         lease=lease,
                         expected=lease,
@@ -6767,22 +6783,21 @@ class WorktreeService:
                 f"lease {lease.id} is {lease.state.value}; preserve it for recovery",
                 lease=lease,
             )
-        if lease.state is LeaseState.BLOCKED:
-            assert expected.source_base_sha is not None
-            assert expected.source_head_sha is not None
-            assert expected.target_base_sha is not None
-            recovered = self._recover_sync_apply_failed_noop(
-                lease=lease,
-                expected=expected,
-                github=github,
-                source_branch=source_branch,
-                target_branch=target_branch,
-                source_sha=expected.source_head_sha,
-                target_sha=expected.target_base_sha,
-                merge_base=expected.source_base_sha,
-            )
-            if recovered is not None:
-                return recovered
+        assert expected.source_base_sha is not None
+        assert expected.source_head_sha is not None
+        assert expected.target_base_sha is not None
+        recovered = self._recover_sync_noop(
+            lease=lease,
+            expected=expected,
+            github=github,
+            source_branch=source_branch,
+            target_branch=target_branch,
+            source_sha=expected.source_head_sha,
+            target_sha=expected.target_base_sha,
+            merge_base=expected.source_base_sha,
+        )
+        if recovered is not None:
+            return recovered
         worktree = self._registered_worktree(lease)
         if (
             worktree is None
@@ -6964,7 +6979,7 @@ class WorktreeService:
             actions=verification_actions,
         )
 
-    def _recover_sync_apply_failed_noop(
+    def _recover_sync_noop(
         self,
         *,
         lease: Lease,
@@ -6976,19 +6991,108 @@ class WorktreeService:
         target_sha: str,
         merge_base: str,
     ) -> CommandResult | None:
+        if (
+            lease.repository_root != expected.repository_root
+            or lease.initiative != expected.initiative
+            or not lease.managed
+            or lease.owner_kind != "awf"
+        ):
+            return self._sync_blocked(
+                "sync_lease_stale",
+                (
+                    f"lease {lease.id} does not match the current source and target "
+                    "provenance"
+                ),
+                lease=lease,
+            )
         try:
             events = self.registry.list_events(lease.id)
         except (RuntimeError, sqlite3.Error) as error:
             return self._sync_blocked(
                 "registry_conflict", str(error), lease=lease
             )
-        if (
-            not events
-            or events[-1].event_type != "sync_blocked"
-            or events[-1].to_state is not LeaseState.BLOCKED
-            or not events[-1].summary.startswith("sync_apply_failed:")
-        ):
+        for event in reversed(events):
+            if event.event_type in {"cleanup_reserved", "cleanup_released"}:
+                continue
+            if event.event_type == "sync_noop_pending":
+                break
+            if event.event_type == "sync_blocked":
+                if (
+                    event.to_state is LeaseState.BLOCKED
+                    and event.summary.startswith("sync_apply_failed:")
+                ):
+                    break
             return None
+        else:
+            return None
+        try:
+            reservation = self.registry.get_cleanup_reservation(lease.id)
+        except sqlite3.Error as error:
+            return self._sync_blocked(
+                "registry_conflict", str(error), lease=lease
+            )
+        if reservation is not None:
+            if lease.head_sha != target_sha:
+                return self._sync_blocked(
+                    "sync_lease_head_mismatch",
+                    f"lease {lease.id} worktree head changed before noop recovery",
+                    lease=lease,
+                )
+            if reservation.branch_sha != target_sha:
+                return self._sync_blocked(
+                    "cleanup_reserved",
+                    (
+                        f"lease {lease.id} cleanup reservation does not match the "
+                        "target head"
+                    ),
+                    lease=lease,
+                )
+            try:
+                remote_sync_sha = self.git.remote_branch_sha(lease.branch)
+                target_pull_request = github.find_open_pr(
+                    head=lease.branch, base=target_branch
+                )
+            except (ExternalServiceError, GitRemoteError) as error:
+                return self._external_error(
+                    "wt.sync", "sync_publish_failed", str(error), lease=lease
+                )
+            if remote_sync_sha is not None:
+                return self._sync_blocked(
+                    "sync_branch_exists",
+                    (
+                        f"remote branch {lease.branch!r} exists while recovering "
+                        "the no-op synchronization"
+                    ),
+                    lease=lease,
+                )
+            if target_pull_request is not None:
+                return self._sync_blocked(
+                    "sync_pr_open",
+                    (
+                        f"sync pull request #{target_pull_request.number} exists "
+                        "while recovering the no-op synchronization"
+                    ),
+                    lease=lease,
+                )
+            return self._recover_sync_noop_cleanup_reservation(
+                lease,
+                reservation,
+                source_branch=source_branch,
+                target_branch=target_branch,
+                source_sha=source_sha,
+                target_sha=target_sha,
+                merge_base=merge_base,
+                removal_error=None,
+            )
+        if lease.head_sha != target_sha:
+            return None
+        try:
+            if self.git.head_sha(lease.worktree_path) != target_sha:
+                return None
+        except (GitError, OSError) as error:
+            return self._sync_blocked(
+                "sync_apply_failed", str(error), lease=lease
+            )
         return self._finalize_sync_noop(
             lease=lease,
             expected=expected,
@@ -7157,43 +7261,89 @@ class WorktreeService:
                 "registry_conflict", str(error), lease=current
             )
         post_lock_failure: tuple[str, str] | None = None
+        registry_error: RuntimeError | sqlite3.Error | None = None
+        removal_error: GitError | OSError | None = None
+        hold_error: GitError | OSError | None = None
+        worktree_removed = False
         try:
             with self.git.hold_worktree_branch_if_at(
                 current.worktree_path, current.branch, reservation.branch_sha
             ):
-                reserved_current = self.registry.get_lease(current.id)
-                if (
-                    reserved_current is None
-                    or reserved_current.version != reservation.reserved_version
-                    or self.registry.get_cleanup_reservation(current.id)
-                    != reservation
-                ):
-                    post_lock_failure = (
-                        "lease_changed",
-                        f"lease {current.id} changed while noop cleanup was reserved",
+                try:
+                    reserved_current = self.registry.get_lease(current.id)
+                    active_reservation = self.registry.get_cleanup_reservation(
+                        current.id
                     )
-                elif self.git.status_porcelain(current.worktree_path):
-                    post_lock_failure = (
-                        "dirty_sync_lease",
-                        f"lease {current.id} has uncommitted changes",
-                    )
-                elif (
-                    self.git.head_sha(current.worktree_path) != target_sha
-                    or self.git.index_tree_sha(current.worktree_path) != target_tree
-                ):
-                    post_lock_failure = (
-                        "sync_lease_head_mismatch",
-                        f"lease {current.id} worktree changed before noop cleanup",
-                    )
+                except (RuntimeError, sqlite3.Error) as error:
+                    registry_error = error
                 else:
-                    self.git.remove_worktree(current.worktree_path)
-        except (GitError, OSError, RuntimeError, sqlite3.Error) as error:
+                    if (
+                        reserved_current is None
+                        or reserved_current.version != reservation.reserved_version
+                        or active_reservation != reservation
+                    ):
+                        post_lock_failure = (
+                            "lease_changed",
+                            (
+                                f"lease {current.id} changed while noop cleanup was "
+                                "reserved"
+                            ),
+                        )
+                    elif self.git.status_porcelain(current.worktree_path):
+                        post_lock_failure = (
+                            "dirty_sync_lease",
+                            f"lease {current.id} has uncommitted changes",
+                        )
+                    elif (
+                        self.git.head_sha(current.worktree_path) != target_sha
+                        or self.git.index_tree_sha(current.worktree_path)
+                        != target_tree
+                    ):
+                        post_lock_failure = (
+                            "sync_lease_head_mismatch",
+                            (
+                                f"lease {current.id} worktree changed before noop "
+                                "cleanup"
+                            ),
+                        )
+                    else:
+                        try:
+                            self.git.remove_worktree(current.worktree_path)
+                        except (GitError, OSError) as error:
+                            removal_error = error
+                        else:
+                            worktree_removed = True
+        except (GitError, OSError) as error:
+            hold_error = error
+        if registry_error is not None:
             return self._release_sync_noop_cleanup_reservation(
                 current,
                 reservation,
-                code="worktree_remove_failed",
+                code="registry_conflict",
                 message=(
-                    f"unable to remove worktree for lease {current.id}: {error}"
+                    f"unable to revalidate cleanup reservation for lease "
+                    f"{current.id}: {registry_error}"
+                ),
+            )
+        if worktree_removed or removal_error is not None:
+            return self._recover_sync_noop_cleanup_reservation(
+                current,
+                reservation,
+                source_branch=source_branch,
+                target_branch=target_branch,
+                source_sha=source_sha,
+                target_sha=target_sha,
+                merge_base=merge_base,
+                removal_error=removal_error or hold_error,
+            )
+        if hold_error is not None:
+            return self._release_sync_noop_cleanup_reservation(
+                current,
+                reservation,
+                code="sync_cleanup_hold_failed",
+                message=(
+                    f"unable to hold sync branch {current.branch!r} for noop "
+                    f"cleanup: {hold_error}"
                 ),
             )
         if post_lock_failure is not None:
@@ -7211,6 +7361,59 @@ class WorktreeService:
             source_sha=source_sha,
             target_sha=target_sha,
             merge_base=merge_base,
+        )
+
+    def _recover_sync_noop_cleanup_reservation(
+        self,
+        lease: Lease,
+        reservation: CleanupReservation,
+        *,
+        source_branch: str,
+        target_branch: str,
+        source_sha: str,
+        target_sha: str,
+        merge_base: str,
+        removal_error: Exception | None,
+    ) -> CommandResult:
+        path_blocker = self._cleanup_path_blocker(lease)
+        if path_blocker is not None:
+            return self._release_sync_noop_cleanup_reservation(
+                lease,
+                reservation,
+                code=path_blocker["code"],
+                message=path_blocker["message"],
+            )
+        try:
+            worktrees = self.git.list_worktrees()
+        except (GitError, OSError) as error:
+            return self._release_sync_noop_cleanup_reservation(
+                lease,
+                reservation,
+                code="worktree_inspection_failed",
+                message=(
+                    f"unable to inspect worktree for lease {lease.id}: {error}"
+                ),
+            )
+        path_is_absent = (
+            not lease.worktree_path.exists()
+            and all(worktree.path != lease.worktree_path for worktree in worktrees)
+        )
+        if path_is_absent:
+            return self._complete_sync_noop_cleanup(
+                lease,
+                reservation,
+                source_branch=source_branch,
+                target_branch=target_branch,
+                source_sha=source_sha,
+                target_sha=target_sha,
+                merge_base=merge_base,
+            )
+        detail = f": {removal_error}" if removal_error is not None else ""
+        return self._release_sync_noop_cleanup_reservation(
+            lease,
+            reservation,
+            code="worktree_remove_failed",
+            message=f"unable to remove worktree for lease {lease.id}{detail}",
         )
 
     def _release_sync_noop_cleanup_reservation(
