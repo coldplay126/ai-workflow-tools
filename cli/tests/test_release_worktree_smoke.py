@@ -280,6 +280,83 @@ class SmokeHarness:
         self.github.prs[number] = source
         return source
 
+    def add_ordered_dependent_pair(
+        self, *, first_number: int = 527, second_number: int = 530
+    ) -> tuple[PullRequest, PullRequest]:
+        path = "ordered-dependent.txt"
+        first_branch = f"feature/pr-{first_number}"
+        second_branch = f"feature/pr-{second_number}"
+        git_command(self.repo, "checkout", "-q", "staging")
+        first_base_sha = self.git.head_sha(self.repo)
+        git_command(self.repo, "checkout", "-q", "-b", first_branch)
+        (self.repo / path).write_text("api=v1\n", encoding="utf-8")
+        git_command(self.repo, "add", path)
+        git_command(self.repo, "commit", "-q", "-m", "ordered prerequisite")
+        first_head_sha = self.git.head_sha(self.repo)
+        git_command(self.repo, "push", "-q", "-u", "origin", first_branch)
+        git_command(self.repo, "checkout", "-q", "staging")
+        git_command(
+            self.repo,
+            "merge",
+            "--no-ff",
+            "-q",
+            first_branch,
+            "-m",
+            "merge ordered prerequisite",
+        )
+        first_merge_sha = self.git.head_sha(self.repo)
+        git_command(self.repo, "push", "-q", "origin", "staging")
+
+        second_base_sha = self.git.head_sha(self.repo)
+        git_command(self.repo, "checkout", "-q", "-b", second_branch)
+        (self.repo / path).write_text("api=v1\nconsumer=enabled\n", encoding="utf-8")
+        git_command(self.repo, "add", path)
+        git_command(self.repo, "commit", "-q", "-m", "ordered dependent change")
+        second_head_sha = self.git.head_sha(self.repo)
+        git_command(self.repo, "push", "-q", "-u", "origin", second_branch)
+        git_command(self.repo, "checkout", "-q", "staging")
+        git_command(
+            self.repo,
+            "merge",
+            "--no-ff",
+            "-q",
+            second_branch,
+            "-m",
+            "merge ordered dependent change",
+        )
+        second_merge_sha = self.git.head_sha(self.repo)
+        git_command(self.repo, "push", "-q", "origin", "staging")
+        sources = (
+            PullRequest(
+                number=first_number,
+                state="MERGED",
+                base_ref="staging",
+                base_sha=first_base_sha,
+                head_ref=first_branch,
+                head_sha=first_head_sha,
+                merge_commit_sha=first_merge_sha,
+                review_decision="APPROVED",
+                checks_passed=True,
+                changed_paths=(path,),
+                url=f"https://github.example/acme/repo/pull/{first_number}",
+            ),
+            PullRequest(
+                number=second_number,
+                state="MERGED",
+                base_ref="staging",
+                base_sha=second_base_sha,
+                head_ref=second_branch,
+                head_sha=second_head_sha,
+                merge_commit_sha=second_merge_sha,
+                review_decision="APPROVED",
+                checks_passed=True,
+                changed_paths=(path,),
+                url=f"https://github.example/acme/repo/pull/{second_number}",
+            ),
+        )
+        self.github.prs.update({source.number: source for source in sources})
+        return sources
+
     def add_independent_followup(self, *, number: int = 373) -> PullRequest:
         branch = f"feature/pr-{number}"
         path = f"independent-{number}.txt"
@@ -507,12 +584,61 @@ def test_out_of_order_promotion_smoke_generates_b_without_staging_a(
         "AWF-Source-PR: 373",
         f"AWF-Source-Base: {source.base_sha}",
         f"AWF-Source-Head: {source.head_sha}",
+        f"AWF-Source-Merge: {source.merge_commit_sha}",
         f"AWF-Target-Base: {promoted.lease.target_base_sha}",
         f"AWF-Lease-ID: {promoted.lease.id}",
         "AWF-Promotion-Mode: out-of-order",
         "AWF-Resolution: automatic",
     ):
         assert trailer in smoke.github.created_pr_bodies[0]
+
+
+def test_out_of_order_promotion_smoke_applies_ordered_dependent_sources(
+    smoke: SmokeHarness,
+) -> None:
+    first, second = smoke.add_ordered_dependent_pair()
+
+    preview = smoke.service.promote(
+        source_pr=(first.number, second.number),
+        target_branch="main",
+        out_of_order=True,
+        apply=False,
+    )
+
+    assert preview.decision == "preview"
+    assert preview.actions[0]["source_prs"] == [527, 530]
+    assert preview.actions[0]["sources"] == [
+        {
+            "ordinal": ordinal,
+            "pr": source.number,
+            "base_ref": source.base_ref,
+            "base_sha": source.base_sha,
+            "head_sha": source.head_sha,
+            "merge_sha": source.merge_commit_sha,
+            "reviewed_paths": ["ordered-dependent.txt"],
+        }
+        for ordinal, source in enumerate((first, second))
+    ]
+    promoted = smoke.service.promote(
+        source_pr=(first.number, second.number),
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert promoted.decision == "ready", promoted.blockers
+    assert promoted.lease is not None
+    assert (promoted.lease.worktree_path / "ordered-dependent.txt").read_text(
+        encoding="utf-8"
+    ) == "api=v1\nconsumer=enabled\n"
+    assert [
+        source.source_pr
+        for source in smoke.registry.get_promotion_sources(promoted.lease.id)
+    ] == [527, 530]
+    body = smoke.github.created_pr_bodies[0]
+    for source in (first, second):
+        assert f"AWF-Source-PR: {source.number}" in body
+        assert f"AWF-Source-Merge: {source.merge_commit_sha}" in body
 
 
 def test_imported_worktree_pr_cleanup_lifecycle_smoke(smoke: SmokeHarness) -> None:

@@ -820,6 +820,8 @@ def test_wt_promote_forwards_out_of_order(
             "promote",
             "--source-pr",
             "372",
+            "--source-pr",
+            "373",
             "--out-of-order",
             "--to",
             "main",
@@ -833,6 +835,7 @@ def test_wt_promote_forwards_out_of_order(
     assert stderr == ""
     assert json.loads(stdout)["decision"] == "preview"
     assert received["out_of_order"] is True
+    assert received["source_pr"] == [372, 373]
 
 
 

@@ -100,11 +100,21 @@ class Lease:
     target_base_sha: str | None = None
     reviewed_paths: tuple[str, ...] = ()
     conflicted_paths: tuple[str, ...] = ()
+    conflict_source_ordinal: int | None = None
+    legacy_source_trailers: bool = False
     protected_index_entries: tuple[tuple[str, tuple[str, str] | None], ...] = ()
 
     def __post_init__(self) -> None:
         self._validate_path_metadata("reviewed_paths", self.reviewed_paths)
         self._validate_path_metadata("conflicted_paths", self.conflicted_paths)
+        if self.conflict_source_ordinal is not None and (
+            not isinstance(self.conflict_source_ordinal, int)
+            or isinstance(self.conflict_source_ordinal, bool)
+            or self.conflict_source_ordinal < 0
+        ):
+            raise ValueError("conflict_source_ordinal must be a non-negative integer")
+        if not isinstance(self.legacy_source_trailers, bool):
+            raise ValueError("legacy_source_trailers must be a boolean")
         self._validate_protected_index_entries(self.protected_index_entries)
 
     @staticmethod
@@ -170,6 +180,8 @@ class Lease:
         target_base_sha: str | None = None,
         reviewed_paths: tuple[str, ...] = (),
         conflicted_paths: tuple[str, ...] = (),
+        conflict_source_ordinal: int | None = None,
+        legacy_source_trailers: bool = False,
         protected_index_entries: tuple[
             tuple[str, tuple[str, str] | None], ...
         ] = (),
@@ -211,6 +223,8 @@ class Lease:
             target_base_sha=target_base_sha,
             reviewed_paths=reviewed_paths,
             conflicted_paths=conflicted_paths,
+            conflict_source_ordinal=conflict_source_ordinal,
+            legacy_source_trailers=legacy_source_trailers,
             protected_index_entries=protected_index_entries,
         )
 
@@ -256,6 +270,50 @@ class CleanupReservation:
     branch_sha: str
     created_at: str
 
+
+
+
+@dataclass(frozen=True)
+class PromotionSource:
+    """An ordered immutable source pin owned by an out-of-order promotion lease."""
+
+    lease_id: str
+    ordinal: int
+    source_pr: int
+    base_ref: str
+    base_sha: str
+    head_sha: str
+    merge_sha: str
+    changed_paths: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.lease_id:
+            raise ValueError("promotion source lease id must be non-empty")
+        if self.ordinal < 0:
+            raise ValueError("promotion source ordinal must be non-negative")
+        if self.source_pr <= 0:
+            raise ValueError("promotion source pull request must be positive")
+        if not self.base_ref:
+            raise ValueError("promotion source base ref must be non-empty")
+        for name, value in (
+            ("base_sha", self.base_sha),
+            ("head_sha", self.head_sha),
+            ("merge_sha", self.merge_sha),
+        ):
+            if _GIT_OBJECT_ID.fullmatch(value) is None:
+                raise ValueError(f"promotion source {name} must be a Git object id")
+        Lease._validate_path_metadata("promotion source changed_paths", self.changed_paths)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ordinal": self.ordinal,
+            "source_pr": self.source_pr,
+            "base_ref": self.base_ref,
+            "base_sha": self.base_sha,
+            "head_sha": self.head_sha,
+            "merge_sha": self.merge_sha,
+            "changed_paths": list(self.changed_paths),
+        }
 
 
 @dataclass(frozen=True)

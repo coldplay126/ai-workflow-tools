@@ -14,6 +14,7 @@ from awf.worktrees.models import (
     Lease,
     LeaseState,
     PromotionMode,
+    PromotionSource,
     Purpose,
     ReleaseBridge,
     ReleaseSource,
@@ -88,6 +89,21 @@ def release_source(bridge: ReleaseBridge, ordinal: int, source_pr: int) -> Relea
         head_sha="b" * 40,
         merge_sha="c" * 40,
         changed_paths=("src/release.py",),
+    )
+
+
+def promotion_source(
+    promotion: Lease, ordinal: int, source_pr: int
+) -> PromotionSource:
+    return PromotionSource(
+        lease_id=promotion.id,
+        ordinal=ordinal,
+        source_pr=source_pr,
+        base_ref="staging",
+        base_sha=chr(ord("a") + ordinal) * 40,
+        head_sha=chr(ord("b") + ordinal) * 40,
+        merge_sha=chr(ord("c") + ordinal) * 40,
+        changed_paths=(f"src/source-{source_pr}.py",),
     )
 
 
@@ -257,6 +273,78 @@ def test_registry_publishes_release_and_lease_atomically(tmp_path: Path) -> None
 
 
 
+
+
+def test_registry_atomically_round_trips_ordered_promotion_source_pins(
+    tmp_path: Path,
+) -> None:
+    registry = WorktreeRegistry(tmp_path / "worktrees.sqlite3")
+    promotion = replace(
+        lease(tmp_path),
+        initiative="prs-372-373-to-main-out-of-order",
+        worktree_path=tmp_path / "cache" / "promotion",
+        purpose=Purpose.PROMOTE,
+        branch="awf/prs-372-373-to-main-out-of-order/promote",
+        base_ref="origin/main",
+        promotion_mode=PromotionMode.OUT_OF_ORDER,
+        source_pr=372,
+        source_base_sha="a" * 40,
+        source_head_sha="d" * 40,
+        target_base_sha="e" * 40,
+        reviewed_paths=("src/source-372.py", "src/source-373.py"),
+    )
+    sources = (
+        promotion_source(promotion, 0, 372),
+        promotion_source(promotion, 1, 373),
+    )
+
+    created = registry.create_promotion_lease(promotion, sources)
+
+    assert registry.get_lease(created.id) == created
+    assert registry.get_promotion_sources(created.id) == sources
+    assert registry.get_promotion_sources_read_only(created.id) == sources
+    invalid_promotion = replace(
+        promotion,
+        id="another-promotion",
+        initiative="another-promotion",
+        worktree_path=tmp_path / "cache" / "another-promotion",
+        branch="awf/another-promotion/promote",
+    )
+    with pytest.raises(ValueError, match="invalid ordered"):
+        registry.create_promotion_lease(
+            invalid_promotion,
+            (
+                promotion_source(promotion, 0, 372),
+                promotion_source(promotion, 1, 372),
+            ),
+        )
+    assert registry.get_lease(invalid_promotion.id) is None
+
+
+def test_registry_backfills_verified_legacy_single_source_pin(tmp_path: Path) -> None:
+    registry = WorktreeRegistry(tmp_path / "worktrees.sqlite3")
+    legacy = replace(
+        lease(tmp_path),
+        initiative="legacy-out-of-order",
+        worktree_path=tmp_path / "cache" / "legacy-out-of-order",
+        purpose=Purpose.PROMOTE,
+        branch="awf/legacy-out-of-order/promote",
+        base_ref="origin/main",
+        promotion_mode=PromotionMode.OUT_OF_ORDER,
+        source_pr=372,
+        source_base_sha="a" * 40,
+        source_head_sha="b" * 40,
+        target_base_sha="e" * 40,
+        reviewed_paths=("src/source-372.py",),
+    )
+    source = promotion_source(legacy, 0, 372)
+    registry.create_lease(legacy)
+
+    assert registry.get_promotion_sources(legacy.id) == ()
+    assert registry.backfill_promotion_sources(legacy, (source,)) == (source,)
+    assert registry.get_promotion_sources(legacy.id) == (source,)
+
+
 def test_registry_round_trips_out_of_order_provenance(tmp_path: Path) -> None:
     registry = WorktreeRegistry(tmp_path / "worktrees.sqlite3")
     created = replace(
@@ -283,6 +371,8 @@ def test_registry_round_trips_out_of_order_provenance(tmp_path: Path) -> None:
         "target_base_sha": payload["target_base_sha"],
         "reviewed_paths": payload["reviewed_paths"],
         "conflicted_paths": payload["conflicted_paths"],
+        "conflict_source_ordinal": payload["conflict_source_ordinal"],
+        "legacy_source_trailers": payload["legacy_source_trailers"],
         "protected_index_entries": payload["protected_index_entries"],
     } == {
         "promotion_mode": "out_of_order",
@@ -292,6 +382,8 @@ def test_registry_round_trips_out_of_order_provenance(tmp_path: Path) -> None:
         "target_base_sha": "c" * 40,
         "reviewed_paths": ["src/a.py", "src/b.py"],
         "conflicted_paths": ["src/b.py"],
+        "conflict_source_ordinal": None,
+        "legacy_source_trailers": False,
         "protected_index_entries": [
             {"path": "src/a.py", "mode": "100644", "blob_oid": "d" * 40}
         ],
@@ -403,6 +495,9 @@ def test_registry_migrates_legacy_lease_with_promotion_defaults(
     assert loaded.target_base_sha is None
     assert loaded.reviewed_paths == ()
     assert loaded.conflicted_paths == ()
+    assert registry.get_promotion_sources("legacy-lease") == ()
+    assert loaded.conflict_source_ordinal is None
+    assert loaded.legacy_source_trailers is False
 
 
 def test_transition_updates_resolution_metadata_with_compare_and_swap(
@@ -425,13 +520,22 @@ def test_transition_updates_resolution_metadata_with_compare_and_swap(
         expected_version=created.version,
         resolution_state=ResolutionState.MANUAL_REVIEWED,
         conflicted_paths=(),
+        conflict_source_ordinal=1,
         protected_index_entries=(("src/a.py", None),),
     )
 
     assert updated.resolution_state is ResolutionState.MANUAL_REVIEWED
     assert updated.conflicted_paths == ()
+    assert updated.conflict_source_ordinal == 1
     assert updated.protected_index_entries == (("src/a.py", None),)
     assert registry.get_lease(created.id) == updated
+    cleared = registry.transition(
+        updated.id,
+        LeaseState.BLOCKED,
+        expected_version=updated.version,
+        clear_conflict_source_ordinal=True,
+    )
+    assert cleared.conflict_source_ordinal is None
 
 
 @pytest.mark.parametrize(
@@ -512,6 +616,8 @@ def test_ensure_resumes_and_repeats_a_partial_legacy_migration(tmp_path: Path) -
         "reviewed_paths",
         "conflicted_paths",
         "protected_index_entries",
+        "legacy_source_trailers",
+        "conflict_source_ordinal",
     } <= columns
 
 

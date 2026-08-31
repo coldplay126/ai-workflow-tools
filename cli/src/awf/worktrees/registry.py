@@ -15,6 +15,7 @@ from .models import (
     Lease,
     LeaseState,
     PromotionMode,
+    PromotionSource,
     Purpose,
     ReleaseBridge,
     ReleaseSource,
@@ -58,6 +59,9 @@ CREATE TABLE IF NOT EXISTS worktree_leases (
     target_base_sha TEXT,
     reviewed_paths TEXT NOT NULL DEFAULT '[]',
     conflicted_paths TEXT NOT NULL DEFAULT '[]',
+    conflict_source_ordinal INTEGER,
+    legacy_source_trailers INTEGER NOT NULL DEFAULT 0
+        CHECK (legacy_source_trailers IN (0,1)),
     protected_index_entries TEXT NOT NULL DEFAULT '[]',
     deployment_state TEXT NOT NULL CHECK (deployment_state IN (
         'unknown','pending','healthy','failed','not_required'
@@ -135,6 +139,18 @@ CREATE TABLE IF NOT EXISTS release_bridge_pending_sources (
     merge_sha TEXT NOT NULL,
     changed_paths TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS promotion_lease_sources (
+    lease_id TEXT NOT NULL REFERENCES worktree_leases(id) ON DELETE RESTRICT,
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    source_pr INTEGER NOT NULL CHECK (source_pr > 0),
+    base_ref TEXT NOT NULL,
+    base_sha TEXT NOT NULL,
+    head_sha TEXT NOT NULL,
+    merge_sha TEXT NOT NULL,
+    changed_paths TEXT NOT NULL,
+    PRIMARY KEY (lease_id, ordinal),
+    UNIQUE (lease_id, source_pr)
+);
 """
 
 _LEASE_FILTER_COLUMNS = {
@@ -195,6 +211,15 @@ class WorktreeRegistry:
                 "ALTER TABLE worktree_leases ADD COLUMN protected_index_entries "
                 "TEXT NOT NULL DEFAULT '[]'"
             ),
+            "conflict_source_ordinal": (
+                "ALTER TABLE worktree_leases ADD COLUMN "
+                "conflict_source_ordinal INTEGER"
+            ),
+            "legacy_source_trailers": (
+                "ALTER TABLE worktree_leases ADD COLUMN "
+                "legacy_source_trailers INTEGER NOT NULL DEFAULT 0 "
+                "CHECK (legacy_source_trailers IN (0,1))"
+            ),
         }
         with closing(self._connect()) as connection:
             connection.executescript(_SCHEMA)
@@ -224,7 +249,9 @@ class WorktreeRegistry:
                         head_sha, promotion_mode, managed, owner_kind, owner_id,
                         state, source_pr, target_pr, resolution_state, source_base_sha,
                         source_head_sha, target_base_sha, reviewed_paths,
-                        conflicted_paths, protected_index_entries, deployment_state, retain,
+                        conflicted_paths, conflict_source_ordinal,
+                        legacy_source_trailers, protected_index_entries,
+                        deployment_state, retain,
                         created_at, last_used_at, updated_at, removed_at, version
                     ) VALUES (
                         :id, :repository_id, :repository_name, :repository_root,
@@ -232,8 +259,9 @@ class WorktreeRegistry:
                         :head_sha, :promotion_mode, :managed, :owner_kind, :owner_id,
                         :state, :source_pr, :target_pr, :resolution_state,
                         :source_base_sha, :source_head_sha, :target_base_sha,
-                        :reviewed_paths,
-                        :conflicted_paths, :protected_index_entries, :deployment_state, :retain,
+                        :reviewed_paths, :conflicted_paths, :conflict_source_ordinal,
+                        :legacy_source_trailers, :protected_index_entries,
+                        :deployment_state, :retain,
                         :created_at, :last_used_at, :updated_at, :removed_at, :version
                     )
                     """,
@@ -246,6 +274,162 @@ class WorktreeRegistry:
                 raise ValueError("active lease already exists") from error
             raise
         return lease
+
+    def create_promotion_lease(
+        self, lease: Lease, sources: tuple[PromotionSource, ...]
+    ) -> Lease:
+        """Atomically persist an out-of-order lease and every immutable source pin."""
+        if (
+            lease.purpose is not Purpose.PROMOTE
+            or lease.promotion_mode is not PromotionMode.OUT_OF_ORDER
+            or not sources
+            or tuple(source.lease_id for source in sources) != (lease.id,) * len(sources)
+            or tuple(source.ordinal for source in sources) != tuple(range(len(sources)))
+            or len({source.source_pr for source in sources}) != len(sources)
+        ):
+            raise ValueError("invalid ordered promotion source pins")
+        self.ensure()
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                INSERT INTO worktree_leases (
+                    id, repository_id, repository_name, repository_root,
+                    worktree_path, initiative, purpose, branch, base_ref,
+                    head_sha, promotion_mode, managed, owner_kind, owner_id,
+                    state, source_pr, target_pr, resolution_state, source_base_sha,
+                    source_head_sha, target_base_sha, reviewed_paths,
+                    conflicted_paths, conflict_source_ordinal,
+                    legacy_source_trailers, protected_index_entries,
+                    deployment_state, retain,
+                    created_at, last_used_at, updated_at, removed_at, version
+                ) VALUES (
+                    :id, :repository_id, :repository_name, :repository_root,
+                    :worktree_path, :initiative, :purpose, :branch, :base_ref,
+                    :head_sha, :promotion_mode, :managed, :owner_kind, :owner_id,
+                    :state, :source_pr, :target_pr, :resolution_state,
+                    :source_base_sha, :source_head_sha, :target_base_sha,
+                    :reviewed_paths, :conflicted_paths, :conflict_source_ordinal,
+                    :legacy_source_trailers, :protected_index_entries,
+                    :deployment_state, :retain,
+                    :created_at, :last_used_at, :updated_at, :removed_at, :version
+                )
+                """,
+                self._lease_parameters(lease),
+            )
+            connection.executemany(
+                """
+                INSERT INTO promotion_lease_sources (
+                    lease_id, ordinal, source_pr, base_ref, base_sha, head_sha,
+                    merge_sha, changed_paths
+                ) VALUES (
+                    :lease_id, :ordinal, :source_pr, :base_ref, :base_sha, :head_sha,
+                    :merge_sha, :changed_paths
+                )
+                """,
+                tuple(
+                    self._promotion_source_parameters(source)
+                    for source in sources
+                ),
+            )
+            connection.commit()
+        except sqlite3.IntegrityError as error:
+            connection.rollback()
+            if self._is_active_identity_conflict(error) or self.find_active(
+                lease.repository_id, lease.initiative, lease.purpose
+            ):
+                raise ValueError("active lease already exists") from error
+            raise
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return lease
+
+    def backfill_promotion_sources(
+        self, lease: Lease, sources: tuple[PromotionSource, ...]
+    ) -> tuple[PromotionSource, ...]:
+        """Atomically attach the one source pin supported by pre-pin OOO leases."""
+        if (
+            len(sources) != 1
+            or sources[0].lease_id != lease.id
+            or sources[0].ordinal != 0
+            or lease.purpose is not Purpose.PROMOTE
+            or lease.promotion_mode is not PromotionMode.OUT_OF_ORDER
+            or lease.source_pr != sources[0].source_pr
+            or lease.source_base_sha != sources[0].base_sha
+            or lease.source_head_sha != sources[0].head_sha
+            or lease.reviewed_paths != sources[0].changed_paths
+        ):
+            raise ValueError("invalid legacy promotion source backfill")
+        self.ensure()
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM worktree_leases WHERE id = ?", (lease.id,)
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("promotion lease changed concurrently")
+            current = self._lease_from_row(row)
+            if (
+                current.purpose is not Purpose.PROMOTE
+                or current.promotion_mode is not PromotionMode.OUT_OF_ORDER
+                or current.source_pr != sources[0].source_pr
+                or current.source_base_sha != sources[0].base_sha
+                or current.source_head_sha != sources[0].head_sha
+                or current.reviewed_paths != sources[0].changed_paths
+            ):
+                raise ValueError("legacy promotion provenance changed")
+            persisted = self._promotion_sources(connection, lease.id)
+            if persisted:
+                if persisted != sources:
+                    raise ValueError("promotion source pins already differ")
+            else:
+                connection.executemany(
+                    """
+                    INSERT INTO promotion_lease_sources (
+                        lease_id, ordinal, source_pr, base_ref, base_sha, head_sha,
+                        merge_sha, changed_paths
+                    ) VALUES (
+                        :lease_id, :ordinal, :source_pr, :base_ref, :base_sha, :head_sha,
+                        :merge_sha, :changed_paths
+                    )
+                    """,
+                    tuple(
+                        self._promotion_source_parameters(source)
+                        for source in sources
+                    ),
+                )
+                persisted = sources
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return persisted
+
+    def get_promotion_sources(self, lease_id: str) -> tuple[PromotionSource, ...]:
+        self.ensure()
+        with closing(self._connect()) as connection:
+            return self._promotion_sources(connection, lease_id)
+
+    def get_promotion_sources_read_only(
+        self, lease_id: str
+    ) -> tuple[PromotionSource, ...]:
+        if not self.db_path.is_file():
+            return ()
+        with closing(self._connect_read_only()) as connection:
+            table = connection.execute(
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = 'promotion_lease_sources'
+                """
+            ).fetchone()
+            return self._promotion_sources(connection, lease_id) if table else ()
 
     def get_lease(self, lease_id: str) -> Lease | None:
         self.ensure()
@@ -1013,11 +1197,20 @@ class WorktreeRegistry:
         managed: bool | None = None,
         resolution_state: ResolutionState | None = None,
         conflicted_paths: tuple[str, ...] | None = None,
+        conflict_source_ordinal: int | None = None,
+        clear_conflict_source_ordinal: bool = False,
+        legacy_source_trailers: bool | None = None,
         protected_index_entries: tuple[
             tuple[str, tuple[str, str] | None], ...
         ]
         | None = None,
     ) -> Lease:
+        if not isinstance(clear_conflict_source_ordinal, bool):
+            raise ValueError("clear_conflict_source_ordinal must be a boolean")
+        if legacy_source_trailers is not None and not isinstance(
+            legacy_source_trailers, bool
+        ):
+            raise ValueError("legacy_source_trailers must be a boolean")
         self.ensure()
         connection = self._connect()
         try:
@@ -1049,11 +1242,31 @@ class WorktreeRegistry:
                 update_values["retain"] = int(retain)
             if managed is not None:
                 update_values["managed"] = int(managed)
+            if clear_conflict_source_ordinal:
+                if conflict_source_ordinal is not None:
+                    raise ValueError(
+                        "conflict source ordinal cannot be set and cleared together"
+                    )
+                update_values["conflict_source_ordinal"] = None
+            elif conflict_source_ordinal is not None:
+                if (
+                    not isinstance(conflict_source_ordinal, int)
+                    or isinstance(conflict_source_ordinal, bool)
+                    or conflict_source_ordinal < 0
+                ):
+                    raise ValueError(
+                        "conflict_source_ordinal must be a non-negative integer"
+                    )
+                update_values["conflict_source_ordinal"] = conflict_source_ordinal
             if resolution_state is not None:
                 update_values["resolution_state"] = resolution_state.value
             if conflicted_paths is not None:
                 update_values["conflicted_paths"] = self._path_metadata_to_json(
                     conflicted_paths, name="conflicted_paths"
+                )
+            if legacy_source_trailers is not None:
+                update_values["legacy_source_trailers"] = int(
+                    legacy_source_trailers
                 )
             if protected_index_entries is not None:
                 update_values[
@@ -1459,6 +1672,35 @@ class WorktreeRegistry:
             for row in rows
         ]
 
+    def list_events_read_only(self, lease_id: str) -> list[WorktreeEvent]:
+        if not self.db_path.is_file():
+            return []
+        with closing(self._connect_read_only()) as connection:
+            rows = connection.execute(
+                "SELECT * FROM worktree_events WHERE lease_id = ? ORDER BY id",
+                (lease_id,),
+            ).fetchall()
+        return [
+            WorktreeEvent(
+                id=row["id"],
+                lease_id=row["lease_id"],
+                event_type=row["event_type"],
+                from_state=(
+                    LeaseState(row["from_state"])
+                    if row["from_state"] is not None
+                    else None
+                ),
+                to_state=(
+                    LeaseState(row["to_state"]) if row["to_state"] is not None else None
+                ),
+                observed_head_sha=row["observed_head_sha"],
+                pr_number=row["pr_number"],
+                summary=row["summary"],
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
+
     @staticmethod
     def _valid_release_transition(
         current: ReleaseState, target: ReleaseState
@@ -1542,6 +1784,51 @@ class WorktreeRegistry:
         ).fetchall()
         return tuple(self._release_source_from_row(row) for row in rows)
 
+    @staticmethod
+    def _promotion_source_parameters(source: PromotionSource) -> dict[str, Any]:
+        return {
+            "lease_id": source.lease_id,
+            "ordinal": source.ordinal,
+            "source_pr": source.source_pr,
+            "base_ref": source.base_ref,
+            "base_sha": source.base_sha,
+            "head_sha": source.head_sha,
+            "merge_sha": source.merge_sha,
+            "changed_paths": WorktreeRegistry._path_metadata_to_json(
+                source.changed_paths,
+                name="promotion source changed_paths",
+            ),
+        }
+
+    @staticmethod
+    def _promotion_source_from_row(row: sqlite3.Row) -> PromotionSource:
+        return PromotionSource(
+            lease_id=row["lease_id"],
+            ordinal=row["ordinal"],
+            source_pr=row["source_pr"],
+            base_ref=row["base_ref"],
+            base_sha=row["base_sha"],
+            head_sha=row["head_sha"],
+            merge_sha=row["merge_sha"],
+            changed_paths=WorktreeRegistry._path_metadata_from_json(
+                row["changed_paths"],
+                name="promotion source changed_paths",
+            ),
+        )
+
+    def _promotion_sources(
+        self, connection: sqlite3.Connection, lease_id: str
+    ) -> tuple[PromotionSource, ...]:
+        rows = connection.execute(
+            """
+            SELECT * FROM promotion_lease_sources
+            WHERE lease_id = ?
+            ORDER BY ordinal
+            """,
+            (lease_id,),
+        ).fetchall()
+        return tuple(self._promotion_source_from_row(row) for row in rows)
+
     def _release_from_row(
         self, connection: sqlite3.Connection, row: sqlite3.Row
     ) -> ReleaseBridge:
@@ -1596,9 +1883,11 @@ class WorktreeRegistry:
             "managed": int(lease.managed),
             "owner_kind": lease.owner_kind,
             "owner_id": lease.owner_id,
+            "conflict_source_ordinal": lease.conflict_source_ordinal,
             "state": lease.state.value,
             "source_pr": lease.source_pr,
             "target_pr": lease.target_pr,
+            "legacy_source_trailers": int(lease.legacy_source_trailers),
             "resolution_state": lease.resolution_state.value,
             "source_base_sha": lease.source_base_sha,
             "source_head_sha": lease.source_head_sha,
@@ -1638,9 +1927,19 @@ class WorktreeRegistry:
             managed=bool(row["managed"]),
             owner_kind=row["owner_kind"],
             owner_id=row["owner_id"],
+            conflict_source_ordinal=(
+                row["conflict_source_ordinal"]
+                if "conflict_source_ordinal" in row.keys()
+                else None
+            ),
             state=LeaseState(row["state"]),
             source_pr=row["source_pr"],
             target_pr=row["target_pr"],
+            legacy_source_trailers=(
+                bool(row["legacy_source_trailers"])
+                if "legacy_source_trailers" in row.keys()
+                else False
+            ),
             resolution_state=ResolutionState(row["resolution_state"]),
             source_base_sha=row["source_base_sha"],
             source_head_sha=row["source_head_sha"],

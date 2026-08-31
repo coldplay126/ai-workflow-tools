@@ -33,6 +33,7 @@ from .models import (
     Lease,
     LeaseState,
     PromotionMode,
+    PromotionSource,
     Purpose,
     ReleaseBridge,
     ReleaseSource,
@@ -80,6 +81,7 @@ class _PromotionRecoveryPreflight:
     target_branch: str
     dirty_paths: tuple[str, ...]
     reconciliation_head: str | None = None
+    legacy_manual_message: bool = False
 
 @dataclass(frozen=True)
 class _PromotionRetryIdentity:
@@ -650,13 +652,10 @@ class WorktreeService:
             if out_of_order
             else PromotionMode.EXACT
         )
-        if promotion_mode is PromotionMode.OUT_OF_ORDER and (
-            len(source_numbers) != 1 or exclude_paths
-        ):
+        if promotion_mode is PromotionMode.OUT_OF_ORDER and exclude_paths:
             return self._promotion_blocked(
                 "invalid_out_of_order_promotion",
-                "out-of-order promotion requires exactly one source pull request "
-                "and no excluded paths",
+                "out-of-order promotion does not allow excluded paths",
             )
         try:
             excluded_paths = self._promotion_excluded_paths(exclude_paths)
@@ -697,7 +696,12 @@ class WorktreeService:
             )
         for source in sources:
             invalid_oid = self._invalid_promotion_oid(
-                source, require_merge=bool(excluded_paths) or len(sources) > 1
+                source,
+                require_merge=(
+                    promotion_mode is PromotionMode.OUT_OF_ORDER
+                    or bool(excluded_paths)
+                    or len(sources) > 1
+                ),
             )
             if invalid_oid is not None:
                 return self._promotion_blocked(
@@ -733,7 +737,7 @@ class WorktreeService:
                     active,
                     repository_id=lease.repository_id,
                     initiative=lease.initiative,
-                    source_pr=lease.source_pr,
+                    sources=sources,
                     target_ref=target_ref,
                     expected_branch=lease.branch,
                     live_target_sha=target_sha,
@@ -751,6 +755,7 @@ class WorktreeService:
                     active,
                     expected=lease,
                     github=github,
+                    sources=sources,
                     target_branch=target_branch,
                 )
                 if resolution_preview is not None:
@@ -767,15 +772,20 @@ class WorktreeService:
                         "source_prs": [source.number for source in sources],
                         "sources": [
                             {
+                                "ordinal": ordinal,
                                 "pr": source.number,
+                                "base_ref": source.base_ref,
                                 "base_sha": source.base_sha,
                                 "head_sha": source.head_sha,
                                 "merge_sha": source.merge_commit_sha,
+                                "reviewed_paths": list(
+                                    sorted(source.changed_paths)
+                                ),
                             }
-                            for source in sources
+                            for ordinal, source in enumerate(sources)
                         ],
                         "source_base_sha": sources[0].base_sha,
-                        "source_head_sha": sources[-1].head_sha,
+                        "source_head_sha": sources[0].head_sha,
                         "excluded_paths": list(excluded_paths),
                         "target_branch": target_branch,
                         "target_base_sha": target_sha,
@@ -837,7 +847,7 @@ class WorktreeService:
                                 active,
                                 repository_id=repository_id,
                                 initiative=initiative,
-                                source_pr=sources[0].number,
+                                sources=sources,
                                 target_ref=target_ref,
                                 expected_branch=expected_branch,
                                 live_target_sha=target_sha,
@@ -876,20 +886,26 @@ class WorktreeService:
                 assert target_sha is not None
                 staging_sha = (
                     self.git.fetch_ref(sources[0].base_ref)
-                    if excluded_paths
+                    if (
+                        excluded_paths
+                        or promotion_mode is PromotionMode.OUT_OF_ORDER
+                    )
                     else None
                 )
-                deltas: list[bytes] = []
+                deltas: list[tuple[int, bytes]] = []
                 expected_blob_heads: dict[str, str] | None = (
                     {} if promotion_mode is PromotionMode.EXACT else None
                 )
                 previous_source_merge_sha: str | None = None
-                for source in sources:
+                for source_ordinal, source in enumerate(sources):
                     source_base_sha = self.git.fetch_ref(source.base_sha)
                     source_head_sha = self.git.fetch_ref(source.head_sha)
                     source_merge_sha: str | None = None
                     if source.merge_commit_sha is None:
-                        if excluded_paths:
+                        if (
+                            excluded_paths
+                            or promotion_mode is PromotionMode.OUT_OF_ORDER
+                        ):
                             return self._promotion_blocked(
                                 "source_pr_invalid_oid",
                                 (
@@ -926,7 +942,10 @@ class WorktreeService:
                                 " do not match the reviewed SHAs"
                             ),
                         )
-                    if excluded_paths and merge_base != source_base_sha:
+                    if (
+                        excluded_paths
+                        or promotion_mode is PromotionMode.OUT_OF_ORDER
+                    ) and merge_base != source_base_sha:
                         return self._promotion_blocked(
                             "source_base_not_ancestor",
                             (
@@ -935,7 +954,10 @@ class WorktreeService:
                             ),
                         )
                     if (
-                        excluded_paths
+                        (
+                            excluded_paths
+                            or promotion_mode is PromotionMode.OUT_OF_ORDER
+                        )
                         and source_merge_sha is not None
                         and staging_sha is not None
                         and (
@@ -1004,7 +1026,10 @@ class WorktreeService:
                             "out-of-order promotion does not support renamed paths",
                         )
                     if (
-                        excluded_paths
+                        (
+                            excluded_paths
+                            or promotion_mode is PromotionMode.OUT_OF_ORDER
+                        )
                         and source_merge_sha is not None
                         and any(
                             self.git.path_blob(source_merge_sha, path)
@@ -1047,7 +1072,7 @@ class WorktreeService:
                                     " included changes after path exclusions"
                                 ),
                             )
-                        deltas.append(included_patch)
+                        deltas.append((source_ordinal, included_patch))
                     if expected_blob_heads is not None:
                         for path in included_source_paths:
                             expected_blob_heads[path] = source_head_sha
@@ -1095,13 +1120,20 @@ class WorktreeService:
                 lease = replace(
                     lease, head_sha=self.git.head_sha(lease.worktree_path)
                 )
-                lease = self.registry.create_lease(lease)
+                lease = (
+                    self.registry.create_promotion_lease(
+                        lease,
+                        self._promotion_source_pins(lease, sources),
+                    )
+                    if promotion_mode is PromotionMode.OUT_OF_ORDER
+                    else self.registry.create_lease(lease)
+                )
             except (GitError, OSError, RuntimeError, ValueError, sqlite3.Error) as error:
                 result = self._handle_creation_failure(lease, error, target_sha)
                 return replace(result, command="wt.promote")
 
             try:
-                for patch in deltas:
+                for source_ordinal, patch in deltas:
                     self.git.apply_indexed_patch(lease.worktree_path, patch)
                 promotion_head = self.git.commit(
                     lease.worktree_path,
@@ -1182,7 +1214,9 @@ class WorktreeService:
                 verification_actions = self._verify_promotion(lease.worktree_path)
             except GitPatchConflict as error:
                 if promotion_mode is PromotionMode.OUT_OF_ORDER:
-                    return self._record_out_of_order_conflict(lease, error)
+                    return self._record_out_of_order_conflict(
+                        lease, error, source_ordinal=source_ordinal
+                    )
                 return self._block_promotion_lease(
                     lease, "promotion_apply_failed", str(error)
                 )
@@ -1210,6 +1244,17 @@ class WorktreeService:
                     "registry_conflict", str(error), lease=lease
                 )
             if promotion_mode is PromotionMode.OUT_OF_ORDER:
+                source_blocker = self._out_of_order_reuse_source_blocker(
+                    lease, sources
+                )
+                if source_blocker is not None:
+                    if source_blocker.status == "error":
+                        return source_blocker
+                    return self._block_promotion_lease(
+                        lease,
+                        "promotion_provenance_changed",
+                        source_blocker.blockers[0]["message"],
+                    )
                 try:
                     live_target_sha = self.git.remote_branch_sha(target_branch)
                 except GitRemoteError as error:
@@ -2294,6 +2339,8 @@ class WorktreeService:
                         summary="manually reviewed amended resolution reconciled",
                         observed_head_sha=preflight.reconciliation_head,
                         head_sha=preflight.reconciliation_head,
+                        clear_conflict_source_ordinal=True,
+                        legacy_source_trailers=preflight.legacy_manual_message,
                         resolution_state=ResolutionState.MANUAL_REVIEWED,
                     )
                     return CommandResult.ok(
@@ -2319,9 +2366,12 @@ class WorktreeService:
                     or self.git.head_sha(lease.worktree_path) != lease.head_sha
                     or self.git.commit_parents(lease.head_sha)
                     != (lease.target_base_sha,)
-                    or self.git.commit_message(lease.worktree_path)
-                    != self._manual_reviewed_promotion_message(
-                        lease, target_branch
+                    or not self._manual_reviewed_promotion_message_matches(
+                        lease,
+                        target_branch,
+                        self.git.commit_message(lease.worktree_path),
+                        read_only=False,
+                        allow_legacy_unpinned=preflight.legacy_manual_message,
                     )
                     or self.git.committed_diff_has_conflict_markers(
                         lease.worktree_path,
@@ -2383,9 +2433,12 @@ class WorktreeService:
                     != staged_tree_sha
                     or self.git.commit_parents(promotion_head)
                     != (lease.target_base_sha,)
-                    or self.git.commit_message(lease.worktree_path)
-                    != self._manual_reviewed_promotion_message(
-                        lease, target_branch
+                    or not self._manual_reviewed_promotion_message_matches(
+                        lease,
+                        target_branch,
+                        self.git.commit_message(lease.worktree_path),
+                        read_only=False,
+                        allow_legacy_unpinned=preflight.legacy_manual_message,
                     )
                 ):
                     return self._recover_promotion_blocked(
@@ -2443,6 +2496,8 @@ class WorktreeService:
                     observed_head_sha=promotion_head,
                     head_sha=promotion_head,
                     resolution_state=ResolutionState.MANUAL_REVIEWED,
+                    clear_conflict_source_ordinal=True,
+                    legacy_source_trailers=preflight.legacy_manual_message,
                 )
         except GitRemoteError as error:
             return self._external_error(
@@ -7144,7 +7199,7 @@ class WorktreeService:
                 else None
             ),
             source_head_sha=(
-                sources[-1].head_sha
+                sources[0].head_sha
                 if promotion_mode is PromotionMode.OUT_OF_ORDER
                 else None
             ),
@@ -7177,6 +7232,71 @@ class WorktreeService:
         )
 
     @staticmethod
+    def _promotion_source_pins(
+        lease: Lease, sources: Sequence[PullRequest]
+    ) -> tuple[PromotionSource, ...]:
+        pins: list[PromotionSource] = []
+        for ordinal, source in enumerate(sources):
+            if source.merge_commit_sha is None:
+                raise ValueError(
+                    f"source pull request #{source.number} has an invalid merge SHA"
+                )
+            pins.append(
+                PromotionSource(
+                    lease_id=lease.id,
+                    ordinal=ordinal,
+                    source_pr=source.number,
+                    base_ref=source.base_ref,
+                    base_sha=source.base_sha,
+                    head_sha=source.head_sha,
+                    merge_sha=source.merge_commit_sha,
+                    changed_paths=tuple(sorted(source.changed_paths)),
+                )
+            )
+        return tuple(pins)
+
+    @staticmethod
+    def _legacy_promotion_source_pins_match(
+        lease: Lease, sources: Sequence[PullRequest]
+    ) -> bool:
+        return (
+            lease.purpose is Purpose.PROMOTE
+            and lease.promotion_mode is PromotionMode.OUT_OF_ORDER
+            and len(sources) == 1
+            and lease.source_pr == sources[0].number
+            and lease.source_base_sha == sources[0].base_sha
+            and lease.source_head_sha == sources[0].head_sha
+            and lease.reviewed_paths == tuple(sorted(sources[0].changed_paths))
+            and sources[0].merge_commit_sha is not None
+        )
+
+    def _promotion_source_pins_match(
+        self,
+        lease: Lease,
+        sources: Sequence[PullRequest],
+        *,
+        read_only: bool = False,
+    ) -> bool:
+        persisted = (
+            self.registry.get_promotion_sources_read_only(lease.id)
+            if read_only
+            else self.registry.get_promotion_sources(lease.id)
+        )
+        return (
+            persisted == self._promotion_source_pins(lease, sources)
+            if persisted
+            else self._legacy_promotion_source_pins_match(lease, sources)
+        )
+
+    def _backfill_legacy_promotion_source_pins(
+        self, lease: Lease, sources: Sequence[PullRequest]
+    ) -> bool:
+        if not self._legacy_promotion_source_pins_match(lease, sources):
+            return False
+        pins = self._promotion_source_pins(lease, sources)
+        return self.registry.backfill_promotion_sources(lease, pins) == pins
+
+    @staticmethod
     def _promotion_initiative(
         source_prs: Sequence[int],
         target_branch: str,
@@ -7205,7 +7325,7 @@ class WorktreeService:
         *,
         repository_id: str,
         initiative: str,
-        source_pr: int | None,
+        sources: Sequence[PullRequest],
         target_ref: str,
         expected_branch: str,
         live_target_sha: str,
@@ -7223,7 +7343,6 @@ class WorktreeService:
             or lease.protected_index_entries
             or lease.repository_id != repository_id
             or lease.initiative != initiative
-            or lease.source_pr != source_pr
             or lease.base_ref != target_ref
             or lease.branch != expected_branch
             or _GIT_OBJECT_ID.fullmatch(lease.head_sha) is None
@@ -7231,7 +7350,14 @@ class WorktreeService:
         ):
             return None
         try:
-            events = self.registry.list_events(lease.id)
+            if not self._promotion_source_pins_match(
+                lease, sources, read_only=True
+            ):
+                return None
+        except (ValueError, sqlite3.Error):
+            return None
+        try:
+            events = self.registry.list_events_read_only(lease.id)
             worktree = self._registered_worktree(lease)
             if (
                 not events
@@ -7268,6 +7394,7 @@ class WorktreeService:
         *,
         expected: Lease,
         github: GhClient,
+        sources: Sequence[PullRequest],
         target_branch: str,
     ) -> CommandResult | None:
         if (
@@ -7284,7 +7411,6 @@ class WorktreeService:
             or lease.repository_id != expected.repository_id
             or lease.initiative != expected.initiative
             or lease.purpose is not Purpose.PROMOTE
-            or lease.source_pr != expected.source_pr
             or lease.base_ref != expected.base_ref
             or lease.branch != expected.branch
             or lease.target_base_sha is None
@@ -7296,14 +7422,24 @@ class WorktreeService:
                 f"lease {lease.id} does not match pending conflict provenance",
                 lease=lease,
             )
-        if (
-            lease.source_base_sha != expected.source_base_sha
-            or lease.source_head_sha != expected.source_head_sha
-            or lease.head_sha != lease.target_base_sha
-        ):
+        if lease.head_sha != lease.target_base_sha:
             return self._promotion_blocked(
                 "promotion_provenance_changed",
                 f"lease {lease.id} pending conflict provenance changed",
+                lease=lease,
+            )
+        try:
+            source_pins_match = self._promotion_source_pins_match(
+                lease, sources, read_only=True
+            )
+        except (ValueError, sqlite3.Error) as error:
+            return self._promotion_blocked(
+                "registry_conflict", str(error), lease=lease
+            )
+        if not source_pins_match:
+            return self._promotion_blocked(
+                "promotion_provenance_changed",
+                f"lease {lease.id} source pull request provenance changed",
                 lease=lease,
             )
         try:
@@ -7392,6 +7528,17 @@ class WorktreeService:
                     "lease_id": lease.id,
                     "path": str(lease.worktree_path),
                     "conflicted_paths": list(lease.conflicted_paths),
+                    "conflict_source_ordinal": (
+                        lease.conflict_source_ordinal
+                        if lease.conflict_source_ordinal is not None
+                        else 0
+                    ),
+                    "remaining_source_prs": [
+                        source.number
+                        for source in sources[
+                            (lease.conflict_source_ordinal or 0) + 1 :
+                        ]
+                    ],
                     "reviewed_paths": list(lease.reviewed_paths),
                     "current_changed_paths": list(changed_paths),
                 },
@@ -7439,19 +7586,9 @@ class WorktreeService:
                 f"lease {lease.id} is not a blocked manually reviewed out-of-order promotion",
                 lease=lease,
             )
-        if (
-            not isinstance(lease.source_pr, int)
-            or isinstance(lease.source_pr, bool)
-            or lease.source_pr <= 0
-            or any(
-                value is None or _GIT_OBJECT_ID.fullmatch(value) is None
-                for value in (
-                    lease.source_base_sha,
-                    lease.source_head_sha,
-                    lease.target_base_sha,
-                    lease.head_sha,
-                )
-            )
+        if any(
+            value is None or _GIT_OBJECT_ID.fullmatch(value) is None
+            for value in (lease.target_base_sha, lease.head_sha)
         ):
             return self._recover_promotion_blocked(
                 "promotion_incomplete",
@@ -7495,6 +7632,14 @@ class WorktreeService:
                     f"lease {lease.id} does not match its managed promotion provenance",
                     lease=lease,
                 )
+            legacy_message_candidate = (
+                lease.legacy_source_trailers
+                or not (
+                    self.registry.get_promotion_sources(lease.id)
+                    if apply
+                    else self.registry.get_promotion_sources_read_only(lease.id)
+                )
+            )
             source_blocker = self._recover_promotion_source_blocker(
                 lease, target_ref, verify_objects=apply
             )
@@ -7502,6 +7647,13 @@ class WorktreeService:
                 return source_blocker
             worktree = self._registered_worktree(lease)
             promotion_head = self.git.head_sha(lease.worktree_path)
+            promotion_message = self.git.commit_message(lease.worktree_path)
+            legacy_manual_message = (
+                legacy_message_candidate
+                and self._legacy_manual_reviewed_message_matches(
+                    lease, target_branch, promotion_message
+                )
+            )
             if (
                 worktree is None
                 or worktree.branch != lease.branch
@@ -7509,8 +7661,13 @@ class WorktreeService:
                 or worktree.bare
                 or self.git.commit_parents(promotion_head)
                 != (lease.target_base_sha,)
-                or self.git.commit_message(lease.worktree_path)
-                != self._manual_reviewed_promotion_message(lease, target_branch)
+                or not self._manual_reviewed_promotion_message_matches(
+                    lease,
+                    target_branch,
+                    promotion_message,
+                    read_only=not apply,
+                    allow_legacy_unpinned=legacy_message_candidate,
+                )
                 or self.git.committed_diff_has_conflict_markers(
                     lease.worktree_path,
                     lease.target_base_sha,
@@ -7565,6 +7722,7 @@ class WorktreeService:
                     target_branch=target_branch,
                     dirty_paths=(),
                     reconciliation_head=promotion_head,
+                    legacy_manual_message=legacy_manual_message,
                 )
             dirty_paths = self.git.worktree_changed_paths(lease.worktree_path)
             if not dirty_paths:
@@ -7602,21 +7760,50 @@ class WorktreeService:
                 str(error),
                 lease=lease,
             )
-        except (AttributeError, ConfigError, GitError, OSError, ValueError) as error:
+        except (
+            AttributeError,
+            ConfigError,
+            GitError,
+            OSError,
+            ValueError,
+            sqlite3.Error,
+        ) as error:
             return self._recover_promotion_blocked(
                 "promotion_incomplete", str(error), lease=lease
             )
         return _PromotionRecoveryPreflight(
             target_branch=target_branch,
             dirty_paths=dirty_paths,
+            legacy_manual_message=legacy_manual_message,
         )
 
     def _recover_promotion_source_blocker(
         self, lease: Lease, target_ref: str, *, verify_objects: bool
     ) -> CommandResult | None:
         try:
+            pins = (
+                self.registry.get_promotion_sources(lease.id)
+                if verify_objects
+                else self.registry.get_promotion_sources_read_only(lease.id)
+            )
+        except sqlite3.Error as error:
+            return self._recover_promotion_blocked(
+                "registry_conflict", str(error), lease=lease
+            )
+        source_numbers = (
+            tuple(pin.source_pr for pin in pins)
+            if pins
+            else ((lease.source_pr,) if lease.source_pr is not None else ())
+        )
+        if not source_numbers:
+            return self._recover_promotion_blocked(
+                "promotion_incomplete",
+                f"lease {lease.id} has no immutable source pins",
+                lease=lease,
+            )
+        try:
             github = self.github or GhClient(self.git.repository_root())
-            source = github.view_pr(lease.source_pr)
+            sources = tuple(github.view_pr(number) for number in source_numbers)
         except ExternalServiceError as error:
             return self._external_error(
                 "wt.recover-promotion",
@@ -7624,31 +7811,34 @@ class WorktreeService:
                 str(error),
                 lease=lease,
             )
-        if source.number != lease.source_pr:
-            return self._recover_promotion_blocked(
-                "promotion_provenance_changed",
-                f"lease {lease.id} source pull request identity changed",
-                lease=lease,
+        for source in sources:
+            source_blocker = self._promotion_source_blocker(source, target_ref)
+            if source_blocker is not None:
+                return self._recover_promotion_blocked(
+                    source_blocker.blockers[0]["code"],
+                    source_blocker.blockers[0]["message"],
+                    lease=lease,
+                )
+            invalid_oid = self._invalid_promotion_oid(source, require_merge=True)
+            if invalid_oid is not None:
+                return self._recover_promotion_blocked(
+                    "source_pr_invalid_oid",
+                    f"source pull request #{source.number} has an invalid {invalid_oid}",
+                    lease=lease,
+                )
+        try:
+            source_pins_match = (
+                pins == self._promotion_source_pins(lease, sources)
+                if pins
+                else self._legacy_promotion_source_pins_match(lease, sources)
             )
-        source_blocker = self._promotion_source_blocker(source, target_ref)
-        if source_blocker is not None:
-            return self._recover_promotion_blocked(
-                source_blocker.blockers[0]["code"],
-                source_blocker.blockers[0]["message"],
-                lease=lease,
-            )
-        invalid_oid = self._invalid_promotion_oid(source)
-        if invalid_oid is not None:
-            return self._recover_promotion_blocked(
-                "source_pr_invalid_oid",
-                f"source pull request #{source.number} has an invalid {invalid_oid}",
-                lease=lease,
-            )
-        if (
-            lease.source_base_sha != source.base_sha
-            or lease.source_head_sha != source.head_sha
-            or lease.reviewed_paths != tuple(sorted(source.changed_paths))
-        ):
+            if not source_pins_match:
+                return self._recover_promotion_blocked(
+                    "promotion_provenance_changed",
+                    f"lease {lease.id} source pull request provenance changed",
+                    lease=lease,
+                )
+        except ValueError:
             return self._recover_promotion_blocked(
                 "promotion_provenance_changed",
                 f"lease {lease.id} source pull request provenance changed",
@@ -7656,7 +7846,7 @@ class WorktreeService:
             )
         if not verify_objects:
             return None
-        source_blocker = self._out_of_order_reuse_source_blocker(lease, source)
+        source_blocker = self._out_of_order_reuse_source_blocker(lease, sources)
         if source_blocker is None:
             return None
         code = source_blocker.blockers[0]["code"]
@@ -7720,20 +7910,66 @@ class WorktreeService:
             )
         return None
 
-    @staticmethod
-    def _manual_reviewed_promotion_message(lease: Lease, target_branch: str) -> str:
-        return "\n".join(
-            (
-                f"Promote PR #{lease.source_pr} to {target_branch}",
-                "",
-                f"AWF-Source-PR: {lease.source_pr}",
-                f"AWF-Source-Base: {lease.source_base_sha}",
-                f"AWF-Source-Head: {lease.source_head_sha}",
-                f"AWF-Target-Base: {lease.target_base_sha}",
-                f"AWF-Lease-ID: {lease.id}",
-                "AWF-Promotion-Mode: out-of-order",
-                "AWF-Resolution: manual-reviewed",
-            )
+    def _manual_reviewed_promotion_message(
+        self, lease: Lease, target_branch: str, *, read_only: bool = False
+    ) -> str:
+        sources = (
+            self.registry.get_promotion_sources_read_only(lease.id)
+            if read_only
+            else self.registry.get_promotion_sources(lease.id)
+        )
+        if not sources and lease.source_pr is not None:
+            github = self.github or GhClient(self.git.repository_root())
+            legacy_source = github.view_pr(lease.source_pr)
+            if self._legacy_promotion_source_pins_match(lease, (legacy_source,)):
+                sources = (legacy_source,)
+        return self._promotion_message(
+            sources=sources,
+            excluded_paths=(),
+            target_sha=lease.target_base_sha or "",
+            lease=lease,
+            target_branch=target_branch,
+            resolution_state=ResolutionState.MANUAL_REVIEWED,
+        )
+
+    def _manual_reviewed_promotion_message_matches(
+        self,
+        lease: Lease,
+        target_branch: str,
+        message: str,
+        *,
+        read_only: bool,
+        allow_legacy_unpinned: bool,
+    ) -> bool:
+        if message == self._manual_reviewed_promotion_message(
+            lease, target_branch, read_only=read_only
+        ):
+            return True
+        return allow_legacy_unpinned and self._legacy_manual_reviewed_message_matches(
+            lease, target_branch, message
+        )
+
+    def _legacy_manual_reviewed_message_matches(
+        self, lease: Lease, target_branch: str, message: str
+    ) -> bool:
+        if lease.source_pr is None:
+            return False
+        github = self.github or GhClient(self.git.repository_root())
+        source = github.view_pr(lease.source_pr)
+        if (
+            not self._legacy_promotion_source_pins_match(lease, (source,))
+            or source.merge_commit_sha is None
+            or _GIT_OBJECT_ID.fullmatch(source.merge_commit_sha) is None
+        ):
+            return False
+        return message == self._promotion_message(
+            sources=(source,),
+            excluded_paths=(),
+            target_sha=lease.target_base_sha or "",
+            lease=lease,
+            target_branch=target_branch,
+            resolution_state=ResolutionState.MANUAL_REVIEWED,
+            include_source_merge=False,
         )
 
     @staticmethod
@@ -7753,7 +7989,13 @@ class WorktreeService:
         github: GhClient,
         sources: Sequence[PullRequest],
         target_branch: str,
+        allow_legacy_unpinned: bool = False,
     ) -> CommandResult:
+        conflict_source_ordinal = (
+            lease.conflict_source_ordinal
+            if lease.conflict_source_ordinal is not None
+            else 0
+        )
         if (
             lease.state is not LeaseState.BLOCKED
             or lease.resolution_state is not ResolutionState.PENDING
@@ -7761,6 +8003,7 @@ class WorktreeService:
             or not lease.conflicted_paths
             or lease.target_pr is not None
             or lease.target_base_sha is None
+            or conflict_source_ordinal >= len(sources)
             or not set(lease.conflicted_paths).issubset(lease.reviewed_paths)
         ):
             return self._promotion_blocked(
@@ -7788,6 +8031,7 @@ class WorktreeService:
                     github=github,
                     sources=sources,
                     target_branch=target_branch,
+                    allow_legacy_unpinned=allow_legacy_unpinned,
                 )
             if self.git.fetch_ref(target_branch) != lease.target_base_sha:
                 return self._promotion_blocked(
@@ -7831,14 +8075,7 @@ class WorktreeService:
                     f"lease {lease.id} still has unmerged paths after staging",
                     lease=lease,
                 )
-            remaining_unstaged_paths = self.git.unstaged_paths(lease.worktree_path)
-            if not set(remaining_unstaged_paths).issubset(lease.conflicted_paths):
-                return self._promotion_blocked(
-                    "promotion_resolution_scope_mismatch",
-                    f"lease {lease.id} has unstaged resolution changes",
-                    lease=lease,
-                )
-            if remaining_unstaged_paths:
+            if self.git.unstaged_paths(lease.worktree_path):
                 return self._promotion_blocked(
                     "promotion_incomplete",
                     f"lease {lease.id} has unstaged conflicted resolution changes",
@@ -7850,6 +8087,58 @@ class WorktreeService:
                     f"lease {lease.id} staged resolution has conflict markers",
                     lease=lease,
                 )
+        except GitRemoteError as error:
+            return self._external_error(
+                "wt.promote", "promotion_recovery_failed", str(error), lease=lease
+            )
+        except ExternalServiceError as error:
+            return self._external_error(
+                "wt.promote", "promotion_recovery_failed", str(error), lease=lease
+            )
+        except (GitError, OSError, RuntimeError, sqlite3.Error) as error:
+            return self._promotion_blocked(
+                "promotion_incomplete", str(error), lease=lease
+            )
+        return self._apply_remaining_out_of_order_sources(
+            lease,
+            github=github,
+            sources=sources,
+            target_branch=target_branch,
+            conflict_source_ordinal=conflict_source_ordinal,
+        )
+
+    def _apply_remaining_out_of_order_sources(
+        self,
+        lease: Lease,
+        *,
+        github: GhClient,
+        sources: Sequence[PullRequest],
+        target_branch: str,
+        conflict_source_ordinal: int,
+    ) -> CommandResult:
+        assert lease.target_base_sha is not None
+        try:
+            for source_ordinal in range(conflict_source_ordinal + 1, len(sources)):
+                source = sources[source_ordinal]
+                if not any(
+                    self.git.path_blob(lease.target_base_sha, path)
+                    != self.git.path_blob(source.head_sha, path)
+                    for path in source.changed_paths
+                ):
+                    continue
+                patch = self.git.binary_diff(source.base_sha, source.head_sha)
+                if not patch:
+                    return self._promotion_blocked(
+                        "promotion_incomplete",
+                        f"source pull request #{source.number} has an empty pending patch",
+                        lease=lease,
+                    )
+                try:
+                    self.git.apply_indexed_patch(lease.worktree_path, patch)
+                except GitPatchConflict as error:
+                    return self._record_out_of_order_conflict(
+                        lease, error, source_ordinal=source_ordinal
+                    )
             promoted_paths = self.git.indexed_changed_paths(
                 lease.worktree_path, lease.target_base_sha
             )
@@ -7861,6 +8150,14 @@ class WorktreeService:
                     f"lease {lease.id} resolved delta is not a non-empty reviewed subset",
                     lease=lease,
                 )
+            protected_paths = tuple(
+                path
+                for path in lease.reviewed_paths
+                if path not in lease.conflicted_paths
+            )
+            protected_index_entries = self.git.index_entry_snapshot(
+                lease.worktree_path, protected_paths
+            )
             promotion_head = self.git.commit(
                 lease.worktree_path,
                 self._promotion_message(
@@ -7885,24 +8182,17 @@ class WorktreeService:
                 LeaseState.BLOCKED,
                 expected_version=lease.version,
                 event_type="promotion_manual_resolution_committed",
-                summary="manually reviewed conflict resolution committed",
+                summary="manually reviewed ordered conflict resolution committed",
                 observed_head_sha=promotion_head,
                 head_sha=promotion_head,
                 resolution_state=ResolutionState.MANUAL_REVIEWED,
+                clear_conflict_source_ordinal=True,
+                legacy_source_trailers=False,
+                protected_index_entries=protected_index_entries,
             )
         except GitRemoteError as error:
             return self._external_error(
-                "wt.promote",
-                "promotion_recovery_failed",
-                str(error),
-                lease=lease,
-            )
-        except ExternalServiceError as error:
-            return self._external_error(
-                "wt.promote",
-                "promotion_recovery_failed",
-                str(error),
-                lease=lease,
+                "wt.promote", "promotion_recovery_failed", str(error), lease=lease
             )
         except (
             GitError,
@@ -7920,6 +8210,8 @@ class WorktreeService:
             sources=sources,
             target_branch=target_branch,
         )
+
+
     def _reconcile_pending_manual_resolution(
         self,
         lease: Lease,
@@ -7927,6 +8219,7 @@ class WorktreeService:
         github: GhClient,
         sources: Sequence[PullRequest],
         target_branch: str,
+        allow_legacy_unpinned: bool = False,
     ) -> CommandResult:
         if (
             lease.state is not LeaseState.BLOCKED
@@ -7955,12 +8248,6 @@ class WorktreeService:
                     f"lease {lease.id} does not match a committed manual resolution",
                     lease=lease,
                 )
-            if not self._protected_index_entries_match(lease):
-                return self._promotion_blocked(
-                    "promotion_resolution_scope_mismatch",
-                    f"lease {lease.id} protected reviewed paths changed",
-                    lease=lease,
-                )
             if self.git.fetch_ref(target_branch) != lease.target_base_sha:
                 return self._promotion_blocked(
                     "promotion_provenance_changed",
@@ -7984,13 +8271,20 @@ class WorktreeService:
                 head_sha=promotion_head,
                 resolution_state=ResolutionState.MANUAL_REVIEWED,
             )
-            source_base_shas = self._promotion_source_bases_from_message(
+            legacy_manual_message = (
+                allow_legacy_unpinned
+                and self._legacy_manual_reviewed_message_matches(
+                    provisional,
+                    target_branch,
+                    self.git.commit_message(lease.worktree_path),
+                )
+            )
+            message_matches = self._manual_reviewed_promotion_message_matches(
+                provisional,
+                target_branch,
                 self.git.commit_message(lease.worktree_path),
-                sources=sources,
-                excluded_paths=(),
-                target_sha=lease.target_base_sha,
-                lease=provisional,
-                target_branch=target_branch,
+                read_only=False,
+                allow_legacy_unpinned=allow_legacy_unpinned,
             )
             promoted_paths = self.git.changed_paths(
                 lease.worktree_path,
@@ -7999,7 +8293,7 @@ class WorktreeService:
                 find_renames=True,
             )
             if (
-                source_base_shas != (lease.source_base_sha,)
+                not message_matches
                 or not promoted_paths
                 or not set(promoted_paths).issubset(lease.reviewed_paths)
                 or self.git.committed_diff_has_conflict_markers(
@@ -8011,6 +8305,14 @@ class WorktreeService:
                     f"lease {lease.id} does not have a valid manual resolution commit",
                     lease=lease,
                 )
+            protected_paths = tuple(
+                path
+                for path in lease.reviewed_paths
+                if path not in lease.conflicted_paths
+            )
+            protected_index_entries = self.git.index_entry_snapshot(
+                lease.worktree_path, protected_paths
+            )
             lease = self.registry.transition(
                 lease.id,
                 LeaseState.BLOCKED,
@@ -8020,6 +8322,9 @@ class WorktreeService:
                 observed_head_sha=promotion_head,
                 head_sha=promotion_head,
                 resolution_state=ResolutionState.MANUAL_REVIEWED,
+                clear_conflict_source_ordinal=True,
+                legacy_source_trailers=legacy_manual_message,
+                protected_index_entries=protected_index_entries,
             )
         except GitRemoteError as error:
             return self._external_error(
@@ -8041,11 +8346,11 @@ class WorktreeService:
             )
         return self._resume_manually_reviewed_promotion(
             lease,
+            allow_legacy_unpinned=allow_legacy_unpinned,
             github=github,
             sources=sources,
             target_branch=target_branch,
         )
-
 
 
     def _resume_manually_reviewed_promotion(
@@ -8055,6 +8360,7 @@ class WorktreeService:
         github: GhClient,
         sources: Sequence[PullRequest],
         target_branch: str,
+        allow_legacy_unpinned: bool = False,
     ) -> CommandResult:
         if (
             lease.state is not LeaseState.BLOCKED
@@ -8111,6 +8417,12 @@ class WorktreeService:
                     lease=lease,
                 )
             promotion_message = self.git.commit_message(lease.worktree_path)
+            legacy_manual_message = (
+                allow_legacy_unpinned
+                and self._legacy_manual_reviewed_message_matches(
+                    lease, target_branch, promotion_message
+                )
+            )
             source_base_shas = self._promotion_source_bases_from_message(
                 promotion_message,
                 sources=sources,
@@ -8118,6 +8430,7 @@ class WorktreeService:
                 target_sha=lease.target_base_sha,
                 lease=lease,
                 target_branch=target_branch,
+                allow_legacy_unpinned=allow_legacy_unpinned,
             )
             promoted_paths = self.git.changed_paths(
                 lease.worktree_path,
@@ -8126,7 +8439,8 @@ class WorktreeService:
                 find_renames=True,
             )
             if (
-                source_base_shas != (lease.source_base_sha,)
+                source_base_shas
+                != tuple(source.base_sha for source in sources)
                 or not promoted_paths
                 or not set(promoted_paths).issubset(lease.reviewed_paths)
                 or self.git.committed_diff_has_conflict_markers(
@@ -8151,6 +8465,7 @@ class WorktreeService:
                 observed_head_sha=promotion_head,
                 head_sha=promotion_head,
                 resolution_state=ResolutionState.MANUAL_REVIEWED,
+                legacy_source_trailers=legacy_manual_message,
             )
         except GitRemoteError as error:
             return self._external_error(
@@ -8185,7 +8500,6 @@ class WorktreeService:
         return replace(resumed, actions=verification_actions)
 
 
-
     def _reuse_promotion(
         self,
         lease: Lease,
@@ -8199,8 +8513,7 @@ class WorktreeService:
         target_branch: str,
     ) -> CommandResult:
         if (
-            lease.source_pr != sources[0].number
-            or lease.base_ref != target_ref
+            lease.base_ref != target_ref
             or lease.promotion_mode is not promotion_mode
             or lease.branch != expected_branch
         ):
@@ -8209,9 +8522,18 @@ class WorktreeService:
                 f"lease {lease.id} does not match the requested promotion",
                 lease=lease,
             )
+        legacy_unpinned = False
         if promotion_mode is PromotionMode.OUT_OF_ORDER:
+            try:
+                legacy_unpinned = lease.legacy_source_trailers or not (
+                    self.registry.get_promotion_sources(lease.id)
+                )
+            except sqlite3.Error as error:
+                return self._promotion_blocked(
+                    "registry_conflict", str(error), lease=lease
+                )
             source_blocker = self._out_of_order_reuse_source_blocker(
-                lease, sources[0]
+                lease, sources
             )
             if source_blocker is not None:
                 if (
@@ -8238,6 +8560,7 @@ class WorktreeService:
                     github=github,
                     sources=sources,
                     target_branch=target_branch,
+                    allow_legacy_unpinned=legacy_unpinned,
                 )
         try:
             promotion_message = self.git.commit_message(lease.worktree_path)
@@ -8277,6 +8600,7 @@ class WorktreeService:
             target_sha=target_base_sha,
             lease=lease,
             target_branch=target_branch,
+            allow_legacy_unpinned=legacy_unpinned,
         )
         if (
             _GIT_OBJECT_ID.fullmatch(target_base_sha) is None
@@ -8326,11 +8650,9 @@ class WorktreeService:
                     target_branch=target_branch,
                 )
         if lease.promotion_mode is PromotionMode.OUT_OF_ORDER and (
-            lease.source_base_sha != sources[0].base_sha
-            or lease.source_head_sha != sources[0].head_sha
-            or lease.target_base_sha != target_base_sha
-            or recorded_source_base_shas != (lease.source_base_sha,)
-            or lease.reviewed_paths != tuple(sorted(sources[0].changed_paths))
+            lease.target_base_sha != target_base_sha
+            or recorded_source_base_shas
+            != tuple(source.base_sha for source in sources)
         ):
             return self._promotion_blocked(
                 "promotion_incomplete",
@@ -8346,6 +8668,7 @@ class WorktreeService:
                 github=github,
                 sources=sources,
                 target_branch=target_branch,
+                allow_legacy_unpinned=legacy_unpinned,
             )
         if lease.state is LeaseState.PR_OPEN and lease.target_pr is not None:
             return CommandResult.ok("wt.promote", decision="reuse", lease=lease)
@@ -8417,43 +8740,115 @@ class WorktreeService:
         )
 
     def _out_of_order_reuse_source_blocker(
-        self, lease: Lease, source: PullRequest
+        self, lease: Lease, sources: Sequence[PullRequest]
     ) -> CommandResult | None:
         try:
-            source_base_sha = self.git.fetch_ref(source.base_sha)
-            source_head_sha = self.git.fetch_ref(source.head_sha)
-            if (
-                source_base_sha != source.base_sha
-                or source_head_sha != source.head_sha
-            ):
+            if not self._promotion_source_pins_match(lease, sources):
                 return self._promotion_blocked(
-                    "source_sha_mismatch",
-                    (
-                        f"fetched source pull request #{source.number} refs do not"
-                        " match the reviewed SHAs"
-                    ),
+                    "promotion_provenance_changed",
+                    f"lease {lease.id} source pull request provenance changed",
                     lease=lease,
                 )
-            merge_base = self.git.merge_base(source_base_sha, source_head_sha)
-            collapsed_paths = tuple(
-                sorted(
-                    self.git.changed_paths(
-                        self.git.repository_root(),
-                        merge_base,
-                        source_head_sha,
-                        find_renames=True,
+            staging_sha = self.git.fetch_ref(sources[0].base_ref)
+            previous_merge_sha: str | None = None
+            reviewed_paths: set[str] = set()
+            for source in sources:
+                if source.merge_commit_sha is None:
+                    return self._promotion_blocked(
+                        "promotion_provenance_changed",
+                        f"lease {lease.id} source pull request provenance changed",
+                        lease=lease,
+                    )
+                source_base_sha = self.git.fetch_ref(source.base_sha)
+                source_head_sha = self.git.fetch_ref(source.head_sha)
+                source_merge_sha = self.git.fetch_ref(source.merge_commit_sha)
+                if (
+                    source_base_sha != source.base_sha
+                    or source_head_sha != source.head_sha
+                    or source_merge_sha != source.merge_commit_sha
+                ):
+                    return self._promotion_blocked(
+                        "source_sha_mismatch",
+                        (
+                            f"fetched source pull request #{source.number} refs do not"
+                            " match the reviewed SHAs"
+                        ),
+                        lease=lease,
+                    )
+                merge_base = self.git.merge_base(source_base_sha, source_head_sha)
+                if merge_base != source_base_sha:
+                    return self._promotion_blocked(
+                        "source_base_not_ancestor",
+                        (
+                            f"source pull request #{source.number} base is not an"
+                            " ancestor of its reviewed head"
+                        ),
+                        lease=lease,
+                    )
+                if (
+                    self.git.merge_base(source_base_sha, source_merge_sha)
+                    != source_base_sha
+                    or self.git.merge_base(source_merge_sha, staging_sha)
+                    != source_merge_sha
+                ):
+                    return self._promotion_blocked(
+                        "source_merge_not_in_staging",
+                        (
+                            f"source pull request #{source.number} merge commit is"
+                            " not in the configured staging history"
+                        ),
+                        lease=lease,
+                    )
+                if (
+                    previous_merge_sha is not None
+                    and self.git.merge_base(previous_merge_sha, source_merge_sha)
+                    != previous_merge_sha
+                ):
+                    return self._promotion_blocked(
+                        "source_pr_sequence_order",
+                        (
+                            f"source pull request #{source.number} was not merged"
+                            " after the preceding source pull request"
+                        ),
+                        lease=lease,
+                    )
+                previous_merge_sha = source_merge_sha
+                collapsed_paths = self.git.changed_paths(
+                    self.git.repository_root(),
+                    merge_base,
+                    source_head_sha,
+                    find_renames=True,
+                )
+                expanded_paths = tuple(
+                    sorted(
+                        self.git.changed_path_endpoints(
+                            self.git.repository_root(),
+                            merge_base,
+                            source_head_sha,
+                        )
                     )
                 )
-            )
-            expanded_paths = tuple(
-                sorted(
-                    self.git.changed_path_endpoints(
-                        self.git.repository_root(),
-                        merge_base,
-                        source_head_sha,
+                source_paths = tuple(sorted(source.changed_paths))
+                if expanded_paths != collapsed_paths:
+                    return self._promotion_blocked(
+                        "unsupported_out_of_order_rename",
+                        "out-of-order promotion does not support renamed paths",
+                        lease=lease,
                     )
-                )
-            )
+                if (
+                    collapsed_paths != source_paths
+                    or any(
+                        self.git.path_blob(source_merge_sha, path)
+                        != self.git.path_blob(source_head_sha, path)
+                        for path in source_paths
+                    )
+                ):
+                    return self._promotion_blocked(
+                        "promotion_provenance_changed",
+                        f"lease {lease.id} source pull request provenance changed",
+                        lease=lease,
+                    )
+                reviewed_paths.update(source_paths)
         except GitRemoteError as error:
             return self._external_error(
                 "wt.promote",
@@ -8461,27 +8856,28 @@ class WorktreeService:
                 str(error),
                 lease=lease,
             )
-        except GitError as error:
+        except (GitError, ValueError, sqlite3.Error) as error:
             return self._promotion_blocked(
                 "source_delta_unavailable", str(error), lease=lease
             )
-        reviewed_paths = tuple(sorted(source.changed_paths))
-        if expanded_paths != collapsed_paths:
+        if lease.reviewed_paths != tuple(sorted(reviewed_paths)):
             return self._promotion_blocked(
-                "unsupported_out_of_order_rename",
-                "out-of-order promotion does not support renamed paths",
+                "promotion_provenance_changed",
+                f"lease {lease.id} reviewed-path provenance changed",
                 lease=lease,
             )
-        if (
-            collapsed_paths != reviewed_paths
-            or lease.source_base_sha != source.base_sha
-            or lease.source_head_sha != source.head_sha
-            or lease.reviewed_paths != reviewed_paths
-        ):
+        try:
+            if not self.registry.get_promotion_sources(lease.id) and not (
+                self._backfill_legacy_promotion_source_pins(lease, sources)
+            ):
+                return self._promotion_blocked(
+                    "promotion_provenance_changed",
+                    f"lease {lease.id} source pull request provenance changed",
+                    lease=lease,
+                )
+        except (ValueError, RuntimeError, sqlite3.Error) as error:
             return self._promotion_blocked(
-                "promotion_incomplete",
-                f"lease {lease.id} does not have exact promotion provenance",
-                lease=lease,
+                "promotion_provenance_changed", str(error), lease=lease
             )
         return None
 
@@ -8971,22 +9367,54 @@ class WorktreeService:
         numbers = ", ".join(f"#{source_pr}" for source_pr in source_prs)
         return f"Promote {label} {numbers} to {target_branch}"
 
+
+    @staticmethod
+    def _promotion_source_number(source: PullRequest | PromotionSource) -> int:
+        return (
+            source.number
+            if isinstance(source, PullRequest)
+            else source.source_pr
+        )
+
+    @staticmethod
+    def _promotion_source_merge_sha(
+        source: PullRequest | PromotionSource,
+    ) -> str | None:
+        return (
+            source.merge_commit_sha
+            if isinstance(source, PullRequest)
+            else source.merge_sha
+        )
+
+
     @staticmethod
     def _promotion_trailers(
         *,
-        sources: Sequence[PullRequest],
+        sources: Sequence[PullRequest | PromotionSource],
         excluded_paths: Sequence[str],
         target_sha: str,
         lease: Lease,
         resolution_state: ResolutionState | None = None,
+        include_source_merge: bool = True,
     ) -> tuple[str, ...]:
         source_trailers = tuple(
             trailer
             for source in sources
             for trailer in (
-                f"AWF-Source-PR: {source.number}",
+                f"AWF-Source-PR: {WorktreeService._promotion_source_number(source)}",
                 f"AWF-Source-Base: {source.base_sha}",
                 f"AWF-Source-Head: {source.head_sha}",
+                *(
+                    (
+                        "AWF-Source-Merge: "
+                        f"{WorktreeService._promotion_source_merge_sha(source)}",
+                    )
+                    if include_source_merge
+                    and lease.promotion_mode is PromotionMode.OUT_OF_ORDER
+                    and WorktreeService._promotion_source_merge_sha(source)
+                    is not None
+                    else ()
+                ),
             )
         )
         excluded_trailers = tuple(
@@ -9024,21 +9452,25 @@ class WorktreeService:
     def _promotion_message(
         self,
         *,
-        sources: Sequence[PullRequest],
+        sources: Sequence[PullRequest | PromotionSource],
         excluded_paths: Sequence[str],
         target_sha: str,
         lease: Lease,
         target_branch: str,
         resolution_state: ResolutionState | None = None,
+        include_source_merge: bool = True,
     ) -> str:
         return "\n".join(
             (
                 self._promotion_title(
-                    tuple(source.number for source in sources),
+                    tuple(
+                        self._promotion_source_number(source) for source in sources
+                    ),
                     target_branch,
                 ),
                 "",
                 *self._promotion_trailers(
+                    include_source_merge=include_source_merge,
                     sources=sources,
                     excluded_paths=excluded_paths,
                     target_sha=target_sha,
@@ -9057,14 +9489,27 @@ class WorktreeService:
         target_sha: str,
         lease: Lease,
         target_branch: str,
+        allow_legacy_unpinned: bool = False,
     ) -> tuple[str, ...] | None:
         lines = message.splitlines()
-        mode_trailer_count = (
-            2 if lease.promotion_mode is PromotionMode.OUT_OF_ORDER else 0
+        out_of_order = lease.promotion_mode is PromotionMode.OUT_OF_ORDER
+        mode_trailer_count = 2 if out_of_order else 0
+        standard_source_trailer_count = len(sources) * (
+            4 if out_of_order else 3
+        )
+        legacy_source_trailers = (
+            allow_legacy_unpinned
+            and out_of_order
+            and len(sources) == 1
+            and len(lines)
+            == 3 + len(excluded_paths) + 4 + mode_trailer_count
+        )
+        source_trailer_count = (
+            3 if legacy_source_trailers else standard_source_trailer_count
         )
         if (
             len(lines)
-            != 3 * len(sources) + len(excluded_paths) + 4 + mode_trailer_count
+            != source_trailer_count + len(excluded_paths) + 4 + mode_trailer_count
             or lines[0]
             != WorktreeService._promotion_title(
                 tuple(source.number for source in sources),
@@ -9076,22 +9521,29 @@ class WorktreeService:
         source_base_shas: list[str] = []
         offset = 2
         for source in sources:
-            source_base_prefix = "AWF-Source-Base: "
+            base_prefix = "AWF-Source-Base: "
             if (
                 lines[offset] != f"AWF-Source-PR: {source.number}"
-                or not lines[offset + 1].startswith(source_base_prefix)
-                or _GIT_OBJECT_ID.fullmatch(
-                    lines[offset + 1][len(source_base_prefix) :]
-                )
-                is None
-                or lines[offset + 2]
-                != f"AWF-Source-Head: {source.head_sha}"
+                or not lines[offset + 1].startswith(base_prefix)
+                or lines[offset + 2] != f"AWF-Source-Head: {source.head_sha}"
             ):
                 return None
-            source_base_shas.append(
-                lines[offset + 1][len(source_base_prefix) :]
-            )
+            source_base_sha = lines[offset + 1][len(base_prefix) :]
+            if (
+                _GIT_OBJECT_ID.fullmatch(source_base_sha) is None
+                or (out_of_order and source_base_sha != source.base_sha)
+            ):
+                return None
+            source_base_shas.append(source_base_sha)
             offset += 3
+            if out_of_order and not legacy_source_trailers:
+                if (
+                    source.merge_commit_sha is None
+                    or lines[offset]
+                    != f"AWF-Source-Merge: {source.merge_commit_sha}"
+                ):
+                    return None
+                offset += 1
         for excluded_path in excluded_paths:
             if lines[offset] != f"AWF-Excluded-Path: {excluded_path}":
                 return None
@@ -9116,7 +9568,7 @@ class WorktreeService:
     def _promotion_body(
         self,
         *,
-        sources: Sequence[PullRequest],
+        sources: Sequence[PullRequest | PromotionSource],
         excluded_paths: Sequence[str],
         target_sha: str,
         lease: Lease,
@@ -9258,7 +9710,11 @@ class WorktreeService:
 
 
     def _record_out_of_order_conflict(
-        self, lease: Lease, error: GitPatchConflict
+        self,
+        lease: Lease,
+        error: GitPatchConflict,
+        *,
+        source_ordinal: int,
     ) -> CommandResult:
         conflicted_paths = tuple(sorted(error.paths))
         protected_paths = tuple(
@@ -9276,13 +9732,14 @@ class WorktreeService:
                 event_type="promotion_blocked",
                 summary=(
                     "out_of_order_conflict: reviewed patch requires managed "
-                    "resolution; conflicted paths: "
+                    f"resolution for source ordinal {source_ordinal}; conflicted paths: "
                     + ", ".join(repr(path) for path in conflicted_paths)
                 ),
                 observed_head_sha=head_sha,
                 head_sha=head_sha,
                 resolution_state=ResolutionState.PENDING,
                 conflicted_paths=conflicted_paths,
+                conflict_source_ordinal=source_ordinal,
                 protected_index_entries=protected_index_entries,
             )
         except (GitError, OSError, RuntimeError, sqlite3.Error) as transition_error:
@@ -9292,8 +9749,9 @@ class WorktreeService:
         return self._promotion_blocked(
             "out_of_order_conflict",
             (
-                f"out-of-order promotion lease {lease.id} has conflicts that require "
-                "manual resolution; conflicted paths: "
+                f"out-of-order promotion lease {lease.id} source ordinal "
+                f"{source_ordinal} has conflicts that require manual resolution; "
+                "conflicted paths: "
                 + ", ".join(repr(path) for path in conflicted_paths)
             ),
             lease=lease,

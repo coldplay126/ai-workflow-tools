@@ -91,17 +91,24 @@
   계속 검증합니다. 명시한 PR delta만 최신 production 기준 단일 브랜치에 적용하며,
   사이의 staging-only commit은 제외합니다.
 
-- exact promotion을 기본으로 유지하며, 선행 staging 변경 A를 production에
-  포함할 수 없는 단일 merged PR B에는 opt-in `--out-of-order`를 추가했습니다.
-  이 경로는 하나의 `--source-pr`만 받고 `--exclude-path`를 허용하지 않으며,
-  위반 시 `invalid_out_of_order_promotion`, rename이면
-  `unsupported_out_of_order_rename`으로 중단합니다. B가 A의 API, schema,
-  behavior에 의존하면 중단해야 합니다. 충돌은 `out_of_order_conflict`로
-  보존하고 AWF가 보고한 파일만 수정한 뒤 같은 preview/apply를 재실행합니다.
-  source 또는 target SHA가 바뀌면 `promotion_provenance_changed`로 중단합니다.
-  synthetic production PR은 별도 approval과 successful checks를 거쳐야 합니다.
-  staging squash commit은 promotion input이
-  아니며 direct staging squash cherry-pick은 금지합니다.
+- exact promotion을 기본으로 유지하며, 선행 staging 변경을 포함하지 않은
+  ordered multi-source promotion을 위해 opt-in `--out-of-order`를 확장했습니다.
+  반복한 `--source-pr`는 staging merge 순서여야 하고 `--exclude-path`는 계속
+  금지됩니다. 모든 source의 ordinal, PR, base ref/base SHA/head SHA/merge SHA,
+  reviewed paths를 lease에 원자적으로 pin하고 merge ancestry·순서·rename을
+  검증합니다. 동일 목록에서 선행 source가 후행 source의 의존성인 경우에는
+  순서대로 적용할 수 있으며, patch는 하나의 synthetic commit으로 재구성됩니다.
+  최종 delta는 ordered reviewed-path union의 비어 있지 않은 부분집합이어야
+  합니다. conflict preview/apply, retry, manual resolution, recover-promotion은
+  전체 source pins와 target pin을 다시 검증합니다. conflict source ordinal을
+  영속해 이후 source patch도 순서대로 적용하고, 모든 patch가 해결된 뒤 하나의
+  synthetic commit을 만듭니다. commit 및 production PR은 각 source
+  PR/base/head/merge trailer를 입력 순서대로 기록하며 parser도 그 sequence를
+  정확히 검증합니다. source 또는 target provenance 변경은
+  `promotion_provenance_changed`, rename은
+  `unsupported_out_of_order_rename`으로 중단합니다. synthetic production PR은
+  별도 approval과 successful checks를 거쳐야 합니다. staging squash commit은
+  promotion input이 아니며 direct staging squash cherry-pick은 금지합니다.
 
 - plan/verify/test에 `awf wf db-check --stage ... --json`을 일반 gate 직전에
   연결했습니다. database signal이 있으면 production schema가 mandatory이고

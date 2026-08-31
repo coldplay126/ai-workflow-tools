@@ -1233,16 +1233,25 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
     assert safety["out_of_order"] == {
         "mode": "explicit_opt_in",
         "exact_mode": "default",
-        "single_source": True,
+        "source_order": "one_or_more_unique_sources_in_staging_merge_order",
+        "source_pins": "ordered_immutable_ordinal_pr_base_ref_base_head_merge_paths",
         "exclude_paths": "forbidden",
         "production_pr_review": "required",
         "production_pr_checks": "required",
         "direct_cherry_pick": "forbidden",
         "staging_squash_input": "forbidden",
-        "conflict_resolution": "managed_conflicted_files_only_replay_same_command",
-        "dependency_conflict": "blocked",
+        "conflict_resolution": (
+            "durable_source_ordinal_then_remaining_ordered_sources_before_"
+            "single_synthetic_commit"
+        ),
+        "legacy_single_source_pins": (
+            "verified_live_scalar_provenance_and_exact_three_trailer_message_"
+            "backfilled_on_apply_only"
+        ),
+        "dependency": "allowed_when_prerequisite_precedes_dependent_source",
         "rename": "unsupported",
         "initial_preview_fields": [
+            "sources",
             "source_base_sha",
             "source_head_sha",
             "target_base_sha",
@@ -1257,9 +1266,9 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
             "open_pull_request",
         ],
         "operator_edit_scope": "unstaged_unmerged_subset_of_conflicted_paths",
-        "final_indexed_delta": "non_empty_reviewed_paths_subset",
+        "final_indexed_delta": "non_empty_ordered_reviewed_path_union_subset",
         "conflict_marker_policy": "markers_only_trailing_whitespace_allowed",
-        "live_target_recheck": "after_verification_before_publish",
+        "live_target_recheck": "all_source_pins_and_target_after_verification_before_publish",
         "protected_index_entries": {
             "paths": "clean_applied_reviewed_paths_outside_conflicted_paths",
             "entry": "stage_zero_mode_blob_oid_or_null",
@@ -1521,10 +1530,10 @@ def test_out_of_order_promotion_docs_share_operator_contract() -> None:
         CLI_README,
     )
     expected_commands = (
-        "awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --json",
-        "awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --apply --json",
-        "awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --json",
-        "awf wt promote --source-pr <number> --to <branch> --out-of-order --repo-root <repo-root> --apply --json",
+        "awf wt promote --source-pr <first> --source-pr <second> --to <branch> --out-of-order --repo-root <repo-root> --json",
+        "awf wt promote --source-pr <first> --source-pr <second> --to <branch> --out-of-order --repo-root <repo-root> --apply --json",
+        "awf wt promote --source-pr <first> --source-pr <second> --to <branch> --out-of-order --repo-root <repo-root> --json",
+        "awf wt promote --source-pr <first> --source-pr <second> --to <branch> --out-of-order --repo-root <repo-root> --apply --json",
     )
     expected_apply = (False, True, False, True)
     required_prose = (
@@ -1532,11 +1541,18 @@ def test_out_of_order_promotion_docs_share_operator_contract() -> None:
         "a code must stay out of production; b applies cleanly",
         "a code must stay out; b has a mechanical patch conflict",
         "b requires a's api, schema, or behavior",
-        "exactly one `--source-pr`",
+        "one or more repeated `--source-pr`",
+        "staging merge order",
         "must not use `--exclude-path`",
-        "only the conflicted files returned by awf",
-        "same preview command",
-        "same command with `--apply`",
+        "ordinal, pr number, base ref, base sha, head sha, merge sha",
+        "authoritative across preview, apply, retry, manual recovery, and publication",
+        "renamed source paths",
+        "#527 followed by #530",
+        "one synthetic commit",
+        "non-empty subset of the ordered",
+        "conflicted files returned by awf",
+        "same ordered preview command",
+        "every source pin and target provenance are unchanged",
         "must pass successful checks on that exact pr before merge",
         "requires approval only when the repository's branch policy requires one",
         "a solo repository must not invent an unavailable reviewer",
@@ -1546,21 +1562,17 @@ def test_out_of_order_promotion_docs_share_operator_contract() -> None:
         "reviewed pr deltas only through `awf wt promote`",
         "all conflict markers must be removed before apply",
         "does not publish and preserves the worktree",
-        "`invalid_out_of_order_promotion`",
         "`unsupported_out_of_order_rename`",
         "`out_of_order_conflict`",
         "`promotion_provenance_changed`",
         "`promotion_resolution_scope_mismatch`",
         "`promotion_resolution_unmerged`",
-        "`source_base_sha`, `source_head_sha`, `target_base_sha`, and `reviewed_paths`",
-        "action order is `resolve_out_of_order_conflict`, `stage_paths`, `commit`, `verify_production`, `push_branch`, then `open_pull_request`",
         "operator's unstaged edits and unmerged paths must be a subset of `conflicted_paths`",
         "awf clean-applied staged `protected_index_entries` may remain outside `conflicted_paths`",
         "their mode+oid pin is exact across preview, apply, and retry",
-        "final indexed and committed paths must be a subset of `reviewed_paths`",
         "checks conflict markers only",
         "trailing whitespace is not prohibited",
-        "rechecks the live target after verification before publish",
+        "rechecks every source pin and the live target after verification before publish",
         "direct `git add` tampering or chmod/file-type mode tampering returns `promotion_resolution_scope_mismatch`",
     )
     forbidden_prose = (
@@ -1578,7 +1590,7 @@ def test_out_of_order_promotion_docs_share_operator_contract() -> None:
         for command, apply in zip(displayed_commands, expected_apply):
             parsed = parser.parse_args(_argv_from_displayed_command(command))
             assert (parsed.command, parsed.wt_command) == ("wt", "promote")
-            assert parsed.source_pr == [1]
+            assert parsed.source_pr == [1, 1]
             assert parsed.out_of_order is True
             assert parsed.apply is apply
             assert parsed.exclude_path == []
@@ -1613,9 +1625,12 @@ def test_out_of_order_promotion_changelog_names_the_opt_in_safety_contract() -> 
 
     assert "exact promotion을 기본으로 유지하며" in changelog
     assert "`--out-of-order`" in changelog
-    assert "`invalid_out_of_order_promotion`" in changelog
+    assert "ordered multi-source promotion" in changelog
+    assert "staging merge 순서" in changelog
+    assert "ordinal, pr, base ref/base sha/head sha/merge sha" in changelog
+    assert "하나의 synthetic commit" in changelog
+    assert "입력 순서대로 기록" in changelog
     assert "`unsupported_out_of_order_rename`" in changelog
-    assert "`out_of_order_conflict`" in changelog
     assert "`promotion_provenance_changed`" in changelog
     assert "staging squash commit" in changelog
 
