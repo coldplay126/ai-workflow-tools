@@ -110,9 +110,12 @@ repository-relative 경로만 허용되며 전체 reviewed delta를 제외할 �
 
 `awf wt sync --from main --to staging`은 configured production-only delta를
 latest staging에 재적용합니다. Preview 뒤 apply하며, no-op은 PR을 만들지 않고
-clean 3-way merge는 staging-only 변경과 Git mode를 보존합니다. 충돌·remote
-drift·검증 실패는 managed worktree를 보존합니다. 생성 PR의 reserved branch와
-`AWF-No-Promote: true` provenance는 이후 `promote`/`release add` 순환을 막습니다.
+clean 3-way merge는 staging-only 변경과 Git mode를 보존합니다. source-only patch
+적용 뒤 index tree가 target과 같으면 새 managed worktree·local branch를 정리하고
+remote branch/PR 없이 verified noop으로 끝냅니다. 같은 pin의 clean
+`sync_apply_failed` lease도 재실행 시 이 cleanup을 복구하지만 drift·dirty·published
+lease는 fail-closed로 보존합니다. 생성 PR의 reserved branch와 `AWF-No-Promote: true`
+provenance는 이후 `promote`/`release add` 순환을 막습니다.
 
 stale merged lease의 일괄 정리는 `awf wt gc --merged --older-than 7d`로
 수행합니다. `--dry-run --json`으로 먼저 확인한 뒤 `--apply --json`을
@@ -398,9 +401,13 @@ reviewed path must remain in the promotion.
 `awf wt sync --from main --to staging` reapplies only the configured
 production-only delta onto the latest staging branch. It is preview-first,
 creates no PR for a no-op, and preserves staging-only clean three-way results
-and Git modes. Conflicts, drift, and verification failures remain in the
-managed worktree. Its reserved branch shape and `AWF-No-Promote: true`
-provenance make promotion and release-add reject the synchronization PR.
+and Git modes. When an applied source-only patch leaves the index tree equal to
+the target, AWF removes its new managed worktree and local branch and returns a
+verified noop without a remote branch or PR. A clean, exactly pinned
+`sync_apply_failed` lease can recover through that cleanup; drifted, dirty, or
+published leases remain fail-closed. Its reserved branch shape and
+`AWF-No-Promote: true` provenance make promotion and release-add reject the
+synchronization PR.
 
 Bulk cleanup uses `awf wt gc --merged --older-than 7d`. Preview with
 `--dry-run --json`, then pass `--apply --json` explicitly. Leases without

@@ -770,6 +770,8 @@ class GitClient:
             raise GitError(f"git {command} failed to launch: {exc}") from exc
         if process.returncode != 0:
             detail = _bounded_stderr(stderr)
+            if not detail:
+                detail = _bounded_stderr(stdout)
             if "not a git repository" in detail.lower():
                 detail = f"not a Git repository: {detail}"
             raise GitError(

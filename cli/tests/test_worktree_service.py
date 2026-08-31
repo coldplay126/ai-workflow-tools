@@ -9577,6 +9577,33 @@ def _add_main_only_change(
     return source_sha
 
 
+def _prepare_sync_three_way_noop(harness: PromotionHarness) -> tuple[str, str]:
+    baseline = "base\nline-2\nline-3\nline-4\nline-5\nline-6\nline-7\ntail\n"
+    source_content = baseline.replace("base\n", "source\n", 1)
+    git_command(harness.repo, "checkout", "-q", "staging")
+    (harness.repo / "README.txt").write_text(baseline, encoding="utf-8")
+    git_command(harness.repo, "add", "README.txt")
+    git_command(harness.repo, "commit", "-q", "-m", "shared readme baseline")
+    git_command(harness.repo, "push", "-q", "origin", "staging")
+    git_command(harness.repo, "checkout", "-q", "main")
+    git_command(harness.repo, "merge", "--ff-only", "-q", "staging")
+    git_command(harness.repo, "push", "-q", "origin", "main")
+    (harness.repo / "README.txt").write_text(source_content, encoding="utf-8")
+    git_command(harness.repo, "add", "README.txt")
+    git_command(harness.repo, "commit", "-q", "-m", "source readme update")
+    source_sha = git_command(harness.repo, "rev-parse", "HEAD")
+    git_command(harness.repo, "push", "-q", "origin", "main")
+    git_command(harness.repo, "checkout", "-q", "staging")
+    (harness.repo / "README.txt").write_text(
+        source_content.replace("tail\n", "staging tail\n"), encoding="utf-8"
+    )
+    git_command(harness.repo, "add", "README.txt")
+    git_command(harness.repo, "commit", "-q", "-m", "staging readme extension")
+    target_sha = git_command(harness.repo, "rev-parse", "HEAD")
+    git_command(harness.repo, "push", "-q", "origin", "staging")
+    return source_sha, target_sha
+
+
 def test_sync_preview_and_apply_preserve_staging_only_changes(
     promotion_harness: PromotionHarness,
 ) -> None:
@@ -9640,6 +9667,27 @@ def test_sync_preview_and_apply_preserve_staging_only_changes(
     assert promotion_harness.git.commit_message(lease.worktree_path).endswith(body)
 
 
+def test_sync_uses_conventional_commit_subject(
+    promotion_harness: PromotionHarness,
+) -> None:
+    _add_main_only_change(promotion_harness)
+
+    result = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+
+    assert result.decision == "ready"
+    assert result.lease is not None
+    assert (
+        promotion_harness.git.commit_message(result.lease.worktree_path).splitlines()[
+            0
+        ]
+        == "chore(sync): sync main to staging"
+    )
+
+
 def test_sync_is_noop_when_staging_contains_main(
     promotion_harness: PromotionHarness,
 ) -> None:
@@ -9659,6 +9707,390 @@ def test_sync_is_noop_when_staging_contains_main(
     assert preview.actions[0]["kind"] == "no_sync_required"
     assert promotion_harness.registry.list_leases() == []
     assert promotion_harness.github.create_calls == []
+
+
+def test_sync_cleans_up_when_source_patch_has_no_indexed_target_delta(
+    promotion_harness: PromotionHarness,
+) -> None:
+    source_sha, target_sha = _prepare_sync_three_way_noop(promotion_harness)
+
+    result = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+
+    assert result.decision == "noop"
+    assert result.lease is None
+    assert [action["kind"] for action in result.actions] == [
+        "no_sync_required",
+        "remove_worktree",
+        "delete_local_branch",
+    ]
+    assert promotion_harness.registry.list_leases(include_removed=False) == []
+    leases = promotion_harness.registry.list_leases()
+    assert len(leases) == 1
+    lease = leases[0]
+    assert lease.state is LeaseState.REMOVED
+    assert lease.source_head_sha == source_sha
+    assert lease.target_base_sha == target_sha
+    assert not lease.worktree_path.exists()
+    assert promotion_harness.git.remote_branch_sha(lease.branch) is None
+    with pytest.raises(GitError):
+        promotion_harness.git.resolve_ref(lease.branch)
+    assert promotion_harness.github.create_calls == []
+
+
+def _blocked_sync_apply_failed_noop_lease(
+    harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> Lease:
+    _, target_sha = _prepare_sync_three_way_noop(harness)
+    original_index_tree_sha = harness.git.index_tree_sha
+    calls = 0
+
+    def force_nonempty_index_tree(cwd: Path) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return "0" * 40
+        return original_index_tree_sha(cwd)
+
+    monkeypatch.setattr(
+        harness.git, "index_tree_sha", force_nonempty_index_tree
+    )
+    first = harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+    monkeypatch.setattr(harness.git, "index_tree_sha", original_index_tree_sha)
+
+    assert first.decision == "blocked"
+    assert first.blockers[0]["code"] == "sync_apply_failed"
+    assert first.lease is not None
+    blocked = harness.registry.get_lease(first.lease.id)
+    assert blocked is not None
+    assert blocked.state is LeaseState.BLOCKED
+    assert blocked.head_sha == target_sha
+    assert harness.git.head_sha(blocked.worktree_path) == target_sha
+    assert harness.github.create_calls == []
+    return blocked
+
+
+def test_sync_recovers_clean_apply_failure_as_noop(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blocked = _blocked_sync_apply_failed_noop_lease(
+        promotion_harness, monkeypatch
+    )
+
+    recovered = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+
+    assert recovered.decision == "noop"
+    assert recovered.lease is None
+    assert [action["kind"] for action in recovered.actions] == [
+        "no_sync_required",
+        "remove_worktree",
+        "delete_local_branch",
+    ]
+    persisted = promotion_harness.registry.get_lease(blocked.id)
+    assert persisted is not None
+    assert persisted.state is LeaseState.REMOVED
+    assert not blocked.worktree_path.exists()
+    assert promotion_harness.git.remote_branch_sha(blocked.branch) is None
+    assert promotion_harness.github.create_calls == []
+
+
+@pytest.mark.parametrize(
+    ("mutation", "blocker"),
+    (("dirty", "dirty_sync_lease"), ("head", "sync_lease_head_mismatch")),
+)
+def test_sync_noop_recovery_refuses_dirty_or_head_drift(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    blocker: str,
+) -> None:
+    blocked = _blocked_sync_apply_failed_noop_lease(
+        promotion_harness, monkeypatch
+    )
+    if mutation == "dirty":
+        (blocked.worktree_path / "untracked.txt").write_text(
+            "unexpected\n", encoding="utf-8"
+        )
+    else:
+        (blocked.worktree_path / "README.txt").write_text(
+            "tampered\n", encoding="utf-8"
+        )
+        git_command(blocked.worktree_path, "add", "README.txt")
+        git_command(
+            blocked.worktree_path, "commit", "-q", "-m", "tamper sync worktree"
+        )
+
+    result = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+
+    assert result.decision == "blocked"
+    assert result.blockers[0]["code"] == blocker
+    persisted = promotion_harness.registry.get_lease(blocked.id)
+    assert persisted is not None
+    assert persisted.state is LeaseState.BLOCKED
+    assert blocked.worktree_path.exists()
+    assert promotion_harness.github.create_calls == []
+
+
+def test_sync_resumes_verified_commit_after_transient_verify_failure(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _add_main_only_change(promotion_harness)
+    original_verify = promotion_harness.service._verify_promotion
+    attempts = 0
+
+    def fail_once(worktree_path: Path) -> tuple[dict[str, object], ...]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("temporary production verification failure")
+        return original_verify(worktree_path)
+
+    monkeypatch.setattr(promotion_harness.service, "_verify_promotion", fail_once)
+    first = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+
+    assert first.decision == "blocked"
+    assert first.blockers[0]["code"] == "sync_apply_failed"
+    assert first.lease is not None
+    assert first.lease.target_base_sha is not None
+    assert (
+        promotion_harness.git.head_sha(first.lease.worktree_path)
+        != first.lease.target_base_sha
+    )
+
+    resumed = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+
+    assert resumed.decision == "ready"
+    assert resumed.lease is not None
+    assert resumed.lease.state is LeaseState.PR_OPEN
+    assert attempts == 2
+
+
+def test_sync_resumes_legacy_commit_subject(
+    promotion_harness: PromotionHarness,
+) -> None:
+    _add_main_only_change(promotion_harness)
+    promotion_harness.github.create_error = ExternalServiceError("temporary outage")
+    first = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+
+    assert first.exit_code == 4
+    assert first.lease is not None
+    lease = first.lease
+    assert lease.source_base_sha is not None
+    assert lease.source_head_sha is not None
+    assert lease.target_base_sha is not None
+    legacy_message = promotion_harness.service._legacy_sync_message(
+        source_branch="main",
+        target_branch="staging",
+        merge_base=lease.source_base_sha,
+        source_sha=lease.source_head_sha,
+        target_sha=lease.target_base_sha,
+        lease=lease,
+    )
+    git_command(
+        lease.worktree_path, "commit", "--amend", "-q", "-m", legacy_message
+    )
+    git_command(
+        lease.worktree_path,
+        "push",
+        "-q",
+        "--force",
+        "origin",
+        f"HEAD:refs/heads/{lease.branch}",
+    )
+    promotion_harness.github.create_error = None
+
+    resumed = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+
+    assert resumed.decision == "ready"
+    assert resumed.lease is not None
+    assert resumed.lease.state is LeaseState.PR_OPEN
+
+
+@pytest.mark.parametrize(
+    ("published", "blocker"),
+    (("branch", "sync_branch_exists"), ("pull_request", "sync_pr_open")),
+)
+def test_sync_noop_recovery_refuses_published_branch_or_pull_request(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    published: str,
+    blocker: str,
+) -> None:
+    blocked = _blocked_sync_apply_failed_noop_lease(
+        promotion_harness, monkeypatch
+    )
+    assert blocked.target_base_sha is not None
+    if published == "branch":
+        git_command(
+            promotion_harness.repo,
+            "push",
+            "-q",
+            "origin",
+            f"{blocked.branch}:refs/heads/{blocked.branch}",
+        )
+    else:
+        promotion_harness.github.open_prs[(blocked.branch, "staging")] = replace(
+            pull_request(
+                number=901, state="OPEN", head_sha=blocked.target_base_sha
+            ),
+            base_ref="staging",
+            base_sha=blocked.target_base_sha,
+            head_ref=blocked.branch,
+        )
+
+    result = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+
+    assert result.decision == "blocked"
+    assert result.blockers[0]["code"] == blocker
+    assert blocked.worktree_path.exists()
+
+
+def test_sync_noop_retries_after_cleanup_reservation_is_released(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prepare_sync_three_way_noop(promotion_harness)
+    original_remove = promotion_harness.git.remove_worktree
+
+    def fail_remove(_path: Path) -> None:
+        raise GitError("temporary worktree removal failure")
+
+    monkeypatch.setattr(promotion_harness.git, "remove_worktree", fail_remove)
+    first = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+    monkeypatch.setattr(promotion_harness.git, "remove_worktree", original_remove)
+
+    assert first.decision == "blocked"
+    assert first.blockers[0]["code"] == "worktree_remove_failed"
+    assert first.lease is not None
+    assert promotion_harness.registry.list_events(first.lease.id)[
+        -1
+    ].event_type == "cleanup_released"
+
+    retried = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+
+    assert retried.decision == "noop"
+    persisted = promotion_harness.registry.get_lease(first.lease.id)
+    assert persisted is not None
+    assert persisted.state is LeaseState.REMOVED
+
+
+def test_sync_noop_retries_after_external_preflight_failure(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_sha, _ = _prepare_sync_three_way_noop(promotion_harness)
+    branch = promotion_harness.service._sync_branch(
+        promotion_harness.service._sync_initiative("main", "staging"), source_sha
+    )
+    original_remote_branch_sha = promotion_harness.git.remote_branch_sha
+    branch_lookups = 0
+
+    def fail_final_noop_preflight(branch_name: str) -> str | None:
+        nonlocal branch_lookups
+        if branch_name == branch:
+            branch_lookups += 1
+            if branch_lookups == 2:
+                raise GitRemoteError(
+                    "temporary synchronization branch lookup failure"
+                )
+        return original_remote_branch_sha(branch_name)
+
+    monkeypatch.setattr(
+        promotion_harness.git, "remote_branch_sha", fail_final_noop_preflight
+    )
+    first = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+    monkeypatch.setattr(
+        promotion_harness.git, "remote_branch_sha", original_remote_branch_sha
+    )
+
+    assert first.exit_code == 4
+    assert first.lease is not None
+    assert first.lease.state is LeaseState.ACTIVE
+
+    retried = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+
+    assert retried.decision == "noop"
+
+
+def test_sync_noop_completes_cleanup_after_partial_worktree_removal(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prepare_sync_three_way_noop(promotion_harness)
+    original_remove = promotion_harness.git.remove_worktree
+
+    def remove_then_report_failure(path: Path) -> None:
+        original_remove(path)
+        raise GitError("worktree removed after transport failure")
+
+    monkeypatch.setattr(
+        promotion_harness.git, "remove_worktree", remove_then_report_failure
+    )
+    result = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+
+    assert result.decision == "noop"
+    removed = promotion_harness.registry.list_leases()[0]
+    assert removed.state is LeaseState.REMOVED
+    assert not removed.worktree_path.exists()
+    with pytest.raises(GitError):
+        promotion_harness.git.resolve_ref(removed.branch)
 
 
 def test_sync_preserves_source_file_mode_changes(
