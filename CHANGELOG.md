@@ -30,6 +30,14 @@
   allocated bytes and entry counts, takes a nonblocking repository lock, fully
   revalidates all candidates before deletion, and preserves all lease/registry,
   branch, worktree, Git HEAD, and Git status lifecycle state.
+- `awf wt discard-promotion --lease <id>`는 commit 전 비어 있는 exact
+  `promotion_apply_failed` lease만 명시적인 preview/apply로 정리합니다. AWF 소유
+  `PROMOTE`/`EXACT`/`BLOCKED` lease의 PR·remote branch·conflict·protected index·
+  cleanup reservation 부재, clean registered worktree, exact local HEAD/branch pin,
+  마지막 failure event를 확인하고 lock 안에서 다시 검증합니다. legacy
+  `target_base_sha=null` lease는 recorded HEAD가 현재 `base_ref`의 ancestor임을
+  Git graph로 증명할 때만 허용하며, present target base 불일치는 차단합니다.
+  remote branch는 삭제하지 않으며 모든 drift와 blocker는 fail-closed로 보존합니다.
 
 - `awf wt release open|add|seal|publish`로 처음부터 누적 release bridge를
   관리합니다. `open`은 최신 production 기준 `PROMOTE` lease를 만들고, `add`는

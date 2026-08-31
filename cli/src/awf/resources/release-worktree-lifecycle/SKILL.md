@@ -1,7 +1,7 @@
 ---
 name: release-worktree-lifecycle
-version: 1.2.0
-description: Use whenever handling deploy, production release, staging-to-main or staging-to-master promotion, release PR creation or merge, managed feature PR linkage, managed deployment worktree creation or reuse, or merged branch/worktree cleanup. Requires awf wt status/acquire/link-pr/promote/release/finish/gc and forbids bypassing CLI safety blockers.
+version: 1.3.0
+description: Use whenever handling deploy, production release, staging-to-main or staging-to-master promotion, release PR creation or merge, managed feature PR linkage, managed deployment worktree creation or reuse, merged branch/worktree cleanup, or an empty exact promotion apply failure. Requires awf wt status/acquire/link-pr/promote/release/discard-promotion/finish/gc and forbids bypassing CLI safety blockers.
 type: deployment-safety
 conditions:
   trigger:
@@ -163,6 +163,45 @@ If `promote --apply` returns `ready`, MUST use or report the returned lease and
 MUST NOT repeat `--apply`. A blocked promotion is resumable only through the
 CLI's verified prepare, verification, or publication recovery paths; MUST NOT
 manually repair or recreate its lease.
+
+## Empty exact promotion apply-failure discard
+
+Use `discard-promotion` only for an AWF-owned `PROMOTE` lease whose exact
+promotion apply failed before any promotion commit or publication. It is not
+general feature-lease disposal, automatic cleanup, a retry fallback, or a way
+to clear an out-of-order/manual-resolution promotion.
+
+After the required status preflight, inspect the one exact lease:
+
+```sh
+awf wt status --repo-root <repo-root> --refresh --json
+awf wt discard-promotion --lease <id> --repo-root <repo-root> --json
+```
+
+The preview is eligible only when the lease is `BLOCKED`, `EXACT`, has
+`ResolutionState.NONE`, no target PR, no conflict/protected-index metadata, no
+cleanup reservation, no remote branch, one clean registered non-bare,
+non-detached worktree on its recorded branch, and its worktree HEAD and local
+branch ref equal the recorded lease HEAD. Its last failure event MUST be
+`promotion_blocked` with a `promotion_apply_failed:` summary. A present
+`target_base_sha` MUST equal that HEAD; a legacy null target-base pin is eligible
+only when its recorded HEAD is graph-proven to be an ancestor of the currently
+resolved `base_ref`. Deployment state is irrelevant because the lease never
+published.
+
+Review both preview actions (`remove_worktree` and `delete_local_branch`) and
+their `lease_id`, `path`, and `branch`, then explicitly apply the same lease:
+
+```sh
+awf wt discard-promotion --lease <id> --repo-root <repo-root> --apply --json
+```
+
+Apply takes the repository lock, revalidates every guard, reserves cleanup,
+holds the branch, removes the worktree, completes the lease removal, then
+compare-and-deletes only the local branch. It NEVER deletes a remote branch.
+Any blocker, drift, reservation failure, or uncertain partial removal is a
+stop condition: preserve or safely release the reservation as reported, and
+MUST NOT use Git, SQLite, filesystem, or worktree-command bypasses.
 
 ## Cumulative managed release bridge
 
@@ -461,6 +500,8 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
     "out_of_order_promote_apply": "awf wt promote --source-pr <first> --source-pr <second> --to <branch> --out-of-order --repo-root <repo-root> --apply --json",
     "out_of_order_resolution_preview": "awf wt promote --source-pr <first> --source-pr <second> --to <branch> --out-of-order --repo-root <repo-root> --json",
     "out_of_order_resolution_apply": "awf wt promote --source-pr <first> --source-pr <second> --to <branch> --out-of-order --repo-root <repo-root> --apply --json",
+    "discard_promotion_preview": "awf wt discard-promotion --lease <id> --repo-root <repo-root> --json",
+    "discard_promotion_apply": "awf wt discard-promotion --lease <id> --repo-root <repo-root> --apply --json",
     "finish_preview": "awf wt finish --repo-root <repo-root> --pr <merged-pr> --json",
     "finish_apply": "awf wt finish --repo-root <repo-root> --pr <merged-pr> --apply --json",
     "gc_preview": "awf wt gc --repo-root <repo-root> --merged --older-than 7d --dry-run --json",
@@ -487,6 +528,13 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
     },
     "deployment_health": "repository_rollout_evidence",
     "blocked_action": "preserve_worktree_report_code_message",
+    "discard_promotion": {
+      "scope": "one_awf_owned_blocked_empty_exact_promotion_apply_failure_only",
+      "legacy_target_base": "null_requires_recorded_lease_head_to_be_ancestor_of_current_base",
+      "preview_actions": ["remove_worktree", "delete_local_branch"],
+      "apply": "lock_revalidate_reserve_hold_remove_complete_compare_delete_local",
+      "remote_branch": "must_be_absent_and_never_deleted"
+    },
     "compact": {
       "scope": "ignored_untracked_paths_only",
       "eligible_states": ["PR_OPEN", "DEPLOYING", "DEPLOYED", "CLEANABLE"],
@@ -571,6 +619,7 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
       "out_of_order_resolution",
       "import",
       "adopt",
+      "discard_promotion",
       "finish",
       "gc",
       "compact"
@@ -604,6 +653,7 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
       "release_publish": "review_then_apply_explicitly",
       "out_of_order_promote": "review_then_apply_explicitly",
       "out_of_order_resolution": "review_same_blocked_lease_then_apply_explicitly",
+      "discard_promotion": "review_every_action_then_apply_explicitly",
       "finish": "review_blockers_then_apply",
       "gc": "review_blockers_then_apply",
       "compact": "review_every_action_then_apply_explicitly"

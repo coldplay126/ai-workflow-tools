@@ -899,6 +899,66 @@ def test_wt_recover_promotion_forwards_apply(
     assert received == {"lease_id": "lease-123", "apply": True}
 
 
+def test_wt_discard_promotion_parser_surface() -> None:
+    args = build_parser().parse_args(
+        [
+            "wt",
+            "discard-promotion",
+            "--lease",
+            "lease-123",
+            "--repo-root",
+            "/repo",
+            "--apply",
+            "--json",
+        ]
+    )
+
+    assert args.command == "wt"
+    assert args.wt_command == "discard-promotion"
+    assert args.lease == "lease-123"
+    assert args.repo_root == "/repo"
+    assert args.apply is True
+    assert args.json is True
+    assert args.handler.__name__ == "run_wt_discard_promotion"
+
+
+def test_wt_discard_promotion_forwards_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = make_repository(tmp_path)
+    received: dict[str, object] = {}
+
+    def record_discard(
+        _service: object, lease_id: str, *, apply: bool = False
+    ) -> CommandResult:
+        received["lease_id"] = lease_id
+        received["apply"] = apply
+        return CommandResult.ok("wt.discard-promotion", decision="preview")
+
+    monkeypatch.setattr(
+        "awf.commands.wt.WorktreeService.discard_promotion",
+        record_discard,
+    )
+
+    rc, stdout, stderr = capture_main(
+        [
+            "wt",
+            "discard-promotion",
+            "--lease",
+            "lease-123",
+            "--repo-root",
+            str(repo),
+            "--apply",
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    assert stderr == ""
+    assert json.loads(stdout)["decision"] == "preview"
+    assert received == {"lease_id": "lease-123", "apply": True}
+
+
 def test_wt_acquire_preview_emits_one_json_document(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -28,6 +28,7 @@ from awf.commands.wt import (
     run_wt_compact,
     run_wt_link_pr,
     run_wt_doctor,
+    run_wt_discard_promotion,
     run_wt_import,
     run_wt_status,
     run_wt_sync,
@@ -1144,6 +1145,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print a versioned JSON result.",
     )
     wt_recover_promotion_parser.set_defaults(handler=run_wt_recover_promotion)
+
+    wt_discard_promotion_parser = wt_subparsers.add_parser(
+        "discard-promotion",
+        help="Preview or discard one empty exact promotion apply failure.",
+    )
+    wt_discard_promotion_parser.add_argument(
+        "--lease",
+        required=True,
+        help="Blocked empty exact promotion lease id.",
+    )
+    wt_discard_promotion_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to current or parent directories.",
+    )
+    wt_discard_promotion_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Remove the proven-empty promotion worktree and local branch.",
+    )
+    wt_discard_promotion_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_discard_promotion_parser.set_defaults(handler=run_wt_discard_promotion)
 
     wt_finish_parser = wt_subparsers.add_parser(
         "finish",

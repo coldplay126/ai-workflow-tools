@@ -1155,6 +1155,8 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "out_of_order_promote_apply": ("wt", "promote"),
         "out_of_order_resolution_preview": ("wt", "promote"),
         "out_of_order_resolution_apply": ("wt", "promote"),
+        "discard_promotion_preview": ("wt", "discard-promotion"),
+        "discard_promotion_apply": ("wt", "discard-promotion"),
         "finish_preview": ("wt", "finish"),
         "finish_apply": ("wt", "finish"),
         "gc_preview": ("wt", "gc"),
@@ -1206,6 +1208,10 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         commands["out_of_order_resolution_apply"]
         == commands["out_of_order_promote_apply"]
     )
+    assert "--lease" in commands["discard_promotion_preview"]
+    assert "--apply" not in commands["discard_promotion_preview"]
+    assert "--lease" in commands["discard_promotion_apply"]
+    assert "--apply" in commands["discard_promotion_apply"]
     assert "--apply" not in commands["finish_preview"]
     assert "--apply" in commands["finish_apply"]
     assert "--merged" in commands["gc_preview"]
@@ -1230,6 +1236,15 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
     }
     assert safety["deployment_health"] == "repository_rollout_evidence"
     assert safety["blocked_action"] == "preserve_worktree_report_code_message"
+    assert safety["discard_promotion"] == {
+        "scope": "one_awf_owned_blocked_empty_exact_promotion_apply_failure_only",
+        "legacy_target_base": (
+            "null_requires_recorded_lease_head_to_be_ancestor_of_current_base"
+        ),
+        "preview_actions": ["remove_worktree", "delete_local_branch"],
+        "apply": "lock_revalidate_reserve_hold_remove_complete_compare_delete_local",
+        "remote_branch": "must_be_absent_and_never_deleted",
+    }
     assert safety["out_of_order"] == {
         "mode": "explicit_opt_in",
         "exact_mode": "default",
@@ -1316,6 +1331,7 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "out_of_order_resolution",
         "import",
         "adopt",
+        "discard_promotion",
         "finish",
         "gc",
         "compact",
@@ -1348,6 +1364,7 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
             "release_publish": "review_then_apply_explicitly",
             "out_of_order_promote": "review_then_apply_explicitly",
             "out_of_order_resolution": "review_same_blocked_lease_then_apply_explicitly",
+            "discard_promotion": "review_every_action_then_apply_explicitly",
             "finish": "review_blockers_then_apply",
             "gc": "review_blockers_then_apply",
             "compact": "review_every_action_then_apply_explicitly",

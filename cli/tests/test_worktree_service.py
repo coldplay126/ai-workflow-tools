@@ -6,7 +6,7 @@ import subprocess
 import sqlite3
 import sys
 from dataclasses import dataclass, field, replace
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -4997,6 +4997,321 @@ def test_promote_preserves_conflicted_worktree(
     assert result.lease.conflicted_paths == ()
     assert result.lease.worktree_path.exists()
     assert promotion_harness.github.create_calls == []
+
+
+def _failed_empty_exact_promotion(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    legacy: bool = False,
+) -> Lease:
+    def fail_apply(_worktree: Path, _patch: bytes) -> None:
+        raise GitPatchConflict(("feature.txt",), "synthetic exact apply failure")
+
+    monkeypatch.setattr(
+        promotion_harness.git, "apply_indexed_patch", fail_apply
+    )
+    result = promotion_harness.service.promote(
+        source_pr=372, target_branch="main", apply=True
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "promotion_apply_failed"
+    assert result.lease is not None
+    assert result.lease.state is LeaseState.BLOCKED
+    assert result.lease.promotion_mode is PromotionMode.EXACT
+    assert result.lease.target_base_sha == result.lease.head_sha
+    assert promotion_harness.git.status_porcelain(result.lease.worktree_path) == ()
+    if not legacy:
+        return result.lease
+    with closing(promotion_harness.registry._connect()) as connection:
+        connection.execute(
+            "UPDATE worktree_leases SET target_base_sha = NULL WHERE id = ?",
+            (result.lease.id,),
+        )
+        connection.commit()
+    legacy_lease = promotion_harness.registry.get_lease(result.lease.id)
+    assert legacy_lease is not None
+    assert legacy_lease.target_base_sha is None
+    return legacy_lease
+
+
+def test_discard_promotion_previews_and_removes_empty_legacy_exact_lease(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = _failed_empty_exact_promotion(
+        promotion_harness, monkeypatch, legacy=True
+    )
+    before = promotion_harness.registry.get_lease(lease.id)
+    assert before is not None
+    before_events = promotion_harness.registry.list_events(lease.id)
+
+    preview = promotion_harness.service.discard_promotion(lease.id)
+
+    assert preview.decision == "preview"
+    assert preview.lease == before
+    assert preview.actions == (
+        {
+            "kind": "remove_worktree",
+            "lease_id": lease.id,
+            "path": str(lease.worktree_path),
+            "branch": lease.branch,
+        },
+        {
+            "kind": "delete_local_branch",
+            "lease_id": lease.id,
+            "path": str(lease.worktree_path),
+            "branch": lease.branch,
+        },
+    )
+    assert promotion_harness.registry.get_lease(lease.id) == before
+    assert promotion_harness.registry.list_events(lease.id) == before_events
+
+    removed = promotion_harness.service.discard_promotion(lease.id, apply=True)
+
+    assert removed.decision == "removed"
+    assert [action["kind"] for action in removed.actions] == [
+        "remove_worktree",
+        "delete_local_branch",
+    ]
+    assert not lease.worktree_path.exists()
+    stored = promotion_harness.registry.get_lease(lease.id)
+    assert stored is not None
+    assert stored.state is LeaseState.REMOVED
+    with pytest.raises(GitError):
+        promotion_harness.git.resolve_ref(lease.branch)
+
+
+def test_discard_promotion_rejects_exact_failure_after_commit(
+    promotion_harness: PromotionHarness,
+) -> None:
+    promotion_harness.configure(
+        verify_production=(
+            (sys.executable, "-c", "import sys; sys.exit(1)"),
+        )
+    )
+
+    failed = promotion_harness.service.promote(
+        source_pr=372, target_branch="main", apply=True
+    )
+
+    assert failed.status == "blocked"
+    assert failed.blockers[0]["code"] == "promotion_apply_failed"
+    assert failed.lease is not None
+    assert failed.lease.target_base_sha is not None
+    assert failed.lease.head_sha != failed.lease.target_base_sha
+
+    result = promotion_harness.service.discard_promotion(failed.lease.id)
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "target_base_mismatch"
+    assert failed.lease.worktree_path.exists()
+
+
+def test_discard_promotion_rejects_wrong_failure_event(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = _failed_empty_exact_promotion(promotion_harness, monkeypatch)
+    promotion_harness.registry.record_cleanup_event(
+        lease.id,
+        event_type="promotion_publish_failed",
+        summary="promotion publication failed after apply",
+    )
+
+    result = promotion_harness.service.discard_promotion(lease.id)
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "promotion_failure_not_recorded"
+    assert lease.worktree_path.exists()
+
+
+def test_discard_promotion_reports_remote_lookup_failure_as_external_error(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = _failed_empty_exact_promotion(promotion_harness, monkeypatch)
+
+    def fail_remote_lookup(_branch: str) -> str | None:
+        raise GitRemoteError("origin temporarily unavailable")
+
+    monkeypatch.setattr(
+        promotion_harness.git, "remote_branch_sha", fail_remote_lookup
+    )
+
+    result = promotion_harness.service.discard_promotion(lease.id)
+
+    assert result.status == "error"
+    assert result.exit_code == 4
+    assert result.blockers[0]["code"] == "remote_branch_inspection_failed"
+    assert lease.worktree_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "code"),
+    [
+        ("dirty", "dirty_worktree"),
+        ("head", "head_mismatch"),
+        ("remote", "remote_branch_present"),
+    ],
+)
+def test_discard_promotion_rejects_worktree_or_branch_drift(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    code: str,
+) -> None:
+    lease = _failed_empty_exact_promotion(promotion_harness, monkeypatch)
+    if mutation == "dirty":
+        (lease.worktree_path / "local.txt").write_text("dirty\n", encoding="utf-8")
+    elif mutation == "head":
+        (lease.worktree_path / "drift.txt").write_text("drift\n", encoding="utf-8")
+        git_command(lease.worktree_path, "add", "drift.txt")
+        git_command(lease.worktree_path, "commit", "-q", "-m", "promotion drift")
+    else:
+        git_command(
+            lease.worktree_path, "push", "-q", "-u", "origin", lease.branch
+        )
+
+    result = promotion_harness.service.discard_promotion(lease.id)
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == code
+    assert lease.worktree_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("invalid_fields", "code"),
+    [
+        ({"target_pr": 900}, "target_pr_present"),
+        ({"promotion_mode": PromotionMode.OUT_OF_ORDER}, "not_exact_promotion"),
+        ({"purpose": Purpose.FEATURE}, "not_promotion_lease"),
+        ({"target_base_sha": "0" * 40}, "target_base_mismatch"),
+    ],
+)
+def test_discard_promotion_rejects_pr_linked_non_exact_or_feature_lease(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_fields: dict[str, object],
+    code: str,
+) -> None:
+    lease = _failed_empty_exact_promotion(promotion_harness, monkeypatch)
+    invalid = replace(lease, **invalid_fields)
+    monkeypatch.setattr(
+        promotion_harness.registry,
+        "get_lease_read_only",
+        lambda _lease_id: invalid,
+    )
+
+    result = promotion_harness.service.discard_promotion(lease.id)
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == code
+    assert lease.worktree_path.exists()
+
+
+def test_discard_promotion_blocks_when_cleanup_reservation_fails(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = _failed_empty_exact_promotion(promotion_harness, monkeypatch)
+
+    def fail_reservation(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("simulated reservation race")
+
+    monkeypatch.setattr(
+        promotion_harness.registry, "reserve_cleanup", fail_reservation
+    )
+
+    result = promotion_harness.service.discard_promotion(lease.id, apply=True)
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "registry_conflict"
+    assert lease.worktree_path.exists()
+    assert promotion_harness.registry.get_cleanup_reservation(lease.id) is None
+
+
+def test_discard_promotion_releases_reservation_when_worktree_removal_fails(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = _failed_empty_exact_promotion(promotion_harness, monkeypatch)
+    original_remove = promotion_harness.git.remove_worktree
+
+    def fail_remove(_path: Path) -> None:
+        raise GitError("simulated worktree removal failure")
+
+    monkeypatch.setattr(promotion_harness.git, "remove_worktree", fail_remove)
+
+    result = promotion_harness.service.discard_promotion(lease.id, apply=True)
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "worktree_remove_failed"
+    assert lease.worktree_path.exists()
+    current = promotion_harness.registry.get_lease(lease.id)
+    assert current is not None
+    assert current.state is LeaseState.BLOCKED
+    assert promotion_harness.registry.get_cleanup_reservation(lease.id) is None
+
+    monkeypatch.setattr(promotion_harness.git, "remove_worktree", original_remove)
+    retried = promotion_harness.service.discard_promotion(lease.id, apply=True)
+
+    assert retried.decision == "removed"
+    assert not lease.worktree_path.exists()
+
+
+def test_discard_promotion_recovers_completed_worktree_removal_after_restart(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = _failed_empty_exact_promotion(promotion_harness, monkeypatch)
+    reservation = promotion_harness.registry.reserve_cleanup(
+        lease.id, expected_version=lease.version, branch_sha=lease.head_sha
+    )
+    promotion_harness.git.remove_worktree(lease.worktree_path)
+
+    result = promotion_harness.service.discard_promotion(lease.id, apply=True)
+
+    assert result.decision == "removed"
+    assert result.lease is not None
+    assert result.lease.state is LeaseState.REMOVED
+    assert promotion_harness.registry.get_cleanup_reservation(lease.id) is None
+    assert reservation.branch_sha == lease.head_sha
+
+
+def test_discard_promotion_releases_interrupted_reservation_when_path_remains(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = _failed_empty_exact_promotion(promotion_harness, monkeypatch)
+    promotion_harness.registry.reserve_cleanup(
+        lease.id, expected_version=lease.version, branch_sha=lease.head_sha
+    )
+
+    result = promotion_harness.service.discard_promotion(lease.id, apply=True)
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "worktree_remove_failed"
+    assert lease.worktree_path.exists()
+    assert promotion_harness.registry.get_cleanup_reservation(lease.id) is None
+
+
+def test_discard_promotion_completes_partial_worktree_removal(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = _failed_empty_exact_promotion(promotion_harness, monkeypatch)
+    original_remove = promotion_harness.git.remove_worktree
+
+    def remove_then_fail(path: Path) -> None:
+        original_remove(path)
+        raise GitError("simulated post-removal failure")
+
+    monkeypatch.setattr(
+        promotion_harness.git, "remove_worktree", remove_then_fail
+    )
+
+    result = promotion_harness.service.discard_promotion(lease.id, apply=True)
+
+    assert result.decision == "removed"
+    assert not lease.worktree_path.exists()
+    current = promotion_harness.registry.get_lease(lease.id)
+    assert current is not None
+    assert current.state is LeaseState.REMOVED
+    assert promotion_harness.registry.get_cleanup_reservation(lease.id) is None
 
 
 def test_promote_out_of_order_skips_path_already_at_reviewed_head(

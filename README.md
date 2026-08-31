@@ -117,6 +117,14 @@ remote branch/PR 없이 verified noop으로 끝냅니다. 같은 pin의 clean
 lease는 fail-closed로 보존합니다. 생성 PR의 reserved branch와 `AWF-No-Promote: true`
 provenance는 이후 `promote`/`release add` 순환을 막습니다.
 
+`awf wt discard-promotion --lease <id>`는 commit 전 exact promotion apply
+failure로 비어 있는 lease만 정리하는 예외적 복구 경로입니다. 반드시
+`status --refresh` 뒤 preview JSON의 `remove_worktree`와 `delete_local_branch`
+action을 검토하고, 같은 명령에만 `--apply`를 붙입니다. AWF 소유 `BLOCKED`
+exact lease가 clean 상태이고 PR·remote branch·conflict·cleanup reservation이 없으며
+마지막 이벤트가 `promotion_apply_failed:`여야 합니다. 다른 blocker, drift, 또는
+remote branch는 보존하고 Git·SQLite·filesystem 우회 정리를 해서는 안 됩니다.
+
 stale merged lease의 일괄 정리는 `awf wt gc --merged --older-than 7d`로
 수행합니다. `--dry-run --json`으로 먼저 확인한 뒤 `--apply --json`을
 명시해야 하며, merged PR·clean worktree·deployment health 증거가 부족한 lease는
@@ -408,6 +416,15 @@ verified noop without a remote branch or PR. A clean, exactly pinned
 published leases remain fail-closed. Its reserved branch shape and
 `AWF-No-Promote: true` provenance make promotion and release-add reject the
 synchronization PR.
+
+`awf wt discard-promotion --lease <id>` is the exceptional recovery path only
+for an empty exact promotion apply failure before a commit. After
+`status --refresh`, inspect the preview's `remove_worktree` and
+`delete_local_branch` actions, then add `--apply` only to that same command.
+The AWF-owned `BLOCKED` exact lease must be clean and have no PR, remote
+branch, conflicts, or cleanup reservation, and its final failure event must
+start with `promotion_apply_failed:`. Preserve every other blocker or drift;
+never bypass it with Git, SQLite, or filesystem cleanup.
 
 Bulk cleanup uses `awf wt gc --merged --older-than 7d`. Preview with
 `--dry-run --json`, then pass `--apply --json` explicitly. Leases without
