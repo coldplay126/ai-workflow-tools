@@ -1076,6 +1076,24 @@ def _install_fake_git(
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
 
 
+def test_git_commit_error_uses_stdout_when_stderr_is_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_fake_git(
+        monkeypatch,
+        tmp_path,
+        "import sys\n"
+        "sys.stdout.write('commitlint rejected conventional subject\\n')\n"
+        "raise SystemExit(1)\n",
+    )
+
+    with pytest.raises(
+        GitError, match="commitlint rejected conventional subject"
+    ) as error:
+        GitClient(tmp_path).commit(tmp_path, "chore(sync): sync main to staging")
+
+    assert error.value.returncode == 1
+
 def test_git_error_redacts_url_userinfo(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -456,6 +456,20 @@ class WorktreeService:
                         "source-only paths produced an empty synchronization delta",
                     )
                 self.git.apply_indexed_patch(lease.worktree_path, patch)
+                if (
+                    self.git.index_tree_sha(lease.worktree_path)
+                    == self.git.commit_tree_sha(target_sha, lease.worktree_path)
+                ):
+                    return self._finalize_sync_noop(
+                        lease=lease,
+                        expected=lease,
+                        github=github,
+                        source_branch=source_branch,
+                        target_branch=target_branch,
+                        source_sha=source_sha,
+                        target_sha=target_sha,
+                        merge_base=merge_base,
+                    )
                 sync_head = self.git.commit(
                     lease.worktree_path,
                     self._sync_message(
@@ -6753,6 +6767,22 @@ class WorktreeService:
                 f"lease {lease.id} is {lease.state.value}; preserve it for recovery",
                 lease=lease,
             )
+        if lease.state is LeaseState.BLOCKED:
+            assert expected.source_base_sha is not None
+            assert expected.source_head_sha is not None
+            assert expected.target_base_sha is not None
+            recovered = self._recover_sync_apply_failed_noop(
+                lease=lease,
+                expected=expected,
+                github=github,
+                source_branch=source_branch,
+                target_branch=target_branch,
+                source_sha=expected.source_head_sha,
+                target_sha=expected.target_base_sha,
+                merge_base=expected.source_base_sha,
+            )
+            if recovered is not None:
+                return recovered
         worktree = self._registered_worktree(lease)
         if (
             worktree is None
@@ -6783,10 +6813,19 @@ class WorktreeService:
             target_sha=lease.target_base_sha,
             lease=lease,
         )
+        legacy_expected_message = self._legacy_sync_message(
+            source_branch=source_branch,
+            target_branch=target_branch,
+            merge_base=lease.source_base_sha,
+            source_sha=lease.source_head_sha,
+            target_sha=lease.target_base_sha,
+            lease=lease,
+        )
         if (
             actual_head == lease.target_base_sha
             or self.git.commit_parents(actual_head) != (lease.target_base_sha,)
-            or self.git.commit_message(lease.worktree_path) != expected_message
+            or self.git.commit_message(lease.worktree_path)
+            not in {expected_message, legacy_expected_message}
         ):
             return self._sync_blocked(
                 "sync_lease_head_mismatch",
@@ -6925,6 +6964,324 @@ class WorktreeService:
             actions=verification_actions,
         )
 
+    def _recover_sync_apply_failed_noop(
+        self,
+        *,
+        lease: Lease,
+        expected: Lease,
+        github: GhClient,
+        source_branch: str,
+        target_branch: str,
+        source_sha: str,
+        target_sha: str,
+        merge_base: str,
+    ) -> CommandResult | None:
+        try:
+            events = self.registry.list_events(lease.id)
+        except (RuntimeError, sqlite3.Error) as error:
+            return self._sync_blocked(
+                "registry_conflict", str(error), lease=lease
+            )
+        if (
+            not events
+            or events[-1].event_type != "sync_blocked"
+            or events[-1].to_state is not LeaseState.BLOCKED
+            or not events[-1].summary.startswith("sync_apply_failed:")
+        ):
+            return None
+        return self._finalize_sync_noop(
+            lease=lease,
+            expected=expected,
+            github=github,
+            source_branch=source_branch,
+            target_branch=target_branch,
+            source_sha=source_sha,
+            target_sha=target_sha,
+            merge_base=merge_base,
+        )
+
+    def _finalize_sync_noop(
+        self,
+        *,
+        lease: Lease,
+        expected: Lease,
+        github: GhClient,
+        source_branch: str,
+        target_branch: str,
+        source_sha: str,
+        target_sha: str,
+        merge_base: str,
+    ) -> CommandResult:
+        try:
+            current = self.registry.get_lease(lease.id)
+        except (RuntimeError, sqlite3.Error) as error:
+            return self._sync_blocked(
+                "registry_conflict", str(error), lease=lease
+            )
+        if current is None:
+            return self._sync_blocked(
+                "sync_lease_incomplete",
+                f"lease {lease.id} changed before noop cleanup could begin",
+            )
+        if (
+            current.repository_id != expected.repository_id
+            or current.repository_root != expected.repository_root
+            or current.initiative != expected.initiative
+            or current.purpose is not Purpose.FEATURE
+            or not current.managed
+            or current.owner_kind != "awf"
+            or current.branch != expected.branch
+            or current.base_ref != expected.base_ref
+            or current.source_base_sha != merge_base
+            or current.source_head_sha != source_sha
+            or current.target_base_sha != target_sha
+            or current.reviewed_paths != expected.reviewed_paths
+        ):
+            return self._sync_blocked(
+                "sync_lease_stale",
+                (
+                    f"lease {current.id} does not match the current source and target "
+                    "provenance"
+                ),
+                lease=current,
+            )
+        if current.state not in {LeaseState.ACTIVE, LeaseState.BLOCKED}:
+            return self._sync_blocked(
+                "sync_lease_incomplete",
+                f"lease {current.id} is {current.state.value}; preserve it for recovery",
+                lease=current,
+            )
+        if current.target_pr is not None:
+            return self._sync_blocked(
+                "sync_pr_open",
+                f"lease {current.id} already has a synchronization pull request",
+                lease=current,
+            )
+        path_blocker = self._cleanup_path_blocker(current)
+        if path_blocker is not None:
+            return self._block_sync_lease(
+                current, path_blocker["code"], path_blocker["message"]
+            )
+        try:
+            worktree = self._registered_worktree(current)
+            if (
+                worktree is None
+                or worktree.branch != current.branch
+                or worktree.detached
+                or worktree.bare
+            ):
+                return self._sync_blocked(
+                    "orphaned_sync_lease",
+                    (
+                        f"lease {current.id} is not registered as its managed Git "
+                        "worktree"
+                    ),
+                    lease=current,
+                )
+            if self.git.status_porcelain(current.worktree_path):
+                return self._sync_blocked(
+                    "dirty_sync_lease",
+                    f"lease {current.id} has uncommitted changes",
+                    lease=current,
+                )
+            actual_head = self.git.head_sha(current.worktree_path)
+            branch_sha = self.git.resolve_ref(current.branch)
+            index_tree = self.git.index_tree_sha(current.worktree_path)
+            target_tree = self.git.commit_tree_sha(
+                target_sha, current.worktree_path
+            )
+        except (GitError, OSError) as error:
+            return self._block_sync_lease(
+                current, "sync_apply_failed", str(error)
+            )
+        if (
+            current.head_sha != target_sha
+            or actual_head != target_sha
+            or branch_sha != target_sha
+        ):
+            return self._block_sync_lease(
+                current,
+                "sync_lease_head_mismatch",
+                f"lease {current.id} worktree head changed",
+            )
+        if index_tree != target_tree:
+            return self._block_sync_lease(
+                current,
+                "sync_delta_mismatch",
+                "synchronization index does not match the target tree",
+            )
+        drift_blocker = self._sync_remote_drift_blocker(
+            lease=current,
+            source_branch=source_branch,
+            target_branch=target_branch,
+            source_sha=source_sha,
+            target_sha=target_sha,
+        )
+        if drift_blocker is not None:
+            return drift_blocker
+        try:
+            remote_sync_sha = self.git.remote_branch_sha(current.branch)
+            target_pull_request = github.find_open_pr(
+                head=current.branch, base=target_branch
+            )
+        except (ExternalServiceError, GitRemoteError) as error:
+            return self._external_error(
+                "wt.sync", "sync_publish_failed", str(error), lease=current
+            )
+        if remote_sync_sha is not None:
+            return self._block_sync_lease(
+                current,
+                "sync_branch_exists",
+                (
+                    f"remote branch {current.branch!r} exists while recovering "
+                    "the no-op synchronization"
+                ),
+            )
+        if target_pull_request is not None:
+            return self._block_sync_lease(
+                current,
+                "sync_pr_open",
+                (
+                    f"sync pull request #{target_pull_request.number} exists while "
+                    "recovering the no-op synchronization"
+                ),
+            )
+        try:
+            reservation = self.registry.reserve_cleanup(
+                current.id,
+                expected_version=current.version,
+                branch_sha=target_sha,
+            )
+        except (RuntimeError, sqlite3.Error) as error:
+            return self._sync_blocked(
+                "registry_conflict", str(error), lease=current
+            )
+        post_lock_failure: tuple[str, str] | None = None
+        try:
+            with self.git.hold_worktree_branch_if_at(
+                current.worktree_path, current.branch, reservation.branch_sha
+            ):
+                reserved_current = self.registry.get_lease(current.id)
+                if (
+                    reserved_current is None
+                    or reserved_current.version != reservation.reserved_version
+                    or self.registry.get_cleanup_reservation(current.id)
+                    != reservation
+                ):
+                    post_lock_failure = (
+                        "lease_changed",
+                        f"lease {current.id} changed while noop cleanup was reserved",
+                    )
+                elif self.git.status_porcelain(current.worktree_path):
+                    post_lock_failure = (
+                        "dirty_sync_lease",
+                        f"lease {current.id} has uncommitted changes",
+                    )
+                elif (
+                    self.git.head_sha(current.worktree_path) != target_sha
+                    or self.git.index_tree_sha(current.worktree_path) != target_tree
+                ):
+                    post_lock_failure = (
+                        "sync_lease_head_mismatch",
+                        f"lease {current.id} worktree changed before noop cleanup",
+                    )
+                else:
+                    self.git.remove_worktree(current.worktree_path)
+        except (GitError, OSError, RuntimeError, sqlite3.Error) as error:
+            return self._release_sync_noop_cleanup_reservation(
+                current,
+                reservation,
+                code="worktree_remove_failed",
+                message=(
+                    f"unable to remove worktree for lease {current.id}: {error}"
+                ),
+            )
+        if post_lock_failure is not None:
+            return self._release_sync_noop_cleanup_reservation(
+                current,
+                reservation,
+                code=post_lock_failure[0],
+                message=post_lock_failure[1],
+            )
+        return self._complete_sync_noop_cleanup(
+            current,
+            reservation,
+            source_branch=source_branch,
+            target_branch=target_branch,
+            source_sha=source_sha,
+            target_sha=target_sha,
+            merge_base=merge_base,
+        )
+
+    def _release_sync_noop_cleanup_reservation(
+        self,
+        lease: Lease,
+        reservation: CleanupReservation,
+        *,
+        code: str,
+        message: str,
+    ) -> CommandResult:
+        try:
+            released = self.registry.release_cleanup_reservation(
+                lease.id, expected_version=reservation.reserved_version
+            )
+        except (RuntimeError, sqlite3.Error) as error:
+            return self._sync_blocked(
+                "cleanup_reserved",
+                f"lease {lease.id} remains reserved for cleanup: {error}",
+                lease=lease,
+            )
+        return self._sync_blocked(code, message, lease=released)
+
+    def _complete_sync_noop_cleanup(
+        self,
+        lease: Lease,
+        reservation: CleanupReservation,
+        *,
+        source_branch: str,
+        target_branch: str,
+        source_sha: str,
+        target_sha: str,
+        merge_base: str,
+    ) -> CommandResult:
+        try:
+            removed = self.registry.complete_cleanup(
+                lease.id, expected_version=reservation.reserved_version
+            )
+        except (RuntimeError, sqlite3.Error) as error:
+            return self._sync_blocked(
+                "registry_conflict",
+                (
+                    f"worktree for lease {lease.id} was removed but cleanup could not "
+                    f"be completed: {error}"
+                ),
+                lease=lease,
+            )
+        actions: list[dict[str, object]] = [
+            self._cleanup_action("remove_worktree", removed)
+        ]
+        warnings: list[dict[str, str]] = []
+        try:
+            self.git.delete_branch_if_at(removed.branch, reservation.branch_sha)
+        except (GitError, OSError) as error:
+            self._branch_cleanup_warning(
+                removed,
+                "local_branch_cleanup_failed",
+                f"could not delete local branch {removed.branch!r}: {error}",
+                warnings,
+            )
+        else:
+            actions.append(self._cleanup_action("delete_local_branch", removed))
+        return self._sync_noop(
+            source_branch,
+            target_branch,
+            source_sha,
+            target_sha,
+            merge_base,
+            actions=tuple(actions),
+            warnings=tuple(warnings),
+        )
+
     @staticmethod
     def _sync_noop(
         source_branch: str,
@@ -6932,6 +7289,9 @@ class WorktreeService:
         source_sha: str,
         target_sha: str,
         merge_base: str,
+        *,
+        actions: tuple[dict[str, object], ...] = (),
+        warnings: tuple[dict[str, str], ...] = (),
     ) -> CommandResult:
         return CommandResult.ok(
             "wt.sync",
@@ -6945,7 +7305,9 @@ class WorktreeService:
                     "target_head_sha": target_sha,
                     "merge_base_sha": merge_base,
                 },
+                *actions,
             ),
+            warnings=warnings,
         )
 
     @staticmethod
@@ -6969,6 +7331,31 @@ class WorktreeService:
         )
 
     def _sync_message(
+        self,
+        *,
+        source_branch: str,
+        target_branch: str,
+        merge_base: str,
+        source_sha: str,
+        target_sha: str,
+        lease: Lease,
+    ) -> str:
+        return "\n".join(
+            (
+                f"chore(sync): sync {source_branch} to {target_branch}",
+                "",
+                *self._sync_trailers(
+                    source_branch=source_branch,
+                    target_branch=target_branch,
+                    merge_base=merge_base,
+                    source_sha=source_sha,
+                    target_sha=target_sha,
+                    lease=lease,
+                ),
+            )
+        )
+
+    def _legacy_sync_message(
         self,
         *,
         source_branch: str,
