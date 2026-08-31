@@ -2558,6 +2558,129 @@ class WorktreeService:
             ),
         )
 
+    def discard_promotion(
+        self, lease_id: str, *, apply: bool = False
+    ) -> CommandResult:
+        command = "wt.discard-promotion"
+        if not isinstance(lease_id, str) or not lease_id:
+            return self._discard_promotion_blocked(
+                "invalid_lease", "lease must be a non-empty string"
+            )
+        repository_id = self.git.repository_id()
+        if not apply:
+            try:
+                lease = self.registry.get_lease_read_only(lease_id)
+            except sqlite3.Error as error:
+                return self._discard_promotion_blocked("registry_conflict", str(error))
+            if lease is None:
+                return self._discard_promotion_blocked(
+                    "unknown_lease", f"lease {lease_id} does not exist"
+                )
+            preflight = self._discard_promotion_preflight(
+                lease, repository_id=repository_id
+            )
+            if preflight is not None:
+                return preflight
+            return CommandResult.ok(
+                command,
+                decision="preview",
+                lease=lease,
+                actions=(
+                    self._cleanup_action("remove_worktree", lease),
+                    self._cleanup_action("delete_local_branch", lease),
+                ),
+            )
+
+        with repository_lock(self.lock_dir / f"{repository_id}.lock"):
+            lease = self.registry.get_lease(lease_id)
+            if lease is None:
+                return self._discard_promotion_blocked(
+                    "unknown_lease", f"lease {lease_id} does not exist"
+                )
+            try:
+                existing_reservation = self.registry.get_cleanup_reservation(lease.id)
+            except sqlite3.Error as error:
+                return self._discard_promotion_blocked(
+                    "registry_conflict", str(error), lease=lease
+                )
+            if existing_reservation is not None:
+                recovery_preflight = self._discard_promotion_preflight(
+                    lease,
+                    repository_id=repository_id,
+                    reservation=existing_reservation,
+                    recovery=True,
+                )
+                if recovery_preflight is not None:
+                    return recovery_preflight
+                return self._recover_discard_promotion_reservation(
+                    lease,
+                    existing_reservation,
+                    RuntimeError("recovering an interrupted discard promotion"),
+                )
+            preflight = self._discard_promotion_preflight(
+                lease, repository_id=repository_id
+            )
+            if preflight is not None:
+                return preflight
+            try:
+                reservation = self.registry.reserve_cleanup(
+                    lease.id,
+                    expected_version=lease.version,
+                    branch_sha=lease.head_sha,
+                )
+            except (RuntimeError, sqlite3.Error) as error:
+                return self._discard_promotion_blocked(
+                    "registry_conflict",
+                    f"Unable to reserve lease {lease.id} for cleanup: {error}",
+                    lease=lease,
+                )
+
+            removal_error: GitError | OSError | None = None
+            post_lock_result: CommandResult | None = None
+            try:
+                with self.git.hold_worktree_branch_if_at(
+                    lease.worktree_path, lease.branch, reservation.branch_sha
+                ):
+                    reserved = self.registry.get_lease(lease.id)
+                    if reserved is None:
+                        post_lock_result = self._discard_promotion_blocked(
+                            "lease_changed",
+                            f"Lease {lease.id} changed while cleanup was reserved.",
+                        )
+                    else:
+                        post_lock_result = self._discard_promotion_preflight(
+                            reserved,
+                            repository_id=repository_id,
+                            reservation=reservation,
+                        )
+                    if post_lock_result is None:
+                        try:
+                            self.git.remove_worktree(lease.worktree_path)
+                        except (GitError, OSError) as error:
+                            removal_error = error
+            except GitError as error:
+                return self._release_discard_promotion_reservation(
+                    lease,
+                    reservation,
+                    self._discard_promotion_blocked(
+                        "branch_head_mismatch",
+                        (
+                            f"Branch {lease.branch!r} changed before cleanup lock: "
+                            f"{error}"
+                        ),
+                        lease=lease,
+                    ),
+                )
+            if post_lock_result is not None:
+                return self._release_discard_promotion_reservation(
+                    lease, reservation, post_lock_result
+                )
+            if removal_error is not None:
+                return self._recover_discard_promotion_reservation(
+                    lease, reservation, removal_error
+                )
+            return self._complete_discard_promotion_cleanup(lease, reservation)
+
     def status(
         self, *, initiative: str | None = None, refresh: bool = False
     ) -> CommandResult:
@@ -4181,6 +4304,382 @@ class WorktreeService:
                     "message": f"Lease {lease.id} has a symlinked worktree path.",
                 }
         return None
+
+    def _discard_promotion_preflight(
+        self,
+        lease: Lease,
+        *,
+        repository_id: str,
+        reservation: CleanupReservation | None = None,
+        recovery: bool = False,
+    ) -> CommandResult | None:
+        blockers: list[dict[str, str]] = []
+        if lease.repository_id != repository_id:
+            blockers.append(
+                {
+                    "code": "repository_mismatch",
+                    "message": f"Lease {lease.id} belongs to a different repository.",
+                }
+            )
+        if not lease.managed or lease.owner_kind != "awf":
+            blockers.append(
+                {
+                    "code": "unmanaged_lease",
+                    "message": f"Lease {lease.id} is not managed by AWF.",
+                }
+            )
+        if lease.purpose is not Purpose.PROMOTE:
+            blockers.append(
+                {
+                    "code": "not_promotion_lease",
+                    "message": f"Lease {lease.id} is not a promotion lease.",
+                }
+            )
+        if lease.promotion_mode is not PromotionMode.EXACT:
+            blockers.append(
+                {
+                    "code": "not_exact_promotion",
+                    "message": f"Lease {lease.id} is not an exact promotion.",
+                }
+            )
+        if lease.state is not LeaseState.BLOCKED:
+            blockers.append(
+                {
+                    "code": "lease_not_blocked",
+                    "message": f"Lease {lease.id} is not blocked.",
+                }
+            )
+        if lease.resolution_state is not ResolutionState.NONE:
+            blockers.append(
+                {
+                    "code": "promotion_resolution_present",
+                    "message": f"Lease {lease.id} has a promotion resolution state.",
+                }
+            )
+        if lease.target_pr is not None:
+            blockers.append(
+                {
+                    "code": "target_pr_present",
+                    "message": f"Lease {lease.id} is linked to a pull request.",
+                }
+            )
+        if lease.conflicted_paths:
+            blockers.append(
+                {
+                    "code": "promotion_conflicts_present",
+                    "message": f"Lease {lease.id} has conflicted paths.",
+                }
+            )
+        if lease.protected_index_entries:
+            blockers.append(
+                {
+                    "code": "protected_index_entries_present",
+                    "message": f"Lease {lease.id} has protected index entries.",
+                }
+            )
+        if (
+            lease.target_base_sha is not None
+            and lease.target_base_sha != lease.head_sha
+        ):
+            blockers.append(
+                {
+                    "code": "target_base_mismatch",
+                    "message": (
+                        f"Lease {lease.id} head does not match its recorded target base."
+                    ),
+                }
+            )
+        if not lease.branch.startswith("awf/"):
+            blockers.append(
+                {
+                    "code": "unsafe_branch",
+                    "message": f"Lease {lease.id} does not use an AWF branch.",
+                }
+            )
+        if blockers:
+            return CommandResult.blocked(
+                "wt.discard-promotion", blockers=tuple(blockers), lease=lease
+            )
+        if lease.target_base_sha is None:
+            try:
+                live_base_sha = self.git.resolve_ref(lease.base_ref)
+                legacy_base = self.git.merge_base(lease.head_sha, live_base_sha)
+            except GitRemoteError as error:
+                return self._external_error(
+                    "wt.discard-promotion",
+                    "legacy_target_base_unavailable",
+                    (
+                        "Unable to prove the legacy target base for lease "
+                        f"{lease.id}: {error}"
+                    ),
+                    lease=lease,
+                )
+            except (GitError, OSError) as error:
+                return self._discard_promotion_blocked(
+                    "legacy_target_base_unavailable",
+                    (
+                        "Unable to prove the legacy target base for lease "
+                        f"{lease.id}: {error}"
+                    ),
+                    lease=lease,
+                )
+            if legacy_base != lease.head_sha:
+                return self._discard_promotion_blocked(
+                    "legacy_target_base_mismatch",
+                    (
+                        f"Lease {lease.id} HEAD is not an ancestor of its current "
+                        "target base."
+                    ),
+                    lease=lease,
+                )
+
+        try:
+            active_reservation = self.registry.get_cleanup_reservation(lease.id)
+            events = self.registry.list_events_read_only(lease.id)
+        except sqlite3.Error as error:
+            return self._discard_promotion_blocked(
+                "registry_conflict", str(error), lease=lease
+            )
+        if reservation is None:
+            if active_reservation is not None:
+                return self._discard_promotion_blocked(
+                    "cleanup_reserved",
+                    f"Lease {lease.id} is already reserved for cleanup.",
+                    lease=lease,
+                )
+        elif (
+            active_reservation != reservation
+            or lease.version != reservation.reserved_version
+            or not events
+            or events[-1].event_type != "cleanup_reserved"
+            or events[-1].observed_head_sha != reservation.branch_sha
+        ):
+            return self._discard_promotion_blocked(
+                "lease_changed",
+                f"Lease {lease.id} changed while cleanup was reserved.",
+                lease=lease,
+            )
+        if not self._has_discardable_promotion_failure(events):
+            return self._discard_promotion_blocked(
+                "promotion_failure_not_recorded",
+                (
+                    f"Lease {lease.id} was not most recently blocked by an exact "
+                    "promotion apply failure."
+                ),
+                lease=lease,
+            )
+
+        path_blocker = self._cleanup_path_blocker(lease)
+        if path_blocker is not None:
+            return CommandResult.blocked(
+                "wt.discard-promotion", blockers=(path_blocker,), lease=lease
+            )
+        try:
+            remote_head = self.git.remote_branch_sha(lease.branch)
+        except GitRemoteError as error:
+            return self._external_error(
+                "wt.discard-promotion",
+                "remote_branch_inspection_failed",
+                f"Unable to inspect remote branch {lease.branch!r}: {error}",
+                lease=lease,
+            )
+        except (GitError, OSError) as error:
+            return self._discard_promotion_blocked(
+                "remote_branch_inspection_failed",
+                f"Unable to inspect remote branch {lease.branch!r}: {error}",
+                lease=lease,
+            )
+        if remote_head is not None:
+            return self._discard_promotion_blocked(
+                "remote_branch_present",
+                f"Lease {lease.id} still has a remote branch.",
+                lease=lease,
+            )
+        if recovery:
+            return None
+        try:
+            worktrees = self.git.list_worktrees()
+        except (GitError, OSError) as error:
+            return self._discard_promotion_blocked(
+                "worktree_inspection_failed",
+                f"Unable to inspect registered worktrees: {error}",
+                lease=lease,
+            )
+        registered = tuple(
+            worktree
+            for worktree in worktrees
+            if worktree.path == lease.worktree_path
+        )
+        if len(registered) != 1 or not lease.worktree_path.is_dir():
+            return self._discard_promotion_blocked(
+                "unregistered_worktree",
+                f"Lease {lease.id} is not registered at its expected path.",
+                lease=lease,
+            )
+        worktree = registered[0]
+        if (
+            worktree.branch != lease.branch
+            or worktree.bare
+            or worktree.detached
+        ):
+            return self._discard_promotion_blocked(
+                "branch_mismatch",
+                f"Lease {lease.id} is not checked out on its registered branch.",
+                lease=lease,
+            )
+        if any(
+            item.path != lease.worktree_path and item.branch == lease.branch
+            for item in worktrees
+        ):
+            return self._discard_promotion_blocked(
+                "branch_in_use",
+                f"Branch {lease.branch!r} is checked out elsewhere.",
+                lease=lease,
+            )
+        try:
+            if self.git.status_porcelain(lease.worktree_path):
+                return self._discard_promotion_blocked(
+                    "dirty_worktree",
+                    f"Lease {lease.id} has uncommitted changes.",
+                    lease=lease,
+                )
+            worktree_head = self.git.head_sha(lease.worktree_path)
+            branch_head = self.git.resolve_ref(lease.branch)
+        except (GitError, OSError) as error:
+            return self._discard_promotion_blocked(
+                "head_unavailable",
+                f"Unable to inspect lease HEAD: {error}",
+                lease=lease,
+            )
+        if worktree_head != lease.head_sha:
+            return self._discard_promotion_blocked(
+                "head_mismatch",
+                f"Lease {lease.id} HEAD no longer matches its recorded head.",
+                lease=lease,
+            )
+        if branch_head != lease.head_sha:
+            return self._discard_promotion_blocked(
+                "branch_head_mismatch",
+                f"Branch {lease.branch!r} no longer matches the recorded head.",
+                lease=lease,
+            )
+        return None
+
+    def _complete_discard_promotion_cleanup(
+        self, lease: Lease, reservation: CleanupReservation
+    ) -> CommandResult:
+        try:
+            removed = self.registry.complete_cleanup(
+                lease.id, expected_version=reservation.reserved_version
+            )
+        except (RuntimeError, ValueError, sqlite3.Error) as error:
+            return self._discard_promotion_blocked(
+                "registry_conflict",
+                (
+                    "Worktree was removed but the cleanup reservation could not be "
+                    f"completed: {error}"
+                ),
+                lease=lease,
+            )
+        actions: list[dict[str, object]] = [
+            self._cleanup_action("remove_worktree", removed)
+        ]
+        warnings: list[dict[str, str]] = []
+        try:
+            self.git.delete_branch_if_at(removed.branch, reservation.branch_sha)
+        except (GitError, OSError) as error:
+            self._branch_cleanup_warning(
+                removed,
+                "local_branch_cleanup_failed",
+                f"Could not delete local branch {removed.branch!r}: {error}",
+                warnings,
+            )
+        else:
+            actions.append(self._cleanup_action("delete_local_branch", removed))
+        return CommandResult.ok(
+            "wt.discard-promotion",
+            decision="removed",
+            lease=removed,
+            actions=tuple(actions),
+            warnings=tuple(warnings),
+        )
+
+    def _recover_discard_promotion_reservation(
+        self,
+        lease: Lease,
+        reservation: CleanupReservation,
+        removal_error: Exception,
+    ) -> CommandResult:
+        path_blocker = self._cleanup_path_blocker(lease)
+        if path_blocker is not None:
+            return CommandResult.blocked(
+                "wt.discard-promotion", blockers=(path_blocker,), lease=lease
+            )
+        try:
+            worktrees = self.git.list_worktrees()
+        except (GitError, OSError) as error:
+            return self._discard_promotion_blocked(
+                "worktree_inspection_failed",
+                f"Unable to inspect reserved worktree: {error}",
+                lease=lease,
+            )
+        path_is_absent = (
+            not lease.worktree_path.exists()
+            and all(worktree.path != lease.worktree_path for worktree in worktrees)
+        )
+        if path_is_absent:
+            return self._complete_discard_promotion_cleanup(lease, reservation)
+        return self._release_discard_promotion_reservation(
+            lease,
+            reservation,
+            self._discard_promotion_blocked(
+                "worktree_remove_failed",
+                f"Unable to remove worktree for lease {lease.id}: {removal_error}",
+                lease=lease,
+            ),
+        )
+
+    def _release_discard_promotion_reservation(
+        self,
+        lease: Lease,
+        reservation: CleanupReservation,
+        result: CommandResult,
+    ) -> CommandResult:
+        try:
+            released = self.registry.release_cleanup_reservation(
+                lease.id, expected_version=reservation.reserved_version
+            )
+        except (RuntimeError, sqlite3.Error) as error:
+            return self._discard_promotion_blocked(
+                "cleanup_reserved",
+                f"Lease {lease.id} remains reserved for cleanup: {error}",
+                lease=lease,
+            )
+        return replace(result, lease=released)
+
+    @staticmethod
+    def _has_discardable_promotion_failure(events: Sequence[object]) -> bool:
+        for event in reversed(events):
+            event_type = getattr(event, "event_type", None)
+            if event_type in {"cleanup_reserved", "cleanup_released"}:
+                continue
+            summary = getattr(event, "summary", "")
+            return (
+                event_type == "promotion_blocked"
+                and isinstance(summary, str)
+                and summary.startswith("promotion_apply_failed:")
+            )
+        return False
+
+    @staticmethod
+    def _discard_promotion_blocked(
+        code: str, message: str, *, lease: Lease | None = None
+    ) -> CommandResult:
+        return CommandResult.blocked(
+            "wt.discard-promotion",
+            blockers=({"code": code, "message": message},),
+            lease=lease,
+        )
 
     def _cleanup_branches(
         self,
@@ -7793,11 +8292,7 @@ class WorktreeService:
                 if promotion_mode is PromotionMode.OUT_OF_ORDER
                 else None
             ),
-            target_base_sha=(
-                target_sha
-                if promotion_mode is PromotionMode.OUT_OF_ORDER
-                else None
-            ),
+            target_base_sha=target_sha,
             reviewed_paths=(
                 tuple(
                     sorted(

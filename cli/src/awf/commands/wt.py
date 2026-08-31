@@ -208,6 +208,14 @@ def run_wt_recover_promotion(args: argparse.Namespace) -> int:
     )
 
 
+def run_wt_discard_promotion(args: argparse.Namespace) -> int:
+    return _run(
+        args,
+        "wt.discard-promotion",
+        lambda service: service.discard_promotion(args.lease, apply=args.apply),
+    )
+
+
 def run_wt_finish(args: argparse.Namespace) -> int:
     return _run(
         args,
