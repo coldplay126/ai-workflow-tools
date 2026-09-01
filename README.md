@@ -130,9 +130,12 @@ stale merged lease의 일괄 정리는 `awf wt gc --merged --older-than 7d`로
 명시해야 하며, merged PR·clean worktree·deployment health 증거가 부족한 lease는
 삭제하지 않고 blocker로 보존합니다.
 
-AWF는 범용 배포 오케스트레이터가 아닙니다. 기존 CI/배포 시스템 주변에서
-repository-configured verification/status argv 명령만 실행하며, healthy
-evidence가 없으면 worktree를 보존합니다.
+AWF는 범용 배포 오케스트레이터가 아닙니다. repository config가 실행 대상을
+고르는 것은 허용하지 않습니다. `~/.config/awf/adapters/` 아래의 regular
+non-symlink, operator-owned exact repository-id adapter만
+`awf.deployment-evidence/v1` JSON evidence를 반환할 수 있습니다. 실행 환경은
+최소 allowlist로 제한되며, exact PR merge SHA에 묶인 fresh healthy evidence만
+worktree 정리를 허용합니다.
 
 `awf ready`는 프로젝트에서 가장 먼저 실행하는 read-only 점검입니다. 설정,
 provider, skill, scan, workflow, operations wiki 상태를 한 번에 모아 현재
@@ -431,10 +434,12 @@ Bulk cleanup uses `awf wt gc --merged --older-than 7d`. Preview with
 merged-PR, clean-worktree, and deployment-health evidence are preserved and
 reported as blockers.
 
-AWF is not a generic deployment orchestrator. It runs repository-configured
-verification and status argv commands around the existing CI and deployment
-system, and preserves the worktree if health evidence is missing, unhealthy,
-or inconclusive.
+AWF is not a generic deployment orchestrator. Repository configuration cannot
+select an executable. Only a regular, non-symlink, operator-owned exact
+repository-id adapter below `~/.config/awf/adapters/` may return
+`awf.deployment-evidence/v1` JSON evidence. Its environment is minimally
+allowlisted, and cleanup requires fresh healthy evidence bound to the exact PR
+merge SHA.
 
 `awf ready` is the first read-only check for a project. It combines config,
 provider, skill, scan, workflow, and operations-wiki readiness into one report,

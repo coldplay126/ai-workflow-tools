@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from contextlib import closing
 
+from datetime import datetime, timedelta, timezone
 import json
 
 import sqlite3
+import re
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .models import (
     CleanupReservation,
@@ -25,6 +27,15 @@ from .models import (
     now_iso,
     release_source_digest,
 )
+
+_EVIDENCE_PROTOCOL = "awf.deployment-evidence/v1"
+_EVIDENCE_STATUS = frozenset({"healthy", "pending", "failed", "unknown"})
+_EVIDENCE_OID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+_EVIDENCE_SHA256 = re.compile(r"[0-9a-f]{64}")
+_EVIDENCE_RFC3339_UTC = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|\+00:00)"
+)
+
 
 
 _SCHEMA = """
@@ -85,7 +96,8 @@ CREATE TABLE IF NOT EXISTS worktree_events (
     observed_head_sha TEXT,
     pr_number INTEGER,
     summary TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    evidence TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_worktree_events_lease_id_id
 ON worktree_events(lease_id, id);
@@ -221,6 +233,9 @@ class WorktreeRegistry:
                 "CHECK (legacy_source_trailers IN (0,1))"
             ),
         }
+        event_migrations = {
+            "evidence": "ALTER TABLE worktree_events ADD COLUMN evidence TEXT",
+        }
         with closing(self._connect()) as connection:
             connection.executescript(_SCHEMA)
             try:
@@ -229,8 +244,15 @@ class WorktreeRegistry:
                     row["name"]
                     for row in connection.execute("PRAGMA table_info(worktree_leases)")
                 }
+                event_columns = {
+                    row["name"]
+                    for row in connection.execute("PRAGMA table_info(worktree_events)")
+                }
                 for name, statement in migrations.items():
                     if name not in columns:
+                        connection.execute(statement)
+                for name, statement in event_migrations.items():
+                    if name not in event_columns:
                         connection.execute(statement)
                 connection.commit()
             except Exception:
@@ -1204,6 +1226,7 @@ class WorktreeRegistry:
             tuple[str, tuple[str, str] | None], ...
         ]
         | None = None,
+        evidence: Mapping[str, str] | None = None,
     ) -> Lease:
         if not isinstance(clear_conflict_source_ordinal, bool):
             raise ValueError("clear_conflict_source_ordinal must be a boolean")
@@ -1211,6 +1234,7 @@ class WorktreeRegistry:
             legacy_source_trailers, bool
         ):
             raise ValueError("legacy_source_trailers must be a boolean")
+        evidence_json = self._evidence_to_json(evidence)
         self.ensure()
         connection = self._connect()
         try:
@@ -1285,8 +1309,8 @@ class WorktreeRegistry:
                 """
                 INSERT INTO worktree_events (
                     lease_id, event_type, from_state, to_state, observed_head_sha,
-                    pr_number, summary, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    pr_number, summary, created_at, evidence
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     lease_id,
@@ -1297,6 +1321,7 @@ class WorktreeRegistry:
                     pr_number,
                     self._bound_summary(summary),
                     timestamp,
+                    evidence_json,
                 ),
             )
             updated_row = connection.execute(
@@ -1651,26 +1676,7 @@ class WorktreeRegistry:
                 "SELECT * FROM worktree_events WHERE lease_id = ? ORDER BY id",
                 (lease_id,),
             ).fetchall()
-        return [
-            WorktreeEvent(
-                id=row["id"],
-                lease_id=row["lease_id"],
-                event_type=row["event_type"],
-                from_state=(
-                    LeaseState(row["from_state"])
-                    if row["from_state"] is not None
-                    else None
-                ),
-                to_state=(
-                    LeaseState(row["to_state"]) if row["to_state"] is not None else None
-                ),
-                observed_head_sha=row["observed_head_sha"],
-                pr_number=row["pr_number"],
-                summary=row["summary"],
-                created_at=row["created_at"],
-            )
-            for row in rows
-        ]
+        return [self._event_from_row(row) for row in rows]
 
     def list_events_read_only(self, lease_id: str) -> list[WorktreeEvent]:
         if not self.db_path.is_file():
@@ -1680,26 +1686,30 @@ class WorktreeRegistry:
                 "SELECT * FROM worktree_events WHERE lease_id = ? ORDER BY id",
                 (lease_id,),
             ).fetchall()
-        return [
-            WorktreeEvent(
-                id=row["id"],
-                lease_id=row["lease_id"],
-                event_type=row["event_type"],
-                from_state=(
-                    LeaseState(row["from_state"])
-                    if row["from_state"] is not None
-                    else None
-                ),
-                to_state=(
-                    LeaseState(row["to_state"]) if row["to_state"] is not None else None
-                ),
-                observed_head_sha=row["observed_head_sha"],
-                pr_number=row["pr_number"],
-                summary=row["summary"],
-                created_at=row["created_at"],
-            )
-            for row in rows
-        ]
+        return [self._event_from_row(row) for row in rows]
+
+    @staticmethod
+    def _event_from_row(row: sqlite3.Row) -> WorktreeEvent:
+        return WorktreeEvent(
+            id=row["id"],
+            lease_id=row["lease_id"],
+            event_type=row["event_type"],
+            from_state=(
+                LeaseState(row["from_state"])
+                if row["from_state"] is not None
+                else None
+            ),
+            to_state=(
+                LeaseState(row["to_state"]) if row["to_state"] is not None else None
+            ),
+            observed_head_sha=row["observed_head_sha"],
+            pr_number=row["pr_number"],
+            summary=row["summary"],
+            created_at=row["created_at"],
+            evidence=WorktreeRegistry._evidence_from_json(
+                row["evidence"] if "evidence" in row.keys() else None
+            ),
+        )
 
     @staticmethod
     def _valid_release_transition(
@@ -2056,6 +2066,96 @@ class WorktreeRegistry:
         )
         Lease._validate_protected_index_entries(protected_index_entries)
         return protected_index_entries
+    @staticmethod
+    def _evidence_to_json(evidence: Mapping[str, str] | None) -> str | None:
+        if evidence is None:
+            return None
+        allowed = {
+            "protocol",
+            "subject_revision",
+            "status",
+            "observed_at",
+            "received_at",
+            "adapter_digest",
+            "response_digest",
+            "evidence_id",
+            "diagnostic_code",
+        }
+        if (
+            not isinstance(evidence, Mapping)
+            or not set(evidence).issubset(allowed)
+            or not set(evidence).issuperset(
+                {
+                    "protocol",
+                    "subject_revision",
+                    "status",
+                    "observed_at",
+                    "received_at",
+                    "adapter_digest",
+                    "response_digest",
+                }
+            )
+            or any(
+                not isinstance(key, str)
+                or not isinstance(value, str)
+                or not value
+                or len(value.encode("utf-8")) > 512
+                for key, value in evidence.items()
+            )
+        ):
+            raise ValueError("invalid deployment evidence")
+        encoded = json.dumps(dict(evidence), sort_keys=True, separators=(",", ":"))
+        if len(encoded.encode("utf-8")) > 2048:
+            raise ValueError("deployment evidence exceeds the maximum size")
+        return encoded
+
+    @staticmethod
+    def _evidence_from_json(value: object) -> dict[str, str] | None:
+        if value is None or not isinstance(value, str):
+            return None
+        try:
+            decoded = json.loads(value)
+            WorktreeRegistry._evidence_to_json(decoded)
+            if not isinstance(decoded, dict):
+                return None
+            evidence = dict(decoded)
+            if (
+                evidence["protocol"] != _EVIDENCE_PROTOCOL
+                or evidence["status"] not in _EVIDENCE_STATUS
+                or _EVIDENCE_OID.fullmatch(evidence["subject_revision"]) is None
+                or _EVIDENCE_SHA256.fullmatch(evidence["adapter_digest"]) is None
+                or _EVIDENCE_SHA256.fullmatch(evidence["response_digest"]) is None
+            ):
+                return None
+            observed_at = WorktreeRegistry._evidence_timestamp(
+                evidence["observed_at"]
+            )
+            received_at = WorktreeRegistry._evidence_timestamp(
+                evidence["received_at"]
+            )
+            if (
+                observed_at is None
+                or received_at is None
+                or observed_at > received_at
+                or received_at > datetime.now(timezone.utc)
+            ):
+                return None
+            return evidence
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+
+    @staticmethod
+    def _evidence_timestamp(value: str) -> datetime | None:
+        if _EVIDENCE_RFC3339_UTC.fullmatch(value) is None:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+            return None
+        return parsed.astimezone(timezone.utc)
+
     @staticmethod
     def _is_active_identity_conflict(error: sqlite3.IntegrityError) -> bool:
         message = str(error)

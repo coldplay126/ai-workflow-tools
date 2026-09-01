@@ -293,7 +293,7 @@ def test_root_parser_exposes_package_version(capsys: pytest.CaptureFixture[str])
         build_parser().parse_args(["--version"])
 
     assert raised.value.code == 0
-    assert capsys.readouterr().out == "awf 0.1.6\n"
+    assert capsys.readouterr().out == "awf 0.1.7\n"
 
 
 def test_analysis_generation_integrity_docs_share_contract() -> None:
@@ -384,16 +384,45 @@ def test_analysis_policy_consistency_docs_share_contract() -> None:
 
 def test_release_metadata_versions_match() -> None:
     assert (REPO_ROOT / "cli" / "pyproject.toml").read_text(encoding="utf-8").count(
-        'version = "0.1.6"'
+        'version = "0.1.7"'
     ) == 1
     assert (REPO_ROOT / "cli" / "src" / "awf" / "__init__.py").read_text(
         encoding="utf-8"
-    ).count('__version__ = "0.1.6"') == 1
+    ).count('__version__ = "0.1.7"') == 1
     assert (REPO_ROOT / "cli" / "uv.lock").read_text(encoding="utf-8").count(
-        'version = "0.1.6"'
+        'version = "0.1.7"'
     ) >= 1
     changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    assert "## [0.1.6] - 2026-08-13" in changelog
+    assert "## [Unreleased]" in changelog
+    assert "awf.deployment-evidence/v1" in changelog
+
+def test_deployment_evidence_docs_use_the_operator_protocol() -> None:
+    canonical = (
+        REPO_ROOT / "claude" / "skills" / "release-worktree-lifecycle" / "SKILL.md"
+    )
+    packaged = (
+        REPO_ROOT
+        / "cli"
+        / "src"
+        / "awf"
+        / "resources"
+        / "release-worktree-lifecycle"
+        / "SKILL.md"
+    )
+    paths = (REPO_ROOT / "README.md", CLI_README, canonical)
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        assert "awf.deployment-evidence/v1" in text
+        assert "~/.config/awf/adapters/" in text
+        assert "status_command" not in text
+        assert "repository-configured verification and status argv" not in text
+    for path in (CLI_README, canonical):
+        text = path.read_text(encoding="utf-8")
+        assert "environment = " in text
+        assert "PATH`, `PYTHONPATH`" in text
+        assert "full adapter process group" in text
+    assert canonical.read_bytes() == packaged.read_bytes()
+
 
 
 def test_multi_agent_snippet_requires_live_cmux_roster() -> None:

@@ -16,6 +16,20 @@
 - `awf wt sync`는 source-only patch 적용 뒤 index tree가 target과 같으면 commit·remote branch·PR 없이 managed worktree와 local branch를 정리하는 verified noop으로 끝냅니다. 정확한 source/target pin을 유지한 clean BLOCKED `sync_apply_failed` lease만 재실행으로 이 cleanup을 복구하며, drift·dirty·published lease는 fail-closed로 보존합니다. 실제 sync commit subject는 repository commitlint와 호환되는 `chore(sync): sync <source> to <target>` 형식입니다.
 - Git commit 실패 시 stderr가 비어 있으면 bounded·redacted stdout 진단을 함께 반환합니다.
 
+### Security
+
+- `awf wt` deployment cleanup evidence now uses the provider-neutral,
+  versioned `awf.deployment-evidence/v1` protocol. Repository deployment
+  commands are rejected; only an operator-owned exact repository-id adapter
+  below `~/.config/awf/adapters/` can run. Adapter paths and their parent chain
+  reject symlinks and unsafe ownership or modes. The executor uses a minimal
+  explicit environment, requires explicit opt-in for additional inherited
+  names, bounds process output, and terminates the full process group on
+  timeout or overflow. Strict nonce/revision binding, merge revalidation after
+  both probe and cleanup reservation, fresh apply probes, and allowlisted
+  received-at registry evidence fail closed without retaining raw output or
+  credentials.
+
 ### Added
 - `awf wt sync --from <production> --to <staging>`가 configured production의
   source-only delta를 latest staging에 preview/apply하고, clean 3-way 결과와 Git

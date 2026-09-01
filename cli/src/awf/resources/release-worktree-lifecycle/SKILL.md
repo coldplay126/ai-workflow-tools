@@ -1,6 +1,6 @@
 ---
 name: release-worktree-lifecycle
-version: 1.3.0
+version: 1.3.2
 description: Use whenever handling deploy, production release, staging-to-main or staging-to-master promotion, release PR creation or merge, managed feature PR linkage, managed deployment worktree creation or reuse, merged branch/worktree cleanup, or an empty exact promotion apply failure. Requires awf wt status/acquire/link-pr/promote/release/discard-promotion/finish/gc and forbids bypassing CLI safety blockers.
 type: deployment-safety
 conditions:
@@ -360,7 +360,45 @@ cherry-pick is forbidden.
 
 ## Deployment verification
 
-After the production PR merges, MUST use the repository's existing CI and rollout path to prove the deployed revision is healthy. MUST NOT infer health from a merged PR, a passing local command, elapsed time, or an unavailable provider. Unknown or failed deployment health is `blocked`; preserve the release worktree and report the evidence gap.
+The repository MUST NOT configure deployment commands. The local operator MAY
+map only the exact repository ID to an adapter under the exact
+`~/.config/awf/adapters/` directory:
+
+```toml
+[worktree.deployment.adapters."<repository_id>"]
+command = ["/home/operator/.config/awf/adapters/deployment-evidence-adapter"]
+environment = ["DEPLOYMENT_REGION"] # optional inherited-name allowlist
+max_age_seconds = 300
+```
+
+The config, every adapter-directory parent, and the executable MUST be
+operator-owned and not group- or world-writable. The executable MUST be a
+regular non-symlink file below that directory; repository fallback, alias,
+profile selection, relative paths, and adapters outside it are forbidden.
+
+AWF invokes the adapter with `shell=False`, neutral cwd, bounded pipes, and an
+explicit minimal environment. It forwards only `HOME`, `USER`, `LOGNAME`,
+`TMPDIR`, and `LANG` by default. `environment` permits only explicitly named
+inherited values; `PATH`, `PYTHONPATH`, `DYLD_*`, `LD_*`, `GIT_*`, and cloud
+credentials or overrides are not inherited unless explicitly allowlisted.
+
+The adapter receives one `awf.deployment-evidence/v1` JSON request on stdin:
+`protocol`, fresh `request_id`, `repository_id`, `pull_request_number`,
+`source_head_sha`, exact merge-SHA `subject_revision`, and UTC `requested_at`.
+It MUST emit one strict bounded JSON object with the same protocol, nonce,
+repository, and subject revision; `healthy|pending|failed|unknown` status; and
+RFC3339 UTC `observed_at`. Bounded opaque `evidence_id` and `diagnostic_code`
+are optional.
+
+`status --refresh` and `finish --apply` each obtain a fresh response. `finish`
+MUST re-probe with a new nonce and compare the proven merge identity again
+after both its probe and cleanup reservation. Only fresh, exact-bound `healthy`
+permits cleanup. `pending`, `unknown`, `failed`, changed merge identity, invalid
+JSON, mismatch or replay, stale evidence, nonzero exit, timeout, or output
+overflow preserve the worktree. AWF terminates the full adapter process group
+on timeout or overflow even after the adapter leader exits, records received-at
+time only with allowlisted structured evidence, and MUST NOT store raw stdout,
+stderr, credentials, or provider-specific fields.
 
 ## Imported legacy worktree cleanup
 
