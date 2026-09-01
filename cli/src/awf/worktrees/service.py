@@ -15,7 +15,17 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from datetime import datetime, timedelta, timezone
 
-from .config import ConfigError, WorktreeConfig, load_worktree_config
+from .config import (
+    ConfigError,
+    WorktreeConfig,
+    load_deployment_adapter,
+    load_worktree_config,
+)
+from .evidence import (
+    DeploymentEvidenceExecutor,
+    DeploymentEvidenceRequest,
+    EvidenceProbeResult,
+)
 from .git import (
     GitClient,
     GitError,
@@ -65,8 +75,6 @@ def cache_root() -> Path:
 
 
 _MAX_IMPORT_COLLISION_ACTIONS = 32
-_DEPLOYMENT_STATUS_TIMEOUT_SECONDS = 30.0
-
 _PRODUCTION_VERIFY_TIMEOUT_SECONDS = 300.0
 _GITHUB_ACTOR_LOGIN = re.compile(
     r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}(?:\[bot\])?"
@@ -127,7 +135,7 @@ class WorktreeService:
         config: WorktreeConfig | None = None,
         command_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
         github: GhClient | None = None,
-        deployment_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+        evidence_executor: DeploymentEvidenceExecutor | None = None,
         cache_dir: Path | None = None,
         state_dir: Path | None = None,
         lock_dir: Path | None = None,
@@ -142,7 +150,6 @@ class WorktreeService:
         )
         self.command_runner = command_runner or subprocess.run
         self.github = github
-        self.deployment_runner = deployment_runner or self.command_runner
         self.cache_dir = Path(
             os.path.abspath(str((cache_dir or cache_root()).expanduser()))
         )
@@ -156,6 +163,9 @@ class WorktreeService:
             / "release-worktree-lifecycle"
         ).resolve()
         self.home_dir = (home_dir or Path.home()).expanduser().resolve()
+        self.evidence_executor = evidence_executor or DeploymentEvidenceExecutor(
+            neutral_cwd=self.home_dir
+        )
 
     def acquire(
         self,
@@ -3634,7 +3644,9 @@ class WorktreeService:
                     lease=current,
                     warnings=warnings,
                 )
-            blockers = self._cleanup_blockers(current, pull_request)
+            blockers = self._cleanup_blockers(
+                current, pull_request, include_deployment=False
+            )
             if blockers:
                 return CommandResult.blocked(
                     "wt.finish",
@@ -3642,19 +3654,15 @@ class WorktreeService:
                     lease=current,
                     warnings=tuple(warnings),
                 )
-            forced = self._force_cleanup_deployment_probe(
+            forced, forced_probe, subject_revision = self._force_cleanup_deployment_probe(
                 current, pull_request, warnings
             )
-            if isinstance(forced, CommandResult):
-                return forced
             if forced is None:
-                recorded = self.registry.get_lease(current.id) or current
-                return self._cleanup_blocked(
+                return CommandResult.blocked(
                     "wt.finish",
-                    "deployment_not_healthy",
-                    f"Promotion lease {current.id} has no freshly proven deployment.",
-                    lease=recorded,
-                    warnings=warnings,
+                    blockers=(self._deployment_evidence_blocker(current, forced_probe),),
+                    lease=self.registry.get_lease(current.id) or current,
+                    warnings=tuple(warnings),
                 )
             current = forced
             try:
@@ -3674,6 +3682,17 @@ class WorktreeService:
                     "wt.finish",
                     "github_refresh_failed",
                     f"Unable to revalidate pull request state: {error}",
+                    lease=current,
+                    warnings=warnings,
+                )
+            if not self._matches_deployment_subject(pull_request, subject_revision):
+                return self._cleanup_blocked(
+                    "wt.finish",
+                    "deployment_subject_changed",
+                    (
+                        f"Pull request #{current.target_pr} merge revision changed after "
+                        "fresh deployment evidence."
+                    ),
                     lease=current,
                     warnings=warnings,
                 )
@@ -3753,9 +3772,23 @@ class WorktreeService:
                                 f"Unable to revalidate pull request state: {error}"
                             )
                         else:
-                            post_lock_blockers = self._cleanup_blockers(
-                                reserved_current, pull_request
-                            )
+                            if not self._matches_deployment_subject(
+                                pull_request, subject_revision
+                            ):
+                                post_lock_blockers = (
+                                    {
+                                        "code": "deployment_subject_changed",
+                                        "message": (
+                                            f"Pull request #{reserved_current.target_pr} "
+                                            "merge revision changed after fresh "
+                                            "deployment evidence."
+                                        ),
+                                    },
+                                )
+                            else:
+                                post_lock_blockers = self._cleanup_blockers(
+                                    reserved_current, pull_request
+                                )
                             if not post_lock_blockers:
                                 try:
                                     self.git.remove_worktree(
@@ -3895,63 +3928,173 @@ class WorktreeService:
         lease: Lease,
         pull_request: PullRequest,
         warnings: list[dict[str, str]],
-    ) -> Lease | CommandResult | None:
+    ) -> tuple[Lease | None, EvidenceProbeResult, str | None]:
         if lease.purpose is not Purpose.PROMOTE:
-            return lease
-        command = self.config.deployment_status_command
-
-        if not command:
-            return self._record_cleanup_deployment_probe(
-                lease,
-                pull_request,
-                state=LeaseState.BLOCKED,
-                deployment_state=DeploymentState.UNKNOWN,
-                summary="Fresh deployment status probe is not configured",
-                warnings=warnings,
+            return lease, EvidenceProbeResult(None, datetime.now(timezone.utc)), None
+        probe, adapter_digest = self._probe_deployment(lease, pull_request)
+        evidence = (
+            probe.response.registry_evidence(
+                adapter_digest=adapter_digest, received_at=probe.received_at
             )
-        try:
-            completed = self.deployment_runner(
-                list(command),
-                cwd=lease.repository_root,
-                check=False,
-                shell=False,
-                capture_output=True,
-                text=True,
-                timeout=_DEPLOYMENT_STATUS_TIMEOUT_SECONDS,
-            )
-            returncode = completed.returncode
-        except Exception:
-            return self._external_error(
-                "wt.finish",
-                "deployment_probe_failed",
-                f"Unable to run a fresh deployment status probe for lease {lease.id}.",
-                lease=lease,
-                warnings=warnings,
-            )
-        if not isinstance(returncode, int) or isinstance(returncode, bool):
-            return self._external_error(
-                "wt.finish",
-                "deployment_probe_failed",
-                f"Fresh deployment status probe returned an invalid status for lease {lease.id}.",
-                lease=lease,
-                warnings=warnings,
-            )
-        if returncode != 0:
-            return self._external_error(
-                "wt.finish",
-                "deployment_probe_failed",
-                f"Fresh deployment status probe failed for lease {lease.id}.",
-                lease=lease,
-                warnings=warnings,
-            )
-        return self._record_cleanup_deployment_probe(
+            if probe.response is not None and adapter_digest is not None
+            else None
+        )
+        if probe.status == "healthy":
+            state = LeaseState.CLEANABLE
+            deployment_state = DeploymentState.HEALTHY
+            summary = "Fresh deployment evidence is healthy"
+        elif probe.status == "failed":
+            state = LeaseState.BLOCKED
+            deployment_state = DeploymentState.FAILED
+            summary = "Fresh deployment evidence reports failed"
+        elif probe.status == "pending":
+            state = LeaseState.DEPLOYING
+            deployment_state = DeploymentState.PENDING
+            summary = "Fresh deployment evidence reports pending"
+        else:
+            state = LeaseState.BLOCKED
+            deployment_state = DeploymentState.UNKNOWN
+            summary = "Fresh deployment evidence is unavailable or inconclusive"
+        recorded = self._record_cleanup_deployment_probe(
             lease,
             pull_request,
-            state=LeaseState.CLEANABLE,
-            deployment_state=DeploymentState.HEALTHY,
-            summary="Fresh deployment status probe is healthy",
+            state=state,
+            deployment_state=deployment_state,
+            summary=summary,
+            evidence=evidence,
             warnings=warnings,
         )
+        if probe.status != "healthy":
+            return None, probe, None
+        if recorded is None or probe.response is None:
+            return (
+                None,
+                EvidenceProbeResult(
+                    None, probe.received_at, "deployment_probe_record_failed"
+                ),
+                None,
+            )
+        return recorded, probe, probe.response.subject_revision
+
+    @staticmethod
+    def _matches_deployment_subject(
+        pull_request: PullRequest, subject_revision: str | None
+    ) -> bool:
+        return (
+            subject_revision is None
+            or pull_request.merge_commit_sha == subject_revision
+        )
+
+    @staticmethod
+    def _deployment_evidence_blocker(
+        lease: Lease, probe: EvidenceProbeResult
+    ) -> dict[str, str]:
+        if probe.status == "failed":
+            return {
+                "code": "deployment_evidence_failed",
+                "message": (
+                    f"Fresh deployment evidence reported failed for promotion lease "
+                    f"{lease.id}."
+                ),
+            }
+        if probe.status == "pending":
+            return {
+                "code": "deployment_evidence_pending",
+                "message": (
+                    f"Fresh deployment evidence is pending for promotion lease "
+                    f"{lease.id}."
+                ),
+            }
+        return {
+            "code": "deployment_evidence_unknown",
+            "message": (
+                f"Fresh deployment evidence is unknown or unavailable for promotion "
+                f"lease {lease.id}."
+            ),
+        }
+
+    @staticmethod
+    def _deployment_state_blocker(lease: Lease) -> dict[str, str]:
+        status = {
+            DeploymentState.FAILED: "failed",
+            DeploymentState.PENDING: "pending",
+        }.get(lease.deployment_state, "unknown")
+        return WorktreeService._deployment_evidence_blocker(
+            lease, EvidenceProbeResult(None, datetime.now(timezone.utc), status)
+        )
+
+    def _probe_deployment(
+        self, lease: Lease, pull_request: PullRequest
+    ) -> tuple[EvidenceProbeResult, str | None]:
+        received_at = datetime.now(timezone.utc)
+        subject_revision = pull_request.merge_commit_sha
+        if (
+            not isinstance(subject_revision, str)
+            or _GIT_OBJECT_ID.fullmatch(subject_revision) is None
+            or _GIT_OBJECT_ID.fullmatch(pull_request.head_sha) is None
+        ):
+            return (
+                EvidenceProbeResult(
+                    None, received_at, "deployment_subject_revision_invalid"
+                ),
+                None,
+            )
+        try:
+            adapter = load_deployment_adapter(
+                lease.repository_id, home_dir=self.home_dir
+            )
+        except ConfigError:
+            return (
+                EvidenceProbeResult(
+                    None, received_at, "deployment_adapter_configuration_invalid"
+                ),
+                None,
+            )
+        if adapter is None:
+            return (
+                EvidenceProbeResult(
+                    None, received_at, "deployment_adapter_not_configured"
+                ),
+                None,
+            )
+        try:
+            request = DeploymentEvidenceRequest.create(
+                repository_id=lease.repository_id,
+                pull_request_number=pull_request.number,
+                source_head_sha=pull_request.head_sha,
+                subject_revision=subject_revision,
+            )
+        except ValueError:
+            return (
+                EvidenceProbeResult(None, received_at, "deployment_request_invalid"),
+                None,
+            )
+        result = self.evidence_executor.execute(adapter, request)
+        if result.response is None:
+            return result, adapter.config_digest
+        try:
+            refreshed = (
+                self.github or GhClient(lease.repository_root)
+            ).view_pr(pull_request.number)
+        except (ExternalServiceError, KeyError, OSError, ValueError):
+            return (
+                EvidenceProbeResult(
+                    None, result.received_at, "deployment_pr_revalidation_failed"
+                ),
+                adapter.config_digest,
+            )
+        if (
+            refreshed.number != pull_request.number
+            or refreshed.head_sha != pull_request.head_sha
+            or refreshed.merge_commit_sha != subject_revision
+        ):
+            return (
+                EvidenceProbeResult(
+                    None, result.received_at, "deployment_subject_changed"
+                ),
+                adapter.config_digest,
+            )
+        return result, adapter.config_digest
 
     def _record_cleanup_deployment_probe(
         self,
@@ -3961,6 +4104,7 @@ class WorktreeService:
         state: LeaseState,
         deployment_state: DeploymentState,
         summary: str,
+        evidence: Mapping[str, str] | None,
         warnings: list[dict[str, str]],
     ) -> Lease | None:
         try:
@@ -3968,18 +4112,19 @@ class WorktreeService:
                 lease.id,
                 state,
                 expected_version=lease.version,
-                event_type="cleanup_deployment_probe",
+                event_type="deployment_evidence",
                 summary=summary,
                 observed_head_sha=pull_request.head_sha,
                 pr_number=pull_request.number,
                 deployment_state=deployment_state,
+                evidence=evidence,
             )
-        except (RuntimeError, sqlite3.Error):
+        except (RuntimeError, sqlite3.Error, ValueError):
             warnings.append(
                 {
                     "code": "deployment_probe_record_failed",
                     "message": (
-                        f"Unable to record a fresh deployment status probe for lease {lease.id}."
+                        f"Unable to record fresh deployment evidence for lease {lease.id}."
                     ),
                 }
             )
@@ -3996,7 +4141,7 @@ class WorktreeService:
                 {
                     "code": "deployment_probe_record_failed",
                     "message": (
-                        f"Unable to revalidate a fresh deployment status probe for lease "
+                        f"Unable to revalidate fresh deployment evidence for lease "
                         f"{lease.id}."
                     ),
                 }
@@ -4124,7 +4269,11 @@ class WorktreeService:
         )
 
     def _cleanup_blockers(
-        self, lease: Lease, pull_request: PullRequest
+        self,
+        lease: Lease,
+        pull_request: PullRequest,
+        *,
+        include_deployment: bool = True,
     ) -> tuple[dict[str, str], ...]:
         blockers: list[dict[str, str]] = []
         if not self._is_cleanup_managed(lease):
@@ -4165,15 +4314,12 @@ class WorktreeService:
                     ),
                 }
             )
-        if lease.purpose is Purpose.PROMOTE and (
-            lease.deployment_state is not DeploymentState.HEALTHY
+        if (
+            include_deployment
+            and lease.purpose is Purpose.PROMOTE
+            and lease.deployment_state is not DeploymentState.HEALTHY
         ):
-            blockers.append(
-                {
-                    "code": "deployment_not_healthy",
-                    "message": f"Promotion lease {lease.id} has no healthy deployment.",
-                }
-            )
+            blockers.append(self._deployment_state_blocker(lease))
         path_blocker = self._cleanup_path_blocker(lease)
         if path_blocker is not None:
             blockers.append(path_blocker)
@@ -4941,63 +5087,56 @@ class WorktreeService:
         current = self._current_refresh_lease(lease_id, pull_request.number)
         if current is None:
             return
-        if (
-            current.state is LeaseState.CLEANABLE
-            and current.deployment_state is DeploymentState.HEALTHY
-        ):
-            return
-
-        command = self.config.deployment_status_command
-        self._transition_refresh(
-            lease_id,
-            pull_request,
-            LeaseState.DEPLOYING,
-            deployment_state=(
-                DeploymentState.PENDING if command else DeploymentState.UNKNOWN
-            ),
-        )
-        if not command:
-            return
-        current = self._current_refresh_lease(lease_id, pull_request.number)
-        if current is None:
-            return
-        try:
-            completed = self.deployment_runner(
-                list(command),
-                cwd=current.repository_root,
-                check=False,
-                shell=False,
-                capture_output=True,
-                text=True,
-                timeout=_DEPLOYMENT_STATUS_TIMEOUT_SECONDS,
-            )
-        except Exception:
-            warnings.append(
-                {
-                    "code": "deployment_refresh_failed",
-                    "message": f"Unable to refresh deployment state for lease {lease_id}.",
-                }
-            )
-            return
-        if completed.returncode != 0:
+        probe, adapter_digest = self._probe_deployment(current, pull_request)
+        if probe.response is None:
             self._transition_refresh(
                 lease_id,
                 pull_request,
-                LeaseState.BLOCKED,
-                deployment_state=DeploymentState.FAILED,
+                LeaseState.DEPLOYING,
+                deployment_state=DeploymentState.UNKNOWN,
+            )
+            warnings.append(
+                {
+                    "code": probe.failure_code or "deployment_evidence_invalid",
+                    "message": f"Unable to refresh deployment evidence for lease {lease_id}.",
+                }
             )
             return
-        self._transition_refresh(
-            lease_id,
-            pull_request,
-            LeaseState.DEPLOYED,
-            deployment_state=DeploymentState.HEALTHY,
+        evidence = probe.response.registry_evidence(
+            adapter_digest=adapter_digest or "",
+            received_at=probe.received_at,
         )
+        if probe.status == "healthy":
+            self._transition_refresh(
+                lease_id,
+                pull_request,
+                LeaseState.CLEANABLE,
+                deployment_state=DeploymentState.HEALTHY,
+                event_type="deployment_evidence",
+                summary="Fresh deployment evidence is healthy",
+                evidence=evidence,
+            )
+            return
+        if probe.status == "failed":
+            state = LeaseState.BLOCKED
+            deployment_state = DeploymentState.FAILED
+            summary = "Deployment evidence reports failed"
+        elif probe.status == "pending":
+            state = LeaseState.DEPLOYING
+            deployment_state = DeploymentState.PENDING
+            summary = "Deployment evidence reports pending"
+        else:
+            state = LeaseState.DEPLOYING
+            deployment_state = DeploymentState.UNKNOWN
+            summary = "Deployment evidence reports unknown"
         self._transition_refresh(
             lease_id,
             pull_request,
-            LeaseState.CLEANABLE,
-            deployment_state=DeploymentState.HEALTHY,
+            state,
+            deployment_state=deployment_state,
+            event_type="deployment_evidence",
+            summary=summary,
+            evidence=evidence,
         )
 
     def _current_refresh_lease(
@@ -5049,12 +5188,16 @@ class WorktreeService:
         state: LeaseState,
         *,
         deployment_state: DeploymentState | None,
+        event_type: str = "github_refresh",
+        summary: str = "GitHub refresh",
+        evidence: Mapping[str, str] | None = None,
     ) -> Lease | None:
         current = self._current_refresh_lease(lease_id, pull_request.number)
         if current is None:
             return None
         if (
-            current.state is state
+            evidence is None
+            and current.state is state
             and (
                 deployment_state is None
                 or current.deployment_state is deployment_state
@@ -5065,11 +5208,12 @@ class WorktreeService:
             lease_id,
             state,
             expected_version=current.version,
-            event_type="github_refresh",
-            summary="GitHub refresh",
+            event_type=event_type,
+            summary=summary,
             observed_head_sha=pull_request.head_sha,
             pr_number=pull_request.number,
             deployment_state=deployment_state,
+            evidence=evidence,
         )
 
     def import_root(self, root: Path, *, apply: bool) -> CommandResult:

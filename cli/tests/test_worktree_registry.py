@@ -438,6 +438,17 @@ def test_registry_migrates_legacy_lease_with_promotion_defaults(
                 removed_at TEXT,
                 version INTEGER NOT NULL DEFAULT 0
             );
+            CREATE TABLE worktree_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                lease_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                from_state TEXT,
+                to_state TEXT,
+                observed_head_sha TEXT,
+                pr_number INTEGER,
+                summary TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             """
         )
         connection.execute(
@@ -481,6 +492,24 @@ def test_registry_migrates_legacy_lease_with_promotion_defaults(
                 "version": 0,
             },
         )
+        connection.execute(
+            """
+            INSERT INTO worktree_events (
+                lease_id, event_type, from_state, to_state, observed_head_sha,
+                pr_number, summary, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "legacy-lease",
+                "legacy",
+                "ACTIVE",
+                "ACTIVE",
+                None,
+                None,
+                "legacy event",
+                "2030-01-02T03:04:05+00:00",
+            ),
+        )
 
     registry = WorktreeRegistry(db_path)
     registry.ensure()
@@ -498,6 +527,8 @@ def test_registry_migrates_legacy_lease_with_promotion_defaults(
     assert registry.get_promotion_sources("legacy-lease") == ()
     assert loaded.conflict_source_ordinal is None
     assert loaded.legacy_source_trailers is False
+    events = registry.list_events("legacy-lease")
+    assert events[-1].evidence is None
 
 
 def test_transition_updates_resolution_metadata_with_compare_and_swap(

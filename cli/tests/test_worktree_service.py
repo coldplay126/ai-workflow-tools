@@ -14,6 +14,10 @@ import pytest
 
 import awf.worktrees.service as service_module
 from awf.worktrees.config import WorktreeConfig
+from awf.worktrees.evidence import (
+    DeploymentEvidenceResponse,
+    EvidenceProbeResult,
+)
 from awf.worktrees.git import (
     GitClient,
     GitError,
@@ -134,11 +138,57 @@ def pull_request(
 
 
 def merged_pr(**kwargs: object) -> PullRequest:
-    return pull_request(state="MERGED", merge_commit_sha="merge-sha", **kwargs)
+    return pull_request(state="MERGED", merge_commit_sha="f" * 40, **kwargs)
 
 
 def closed_pr(**kwargs: object) -> PullRequest:
     return pull_request(state="CLOSED", **kwargs)
+
+
+class StubEvidenceExecutor:
+    def __init__(self, status: str = "healthy") -> None:
+        self.status = status
+        self.failure_code: str | None = None
+        self.requests: list[object] = []
+
+    def execute(self, adapter: object, request: object) -> EvidenceProbeResult:
+        self.requests.append(request)
+        received_at = datetime.now(timezone.utc)
+        if self.failure_code is not None:
+            return EvidenceProbeResult(None, received_at, self.failure_code)
+        return EvidenceProbeResult(
+            DeploymentEvidenceResponse(
+                protocol=request.protocol,
+                request_id=request.request_id,
+                repository_id=request.repository_id,
+                subject_revision=request.subject_revision,
+                status=self.status,
+                observed_at=datetime.now(timezone.utc)
+                .isoformat(timespec="seconds")
+                .replace("+00:00", "Z"),
+            ),
+            received_at,
+        )
+
+
+def _operator_home(tmp_path: Path, repository_id: str) -> Path:
+    home_dir = tmp_path / "operator-home"
+    config_path = home_dir / ".config" / "awf" / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    executable = config_path.parent / "adapters" / "deployment-adapter"
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o700)
+    config_path.write_text(
+        "[worktree.deployment.adapters."
+        + json.dumps(repository_id)
+        + "]\ncommand = ["
+        + json.dumps(str(executable))
+        + "]\n",
+        encoding="utf-8",
+    )
+    config_path.chmod(0o600)
+    return home_dir
 
 
 @dataclass
@@ -150,6 +200,8 @@ class Harness:
     state_dir: Path
     lock_dir: Path
     github: FakeGitHub
+    home_dir: Path
+    evidence_executor: StubEvidenceExecutor
     service: WorktreeService
 
     @classmethod
@@ -160,7 +212,9 @@ class Harness:
         cache_dir = tmp_path / "cache"
         state_dir = tmp_path / "state"
         lock_dir = tmp_path / "locks"
-        github = FakeGitHub()
+        github = FakeGitHub(repository_root=repo)
+        home_dir = _operator_home(tmp_path, git.repository_id())
+        evidence_executor = StubEvidenceExecutor()
         return cls(
             repo=repo,
             git=git,
@@ -168,15 +222,19 @@ class Harness:
             cache_dir=cache_dir,
             state_dir=state_dir,
             lock_dir=lock_dir,
+            home_dir=home_dir,
+            evidence_executor=evidence_executor,
             github=github,
             service=WorktreeService(
                 registry,
                 git,
                 config=WorktreeConfig(default_base="staging"),
                 github=github,
+                evidence_executor=evidence_executor,
                 cache_dir=cache_dir,
                 state_dir=state_dir,
                 lock_dir=lock_dir,
+                home_dir=home_dir,
             ),
         )
 
@@ -213,9 +271,12 @@ class Harness:
                 prepare_inputs=("README.txt",),
                 prepare_command=(sys.executable, "-c", script),
             ),
+            github=self.github,
+            evidence_executor=self.evidence_executor,
             cache_dir=self.cache_dir,
             state_dir=self.state_dir,
             lock_dir=self.lock_dir,
+            home_dir=self.home_dir,
         )
     def make_external_worktree(self, branch: str) -> Path:
         external = self.repo.parent / branch
@@ -356,6 +417,8 @@ class PromotionHarness:
     lock_dir: Path
     github: FakeGitHub
     config: WorktreeConfig
+    home_dir: Path
+    evidence_executor: StubEvidenceExecutor
     service: WorktreeService
     source_base_sha: str
     source_head_sha: str
@@ -419,6 +482,8 @@ class PromotionHarness:
             production_branch="main",
             verify_production=((sys.executable, "-c", "pass"),),
         )
+        home_dir = _operator_home(tmp_path, git.repository_id())
+        evidence_executor = StubEvidenceExecutor()
         return cls(
             repo=repo,
             git=git,
@@ -428,14 +493,18 @@ class PromotionHarness:
             lock_dir=lock_dir,
             github=github,
             config=config,
+            home_dir=home_dir,
+            evidence_executor=evidence_executor,
             service=WorktreeService(
                 registry,
                 git,
                 config=config,
                 github=github,
+                evidence_executor=evidence_executor,
                 cache_dir=cache_dir,
                 state_dir=state_dir,
                 lock_dir=lock_dir,
+                home_dir=home_dir,
             ),
             source_base_sha=source_base_sha,
             source_head_sha=source_head_sha,
@@ -448,9 +517,11 @@ class PromotionHarness:
             self.git,
             config=self.config,
             github=self.github,
+            evidence_executor=self.evidence_executor,
             cache_dir=self.cache_dir,
             state_dir=self.state_dir,
             lock_dir=self.lock_dir,
+            home_dir=self.home_dir,
         )
 
     def make_target_conflict(self) -> None:
@@ -659,20 +730,16 @@ class PromotionHarness:
         return source
 
     def merged_promotion(self, mutation: str) -> Lease:
-        if mutation == "deployment_unknown":
-            self.configure(deployment_status_command=())
-        elif mutation == "deployment_failed":
-            self.configure(
-                deployment_status_command=(
-                    sys.executable,
-                    "-c",
-                    "import sys; sys.exit(1)",
-                )
-            )
-        else:
-            self.configure(
-                deployment_status_command=(sys.executable, "-c", "pass")
-            )
+        self.evidence_executor.failure_code = None
+        self.evidence_executor.status = (
+            "unknown"
+            if mutation == "deployment_unknown"
+            else "failed"
+            if mutation == "deployment_failed"
+            else "pending"
+            if mutation == "deployment_pending"
+            else "healthy"
+        )
         promoted = self.service.promote(
             source_pr=372, target_branch="main", apply=True
         )
@@ -1066,34 +1133,14 @@ def test_refresh_promoted_lease_cleanable_after_healthy_deployment(
     lease = harness.attach_pr(acquired.lease, 42)
     harness.github.prs[42] = merged_pr(number=42, head_sha=lease.head_sha)
 
-    deployment_calls: list[list[str]] = []
-
-    def deployment_runner(
-        command: list[str], **_: object
-    ) -> subprocess.CompletedProcess[str]:
-        deployment_calls.append(command)
-        return subprocess.CompletedProcess(command, 0, "", "")
-
-    harness.service = WorktreeService(
-        harness.registry,
-        harness.git,
-        config=WorktreeConfig(
-            default_base="staging", deployment_status_command=("deploy", "status")
-        ),
-        github=harness.github,
-        deployment_runner=deployment_runner,
-        cache_dir=harness.cache_dir,
-        state_dir=harness.state_dir,
-        lock_dir=harness.lock_dir,
-    )
 
     first = harness.service.status(initiative="reward-widget", refresh=True)
     second = harness.service.status(initiative="reward-widget", refresh=True)
 
     assert first.leases[0].state is LeaseState.CLEANABLE
     assert first.leases[0].deployment_state is DeploymentState.HEALTHY
-    assert second.leases[0].version == first.leases[0].version
-    assert deployment_calls == [["deploy", "status"]]
+    assert second.leases[0].version > first.leases[0].version
+    assert len(harness.evidence_executor.requests) == 2
 
 
 def test_refresh_blocks_merged_promotion_when_pr_head_differs_before_deployment(
@@ -1111,26 +1158,7 @@ def test_refresh_blocks_merged_promotion_when_pr_head_differs_before_deployment(
     lease = harness.attach_pr(acquired.lease, 42)
     pull_request_head = "different-head-sha"
     harness.github.prs[42] = merged_pr(number=42, head_sha=pull_request_head)
-    deployment_calls: list[list[str]] = []
-
-    def deployment_runner(
-        command: list[str], **_: object
-    ) -> subprocess.CompletedProcess[str]:
-        deployment_calls.append(command)
-        return subprocess.CompletedProcess(command, 0, "", "")
-
-    harness.service = WorktreeService(
-        harness.registry,
-        harness.git,
-        config=WorktreeConfig(
-            default_base="staging", deployment_status_command=("deploy", "status")
-        ),
-        github=harness.github,
-        deployment_runner=deployment_runner,
-        cache_dir=harness.cache_dir,
-        state_dir=harness.state_dir,
-        lock_dir=harness.lock_dir,
-    )
+    assert harness.evidence_executor.requests == []
 
     result = harness.service.status(initiative="reward-widget", refresh=True)
 
@@ -1138,7 +1166,7 @@ def test_refresh_blocks_merged_promotion_when_pr_head_differs_before_deployment(
     assert current.state is LeaseState.BLOCKED
     assert current.deployment_state is DeploymentState.UNKNOWN
     assert current.head_sha == lease.head_sha
-    assert deployment_calls == []
+    assert harness.evidence_executor.requests == []
     event = harness.registry.list_events(lease.id)[-1]
     assert event.event_type == "github_refresh_head_mismatch"
     assert event.observed_head_sha == pull_request_head
@@ -1171,26 +1199,7 @@ def test_refresh_records_head_mismatch_for_unrelated_blocked_promotion(
     )
     pull_request_head = "different-head-sha"
     harness.github.prs[42] = merged_pr(number=42, head_sha=pull_request_head)
-    deployment_calls: list[list[str]] = []
-
-    def deployment_runner(
-        command: list[str], **_: object
-    ) -> subprocess.CompletedProcess[str]:
-        deployment_calls.append(command)
-        return subprocess.CompletedProcess(command, 0, "", "")
-
-    harness.service = WorktreeService(
-        harness.registry,
-        harness.git,
-        config=WorktreeConfig(
-            default_base="staging", deployment_status_command=("deploy", "status")
-        ),
-        github=harness.github,
-        deployment_runner=deployment_runner,
-        cache_dir=harness.cache_dir,
-        state_dir=harness.state_dir,
-        lock_dir=harness.lock_dir,
-    )
+    assert harness.evidence_executor.requests == []
 
     first = harness.service.status(initiative="reward-widget", refresh=True)
     events = harness.registry.list_events(lease.id)
@@ -1201,7 +1210,7 @@ def test_refresh_records_head_mismatch_for_unrelated_blocked_promotion(
     assert first.leases[0].version == unrelated_block.version + 1
     assert events[-1].event_type == "github_refresh_head_mismatch"
     assert events[-1].observed_head_sha == pull_request_head
-    assert deployment_calls == []
+    assert harness.evidence_executor.requests == []
     assert second.leases[0].version == first.leases[0].version
     assert harness.registry.list_events(lease.id) == events
 
@@ -1221,23 +1230,7 @@ def test_refresh_blocks_promoted_lease_when_deployment_fails(
     lease = harness.attach_pr(acquired.lease, 42)
     harness.github.prs[42] = merged_pr(number=42, head_sha=lease.head_sha)
 
-    def deployment_runner(
-        command: tuple[str, ...], **_: object
-    ) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(command, 1, "", "deployment failed")
-
-    harness.service = WorktreeService(
-        harness.registry,
-        harness.git,
-        config=WorktreeConfig(
-            default_base="staging", deployment_status_command=("deploy", "status")
-        ),
-        github=harness.github,
-        deployment_runner=deployment_runner,
-        cache_dir=harness.cache_dir,
-        state_dir=harness.state_dir,
-        lock_dir=harness.lock_dir,
-    )
+    harness.evidence_executor.status = "failed"
 
     result = harness.service.status(initiative="reward-widget", refresh=True)
 
@@ -1245,7 +1238,7 @@ def test_refresh_blocks_promoted_lease_when_deployment_fails(
     assert result.leases[0].deployment_state is DeploymentState.FAILED
 
 
-def test_refresh_keeps_promoted_lease_deploying_without_status_command(
+def test_refresh_keeps_promoted_lease_deploying_when_evidence_is_unknown(
     harness: Harness,
 ) -> None:
     acquired = harness.service.acquire(
@@ -1259,13 +1252,74 @@ def test_refresh_keeps_promoted_lease_deploying_without_status_command(
     assert acquired.lease is not None
     lease = harness.attach_pr(acquired.lease, 42)
     harness.github.prs[42] = merged_pr(number=42, head_sha=lease.head_sha)
+    harness.evidence_executor.status = "unknown"
 
     first = harness.service.status(initiative="reward-widget", refresh=True)
     second = harness.service.status(initiative="reward-widget", refresh=True)
 
     assert first.leases[0].state is LeaseState.DEPLOYING
     assert first.leases[0].deployment_state is DeploymentState.UNKNOWN
-    assert second.leases[0].version == first.leases[0].version
+    assert second.leases[0].version > first.leases[0].version
+
+def test_refresh_rejects_missing_merge_sha_without_invoking_adapter(
+    harness: Harness,
+) -> None:
+    acquired = harness.service.acquire(
+        initiative="missing-merge",
+        purpose=Purpose.PROMOTE,
+        base=None,
+        branch=None,
+        owner_id="session-1",
+        apply=True,
+    )
+    assert acquired.lease is not None
+    lease = harness.attach_pr(acquired.lease, 42)
+    harness.github.prs[42] = pull_request(
+        number=42,
+        state="MERGED",
+        head_sha=lease.head_sha,
+        merge_commit_sha=None,
+    )
+
+    result = harness.service.status(initiative="missing-merge", refresh=True)
+
+    assert result.leases[0].deployment_state is DeploymentState.UNKNOWN
+    assert result.warnings[0]["code"] == "deployment_subject_revision_invalid"
+    assert harness.evidence_executor.requests == []
+
+
+def test_refresh_rejects_evidence_when_pr_merge_identity_changes_during_probe(
+    harness: Harness,
+) -> None:
+    acquired = harness.service.acquire(
+        initiative="merge-race",
+        purpose=Purpose.PROMOTE,
+        base=None,
+        branch=None,
+        owner_id="session-1",
+        apply=True,
+    )
+    assert acquired.lease is not None
+    lease = harness.attach_pr(acquired.lease, 42)
+    harness.github.prs[42] = merged_pr(number=42, head_sha=lease.head_sha)
+
+    class MergeChangingExecutor(StubEvidenceExecutor):
+        def execute(self, adapter: object, request: object) -> EvidenceProbeResult:
+            result = super().execute(adapter, request)
+            harness.github.prs[42] = replace(
+                harness.github.prs[42], merge_commit_sha="d" * 40
+            )
+            return result
+
+    executor = MergeChangingExecutor()
+    harness.service.evidence_executor = executor
+
+    result = harness.service.status(initiative="merge-race", refresh=True)
+
+    assert result.leases[0].deployment_state is DeploymentState.UNKNOWN
+    assert result.warnings[0]["code"] == "deployment_subject_changed"
+    assert len(executor.requests) == 1
+
 
 @pytest.fixture
 def harness(tmp_path: Path) -> Harness:
@@ -1305,7 +1359,7 @@ def test_refresh_warns_when_compare_and_swap_loses_a_race(
     assert result.warnings[0]["code"] == "lease_refresh_failed"
 
 
-def test_refresh_warns_after_a_bounded_deployment_timeout(
+def test_refresh_fails_closed_when_evidence_executor_times_out(
     harness: Harness,
 ) -> None:
     acquired = harness.service.acquire(
@@ -1319,33 +1373,13 @@ def test_refresh_warns_after_a_bounded_deployment_timeout(
     assert acquired.lease is not None
     lease = harness.attach_pr(acquired.lease, 42)
     harness.github.prs[42] = merged_pr(number=42, head_sha=lease.head_sha)
-    timeouts: list[float] = []
-
-    def deployment_runner(
-        command: list[str], *, timeout: float, **_: object
-    ) -> subprocess.CompletedProcess[str]:
-        timeouts.append(timeout)
-        raise subprocess.TimeoutExpired(command, timeout)
-
-    harness.service = WorktreeService(
-        harness.registry,
-        harness.git,
-        config=WorktreeConfig(
-            default_base="staging", deployment_status_command=("deploy", "status")
-        ),
-        github=harness.github,
-        deployment_runner=deployment_runner,
-        cache_dir=harness.cache_dir,
-        state_dir=harness.state_dir,
-        lock_dir=harness.lock_dir,
-    )
+    harness.evidence_executor.failure_code = "deployment_adapter_timeout"
 
     result = harness.service.status(initiative="reward-widget", refresh=True)
 
     assert result.leases[0].state is LeaseState.DEPLOYING
-    assert result.leases[0].deployment_state is DeploymentState.PENDING
-    assert result.warnings[0]["code"] == "deployment_refresh_failed"
-    assert timeouts == [30.0]
+    assert result.leases[0].deployment_state is DeploymentState.UNKNOWN
+    assert result.warnings[0]["code"] == "deployment_adapter_timeout"
 
 
 def test_acquire_previews_without_creating_a_worktree(harness: Harness) -> None:
@@ -8729,8 +8763,9 @@ def test_production_verifier_kills_timeout_descendant(
         ("head_mismatch", "head_mismatch"),
         ("unmanaged", "unmanaged_lease"),
         ("retain", "retained_lease"),
-        ("deployment_unknown", "deployment_not_healthy"),
-        ("deployment_failed", "deployment_not_healthy"),
+        ("deployment_unknown", "deployment_evidence_unknown"),
+        ("deployment_failed", "deployment_evidence_failed"),
+        ("deployment_pending", "deployment_evidence_pending"),
     ],
 )
 def test_finish_preserves_unsafe_worktree(
@@ -8823,98 +8858,58 @@ def test_gc_is_preview_by_default_and_rechecks_each_candidate(
     assert dirty.worktree_path.exists()
 
 
-def test_finish_classifies_nonzero_deployment_probe_as_external(
+@pytest.mark.parametrize(
+    "failure_code",
+    [
+        "deployment_adapter_nonzero",
+        "deployment_adapter_timeout",
+        "deployment_evidence_invalid",
+    ],
+)
+def test_finish_fails_closed_when_fresh_deployment_evidence_is_invalid(
     promotion_harness: PromotionHarness,
+    failure_code: str,
 ) -> None:
     lease = promotion_harness.merged_promotion("healthy")
-    probes: list[list[str]] = []
-
-    def regressed_probe(
-        command: list[str], **_: object
-    ) -> subprocess.CompletedProcess[str]:
-        probes.append(command)
-        return subprocess.CompletedProcess(command, 1, "", "deployment regressed")
-
-    promotion_harness.service.deployment_runner = regressed_probe
+    promotion_harness.evidence_executor.failure_code = failure_code
 
     result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
 
-    assert result.status == "error"
-    assert result.exit_code == 4
-    assert result.blockers[0]["code"] == "deployment_probe_failed"
-    assert probes == [[sys.executable, "-c", "pass"]]
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "deployment_evidence_unknown"
     assert lease.worktree_path.exists()
     current = promotion_harness.registry.get_lease(lease.id)
     assert current is not None
-    assert current.state is LeaseState.CLEANABLE
-    assert current.deployment_state is DeploymentState.HEALTHY
-
-
-def test_finish_classifies_timed_out_deployment_probe_as_external(
-    promotion_harness: PromotionHarness,
-) -> None:
-    lease = promotion_harness.merged_promotion("healthy")
-
-    def failed_probe(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        raise subprocess.TimeoutExpired(command, 30)
-
-    promotion_harness.service.deployment_runner = failed_probe
-
-    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
-
-    assert result.status == "error"
-    assert result.exit_code == 4
-    assert result.blockers[0]["code"] == "deployment_probe_failed"
-    assert lease.worktree_path.exists()
-    current = promotion_harness.registry.get_lease(lease.id)
-    assert current is not None
-    assert current.state is LeaseState.CLEANABLE
-    assert current.deployment_state is DeploymentState.HEALTHY
-
-
-def test_finish_classifies_malformed_deployment_probe_as_external(
-    promotion_harness: PromotionHarness,
-) -> None:
-    lease = promotion_harness.merged_promotion("healthy")
-
-    class MalformedCompleted:
-        returncode = None
-
-    promotion_harness.service.deployment_runner = lambda *_args, **_kwargs: (
-        MalformedCompleted()
-    )
-
-    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
-
-    assert result.status == "error"
-    assert result.exit_code == 4
-    assert result.blockers[0]["code"] == "deployment_probe_failed"
-    assert lease.worktree_path.exists()
-    current = promotion_harness.registry.get_lease(lease.id)
-    assert current is not None
-    assert current.state is LeaseState.CLEANABLE
-    assert current.deployment_state is DeploymentState.HEALTHY
-
+    assert current.state is LeaseState.BLOCKED
+    assert current.deployment_state is DeploymentState.UNKNOWN
 
 def test_finish_requires_a_fresh_healthy_deployment_probe(
     promotion_harness: PromotionHarness,
 ) -> None:
     lease = promotion_harness.merged_promotion("healthy")
-    probes: list[list[str]] = []
-
-    def healthy_probe(
-        command: list[str], **_: object
-    ) -> subprocess.CompletedProcess[str]:
-        probes.append(command)
-        return subprocess.CompletedProcess(command, 0, "", "")
-
-    promotion_harness.service.deployment_runner = healthy_probe
+    initial_requests = len(promotion_harness.evidence_executor.requests)
 
     result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
 
     assert result.decision == "removed"
-    assert probes == [[sys.executable, "-c", "pass"]]
+    assert len(promotion_harness.evidence_executor.requests) == initial_requests + 2
     assert not lease.worktree_path.exists()
+
+
+def test_refresh_records_healthy_evidence_directly_as_cleanable(
+    promotion_harness: PromotionHarness,
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+    before = promotion_harness.registry.list_events(lease.id)
+
+    result = promotion_harness.service.status(refresh=True)
+
+    assert result.status == "ok"
+    refreshed = promotion_harness.registry.list_events(lease.id)[len(before) :]
+    assert len(refreshed) == 1
+    assert refreshed[0].event_type == "deployment_evidence"
+    assert refreshed[0].to_state == LeaseState.CLEANABLE.value
+    assert refreshed[0].from_state != LeaseState.DEPLOYED.value
 
 
 def test_finish_preserves_promotion_when_forced_probe_cannot_be_recorded(
@@ -8924,7 +8919,7 @@ def test_finish_preserves_promotion_when_forced_probe_cannot_be_recorded(
     original_transition = promotion_harness.registry.transition
 
     def transition(*args: object, **kwargs: object) -> Lease:
-        if kwargs.get("event_type") == "cleanup_deployment_probe":
+        if kwargs.get("event_type") == "deployment_evidence":
             raise RuntimeError("database unavailable")
         return original_transition(*args, **kwargs)
 
@@ -8933,7 +8928,7 @@ def test_finish_preserves_promotion_when_forced_probe_cannot_be_recorded(
     result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
 
     assert result.status == "blocked"
-    assert "deployment_not_healthy" in {item["code"] for item in result.blockers}
+    assert "deployment_evidence_unknown" in {item["code"] for item in result.blockers}
     assert "deployment_probe_record_failed" in {
         item["code"] for item in result.warnings
     }
@@ -8958,6 +8953,55 @@ def test_finish_rejects_a_post_merge_pr_head_advance(
     assert "head_mismatch" in {item["code"] for item in result.blockers}
     assert lease.worktree_path.exists()
 
+
+def test_finish_rejects_merge_revision_changed_after_cleanup_reservation(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+    original_reserve = promotion_harness.registry.reserve_cleanup
+
+    def reserve_then_change(*args: object, **kwargs: object):
+        reservation = original_reserve(*args, **kwargs)
+        promotion_harness.github.prs[lease.target_pr] = replace(
+            promotion_harness.github.prs[lease.target_pr],
+            merge_commit_sha="e" * 40,
+        )
+        return reservation
+
+    monkeypatch.setattr(
+        promotion_harness.registry, "reserve_cleanup", reserve_then_change
+    )
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "deployment_subject_changed"
+    assert promotion_harness.registry.get_cleanup_reservation(lease.id) is None
+    assert lease.worktree_path.exists()
+
+
+
+def test_finish_rejects_merge_revision_changed_after_fresh_probe(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+    original_probe = promotion_harness.service._force_cleanup_deployment_probe
+
+    def probe_then_change(*args: object, **kwargs: object):
+        result = original_probe(*args, **kwargs)
+        promotion_harness.github.prs[lease.target_pr] = replace(
+            promotion_harness.github.prs[lease.target_pr],
+            merge_commit_sha="e" * 40,
+        )
+        return result
+
+    monkeypatch.setattr(
+        promotion_harness.service, "_force_cleanup_deployment_probe", probe_then_change
+    )
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "deployment_subject_changed"
+    assert lease.worktree_path.exists()
 
 def test_gc_rejects_a_post_merge_feature_head_advance(harness: Harness) -> None:
     lease = harness.merged_feature(age_days=10)
@@ -9435,12 +9479,14 @@ def test_finish_releases_reservation_for_post_lock_github_failure(
 ) -> None:
     lease = promotion_harness.merged_promotion("healthy")
     original_view = promotion_harness.github.view_pr
+    failure_while_reserved = False
     view_calls = 0
 
     def fail_post_lock_view(number: int) -> PullRequest:
-        nonlocal view_calls
+        nonlocal failure_while_reserved, view_calls
         view_calls += 1
-        if view_calls == 4:
+        if promotion_harness.registry.get_cleanup_reservation(lease.id) is not None:
+            failure_while_reserved = True
             raise ExternalServiceError("gh pr view failed: network unavailable")
         return original_view(number)
 
@@ -9451,7 +9497,8 @@ def test_finish_releases_reservation_for_post_lock_github_failure(
     assert result.status == "error"
     assert result.exit_code == 4
     assert result.blockers[0]["code"] == "github_refresh_failed"
-    assert view_calls == 4
+    assert failure_while_reserved
+    assert view_calls >= 1
     assert promotion_harness.registry.get_cleanup_reservation(lease.id) is None
     current = promotion_harness.registry.get_lease(lease.id)
     assert current is not None

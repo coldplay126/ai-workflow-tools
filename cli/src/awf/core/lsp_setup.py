@@ -1488,8 +1488,6 @@ def _serialize_worktree_config(config: WorktreeConfig, prepare_command: Sequence
     lines.append(f"command = {_toml_value(list(prepare_command))}")
     if config.verify_production:
         lines += ["", "[verify.production]", f"commands = {_toml_value([list(item) for item in config.verify_production])}"]
-    if config.deployment_status_command:
-        lines += ["", "[deployment]", f"status_command = {_toml_value(list(config.deployment_status_command))}"]
     if config.source_review_policy != "approved":
         lines += ["", "[promotion]", f"source_review_policy = {_toml_value(config.source_review_policy)}"]
     return "\n".join(lines) + "\n"

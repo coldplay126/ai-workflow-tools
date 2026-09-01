@@ -35,8 +35,7 @@ def test_load_config_accepts_only_argv_arrays(tmp_path: Path) -> None:
         '[worktree]\ndefault_base="staging"\nproduction_branch="main"\n'
         "[prepare]\ninputs=[\"package-lock.json\"]\n"
         'command=["npm","ci"]\n'
-        "[verify.production]\ncommands=[[\"npm\",\"test\"],[\"npm\",\"run\",\"build\"]]\n"
-        "[deployment]\nstatus_command=[\"argocd\",\"app\",\"wait\",\"demo\"]\n",
+        "[verify.production]\ncommands=[[\"npm\",\"test\"],[\"npm\",\"run\",\"build\"]]\n",
         encoding="utf-8",
     )
 
@@ -45,6 +44,20 @@ def test_load_config_accepts_only_argv_arrays(tmp_path: Path) -> None:
     assert config.default_base == "staging"
     assert config.verify_production == (("npm", "test"), ("npm", "run", "build"))
 
+
+
+def test_load_config_rejects_repository_deployment_configuration(
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / ".awf"
+    config_dir.mkdir()
+    (config_dir / "worktree.toml").write_text(
+        "[deployment]\nstatus_command=[\"./scripts/status\"]\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="operator-owned adapter"):
+        load_worktree_config(tmp_path)
 
 
 def test_load_config_defaults_to_approved_source_reviews(tmp_path: Path) -> None:
@@ -993,7 +1006,6 @@ def test_repository_identity_hashes_invalid_repository_root_bytes(
         "[prepare]\ninputs = [\"package\\u0000lock.json\"]\n",
         "[prepare]\ncommand = [\"npm\\u0000ci\"]\n",
         "[verify.production]\ncommands = [[\"npm\", \"test\\u0000all\"]]\n",
-        "[deployment]\nstatus_command = [\"argocd\\u0000app\"]\n",
     ],
 )
 def test_config_rejects_embedded_nul_in_all_string_fields(

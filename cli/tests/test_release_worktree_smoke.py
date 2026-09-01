@@ -1,13 +1,18 @@
 from __future__ import annotations
 
-import subprocess
+import json
 import sys
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from awf.worktrees.config import WorktreeConfig
+from awf.worktrees.evidence import (
+    DeploymentEvidenceResponse,
+    EvidenceProbeResult,
+)
 from awf.worktrees.git import GitClient, GitError
 from awf.worktrees.github import ExternalServiceError, PullRequest
 from awf.worktrees.models import (
@@ -80,6 +85,35 @@ class FakeGitHub:
         return pull_request
 
 
+class FakeEvidenceExecutor:
+    def __init__(self, harness: SmokeHarness) -> None:
+        self.harness = harness
+
+    def execute(self, adapter: object, request: object) -> EvidenceProbeResult:
+        self.harness.deployment_calls.append(tuple(adapter.command))
+        received_at = datetime.now(timezone.utc)
+        if self.harness.deployment is DeploymentState.UNKNOWN:
+            return EvidenceProbeResult(None, received_at, "deployment_adapter_unavailable")
+        status = (
+            "failed"
+            if self.harness.deployment is DeploymentState.FAILED
+            else "healthy"
+        )
+        return EvidenceProbeResult(
+            DeploymentEvidenceResponse(
+                protocol=request.protocol,
+                request_id=request.request_id,
+                repository_id=request.repository_id,
+                subject_revision=request.subject_revision,
+                status=status,
+                observed_at=datetime.now(timezone.utc)
+                .isoformat(timespec="seconds")
+                .replace("+00:00", "Z"),
+            ),
+            received_at,
+        )
+
+
 @dataclass
 class SmokeHarness:
     repo: Path
@@ -88,6 +122,7 @@ class SmokeHarness:
     cache_dir: Path
     state_dir: Path
     lock_dir: Path
+    home_dir: Path
     github: FakeGitHub
     config: WorktreeConfig
     deployment: DeploymentState
@@ -141,8 +176,23 @@ class SmokeHarness:
             default_base="staging",
             production_branch="main",
             verify_production=((sys.executable, "-c", "pass"),),
-            deployment_status_command=("deployment-status",),
         )
+        home_dir = tmp_path / "home"
+        config_path = home_dir / ".config" / "awf" / "config.toml"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        executable = config_path.parent / "adapters" / "deployment-adapter"
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o700)
+        config_path.write_text(
+            "[worktree.deployment.adapters."
+            + json.dumps(git.repository_id())
+            + "]\ncommand = ["
+            + json.dumps(str(executable))
+            + "]\n",
+            encoding="utf-8",
+        )
+        config_path.chmod(0o600)
         harness = cls(
             repo=repo,
             git=git,
@@ -150,6 +200,7 @@ class SmokeHarness:
             cache_dir=cache_dir,
             state_dir=state_dir,
             lock_dir=lock_dir,
+            home_dir=home_dir,
             github=github,
             config=config,
             deployment=DeploymentState.UNKNOWN,
@@ -164,19 +215,12 @@ class SmokeHarness:
             self.git,
             config=self.config,
             github=self.github,
-            deployment_runner=self._run_deployment_status,
+            evidence_executor=FakeEvidenceExecutor(self),
             cache_dir=self.cache_dir,
             state_dir=self.state_dir,
             lock_dir=self.lock_dir,
+            home_dir=self.home_dir,
         )
-
-    def _run_deployment_status(
-        self, argv: list[str], **_: object
-    ) -> subprocess.CompletedProcess[str]:
-        self.deployment_calls.append(tuple(argv))
-        if self.deployment is DeploymentState.UNKNOWN:
-            raise OSError("deployment status is unavailable")
-        return subprocess.CompletedProcess(argv, 0, stdout="healthy\n", stderr="")
 
     def enable_verify_success(self) -> None:
         self.config = replace(
@@ -194,20 +238,11 @@ class SmokeHarness:
             merge_commit_sha=self.git.resolve_ref(target_pr.head_ref),
         )
         self.deployment = deployment
-        self.config = replace(
-            self.config,
-            deployment_status_command=(
-                () if deployment is DeploymentState.UNKNOWN else ("deployment-status",)
-            ),
-        )
         self._rebuild_service()
         self.service.status(refresh=True)
 
     def set_deployment_healthy(self) -> None:
         self.deployment = DeploymentState.HEALTHY
-        self.config = replace(
-            self.config, deployment_status_command=("deployment-status",)
-        )
         self._rebuild_service()
 
     def add_divergent_same_file_followup(
@@ -508,20 +543,17 @@ def test_release_worktree_lifecycle_smoke(smoke: SmokeHarness) -> None:
     blocked_cleanup = smoke.service.finish(
         pr_number=promoted.lease.target_pr, apply=True
     )
-    assert blocked_cleanup.blockers[0]["code"] == "deployment_not_healthy"
+    assert blocked_cleanup.blockers[0]["code"] == "deployment_evidence_unknown"
     assert blocked_cleanup.lease is not None
     assert blocked_cleanup.lease.deployment_state is DeploymentState.UNKNOWN
-    assert smoke.deployment_calls == []
+    assert len(smoke.deployment_calls) == 3
     assert promoted.lease.worktree_path.exists()
 
     smoke.set_deployment_healthy()
     removed = smoke.service.finish(pr_number=promoted.lease.target_pr, apply=True)
     assert removed.decision == "removed"
     assert not promoted.lease.worktree_path.exists()
-    assert smoke.deployment_calls == [
-        ("deployment-status",),
-        ("deployment-status",),
-    ]
+    assert len(smoke.deployment_calls) == 5
 
 
 def test_out_of_order_promotion_smoke_generates_b_without_staging_a(

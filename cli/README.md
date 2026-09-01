@@ -252,10 +252,10 @@ stderr:
 
 Exit code `0` means success, preview, reuse, or no-op; `2` means CLI usage or
 configuration-schema error; `3` means a valid safety precondition blocker; `4`
-means an external GitHub, Git remote, or deployment-status failure; and `5`
-means a registry or local-Git mismatch. JSON results include `exit_code`, and
-automation should use structured `blockers` and `warnings` rather than parse
-prose.
+means an external GitHub, Git remote, or deployment-evidence adapter failure;
+and `5` means a registry or local-Git mismatch. JSON results include
+`exit_code`, and automation should use structured `blockers` and `warnings`
+rather than parse prose.
 
 By default the registry is
 `~/.local/state/awf/worktrees.sqlite3` and the worktree cache is
@@ -267,8 +267,8 @@ AWF_WORKTREE_CACHE_DIR="$TMPDIR/awf-worktrees" \
 awf wt status --repo-root . --json
 ```
 
-Repository policy belongs in `.awf/worktree.toml`. Commands are argv arrays,
-not shell strings:
+Repository policy belongs in `.awf/worktree.toml`. Repository commands are argv
+arrays, not shell strings:
 
 ```toml
 [worktree]
@@ -288,10 +288,52 @@ commands = [
   ["uv", "run", "pytest", "tests/release", "-q"],
   ["uv", "run", "ruff", "check", "."],
 ]
-
-[deployment]
-status_command = ["./scripts/deployment-status", "production"]
 ```
+
+Repository `[deployment]` configuration is rejected as a migration error:
+repository content MUST NOT choose an executable. The local operator config at
+`~/.config/awf/config.toml` maps the exact, opaque `repository_id` recorded by
+`awf wt status --json` to one adapter:
+
+```toml
+[worktree.deployment.adapters."<repository_id>"]
+command = ["/home/operator/.config/awf/adapters/deployment-evidence-adapter"]
+environment = ["DEPLOYMENT_REGION"] # optional inherited-name allowlist
+max_age_seconds = 300 # optional; 300 is the default
+```
+
+The executable MUST be a regular, non-symlink file under the exact
+`~/.config/awf/adapters/` directory. The config, adapter directory chain, and
+executable MUST be owned by the invoking user and MUST NOT be group- or
+world-writable. There is no alias, profile, repository fallback, relative
+executable, or path outside that directory.
+
+AWF runs the adapter with `shell=False`, a neutral working directory, and an
+explicit minimal environment. It forwards only `HOME`, `USER`, `LOGNAME`,
+`TMPDIR`, and `LANG` by default; `environment` names opt in additional inherited
+values. `PATH`, `PYTHONPATH`, `DYLD_*`, `LD_*`, `GIT_*`, and cloud credentials
+or overrides are never inherited unless their exact name is explicitly
+allowlisted. AWF writes one strict JSON request to stdin:
+
+```json
+{"protocol":"awf.deployment-evidence/v1","request_id":"nonce","repository_id":"...","pull_request_number":900,"source_head_sha":"<head-oid>","subject_revision":"<merge-oid>","requested_at":"2026-09-01T00:00:00Z"}
+```
+
+The adapter writes exactly one bounded JSON object to stdout with the same
+`protocol`, `request_id`, `repository_id`, and `subject_revision`, a `status`
+of `healthy`, `pending`, `failed`, or `unknown`, and RFC3339 UTC `observed_at`.
+It MAY include a bounded opaque `evidence_id` and `diagnostic_code`. AWF bounds
+both output streams and terminates the full adapter process group on
+timeout or overflow even if its leader already exited. It records only
+allowlisted structured evidence at response receipt time; raw stdout, stderr,
+credentials, and provider-specific fields are never recorded.
+
+Only a fresh `healthy` response bound to the exact PR merge SHA permits cleanup.
+`status --refresh` and `finish --apply` each issue a fresh nonce; `finish`
+re-probes after preflight and compares that subject revision again both before
+and after its cleanup reservation. A changed merge revision, missing evidence,
+`pending`, `unknown`, `failed`, invalid JSON, response mismatch or replay,
+staleness, nonzero exit, timeout, or output overflow preserves the worktree.
 
 `approved_or_self_merged` is the intended policy for a solo repository: it
 accepts either an approved source PR or a PR merged by its author, so AWF does
@@ -585,16 +627,16 @@ awf wt promote --source-pr 372 --source-pr 381 \
 awf wt promote --source-pr 372 --source-pr 381 \
   --exclude-path docs/internal-runbook.md --to main --apply --json
 
-# After the promotion PR has merged, refresh its repository-configured status.
+# After the promotion PR has merged, refresh operator-provided evidence.
 awf wt status --repo-root . --refresh --json
 awf wt finish --pr 900 --json
 awf wt finish --pr 900 --apply --json
 ```
 
-AWF does not provide generic deployment orchestration. It runs the
-repository-configured verification and status argv commands around the existing
-CI and deployment system, and preserves the worktree when that evidence is
-missing, unhealthy, or inconclusive.
+AWF does not provide generic deployment orchestration. It accepts only the
+versioned, provider-neutral operator adapter protocol above, binds evidence to
+the exact merged revision, and preserves the worktree when evidence is missing,
+unhealthy, stale, or inconclusive.
 
 ### Operations wiki / `awf wiki` (English summary)
 

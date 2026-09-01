@@ -261,7 +261,7 @@ class WorktreeEvent:
     pr_number: int | None
     summary: str
     created_at: str
-
+    evidence: dict[str, str] | None = None
 
 @dataclass(frozen=True)
 class CleanupReservation:
