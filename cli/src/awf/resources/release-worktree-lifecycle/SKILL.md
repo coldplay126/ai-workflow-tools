@@ -186,11 +186,17 @@ registry changes, then apply the same lease:
 awf wt recover-sync --lease <id> --repo-root <repo-root> --apply --json
 ```
 
-Apply stages only the recorded conflict paths and restores the prior conflict
-index if staging validation rejects markers or an exact-delta mismatch. It
-inspects final stage-0 blobs directly for conflict markers, requires the final
-changed-path set to exactly equal the reviewed source-only delta, and creates a
-controlled synthetic sync commit with target then source as its only parents.
+Apply first restores every non-conflicted reviewed path whose immutable source
+pin entry exists into both index and worktree, then stages only the recorded
+conflict paths. A non-conflicted clean path deleted by the source pin is
+unsupported: AWF blocks before index or worktree mutation and preserves the
+worktree. If staging validation rejects markers or the exact delta, it restores
+the prior conflict index and rematerializes those clean source-pin entries, so
+the recorded `UU` conflicts plus the exact full reviewed delta remain available
+for the next preview or retry. It inspects final stage-0 blobs directly for
+conflict markers, requires the final changed-path set to exactly equal the
+reviewed source-only delta, and creates a controlled synthetic sync commit with
+target then source as its only parents.
 It reruns prepare and production verification, then immediately revalidates the
 exact commit head, parents, tree, paths, and marker-free blobs before an atomic
 create-if-absent branch push and exact PR verification. Any drift, PR in any

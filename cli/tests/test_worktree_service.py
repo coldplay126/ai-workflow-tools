@@ -9945,7 +9945,9 @@ def _add_main_only_change(
     content: str = "production\n",
 ) -> str:
     git_command(harness.repo, "checkout", "-q", "main")
-    (harness.repo / path).write_text(content, encoding="utf-8")
+    changed_path = harness.repo / path
+    changed_path.parent.mkdir(parents=True, exist_ok=True)
+    changed_path.write_text(content, encoding="utf-8")
     git_command(harness.repo, "add", path)
     git_command(harness.repo, "commit", "-q", "-m", "production-only change")
     source_sha = git_command(harness.repo, "rev-parse", "HEAD")
@@ -10774,6 +10776,123 @@ def _blocked_sync_target_conflict(harness: PromotionHarness) -> Lease:
     assert result.lease.conflicted_paths == ("README.txt",)
     return result.lease
 
+def _blocked_sync_target_conflict_with_source_deleted_clean_path(
+    harness: PromotionHarness,
+) -> tuple[Lease, tuple[str, ...]]:
+    clean_paths = (
+        "src/vote/added.py",
+        "src/vote/removed.py",
+        "src/vote/tally.py",
+    )
+    shared_path = harness.repo / clean_paths[1]
+    git_command(harness.repo, "checkout", "-q", "staging")
+    shared_path.parent.mkdir(parents=True, exist_ok=True)
+    shared_path.write_text("shared vote\n", encoding="utf-8")
+    git_command(harness.repo, "add", clean_paths[1])
+    git_command(harness.repo, "commit", "-q", "-m", "shared vote baseline")
+    git_command(harness.repo, "push", "-q", "origin", "staging")
+    git_command(harness.repo, "checkout", "-q", "main")
+    git_command(harness.repo, "merge", "--no-edit", "-q", "staging")
+    git_command(harness.repo, "push", "-q", "origin", "main")
+    git_command(harness.repo, "checkout", "-q", "staging")
+    (harness.repo / "README.txt").write_text(
+        "staging version\n", encoding="utf-8"
+    )
+    git_command(harness.repo, "add", "README.txt")
+    git_command(harness.repo, "commit", "-q", "-m", "staging readme")
+    git_command(harness.repo, "push", "-q", "origin", "staging")
+    git_command(harness.repo, "checkout", "-q", "main")
+    shared_path.unlink()
+    (harness.repo / clean_paths[0]).write_text(
+        "source addition\n", encoding="utf-8"
+    )
+    (harness.repo / clean_paths[2]).write_text(
+        "source tally\n", encoding="utf-8"
+    )
+    (harness.repo / "README.txt").write_text(
+        "production version\n", encoding="utf-8"
+    )
+    git_command(harness.repo, "add", "-A")
+    git_command(harness.repo, "commit", "-q", "-m", "source vote changes")
+    git_command(harness.repo, "push", "-q", "origin", "main")
+    git_command(harness.repo, "checkout", "-q", "staging")
+    result = harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "sync_target_conflict"
+    assert result.lease is not None
+    assert result.lease.conflicted_paths == ("README.txt",)
+    assert result.lease.reviewed_paths == tuple(
+        sorted(("README.txt", *clean_paths))
+    )
+    return result.lease, clean_paths
+
+
+def _blocked_sync_target_conflict_with_clean_source_paths(
+    harness: PromotionHarness,
+) -> tuple[Lease, tuple[str, ...]]:
+    clean_paths = (
+        "src/vote/added.py",
+        "src/vote/ballot.py",
+        "src/vote/tally.py",
+    )
+    git_command(harness.repo, "checkout", "-q", "staging")
+    for path, content in (
+        (clean_paths[1], "staging ballot\n"),
+        (clean_paths[2], "staging tally\n"),
+    ):
+        changed_path = harness.repo / path
+        changed_path.parent.mkdir(parents=True, exist_ok=True)
+        changed_path.write_text(content, encoding="utf-8")
+    git_command(harness.repo, "add", clean_paths[1], clean_paths[2])
+    git_command(harness.repo, "commit", "-q", "-m", "shared vote baseline")
+    git_command(harness.repo, "push", "-q", "origin", "staging")
+    git_command(harness.repo, "checkout", "-q", "main")
+    git_command(harness.repo, "merge", "--no-edit", "-q", "staging")
+    git_command(harness.repo, "push", "-q", "origin", "main")
+    git_command(harness.repo, "checkout", "-q", "staging")
+    (harness.repo / "README.txt").write_text(
+        "staging version\n", encoding="utf-8"
+    )
+    git_command(harness.repo, "add", "README.txt")
+    git_command(harness.repo, "commit", "-q", "-m", "staging readme")
+    git_command(harness.repo, "push", "-q", "origin", "staging")
+    git_command(harness.repo, "checkout", "-q", "main")
+    (harness.repo / clean_paths[0]).write_text(
+        "source addition\n", encoding="utf-8"
+    )
+    (harness.repo / clean_paths[1]).write_text(
+        "source ballot\n", encoding="utf-8"
+    )
+    (harness.repo / clean_paths[2]).write_text(
+        "source tally\n", encoding="utf-8"
+    )
+    (harness.repo / "README.txt").write_text(
+        "production version\n", encoding="utf-8"
+    )
+    git_command(harness.repo, "add", "-A")
+    git_command(harness.repo, "commit", "-q", "-m", "source vote changes")
+    git_command(harness.repo, "push", "-q", "origin", "main")
+    git_command(harness.repo, "checkout", "-q", "staging")
+    result = harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "sync_target_conflict"
+    assert result.lease is not None
+    assert result.lease.conflicted_paths == ("README.txt",)
+    assert result.lease.reviewed_paths == tuple(
+        sorted(("README.txt", *clean_paths))
+    )
+    return result.lease, clean_paths
+
 
 def test_discard_sync_previews_and_removes_only_stale_conflict_cleanup(
     promotion_harness: PromotionHarness,
@@ -11074,6 +11193,172 @@ def test_recover_sync_stages_recorded_conflicts_and_creates_merge_commit(
         )
         == ("README.txt",)
     )
+
+
+@pytest.mark.parametrize(
+    "source_entries_retained",
+    (True, False),
+    ids=("clean_source_entries_retained", "clean_source_entries_missing"),
+)
+def test_recover_sync_materializes_nonconflicted_source_paths(
+    promotion_harness: PromotionHarness,
+    source_entries_retained: bool,
+) -> None:
+    lease, clean_paths = _blocked_sync_target_conflict_with_clean_source_paths(
+        promotion_harness
+    )
+    assert lease.source_head_sha is not None
+    assert lease.target_base_sha is not None
+    source_entries = {
+        path: promotion_harness.git.path_entry(lease.source_head_sha, path)
+        for path in clean_paths
+    }
+    target_entries = {
+        path: promotion_harness.git.path_entry(lease.target_base_sha, path)
+        for path in clean_paths
+    }
+    assert all(source_entries[path] is not None for path in clean_paths)
+    assert target_entries[clean_paths[0]] is None
+    assert target_entries[clean_paths[1]] is not None
+    assert target_entries[clean_paths[2]] is not None
+    if source_entries_retained:
+        promotion_harness.git.restore_paths_to_ref(
+            lease.worktree_path, lease.source_head_sha, clean_paths
+        )
+    else:
+        promotion_harness.git.restore_paths_to_ref(
+            lease.worktree_path, lease.target_base_sha, clean_paths[1:]
+        )
+        added_path = lease.worktree_path / clean_paths[0]
+        git_command(
+            lease.worktree_path, "update-index", "--force-remove", clean_paths[0]
+        )
+        if added_path.exists():
+            added_path.unlink()
+    assert dict(
+        promotion_harness.git.index_entry_snapshot(
+            lease.worktree_path, clean_paths
+        )
+    ) == (source_entries if source_entries_retained else target_entries)
+    (lease.worktree_path / "README.txt").write_text(
+        "resolved synchronization\n", encoding="utf-8"
+    )
+
+    recovered = promotion_harness.service.recover_sync(lease.id, apply=True)
+
+    assert recovered.decision == "ready"
+    assert recovered.lease is not None
+    assert (
+        promotion_harness.git.changed_path_endpoints(
+            recovered.lease.worktree_path,
+            lease.target_base_sha,
+            recovered.lease.head_sha,
+        )
+        == lease.reviewed_paths
+    )
+    for path, source_entry in source_entries.items():
+        assert (
+            promotion_harness.git.path_entry(recovered.lease.head_sha, path)
+            == source_entry
+        )
+
+
+def test_recover_sync_rematerializes_clean_source_paths_after_rejection(
+    promotion_harness: PromotionHarness,
+) -> None:
+    lease, clean_paths = _blocked_sync_target_conflict_with_clean_source_paths(
+        promotion_harness
+    )
+    assert lease.source_head_sha is not None
+    assert lease.target_base_sha is not None
+    source_entries = {
+        path: promotion_harness.git.path_entry(lease.source_head_sha, path)
+        for path in clean_paths
+    }
+    promotion_harness.git.restore_paths_to_ref(
+        lease.worktree_path, lease.target_base_sha, clean_paths[1:]
+    )
+    added_path = lease.worktree_path / clean_paths[0]
+    git_command(
+        lease.worktree_path, "update-index", "--force-remove", clean_paths[0]
+    )
+    if added_path.exists():
+        added_path.unlink()
+    resolved = lease.worktree_path / "README.txt"
+    resolved.write_text(
+        "<<<<<<< ours\nstaging version\n=======\nproduction version\n>>>>>>> theirs\n",
+        encoding="utf-8",
+    )
+
+    blocked = promotion_harness.service.recover_sync(lease.id, apply=True)
+
+    assert blocked.status == "blocked"
+    assert blocked.blockers[0]["code"] == "sync_conflict_markers_present"
+    assert promotion_harness.git.unmerged_paths(lease.worktree_path) == (
+        "README.txt",
+    )
+    assert dict(
+        promotion_harness.git.index_entry_snapshot(
+            lease.worktree_path, clean_paths
+        )
+    ) == source_entries
+    status_entries = {
+        entry.path: entry
+        for entry in promotion_harness.git.status_porcelain_entries(
+            lease.worktree_path
+        )
+    }
+    assert all(
+        status_entries[path].worktree_status == " " for path in clean_paths
+    )
+    resolved.write_text("resolved synchronization\n", encoding="utf-8")
+    preview = promotion_harness.service.recover_sync(lease.id)
+
+    assert preview.decision == "preview"
+
+    recovered = promotion_harness.service.recover_sync(lease.id, apply=True)
+
+    assert recovered.decision == "ready"
+
+
+def test_recover_sync_rejects_source_deleted_clean_path_without_mutation(
+    promotion_harness: PromotionHarness,
+) -> None:
+    lease, clean_paths = (
+        _blocked_sync_target_conflict_with_source_deleted_clean_path(
+            promotion_harness
+        )
+    )
+    assert lease.source_head_sha is not None
+    assert lease.target_base_sha is not None
+    deleted_path = clean_paths[1]
+    assert (
+        promotion_harness.git.path_entry(lease.source_head_sha, deleted_path)
+        is None
+    )
+    promotion_harness.git.restore_paths_to_ref(
+        lease.worktree_path, lease.target_base_sha, (deleted_path,)
+    )
+    before_index = promotion_harness.git.index_entry_snapshot(
+        lease.worktree_path, (deleted_path,)
+    )
+    before_content = (lease.worktree_path / deleted_path).read_text(
+        encoding="utf-8"
+    )
+
+    blocked = promotion_harness.service.recover_sync(lease.id, apply=True)
+
+    assert blocked.status == "blocked"
+    assert blocked.blockers[0]["code"] == "sync_recovery_failed"
+    assert (
+        promotion_harness.git.index_entry_snapshot(
+            lease.worktree_path, (deleted_path,)
+        )
+        == before_index
+    )
+    assert (lease.worktree_path / deleted_path).read_text(
+        encoding="utf-8"
+    ) == before_content
 
 
 def test_recover_sync_restores_conflict_index_after_marker_and_delta_rejections(
