@@ -17,8 +17,10 @@ from awf.worktrees.git import (
     GitError,
     GitPatchConflict,
     GitRemoteError,
+    GitStatusEntry,
     _bounded_stderr,
     _nul_records,
+    _parse_status_porcelain,
     _parse_worktrees,
 )
 from awf.worktrees import locking as locking_module
@@ -923,6 +925,60 @@ def test_git_client_pushes_branch_from_the_given_worktree(tmp_path: Path) -> Non
     assert git(repo, "ls-remote", "--heads", "origin", "awf/push").split()[1] == "refs/heads/awf/push"
 
 
+def test_git_client_creates_remote_branch_only_when_absent(tmp_path: Path) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    worktree = tmp_path / "push-worktree"
+    client.add_worktree(worktree, "awf/push", client.head_sha())
+
+    expected_sha = client.head_sha(worktree)
+    client.push_branch_create_if_absent(worktree, "awf/push", expected_sha)
+    (worktree / "later.txt").write_text("later\n", encoding="utf-8")
+    git(worktree, "add", "later.txt")
+    git(worktree, "commit", "-m", "later")
+    changed_sha = client.head_sha(worktree)
+
+    with pytest.raises(GitRemoteError):
+        client.push_branch_create_if_absent(
+            worktree, "awf/push", changed_sha
+        )
+
+
+
+def test_git_client_inspects_stage_zero_blobs_for_preserved_markers(
+    tmp_path: Path,
+) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    path = repo / "marker.txt"
+    path.write_text("<<<<<<< preserved\nbefore\n", encoding="utf-8")
+    git(repo, "add", "marker.txt")
+    git(repo, "commit", "-q", "-m", "add literal marker")
+    path.write_text("<<<<<<< preserved\nafter\n", encoding="utf-8")
+    git(repo, "add", "marker.txt")
+
+    assert not client.staged_diff_has_conflict_markers(repo)
+    assert client.index_has_conflict_markers(repo, ("marker.txt",))
+    assert client.tree_has_conflict_markers(
+        repo, client.head_sha(repo), ("marker.txt",)
+    )
+
+
+def test_git_client_skips_gitlink_marker_blob_scan(tmp_path: Path) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    gitlink = client.head_sha(repo)
+    git(repo, "update-index", "--add", "--cacheinfo", f"160000,{gitlink},vendor")
+
+    assert dict(client.index_entry_snapshot(repo, ("vendor",))) == {
+        "vendor": ("160000", gitlink)
+    }
+    assert not client.index_has_conflict_markers(repo, ("vendor",))
+    assert not client.tree_has_conflict_markers(
+        repo, client.index_tree_sha(repo), ("vendor",)
+    )
+
+
 def test_repository_lock_blocks_a_second_nonblocking_holder(tmp_path: Path) -> None:
     lock_path = tmp_path / "locks" / "repo.lock"
     with repository_lock(lock_path):
@@ -1325,3 +1381,29 @@ def test_git_compact_helpers_block_case_variant_tracked_descendants(
     with pytest.raises(GitError, match="tracked descendants"):
         client.remove_ignored_path(repo, "Node_Modules")
     assert tracked.exists()
+
+
+def test_parse_status_porcelain_preserves_conflicts_and_rename_sources() -> None:
+    entries = _parse_status_porcelain(
+        (
+            "UU conflict.txt",
+            "M  staged.txt",
+            "A  added.txt",
+            " T type-changed.txt",
+            "R  renamed.txt",
+            "original.txt",
+        )
+    )
+
+    assert entries == (
+        GitStatusEntry("U", "U", "conflict.txt"),
+        GitStatusEntry("M", " ", "staged.txt"),
+        GitStatusEntry("A", " ", "added.txt"),
+        GitStatusEntry(" ", "T", "type-changed.txt"),
+        GitStatusEntry("R", " ", "renamed.txt", "original.txt"),
+    )
+
+
+def test_parse_status_porcelain_rejects_incomplete_rename_record() -> None:
+    with pytest.raises(GitError, match="incomplete rename"):
+        _parse_status_porcelain(("R  renamed.txt",))

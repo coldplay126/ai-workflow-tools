@@ -15,6 +15,14 @@
   또는 grounded conflict evidence를 fail-closed로 판정합니다.
 - `awf wt sync`는 source-only patch 적용 뒤 index tree가 target과 같으면 commit·remote branch·PR 없이 managed worktree와 local branch를 정리하는 verified noop으로 끝냅니다. 정확한 source/target pin을 유지한 clean BLOCKED `sync_apply_failed` lease만 재실행으로 이 cleanup을 복구하며, drift·dirty·published lease는 fail-closed로 보존합니다. 실제 sync commit subject는 repository commitlint와 호환되는 `chore(sync): sync <source> to <target>` 형식입니다.
 - Git commit 실패 시 stderr가 비어 있으면 bounded·redacted stdout 진단을 함께 반환합니다.
+- `awf wt discard-sync`과 `awf wt recover-sync`는 모든 상태의 PR을 unpublished
+  전제 위반으로 차단합니다. Discard는 reviewed conflict path만 target pin으로
+  정리한 뒤 non-force removal을 사용하고, late removal failure 뒤 source-only
+  binary patch로 recorded conflict를 정확히 재구성해야 reservation을 해제합니다.
+  Registered worktree root의 symlink/device/inode mismatch 또는 재구성 실패는
+  `cleanup_reserved`로 보존합니다. Recovery는 stage-0 blob·exact commit을
+  재검증하고 atomic create-if-absent push를 사용하며 marker/delta 거부 후 기존
+  conflict index를 복구합니다.
 
 ### Security
 
