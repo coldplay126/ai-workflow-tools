@@ -84,6 +84,7 @@ class GitIndexBackup:
     backup_path: Path
     existed: bool
 
+
 class GitClient:
     def __init__(self, cwd: Path, *, timeout: float = 30.0) -> None:
         if timeout <= 0:
@@ -367,7 +368,6 @@ class GitClient:
             *paths,
             cwd=cwd,
         )
-
 
     def delete_branch_if_at(self, branch: str, expected_sha: str) -> None:
         self._run("update-ref", "-d", f"refs/heads/{branch}", expected_sha)

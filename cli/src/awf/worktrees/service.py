@@ -3026,6 +3026,7 @@ class WorktreeService:
             index_backup: GitIndexBackup | None = None
             try:
                 index_backup = self.git.backup_index(lease.worktree_path)
+                self._materialize_recovered_sync_source_paths(lease)
                 self.git.stage_paths(lease.worktree_path, lease.conflicted_paths)
                 final_preflight = self._recover_sync_final_index_preflight(lease)
             except (GitError, OSError) as error:
@@ -6157,7 +6158,54 @@ class WorktreeService:
         )
         if issue is not None:
             return self._recover_sync_blocked(*issue, lease=lease)
+        try:
+            self._recovered_sync_source_paths(lease)
+        except (GitError, OSError) as error:
+            return self._recover_sync_blocked(
+                "sync_recovery_failed", str(error), lease=lease
+            )
         return None
+
+    def _recovered_sync_source_paths(self, lease: Lease) -> tuple[str, ...]:
+        source_head_sha = lease.source_head_sha
+        if source_head_sha is None:
+            raise GitError(
+                f"Lease {lease.id} has no source pin for recovery materialization."
+            )
+        conflicted_paths = set(lease.conflicted_paths)
+        source_paths = tuple(
+            path for path in lease.reviewed_paths if path not in conflicted_paths
+        )
+        for path in source_paths:
+            if self.git.path_entry(source_head_sha, path) is None:
+                raise GitError(
+                    "recovery does not support a source-deleted clean path: "
+                    f"{path}"
+                )
+        return source_paths
+
+    def _materialize_recovered_sync_source_paths(self, lease: Lease) -> None:
+        source_head_sha = lease.source_head_sha
+        if source_head_sha is None:
+            raise GitError(
+                f"Lease {lease.id} has no source pin for recovery materialization."
+            )
+        source_paths = self._recovered_sync_source_paths(lease)
+        if not source_paths:
+            return
+        self.git.restore_paths_to_ref(
+            lease.worktree_path, source_head_sha, source_paths
+        )
+        index_entries = dict(
+            self.git.index_entry_snapshot(lease.worktree_path, source_paths)
+        )
+        for path in source_paths:
+            source_entry = self.git.path_entry(source_head_sha, path)
+            if index_entries[path] != source_entry:
+                raise GitError(
+                    "recovered source path does not match its immutable source pin: "
+                    f"{path}"
+                )
 
     def _recover_sync_final_index_preflight(
         self, lease: Lease
@@ -6226,6 +6274,7 @@ class WorktreeService:
     ) -> CommandResult:
         try:
             self.git.restore_index(backup)
+            self._materialize_recovered_sync_source_paths(lease)
         except (GitError, OSError) as error:
             return self._block_recovered_sync_lease(
                 lease, "sync_index_restore_failed", str(error)

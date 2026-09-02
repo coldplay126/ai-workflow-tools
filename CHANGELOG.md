@@ -21,8 +21,10 @@
   binary patch로 recorded conflict를 정확히 재구성해야 reservation을 해제합니다.
   Registered worktree root의 symlink/device/inode mismatch 또는 재구성 실패는
   `cleanup_reserved`로 보존합니다. Recovery는 stage-0 blob·exact commit을
-  재검증하고 atomic create-if-absent push를 사용하며 marker/delta 거부 후 기존
-  conflict index를 복구합니다.
+  재검증하고, source pin entry가 존재하는 recorded conflict 밖 reviewed path를
+  index와 worktree에 복원합니다. source-deleted clean path는 mutation 전에
+  fail-closed로 차단하고, marker/delta 거부 뒤에는 기존 conflict index와 그 clean
+  source entries를 함께 복구한 뒤 atomic create-if-absent push를 사용합니다.
 
 ### Security
 
