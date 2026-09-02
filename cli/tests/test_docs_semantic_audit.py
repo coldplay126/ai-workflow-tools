@@ -1186,6 +1186,10 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "out_of_order_resolution_apply": ("wt", "promote"),
         "discard_promotion_preview": ("wt", "discard-promotion"),
         "discard_promotion_apply": ("wt", "discard-promotion"),
+        "discard_sync_preview": ("wt", "discard-sync"),
+        "discard_sync_apply": ("wt", "discard-sync"),
+        "recover_sync_preview": ("wt", "recover-sync"),
+        "recover_sync_apply": ("wt", "recover-sync"),
         "finish_preview": ("wt", "finish"),
         "finish_apply": ("wt", "finish"),
         "gc_preview": ("wt", "gc"),
@@ -1241,6 +1245,14 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
     assert "--apply" not in commands["discard_promotion_preview"]
     assert "--lease" in commands["discard_promotion_apply"]
     assert "--apply" in commands["discard_promotion_apply"]
+    assert "--lease" in commands["discard_sync_preview"]
+    assert "--apply" not in commands["discard_sync_preview"]
+    assert "--lease" in commands["discard_sync_apply"]
+    assert "--apply" in commands["discard_sync_apply"]
+    assert "--lease" in commands["recover_sync_preview"]
+    assert "--apply" not in commands["recover_sync_preview"]
+    assert "--lease" in commands["recover_sync_apply"]
+    assert "--apply" in commands["recover_sync_apply"]
     assert "--apply" not in commands["finish_preview"]
     assert "--apply" in commands["finish_apply"]
     assert "--merged" in commands["gc_preview"]
@@ -1273,6 +1285,26 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "preview_actions": ["remove_worktree", "delete_local_branch"],
         "apply": "lock_revalidate_reserve_hold_remove_complete_compare_delete_local",
         "remote_branch": "must_be_absent_and_never_deleted",
+    }
+    assert safety["discard_sync"] == {
+        "scope": "one_awf_owned_blocked_stale_unpublished_sync_target_conflict_only",
+        "preview_actions": ["remove_worktree", "delete_local_branch"],
+        "apply": (
+            "lock_revalidate_reserve_hold_normalize_nonforce_remove_rebuild_"
+            "recorded_conflict_on_failure_complete_compare_delete_local"
+        ),
+        "remote_branch": "must_be_absent_and_never_deleted",
+        "conflict_scope": (
+            "all_git_unmerged_classes_within_reviewed_paths_and_clean_staged_"
+            "source_pin_entries"
+        ),
+    }
+    assert safety["recover_sync"] == {
+        "scope": "one_awf_owned_blocked_current_pin_unpublished_sync_target_conflict_only",
+        "operator_scope": "recorded_uu_conflicted_paths_subset_of_reviewed_paths",
+        "clean_index": "clean_applied_entries_match_source_pin",
+        "commit": "controlled_two_parent_target_then_source_synthetic_sync_commit",
+        "publication": "revalidate_drift_prepare_verify_exact_commit_atomic_create_pr",
     }
     assert safety["out_of_order"] == {
         "mode": "explicit_opt_in",
@@ -1361,6 +1393,8 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "import",
         "adopt",
         "discard_promotion",
+        "discard_sync",
+        "recover_sync",
         "finish",
         "gc",
         "compact",
@@ -1394,6 +1428,8 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
             "out_of_order_promote": "review_then_apply_explicitly",
             "out_of_order_resolution": "review_same_blocked_lease_then_apply_explicitly",
             "discard_promotion": "review_every_action_then_apply_explicitly",
+            "discard_sync": "review_every_action_then_apply_explicitly",
+            "recover_sync": "review_allowed_conflict_paths_then_apply_explicitly",
             "finish": "review_blockers_then_apply",
             "gc": "review_blockers_then_apply",
             "compact": "review_every_action_then_apply_explicitly",

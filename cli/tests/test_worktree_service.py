@@ -62,6 +62,21 @@ class FakeGitHub:
         self.find_calls.append((head, base))
         return self.open_prs.get((head, base))
 
+    def find_pr(self, *, head: str, base: str) -> PullRequest | None:
+        self.find_calls.append((head, base))
+        candidates = {
+            pull_request.number: pull_request
+            for pull_request in (*self.prs.values(), *self.open_prs.values())
+        }
+        return next(
+            (
+                pull_request
+                for pull_request in candidates.values()
+                if pull_request.head_ref == head and pull_request.base_ref == base
+            ),
+            None,
+        )
+
     def find_open_prs_by_prefix(
         self, *, base: str, head_prefix: str
     ) -> tuple[PullRequest, ...]:
@@ -10733,3 +10748,463 @@ def test_sync_branch_identity_remains_non_promotable_after_body_edit(
     )
 
     assert result.blockers[0]["code"] == "source_pr_not_promotable"
+
+
+def _blocked_sync_target_conflict(harness: PromotionHarness) -> Lease:
+    (harness.repo / "README.txt").write_text(
+        "staging version\n", encoding="utf-8"
+    )
+    git_command(harness.repo, "add", "README.txt")
+    git_command(harness.repo, "commit", "-q", "-m", "staging readme")
+    git_command(harness.repo, "push", "-q", "origin", "staging")
+    _add_main_only_change(
+        harness,
+        path="README.txt",
+        content="production version\n",
+    )
+    result = harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "sync_target_conflict"
+    assert result.lease is not None
+    assert result.lease.conflicted_paths == ("README.txt",)
+    return result.lease
+
+
+def test_discard_sync_previews_and_removes_only_stale_conflict_cleanup(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lease = _blocked_sync_target_conflict(promotion_harness)
+    _add_main_only_change(promotion_harness, path="later.txt", content="later\n")
+    before = promotion_harness.registry.get_lease(lease.id)
+    assert before is not None
+    calls: list[tuple[Path, bool]] = []
+    original_remove = promotion_harness.git.remove_worktree
+
+    def record_remove(path: Path, *, force: bool = False) -> None:
+        calls.append((path, force))
+        original_remove(path, force=force)
+
+    monkeypatch.setattr(promotion_harness.git, "remove_worktree", record_remove)
+
+    preview = promotion_harness.service.discard_sync(lease.id)
+
+    assert preview.decision == "preview"
+    assert [action["kind"] for action in preview.actions] == [
+        "remove_worktree",
+        "delete_local_branch",
+    ]
+    assert promotion_harness.registry.get_lease(lease.id) == before
+
+    removed = promotion_harness.service.discard_sync(lease.id, apply=True)
+
+    assert removed.decision == "removed"
+    assert calls == [(lease.worktree_path, False)]
+    assert not lease.worktree_path.exists()
+    stored = promotion_harness.registry.get_lease(lease.id)
+    assert stored is not None
+    assert stored.state is LeaseState.REMOVED
+    with pytest.raises(GitError):
+        promotion_harness.git.resolve_ref(lease.branch)
+
+
+
+def test_discard_sync_restores_conflict_after_late_untracked_removal_failure(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lease = _blocked_sync_target_conflict(promotion_harness)
+    _add_main_only_change(promotion_harness, path="later.txt", content="later\n")
+    original_restore = promotion_harness.git.restore_paths_to_ref
+
+    def restore_then_create_untracked(
+        cwd: Path, ref: str, paths: tuple[str, ...]
+    ) -> None:
+        original_restore(cwd, ref, paths)
+        (cwd / "late-operator.txt").write_text("preserve me\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        promotion_harness.git, "restore_paths_to_ref", restore_then_create_untracked
+    )
+
+    result = promotion_harness.service.discard_sync(lease.id, apply=True)
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "worktree_remove_failed"
+    assert (lease.worktree_path / "late-operator.txt").read_text(
+        encoding="utf-8"
+    ) == "preserve me\n"
+    stored = promotion_harness.registry.get_lease(lease.id)
+    assert stored is not None
+    assert stored.state is LeaseState.BLOCKED
+    assert stored.conflicted_paths == lease.conflicted_paths
+    assert promotion_harness.git.unmerged_paths(lease.worktree_path) == (
+        "README.txt",
+    )
+    assert promotion_harness.registry.get_cleanup_reservation(lease.id) is None
+    monkeypatch.setattr(
+        promotion_harness.git, "restore_paths_to_ref", original_restore
+    )
+    (lease.worktree_path / "late-operator.txt").unlink()
+
+    retried = promotion_harness.service.discard_sync(lease.id, apply=True)
+
+    assert retried.decision == "removed"
+
+
+def test_discard_sync_retains_reservation_when_conflict_rebuild_fails(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lease = _blocked_sync_target_conflict(promotion_harness)
+    _add_main_only_change(promotion_harness, path="later.txt", content="later\n")
+    original_restore = promotion_harness.git.restore_paths_to_ref
+    applied_patches: list[bytes] = []
+
+    def restore_then_create_untracked(
+        cwd: Path, ref: str, paths: tuple[str, ...]
+    ) -> None:
+        original_restore(cwd, ref, paths)
+        (cwd / "late-operator.txt").write_text("preserve me\n", encoding="utf-8")
+
+    def apply_without_conflict(cwd: Path, patch: bytes) -> None:
+        applied_patches.append(patch)
+
+    monkeypatch.setattr(
+        promotion_harness.git, "restore_paths_to_ref", restore_then_create_untracked
+    )
+    monkeypatch.setattr(
+        promotion_harness.git, "apply_indexed_patch", apply_without_conflict
+    )
+
+    result = promotion_harness.service.discard_sync(lease.id, apply=True)
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "cleanup_reserved"
+    assert applied_patches
+    assert (lease.worktree_path / "late-operator.txt").read_text(
+        encoding="utf-8"
+    ) == "preserve me\n"
+    assert promotion_harness.registry.get_cleanup_reservation(lease.id) is not None
+
+
+@pytest.mark.parametrize("replacement", ("directory", "symlink"))
+def test_discard_sync_retains_reservation_when_worktree_root_changes(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: str,
+) -> None:
+    lease = _blocked_sync_target_conflict(promotion_harness)
+    _add_main_only_change(promotion_harness, path="later.txt", content="later\n")
+    original_restore = promotion_harness.git.restore_paths_to_ref
+    replacement_root = promotion_harness.repo.parent / "replacement-root"
+    replacement_root.mkdir()
+    sentinel = replacement_root / "do-not-overwrite.txt"
+    sentinel.write_text("keep\n", encoding="utf-8")
+
+    def restore_then_replace_root(
+        cwd: Path, ref: str, paths: tuple[str, ...]
+    ) -> None:
+        original_restore(cwd, ref, paths)
+        parked = cwd.with_name(f"{cwd.name}-parked")
+        cwd.rename(parked)
+        if replacement == "symlink":
+            cwd.symlink_to(replacement_root, target_is_directory=True)
+        else:
+            cwd.mkdir()
+            (cwd / "do-not-overwrite.txt").write_text("keep\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        promotion_harness.git, "restore_paths_to_ref", restore_then_replace_root
+    )
+
+    def remove_worktree_if_called(path: Path, *, force: bool = False) -> None:
+        raise AssertionError(f"unexpected removal of {path}")
+
+    monkeypatch.setattr(
+        promotion_harness.git, "remove_worktree", remove_worktree_if_called
+    )
+
+    result = promotion_harness.service.discard_sync(lease.id, apply=True)
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "cleanup_reserved"
+    protected_root = (
+        replacement_root if replacement == "symlink" else lease.worktree_path
+    )
+    assert (protected_root / "do-not-overwrite.txt").read_text(
+        encoding="utf-8"
+    ) == "keep\n"
+    assert promotion_harness.registry.get_cleanup_reservation(lease.id) is not None
+
+
+def test_discard_sync_rejects_current_conflict_and_untracked_changes(
+    promotion_harness: PromotionHarness,
+) -> None:
+    lease = _blocked_sync_target_conflict(promotion_harness)
+
+    current = promotion_harness.service.discard_sync(lease.id)
+
+    assert current.status == "blocked"
+    assert current.blockers[0]["code"] == "sync_lease_not_stale"
+    _add_main_only_change(promotion_harness, path="later.txt", content="later\n")
+    (lease.worktree_path / "operator.txt").write_text(
+        "operator\n", encoding="utf-8"
+    )
+
+    scoped = promotion_harness.service.discard_sync(lease.id)
+
+    assert scoped.status == "blocked"
+    assert scoped.blockers[0]["code"] == "sync_resolution_scope_mismatch"
+    assert lease.worktree_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "code"),
+    [
+        ("remote_branch", "remote_branch_present"),
+        ("event", "sync_conflict_not_recorded"),
+    ],
+)
+def test_discard_sync_rejects_published_or_non_conflict_history(
+    promotion_harness: PromotionHarness,
+    mutation: str,
+    code: str,
+) -> None:
+    lease = _blocked_sync_target_conflict(promotion_harness)
+    _add_main_only_change(promotion_harness, path="later.txt", content="later\n")
+    if mutation == "remote_branch":
+        git_command(
+            lease.worktree_path, "push", "-q", "-u", "origin", lease.branch
+        )
+    else:
+        promotion_harness.registry.record_cleanup_event(
+            lease.id,
+            event_type="sync_publish_failed",
+            summary="publication was attempted",
+        )
+
+    result = promotion_harness.service.discard_sync(lease.id)
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == code
+    assert lease.worktree_path.exists()
+
+
+@pytest.mark.parametrize("operation", ("discard_sync", "recover_sync"))
+def test_sync_discard_and_recovery_reject_all_state_pull_requests(
+    promotion_harness: PromotionHarness,
+    operation: str,
+) -> None:
+    lease = _blocked_sync_target_conflict(promotion_harness)
+    promotion_harness.github.prs[901] = replace(
+        pull_request(number=901, state="MERGED", head_sha=lease.head_sha),
+        head_ref=lease.branch,
+    )
+    if operation == "discard_sync":
+        _add_main_only_change(promotion_harness, path="later.txt", content="later\n")
+
+    result = getattr(promotion_harness.service, operation)(lease.id)
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "sync_pr_present"
+    assert lease.worktree_path.exists()
+
+
+def test_discard_sync_recovers_interrupted_reservation_after_removal(
+    promotion_harness: PromotionHarness,
+) -> None:
+    lease = _blocked_sync_target_conflict(promotion_harness)
+    _add_main_only_change(promotion_harness, path="later.txt", content="later\n")
+    reservation = promotion_harness.registry.reserve_cleanup(
+        lease.id,
+        expected_version=lease.version,
+        branch_sha=lease.head_sha,
+    )
+    promotion_harness.git.remove_worktree(lease.worktree_path, force=True)
+
+    result = promotion_harness.service.discard_sync(lease.id, apply=True)
+
+    assert result.decision == "removed"
+    assert result.lease is not None
+    assert result.lease.state is LeaseState.REMOVED
+    assert promotion_harness.registry.get_cleanup_reservation(lease.id) is None
+    assert reservation.branch_sha == lease.target_base_sha
+
+
+def test_recover_sync_stages_recorded_conflicts_and_creates_merge_commit(
+    promotion_harness: PromotionHarness,
+) -> None:
+    lease = _blocked_sync_target_conflict(promotion_harness)
+    (lease.worktree_path / "README.txt").write_text(
+        "resolved synchronization\n", encoding="utf-8"
+    )
+
+    preview = promotion_harness.service.recover_sync(lease.id)
+
+    assert preview.decision == "preview"
+    assert [action["kind"] for action in preview.actions] == [
+        "resolve_sync_target_conflict",
+        "stage_paths",
+        "commit_sync_resolution",
+        "verify_production",
+        "push_branch",
+        "open_pull_request",
+    ]
+
+    recovered = promotion_harness.service.recover_sync(lease.id, apply=True)
+
+    assert recovered.decision == "ready"
+    assert recovered.lease is not None
+    assert recovered.lease.state is LeaseState.PR_OPEN
+    assert promotion_harness.git.commit_parents(recovered.lease.head_sha) == (
+        lease.target_base_sha,
+        lease.source_head_sha,
+    )
+    assert (
+        promotion_harness.git.changed_path_endpoints(
+            recovered.lease.worktree_path,
+            lease.target_base_sha,
+            recovered.lease.head_sha,
+        )
+        == ("README.txt",)
+    )
+
+
+def test_recover_sync_restores_conflict_index_after_marker_and_delta_rejections(
+    promotion_harness: PromotionHarness,
+) -> None:
+    lease = _blocked_sync_target_conflict(promotion_harness)
+    resolved = lease.worktree_path / "README.txt"
+    resolved.write_text(
+        "<<<<<<< ours\nstaging version\n=======\nproduction version\n>>>>>>> theirs\n",
+        encoding="utf-8",
+    )
+
+    markers = promotion_harness.service.recover_sync(lease.id, apply=True)
+
+    assert markers.status == "blocked"
+    assert markers.blockers[0]["code"] == "sync_conflict_markers_present"
+    assert promotion_harness.git.unmerged_paths(lease.worktree_path) == ("README.txt",)
+    resolved.write_text("staging version\n", encoding="utf-8")
+
+    delta = promotion_harness.service.recover_sync(lease.id, apply=True)
+
+    assert delta.status == "blocked"
+    assert delta.blockers[0]["code"] == "sync_delta_mismatch"
+    assert promotion_harness.git.unmerged_paths(lease.worktree_path) == ("README.txt",)
+    resolved.write_text("resolved synchronization\n", encoding="utf-8")
+
+    recovered = promotion_harness.service.recover_sync(lease.id, apply=True)
+
+    assert recovered.decision == "ready"
+
+
+def test_recover_sync_requires_configured_production_verification(
+    promotion_harness: PromotionHarness,
+) -> None:
+    lease = _blocked_sync_target_conflict(promotion_harness)
+    promotion_harness.configure(verify_production=())
+
+    result = promotion_harness.service.recover_sync(lease.id)
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "sync_verify_missing"
+
+
+def test_sync_resumes_publication_of_recovered_two_parent_sync_commit(
+    promotion_harness: PromotionHarness,
+) -> None:
+    lease = _blocked_sync_target_conflict(promotion_harness)
+    (lease.worktree_path / "README.txt").write_text(
+        "resolved synchronization\n", encoding="utf-8"
+    )
+    promotion_harness.github.create_error = ExternalServiceError("temporary outage")
+
+    blocked = promotion_harness.service.recover_sync(lease.id, apply=True)
+
+    assert blocked.status == "error"
+    assert blocked.lease is not None
+    assert blocked.lease.state is LeaseState.ACTIVE
+    promotion_harness.github.create_error = None
+
+    resumed = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+
+    assert resumed.decision == "ready"
+    assert resumed.lease is not None
+    assert resumed.lease.state is LeaseState.PR_OPEN
+    assert promotion_harness.git.commit_parents(resumed.lease.head_sha) == (
+        lease.target_base_sha,
+        lease.source_head_sha,
+    )
+
+
+def test_sync_resumes_after_recovery_commit_transition_crash(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lease = _blocked_sync_target_conflict(promotion_harness)
+    (lease.worktree_path / "README.txt").write_text(
+        "resolved synchronization\n", encoding="utf-8"
+    )
+    original_transition = promotion_harness.registry.transition
+
+    def fail_pending_transition(*args: object, **kwargs: object) -> Lease:
+        if kwargs.get("event_type") == "sync_publish_pending":
+            raise RuntimeError("simulated commit-transition crash")
+        return original_transition(*args, **kwargs)
+
+    monkeypatch.setattr(
+        promotion_harness.registry, "transition", fail_pending_transition
+    )
+
+    interrupted = promotion_harness.service.recover_sync(lease.id, apply=True)
+
+    assert interrupted.status == "blocked"
+    assert interrupted.blockers[0]["code"] == "sync_recovery_failed"
+    assert promotion_harness.git.commit_parents(
+        promotion_harness.git.head_sha(lease.worktree_path)
+    ) == (lease.target_base_sha, lease.source_head_sha)
+    monkeypatch.setattr(promotion_harness.registry, "transition", original_transition)
+
+    resumed = promotion_harness.service.sync(
+        source_branch="main",
+        target_branch="staging",
+        apply=True,
+    )
+
+    assert resumed.decision == "ready"
+    assert resumed.lease is not None
+    assert resumed.lease.state is LeaseState.PR_OPEN
+
+
+def test_recover_sync_rejects_stale_or_out_of_scope_conflict_changes(
+    promotion_harness: PromotionHarness,
+) -> None:
+    lease = _blocked_sync_target_conflict(promotion_harness)
+    (lease.worktree_path / "operator.txt").write_text(
+        "operator\n", encoding="utf-8"
+    )
+
+    scoped = promotion_harness.service.recover_sync(lease.id)
+
+    assert scoped.status == "blocked"
+    assert scoped.blockers[0]["code"] == "sync_resolution_scope_mismatch"
+    (lease.worktree_path / "operator.txt").unlink()
+    _add_main_only_change(promotion_harness, path="later.txt", content="later\n")
+
+    stale = promotion_harness.service.recover_sync(lease.id)
+
+    assert stale.status == "blocked"
+    assert "sync_lease_stale" in {
+        blocker["code"] for blocker in stale.blockers
+    }

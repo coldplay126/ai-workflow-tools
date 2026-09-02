@@ -12,6 +12,7 @@ import subprocess
 import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from tempfile import mkstemp
 
 
 class GitError(RuntimeError):
@@ -69,6 +70,20 @@ class GitPathUsage:
     entry_count: int
 
 
+@dataclass(frozen=True)
+class GitStatusEntry:
+    index_status: str
+    worktree_status: str
+    path: str
+    original_path: str | None = None
+
+
+@dataclass(frozen=True)
+class GitIndexBackup:
+    index_path: Path
+    backup_path: Path
+    existed: bool
+
 class GitClient:
     def __init__(self, cwd: Path, *, timeout: float = 30.0) -> None:
         if timeout <= 0:
@@ -97,8 +112,18 @@ class GitClient:
         return self._text(self._run("rev-parse", "HEAD", cwd=cwd).stdout)
 
     def status_porcelain(self, cwd: Path | None = None) -> tuple[str, ...]:
-        completed = self._run("status", "--porcelain=v1", "-z", cwd=cwd)
+        completed = self._run(
+            "-c", "status.renames=false", "status", "--porcelain=v1", "-z", cwd=cwd
+        )
         return _nul_records(completed.stdout)
+
+    def status_porcelain_entries(
+        self, cwd: Path | None = None
+    ) -> tuple[GitStatusEntry, ...]:
+        completed = self._run(
+            "-c", "status.renames=false", "status", "--porcelain=v1", "-z", cwd=cwd
+        )
+        return _parse_status_porcelain(_nul_records(completed.stdout))
 
     def path_is_ignored(self, cwd: Path, path: str) -> bool:
         """Return whether one literal repository-relative path is ignored."""
@@ -317,8 +342,31 @@ class GitClient:
                 raise creation_error
         self._run("worktree", "add", str(path), branch)
 
-    def remove_worktree(self, path: Path) -> None:
-        self._run("worktree", "remove", str(path))
+    def remove_worktree(self, path: Path, *, force: bool = False) -> None:
+        arguments = ("worktree", "remove", "--force", str(path)) if force else (
+            "worktree",
+            "remove",
+            str(path),
+        )
+        self._run(*arguments)
+
+    def restore_paths_to_ref(
+        self, cwd: Path, ref: str, paths: tuple[str, ...]
+    ) -> None:
+        if not ref:
+            raise GitError("a source ref is required when restoring paths")
+        if not paths:
+            raise GitError("at least one path is required when restoring paths")
+        self._run(
+            "--literal-pathspecs",
+            "restore",
+            f"--source={ref}",
+            "--staged",
+            "--worktree",
+            "--",
+            *paths,
+            cwd=cwd,
+        )
 
 
     def delete_branch_if_at(self, branch: str, expected_sha: str) -> None:
@@ -497,6 +545,60 @@ class GitClient:
                 raise GitPatchConflict(paths, str(error)) from error
             raise
 
+    def backup_index(self, cwd: Path) -> GitIndexBackup:
+        index_path = Path(
+            self._text(
+                self._run(
+                    "rev-parse",
+                    "--path-format=absolute",
+                    "--git-path",
+                    "index",
+                    cwd=cwd,
+                ).stdout
+            )
+        )
+        backup_path: Path | None = None
+        try:
+            descriptor, backup = mkstemp(
+                prefix="awf-index-backup-",
+                dir=index_path.parent,
+            )
+            os.close(descriptor)
+            backup_path = Path(backup)
+            existed = index_path.exists()
+            if existed:
+                shutil.copy2(index_path, backup_path)
+            return GitIndexBackup(
+                index_path=index_path,
+                backup_path=backup_path,
+                existed=existed,
+            )
+        except OSError as error:
+            if backup_path is not None:
+                try:
+                    backup_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise GitError(f"unable to back up the Git index: {error}") from error
+
+    def restore_index(self, backup: GitIndexBackup) -> None:
+        try:
+            if backup.existed:
+                os.replace(backup.backup_path, backup.index_path)
+            else:
+                backup.index_path.unlink(missing_ok=True)
+                backup.backup_path.unlink(missing_ok=True)
+        except OSError as error:
+            raise GitError(f"unable to restore the Git index: {error}") from error
+
+    def discard_index_backup(self, backup: GitIndexBackup) -> None:
+        try:
+            backup.backup_path.unlink(missing_ok=True)
+        except OSError as error:
+            raise GitError(
+                f"unable to remove the Git index backup: {error}"
+            ) from error
+
     def stage_paths(self, cwd: Path, paths: tuple[str, ...]) -> None:
         if not paths:
             raise GitError("at least one path is required for staging")
@@ -618,6 +720,41 @@ class GitClient:
             self._run("diff", "--cached", "--no-ext-diff", cwd=cwd).stdout
         )
 
+    def index_has_conflict_markers(
+        self, cwd: Path, paths: tuple[str, ...]
+    ) -> bool:
+        for _, entry in self.index_entry_snapshot(cwd, paths):
+            if entry is None:
+                continue
+            mode, object_id = entry
+            if mode == "160000":
+                continue
+            contents = self._run("cat-file", "blob", object_id, cwd=cwd).stdout
+            if any(
+                line.startswith(_CONFLICT_MARKER_PREFIXES)
+                for line in contents.splitlines()
+            ):
+                return True
+        return False
+
+    def tree_has_conflict_markers(
+        self, cwd: Path, ref: str, paths: tuple[str, ...]
+    ) -> bool:
+        for path in paths:
+            entry = self.path_entry(ref, path)
+            if entry is None:
+                continue
+            mode, object_id = entry
+            if mode == "160000":
+                continue
+            contents = self._run("cat-file", "blob", object_id, cwd=cwd).stdout
+            if any(
+                line.startswith(_CONFLICT_MARKER_PREFIXES)
+                for line in contents.splitlines()
+            ):
+                return True
+        return False
+
     def worktree_diff_has_conflict_markers(self, cwd: Path) -> bool:
         if _has_added_conflict_marker(
             self._run("diff", "--no-ext-diff", cwd=cwd).stdout
@@ -714,6 +851,46 @@ class GitClient:
         self._run(*arguments, cwd=cwd)
         return self.head_sha(cwd)
 
+    def commit_index_as_merge(
+        self,
+        cwd: Path,
+        message: str,
+        *,
+        branch: str,
+        target_parent: str,
+        source_parent: str,
+    ) -> str:
+        if (
+            re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", target_parent) is None
+            or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", source_parent) is None
+            or target_parent == source_parent
+            or not branch
+            or "\0" in branch
+        ):
+            raise GitError("merge commit parents must be distinct object identifiers")
+        tree = self.index_tree_sha(cwd)
+        commit = self._text(
+            self._run(
+                "commit-tree",
+                tree,
+                "-p",
+                target_parent,
+                "-p",
+                source_parent,
+                "-m",
+                message,
+                cwd=cwd,
+            ).stdout
+        )
+        self._run(
+            "update-ref",
+            f"refs/heads/{branch}",
+            commit,
+            target_parent,
+            cwd=cwd,
+        )
+        return commit
+
     def amend_commit_no_edit(self, cwd: Path) -> str:
         self._run("commit", "--amend", "--no-edit", "--no-verify", cwd=cwd)
         return self.head_sha(cwd)
@@ -721,6 +898,25 @@ class GitClient:
     def push_branch(self, cwd: Path, branch: str) -> None:
         try:
             self._run("push", "-u", "origin", f"HEAD:refs/heads/{branch}", cwd=cwd)
+        except GitError as error:
+            raise GitRemoteError(str(error)) from error
+
+    def push_branch_create_if_absent(
+        self, cwd: Path, branch: str, expected_sha: str
+    ) -> None:
+        if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", expected_sha) is None:
+            raise GitRemoteError("expected branch head must be an object identifier")
+        ref = f"refs/heads/{branch}"
+        try:
+            self._run(
+                "push",
+                "--atomic",
+                "-u",
+                f"--force-with-lease={ref}:",
+                "origin",
+                f"{expected_sha}:{ref}",
+                cwd=cwd,
+            )
         except GitError as error:
             raise GitRemoteError(str(error)) from error
 
@@ -870,6 +1066,45 @@ def _stop_process_group(process: subprocess.Popen[bytes]) -> tuple[bytes, bytes]
 
 def _nul_records(value: bytes) -> tuple[str, ...]:
     return tuple(os.fsdecode(record) for record in value.split(b"\0") if record)
+
+
+def _parse_status_porcelain(
+    records: tuple[str, ...],
+) -> tuple[GitStatusEntry, ...]:
+    entries: list[GitStatusEntry] = []
+    offset = 0
+    while offset < len(records):
+        record = records[offset]
+        offset += 1
+        if (
+            len(record) < 4
+            or record[2] != " "
+            or record[0] not in " MADRCUT?!"
+            or record[1] not in " MADCRUT?!"
+            or (
+                ("?" in record[:2] or "!" in record[:2])
+                and record[:2] not in {"??", "!!"}
+            )
+        ):
+            raise GitError("git status returned an invalid porcelain record")
+        path = record[3:]
+        if not path:
+            raise GitError("git status returned an empty porcelain path")
+        original_path: str | None = None
+        if "R" in record[:2] or "C" in record[:2]:
+            if offset == len(records) or not records[offset]:
+                raise GitError("git status returned an incomplete rename record")
+            original_path = records[offset]
+            offset += 1
+        entries.append(
+            GitStatusEntry(
+                index_status=record[0],
+                worktree_status=record[1],
+                path=path,
+                original_path=original_path,
+            )
+        )
+    return tuple(entries)
 
 
 def _parse_worktrees(value: bytes) -> tuple[GitWorktree, ...]:

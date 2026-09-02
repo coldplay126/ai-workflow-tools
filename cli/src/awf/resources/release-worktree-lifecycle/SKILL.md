@@ -1,7 +1,7 @@
 ---
 name: release-worktree-lifecycle
-version: 1.3.2
-description: Use whenever handling deploy, production release, staging-to-main or staging-to-master promotion, release PR creation or merge, managed feature PR linkage, managed deployment worktree creation or reuse, merged branch/worktree cleanup, or an empty exact promotion apply failure. Requires awf wt status/acquire/link-pr/promote/release/discard-promotion/finish/gc and forbids bypassing CLI safety blockers.
+version: 1.4.0
+description: Use whenever handling deploy, production release, staging-to-main or staging-to-master promotion, release PR creation or merge, managed feature PR linkage, managed deployment worktree creation or reuse, stale sync conflict disposal or recovery, or merged branch/worktree cleanup. Requires awf wt status/acquire/link-pr/sync/recover-sync/discard-sync/promote/release/discard-promotion/finish/gc and forbids bypassing CLI safety blockers.
 type: deployment-safety
 conditions:
   trigger:
@@ -121,6 +121,84 @@ branch uses the permanently reserved `awf/sync-<pair>-<source>/feature` shape.
 `source_pr_not_promotable`, avoiding a production↔staging loop. Merge the sync
 PR only after repository checks and review policy pass; the command does not
 bypass or invent those gates.
+
+## Stale unpublished synchronization-conflict discard
+
+Use `discard-sync` only for one AWF-owned `FEATURE` synchronization lease that
+is `BLOCKED` by `sync_target_conflict`, has no target PR in any state, remote
+branch, or cleanup reservation, and is no longer resumable because its recorded
+source or target pin is stale. It is not general feature-lease disposal,
+conflict resolution, or a way to remove a current-pinned sync lease.
+
+After the required status preflight, inspect both exact preview actions:
+
+```sh
+awf wt status --repo-root <repo-root> --refresh --json
+awf wt discard-sync --lease <id> --repo-root <repo-root> --json
+```
+
+Eligibility requires the configured production-to-staging initiative, reserved
+branch, base, source/target pins, non-empty reviewed paths, one registered
+non-symlink, non-bare, non-detached worktree, and matching worktree HEAD/local
+branch target pin. Its unmerged state MUST comprise only Git's valid unmerged
+status classes inside reviewed paths; every clean staged entry MUST exactly
+match its source pin. Untracked, renamed, unstaged, unrelated, or
+source-pin-mismatched changes stop the operation. Review `remove_worktree` and
+`delete_local_branch`, then apply the same lease:
+
+```sh
+awf wt discard-sync --lease <id> --repo-root <repo-root> --apply --json
+```
+
+Apply locks and revalidates the repository, reserves cleanup, holds the branch,
+rechecks the registered worktree root's non-symlink device/inode identity,
+restores only the proven reviewed conflict paths to the target pin, then uses a
+non-force worktree removal. A newly appearing untracked or out-of-scope change
+therefore makes Git refuse removal rather than being deleted. After that
+refusal, AWF reapplies the recorded source-only binary patch to the target
+index and releases the reservation only when the original recorded conflict
+paths are reconstructed exactly; the late file remains untouched. A path
+identity mismatch or failed reconstruction retains `cleanup_reserved`
+fail-closed. Successful cleanup completes the registry and compare-and-deletes
+only the local branch. It NEVER deletes a remote branch or PR.
+
+## Current synchronization-conflict recovery
+
+Use `recover-sync` only for one AWF-owned, unpublished `BLOCKED`
+`sync_target_conflict` lease whose configured production and staging pins are
+still current and whose production verification commands are configured. It is
+not a stale-lease retry or general feature recovery. Recovery supports only the
+recorded `UU` conflict paths; every operator edit/unmerged path MUST remain a
+subset of the reviewed source-only paths, and clean applied index entries MUST
+match the source pin.
+
+After the required status preflight, first inspect the allowed conflict paths:
+
+```sh
+awf wt status --repo-root <repo-root> --refresh --json
+awf wt recover-sync --lease <id> --repo-root <repo-root> --json
+```
+
+Resolve only the reported files without direct staging, commits, pushes, or
+registry changes, then apply the same lease:
+
+```sh
+awf wt recover-sync --lease <id> --repo-root <repo-root> --apply --json
+```
+
+Apply stages only the recorded conflict paths and restores the prior conflict
+index if staging validation rejects markers or an exact-delta mismatch. It
+inspects final stage-0 blobs directly for conflict markers, requires the final
+changed-path set to exactly equal the reviewed source-only delta, and creates a
+controlled synthetic sync commit with target then source as its only parents.
+It reruns prepare and production verification, then immediately revalidates the
+exact commit head, parents, tree, paths, and marker-free blobs before an atomic
+create-if-absent branch push and exact PR verification. Any drift, PR in any
+state, remote branch, extra path, or parent mismatch is `blocked` and preserves
+the worktree. If a process stops after the synthetic commit transition but
+before publication completes, rerun `awf wt sync --from <production> --to
+<staging> --apply --json` to resume that committed lease; do not create another
+recovery commit.
 
 ## Production promotion
 
@@ -524,6 +602,10 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
     "link_pr_apply": "awf wt link-pr --lease <id> --pr <merged-pr> --apply --json",
     "sync_preview": "awf wt sync --from main --to staging --repo-root <repo-root> --json",
     "sync_apply": "awf wt sync --from main --to staging --repo-root <repo-root> --apply --json",
+    "discard_sync_preview": "awf wt discard-sync --lease <id> --repo-root <repo-root> --json",
+    "discard_sync_apply": "awf wt discard-sync --lease <id> --repo-root <repo-root> --apply --json",
+    "recover_sync_preview": "awf wt recover-sync --lease <id> --repo-root <repo-root> --json",
+    "recover_sync_apply": "awf wt recover-sync --lease <id> --repo-root <repo-root> --apply --json",
     "promote_preview": "awf wt promote --source-pr <number> --to <branch> --repo-root <repo-root> --json",
     "promote_apply": "awf wt promote --source-pr <number> --to <branch> --repo-root <repo-root> --apply --json",
     "release_open_preview": "awf wt release open --release <id> --to <branch> --repo-root <repo-root> --json",
@@ -572,6 +654,20 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
       "preview_actions": ["remove_worktree", "delete_local_branch"],
       "apply": "lock_revalidate_reserve_hold_remove_complete_compare_delete_local",
       "remote_branch": "must_be_absent_and_never_deleted"
+    },
+    "discard_sync": {
+      "scope": "one_awf_owned_blocked_stale_unpublished_sync_target_conflict_only",
+      "preview_actions": ["remove_worktree", "delete_local_branch"],
+      "apply": "lock_revalidate_reserve_hold_normalize_nonforce_remove_rebuild_recorded_conflict_on_failure_complete_compare_delete_local",
+      "remote_branch": "must_be_absent_and_never_deleted",
+      "conflict_scope": "all_git_unmerged_classes_within_reviewed_paths_and_clean_staged_source_pin_entries"
+    },
+    "recover_sync": {
+      "scope": "one_awf_owned_blocked_current_pin_unpublished_sync_target_conflict_only",
+      "operator_scope": "recorded_uu_conflicted_paths_subset_of_reviewed_paths",
+      "clean_index": "clean_applied_entries_match_source_pin",
+      "commit": "controlled_two_parent_target_then_source_synthetic_sync_commit",
+      "publication": "revalidate_drift_prepare_verify_exact_commit_atomic_create_pr"
     },
     "compact": {
       "scope": "ignored_untracked_paths_only",
@@ -658,6 +754,8 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
       "import",
       "adopt",
       "discard_promotion",
+      "discard_sync",
+      "recover_sync",
       "finish",
       "gc",
       "compact"
@@ -692,6 +790,8 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
       "out_of_order_promote": "review_then_apply_explicitly",
       "out_of_order_resolution": "review_same_blocked_lease_then_apply_explicitly",
       "discard_promotion": "review_every_action_then_apply_explicitly",
+      "discard_sync": "review_every_action_then_apply_explicitly",
+      "recover_sync": "review_allowed_conflict_paths_then_apply_explicitly",
       "finish": "review_blockers_then_apply",
       "gc": "review_blockers_then_apply",
       "compact": "review_every_action_then_apply_explicitly"

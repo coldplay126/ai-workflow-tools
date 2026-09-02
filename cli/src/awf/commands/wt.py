@@ -216,6 +216,22 @@ def run_wt_discard_promotion(args: argparse.Namespace) -> int:
     )
 
 
+def run_wt_discard_sync(args: argparse.Namespace) -> int:
+    return _run(
+        args,
+        "wt.discard-sync",
+        lambda service: service.discard_sync(args.lease, apply=args.apply),
+    )
+
+
+def run_wt_recover_sync(args: argparse.Namespace) -> int:
+    return _run(
+        args,
+        "wt.recover-sync",
+        lambda service: service.recover_sync(args.lease, apply=args.apply),
+    )
+
+
 def run_wt_finish(args: argparse.Namespace) -> int:
     return _run(
         args,

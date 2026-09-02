@@ -959,6 +959,84 @@ def test_wt_discard_promotion_forwards_apply(
     assert received == {"lease_id": "lease-123", "apply": True}
 
 
+@pytest.mark.parametrize(
+    ("command", "handler"),
+    [
+        ("discard-sync", "run_wt_discard_sync"),
+        ("recover-sync", "run_wt_recover_sync"),
+    ],
+)
+def test_wt_sync_recovery_parser_surface(command: str, handler: str) -> None:
+    args = build_parser().parse_args(
+        [
+            "wt",
+            command,
+            "--lease",
+            "lease-123",
+            "--repo-root",
+            "/repo",
+            "--apply",
+            "--json",
+        ]
+    )
+
+    assert args.command == "wt"
+    assert args.wt_command == command
+    assert args.lease == "lease-123"
+    assert args.repo_root == "/repo"
+    assert args.apply is True
+    assert args.json is True
+    assert args.handler.__name__ == handler
+
+
+@pytest.mark.parametrize(
+    ("command", "method", "decision"),
+    [
+        ("discard-sync", "discard_sync", "preview"),
+        ("recover-sync", "recover_sync", "ready"),
+    ],
+)
+def test_wt_sync_recovery_forwards_apply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    method: str,
+    decision: str,
+) -> None:
+    repo = make_repository(tmp_path)
+    received: dict[str, object] = {}
+
+    def record_recovery(
+        _service: object, lease_id: str, *, apply: bool = False
+    ) -> CommandResult:
+        received["lease_id"] = lease_id
+        received["apply"] = apply
+        return CommandResult.ok(f"wt.{command}", decision=decision)
+
+    monkeypatch.setattr(
+        f"awf.commands.wt.WorktreeService.{method}",
+        record_recovery,
+    )
+
+    rc, stdout, stderr = capture_main(
+        [
+            "wt",
+            command,
+            "--lease",
+            "lease-123",
+            "--repo-root",
+            str(repo),
+            "--apply",
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    assert stderr == ""
+    assert json.loads(stdout)["decision"] == decision
+    assert received == {"lease_id": "lease-123", "apply": True}
+
+
 def test_wt_acquire_preview_emits_one_json_document(
     tmp_path: Path, monkeypatch
 ) -> None:

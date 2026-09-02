@@ -117,6 +117,32 @@ remote branch/PR 없이 verified noop으로 끝냅니다. 같은 pin의 clean
 lease는 fail-closed로 보존합니다. 생성 PR의 reserved branch와 `AWF-No-Promote: true`
 provenance는 이후 `promote`/`release add` 순환을 막습니다.
 
+`awf wt discard-sync --lease <id>`는 stale source 또는 target pin 때문에 더
+이상 재개할 수 없는 unpublished `sync_target_conflict` lease만 폐기합니다.
+`status --refresh` 뒤 preview의 `remove_worktree`·`delete_local_branch`만
+검토하고 같은 lease에 `--apply`를 붙입니다. AWF가 만든 current
+production→staging identity와 registered non-symlink worktree, target-pinned
+HEAD/local branch, reviewed path 내부의 valid unmerged 상태, source pin과 같은
+clean staged entry, 모든 상태의 PR과 remote branch 부재를 모두 요구합니다.
+Apply는 lock, 재검증, reservation, registered worktree root의 symlink/device/inode
+재확인, reviewed conflict path의 target-pin 정리, non-force removal 순서입니다. 새
+untracked 또는 out-of-scope 변경은 Git이 removal을 거부하게 하며, 이 경우 AWF는
+target index에 recorded source-only binary patch를 다시 적용해 정확한 conflict
+paths를 재구성한 뒤에만 reservation을 해제합니다. 재구성 또는 root identity 검증에
+실패하면 `cleanup_reserved`로 보존하며 remote branch/PR를 절대 삭제하지 않습니다.
+
+`awf wt recover-sync --lease <id>`는 반대로 current-pinned unpublished
+`sync_target_conflict` lease만 복구합니다. configured production verification이
+필수이고 preview가 허용한 recorded `UU` conflict files만 편집한 뒤 같은 명령에
+`--apply`를 붙입니다. AWF는 그 경로만 stage하고 marker-free final stage-0 blob과
+source-only reviewed delta를 검증한 뒤 target→source 두 parent의 controlled
+synthetic commit을 만듭니다. prepare/verify 후 exact commit head·parents·tree·path
+및 marker 상태를 다시 검증하고 atomic create-if-absent push와 exact PR 검증을
+수행합니다. marker/delta 거부는 prior conflict index를 복구합니다. commit transition
+후 publication 전에 중단되면 `awf wt sync --from <production> --to <staging>
+--apply --json`으로 해당 lease를 재개합니다. stale pin, extra/untracked/rename path,
+모든 상태의 PR, remote branch 또는 parent mismatch는 fail-closed입니다.
+
 `awf wt discard-promotion --lease <id>`는 commit 전 exact promotion apply
 failure로 비어 있는 lease만 정리하는 예외적 복구 경로입니다. 반드시
 `status --refresh` 뒤 preview JSON의 `remove_worktree`와 `delete_local_branch`
@@ -419,6 +445,35 @@ verified noop without a remote branch or PR. A clean, exactly pinned
 published leases remain fail-closed. Its reserved branch shape and
 `AWF-No-Promote: true` provenance make promotion and release-add reject the
 synchronization PR.
+
+`awf wt discard-sync --lease <id>` discards only an unpublished
+`sync_target_conflict` lease whose source or target pin is stale and therefore
+cannot resume. After `status --refresh`, inspect only the preview's
+`remove_worktree` and `delete_local_branch` actions, then add `--apply` for
+that same lease. It requires the AWF-created current production-to-staging
+identity, registered non-symlink worktree, target-pinned HEAD/local branch,
+valid reviewed-path unmerged state, source-pinned clean staged entries, and no
+remote branch or PR in any state. Apply locks, revalidates, reserves cleanup,
+rechecks the registered non-symlink worktree root device/inode, restores the
+reviewed conflict paths to the target pin, and uses non-force removal. A late
+untracked or out-of-scope change makes Git refuse removal; AWF then reapplies
+the recorded source-only binary patch to the target index and releases the
+reservation only after reconstructing the exact recorded conflict paths.
+Identity or reconstruction failure remains `cleanup_reserved`; it NEVER
+deletes a remote branch or PR.
+
+`awf wt recover-sync --lease <id>` instead recovers only a current-pinned,
+unpublished `sync_target_conflict` lease with configured production
+verification. Edit only the previewed recorded `UU` conflict files, then apply
+that same lease. AWF stages those files, inspects final stage-0 blobs for
+markers, verifies the source-only reviewed delta, creates a controlled
+target-then-source two-parent synthetic commit, and repeats prepare,
+verification, exact-commit, atomic create-if-absent push, and exact-PR gates.
+Marker or delta rejection restores the prior conflict index. If publication
+stops after the commit transition, rerun `awf wt sync --from <production> --to
+<staging> --apply --json` to resume the committed lease. Stale pins,
+extra/untracked/renamed paths, remote branch/PR in any state, or a parent
+mismatch fail closed.
 
 `awf wt discard-promotion --lease <id>` is the exceptional recovery path only
 for an empty exact promotion apply failure before a commit. After

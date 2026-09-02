@@ -29,6 +29,7 @@ from awf.commands.wt import (
     run_wt_link_pr,
     run_wt_doctor,
     run_wt_discard_promotion,
+    run_wt_discard_sync,
     run_wt_import,
     run_wt_status,
     run_wt_sync,
@@ -38,6 +39,7 @@ from awf.commands.wt import (
     run_wt_release_publish,
     run_wt_release_seal,
     run_wt_recover_promotion,
+    run_wt_recover_sync,
     run_wt_finish,
     run_wt_gc,
 )
@@ -1170,6 +1172,56 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print a versioned JSON result.",
     )
     wt_discard_promotion_parser.set_defaults(handler=run_wt_discard_promotion)
+
+    wt_discard_sync_parser = wt_subparsers.add_parser(
+        "discard-sync",
+        help="Preview or discard one stale unpublished sync conflict lease.",
+    )
+    wt_discard_sync_parser.add_argument(
+        "--lease",
+        required=True,
+        help="Blocked stale synchronization conflict lease id.",
+    )
+    wt_discard_sync_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to current or parent directories.",
+    )
+    wt_discard_sync_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Remove the proven-stale sync worktree and local branch.",
+    )
+    wt_discard_sync_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_discard_sync_parser.set_defaults(handler=run_wt_discard_sync)
+
+    wt_recover_sync_parser = wt_subparsers.add_parser(
+        "recover-sync",
+        help="Preview or publish one current-pinned sync target conflict resolution.",
+    )
+    wt_recover_sync_parser.add_argument(
+        "--lease",
+        required=True,
+        help="Blocked current synchronization conflict lease id.",
+    )
+    wt_recover_sync_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to current or parent directories.",
+    )
+    wt_recover_sync_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Stage allowed conflict paths and publish the verified sync resolution.",
+    )
+    wt_recover_sync_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_recover_sync_parser.set_defaults(handler=run_wt_recover_sync)
 
     wt_finish_parser = wt_subparsers.add_parser(
         "finish",
