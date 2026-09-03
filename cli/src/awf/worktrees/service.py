@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 import time
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -107,6 +108,15 @@ class _PromotionRetryIdentity:
 class _WorktreeIdentity:
     device: int
     inode: int
+    parent_device: int
+    parent_inode: int
+
+
+@dataclass(frozen=True)
+class _RepositoryIdentity:
+    repository_id: str
+    repository_name: str
+    repository_root: Path
 
 
 
@@ -2833,7 +2843,7 @@ class WorktreeService:
                         removal_lease = reserved
                     if post_lock_result is None and removal_lease is not None:
                         identity, identity_issue = (
-                            self._discard_sync_worktree_identity(removal_lease)
+                            self._cleanup_worktree_identity(removal_lease)
                         )
                         if identity_issue is not None:
                             return self._discard_sync_blocked(
@@ -2854,7 +2864,7 @@ class WorktreeService:
                                 removal_lease.reviewed_paths,
                             )
                             normalized_for_removal = True
-                            _, identity_issue = self._discard_sync_worktree_identity(
+                            _, identity_issue = self._cleanup_worktree_identity(
                                 removal_lease, expected=identity
                             )
                             if identity_issue is not None:
@@ -3391,10 +3401,15 @@ class WorktreeService:
                     }
                 )
                 continue
+            repository, repository_blocker = self._validated_cleanup_repository(lease)
+            if repository_blocker is not None:
+                warnings.append(repository_blocker)
+                continue
+            assert repository is not None
             try:
-                pull_request = (self.github or GhClient(lease.repository_root)).view_pr(
-                    lease.target_pr
-                )
+                pull_request = (
+                    self.github or GhClient(repository.repository_root)
+                ).view_pr(lease.target_pr)
             except ExternalServiceError as error:
                 return CommandResult.external_error(
                     "wt.gc",
@@ -4052,6 +4067,15 @@ class WorktreeService:
         apply: bool,
         pull_request: PullRequest | None = None,
     ) -> CommandResult:
+        repository, repository_blocker = self._validated_cleanup_repository(lease)
+        if repository_blocker is not None:
+            return self._cleanup_blocked(
+                "wt.finish",
+                repository_blocker["code"],
+                repository_blocker["message"],
+                lease=lease,
+            )
+        assert repository is not None
         reservation = self.registry.get_cleanup_reservation(lease.id)
         if reservation is not None and not apply:
             return self._cleanup_blocked(
@@ -4063,7 +4087,7 @@ class WorktreeService:
         if not apply:
             try:
                 pull_request = pull_request or (
-                    self.github or GhClient(lease.repository_root)
+                    self.github or GhClient(repository.repository_root)
                 ).view_pr(lease.target_pr)
             except ExternalServiceError as error:
                 return self._external_error(
@@ -4086,7 +4110,9 @@ class WorktreeService:
                     f"Lease {lease.id} has no pull request to prove merged.",
                     lease=lease,
                 )
-            blockers = self._cleanup_blockers(lease, pull_request)
+            blockers = self._cleanup_blockers(
+                lease, pull_request, repository=repository
+            )
             if blockers:
                 return CommandResult.blocked(
                     "wt.finish", blockers=blockers, lease=lease
@@ -4098,7 +4124,7 @@ class WorktreeService:
                 actions=(self._cleanup_action("remove_worktree", lease),),
             )
 
-        repository_id = self.git.repository_id()
+        repository_id = repository.repository_id
         warnings: list[dict[str, str]] = []
         with repository_lock(self.lock_dir / f"{repository_id}.lock"):
             current = self.registry.get_lease(lease.id)
@@ -4114,12 +4140,22 @@ class WorktreeService:
                     f"Lease {lease.id} changed before cleanup could be applied.",
                     lease=current,
                 )
+            repository, repository_blocker = self._validated_cleanup_repository(current)
+            if repository_blocker is not None:
+                return self._cleanup_blocked(
+                    "wt.finish",
+                    repository_blocker["code"],
+                    repository_blocker["message"],
+                    lease=current,
+                    warnings=warnings,
+                )
+            assert repository is not None
             reservation = self.registry.get_cleanup_reservation(current.id)
             if reservation is not None:
                 return self._recover_cleanup_reservation(
-                    current, reservation, warnings
+                    current, reservation, warnings, repository=repository
                 )
-            self._refresh_lease(current, warnings)
+            self._refresh_lease(current, warnings, repository=repository)
             current = self.registry.get_lease(current.id)
             if current is None or current.state is LeaseState.REMOVED:
                 return self._cleanup_blocked(
@@ -4129,10 +4165,20 @@ class WorktreeService:
                     lease=current,
                     warnings=warnings,
                 )
-            try:
-                pull_request = (self.github or GhClient(current.repository_root)).view_pr(
-                    current.target_pr
+            repository, repository_blocker = self._validated_cleanup_repository(current)
+            if repository_blocker is not None:
+                return self._cleanup_blocked(
+                    "wt.finish",
+                    repository_blocker["code"],
+                    repository_blocker["message"],
+                    lease=current,
+                    warnings=warnings,
                 )
+            assert repository is not None
+            try:
+                pull_request = (
+                    self.github or GhClient(repository.repository_root)
+                ).view_pr(current.target_pr)
             except ExternalServiceError as error:
                 return self._external_error(
                     "wt.finish",
@@ -4150,7 +4196,10 @@ class WorktreeService:
                     warnings=warnings,
                 )
             blockers = self._cleanup_blockers(
-                current, pull_request, include_deployment=False
+                current,
+                pull_request,
+                include_deployment=False,
+                repository=repository,
             )
             if blockers:
                 return CommandResult.blocked(
@@ -4159,8 +4208,10 @@ class WorktreeService:
                     lease=current,
                     warnings=tuple(warnings),
                 )
-            forced, forced_probe, subject_revision = self._force_cleanup_deployment_probe(
-                current, pull_request, warnings
+            forced, forced_probe, subject_revision = (
+                self._force_cleanup_deployment_probe(
+                    current, pull_request, warnings, repository=repository
+                )
             )
             if forced is None:
                 return CommandResult.blocked(
@@ -4170,10 +4221,22 @@ class WorktreeService:
                     warnings=tuple(warnings),
                 )
             current = forced
-            try:
-                pull_request = (self.github or GhClient(current.repository_root)).view_pr(
-                    current.target_pr
+            repository, repository_blocker = self._validated_cleanup_repository(
+                current
+            )
+            if repository_blocker is not None:
+                return self._cleanup_blocked(
+                    "wt.finish",
+                    repository_blocker["code"],
+                    repository_blocker["message"],
+                    lease=current,
+                    warnings=warnings,
                 )
+            assert repository is not None
+            try:
+                pull_request = (
+                    self.github or GhClient(repository.repository_root)
+                ).view_pr(current.target_pr)
             except ExternalServiceError as error:
                 return self._external_error(
                     "wt.finish",
@@ -4201,7 +4264,9 @@ class WorktreeService:
                     lease=current,
                     warnings=warnings,
                 )
-            blockers = self._cleanup_blockers(current, pull_request)
+            blockers = self._cleanup_blockers(
+                current, pull_request, repository=repository
+            )
             if blockers:
                 return CommandResult.blocked(
                     "wt.finish",
@@ -4227,6 +4292,16 @@ class WorktreeService:
                     lease=current,
                     warnings=warnings,
                 )
+            identity, identity_issue = self._cleanup_worktree_identity(current)
+            if identity_issue is not None:
+                return self._cleanup_blocked(
+                    "wt.finish",
+                    identity_issue[0],
+                    identity_issue[1],
+                    lease=current,
+                    warnings=warnings,
+                )
+            assert identity is not None
             try:
                 reservation = self.registry.reserve_cleanup(
                     current.id,
@@ -4262,45 +4337,67 @@ class WorktreeService:
                             f"Lease {current.id} changed while cleanup was reserved."
                         )
                     else:
-                        try:
-                            pull_request = (
-                                self.github or GhClient(reserved_current.repository_root)
-                            ).view_pr(reserved_current.target_pr)
-                        except ExternalServiceError as error:
-                            post_lock_external = (
-                                "github_refresh_failed",
-                                f"Unable to revalidate pull request state: {error}",
-                            )
-                        except (KeyError, OSError, ValueError) as error:
-                            post_lock_code = "github_refresh_failed"
-                            post_lock_message = (
-                                f"Unable to revalidate pull request state: {error}"
-                            )
+                        reserved_repository, repository_blocker = (
+                            self._validated_cleanup_repository(reserved_current)
+                        )
+                        if repository_blocker is not None:
+                            post_lock_code = repository_blocker["code"]
+                            post_lock_message = repository_blocker["message"]
                         else:
-                            if not self._matches_deployment_subject(
-                                pull_request, subject_revision
-                            ):
-                                post_lock_blockers = (
-                                    {
-                                        "code": "deployment_subject_changed",
-                                        "message": (
-                                            f"Pull request #{reserved_current.target_pr} "
-                                            "merge revision changed after fresh "
-                                            "deployment evidence."
-                                        ),
-                                    },
+                            assert reserved_repository is not None
+                            try:
+                                pull_request = (
+                                    self.github
+                                    or GhClient(reserved_repository.repository_root)
+                                ).view_pr(reserved_current.target_pr)
+                            except ExternalServiceError as error:
+                                post_lock_external = (
+                                    "github_refresh_failed",
+                                    f"Unable to revalidate pull request state: {error}",
+                                )
+                            except (KeyError, OSError, ValueError) as error:
+                                post_lock_code = "github_refresh_failed"
+                                post_lock_message = (
+                                    f"Unable to revalidate pull request state: {error}"
                                 )
                             else:
-                                post_lock_blockers = self._cleanup_blockers(
-                                    reserved_current, pull_request
-                                )
-                            if not post_lock_blockers:
-                                try:
-                                    self.git.remove_worktree(
-                                        reserved_current.worktree_path
+                                if not self._matches_deployment_subject(
+                                    pull_request, subject_revision
+                                ):
+                                    post_lock_blockers = (
+                                        {
+                                            "code": "deployment_subject_changed",
+                                            "message": (
+                                                f"Pull request #{reserved_current.target_pr} "
+                                                "merge revision changed after fresh "
+                                                "deployment evidence."
+                                            ),
+                                        },
                                     )
-                                except (GitError, OSError) as error:
-                                    removal_error = error
+                                else:
+                                    post_lock_blockers = self._cleanup_blockers(
+                                        reserved_current,
+                                        pull_request,
+                                        repository=reserved_repository,
+                                    )
+                                if not post_lock_blockers:
+                                    _, identity_issue = self._cleanup_worktree_identity(
+                                        reserved_current, expected=identity
+                                    )
+                                    if identity_issue is not None:
+                                        post_lock_blockers = (
+                                            {
+                                                "code": identity_issue[0],
+                                                "message": identity_issue[1],
+                                            },
+                                        )
+                                    else:
+                                        try:
+                                            self.git.remove_worktree(
+                                                reserved_current.worktree_path
+                                            )
+                                        except (GitError, OSError) as error:
+                                            removal_error = error
             except GitError as error:
                 return self._release_cleanup_reservation(
                     current,
@@ -4335,8 +4432,16 @@ class WorktreeService:
                     message=post_lock_message,
                 )
             if removal_error is not None:
+                reserved_current = self.registry.get_lease(current.id)
+                if reserved_current is None:
+                    return self._cleanup_blocked(
+                        "wt.finish",
+                        "lease_changed",
+                        f"Lease {current.id} changed during cleanup recovery.",
+                        warnings=warnings,
+                    )
                 return self._recover_cleanup_reservation(
-                    current,
+                    reserved_current,
                     reservation,
                     warnings,
                     removal_error=removal_error,
@@ -4433,10 +4538,14 @@ class WorktreeService:
         lease: Lease,
         pull_request: PullRequest,
         warnings: list[dict[str, str]],
+        *,
+        repository: _RepositoryIdentity,
     ) -> tuple[Lease | None, EvidenceProbeResult, str | None]:
         if lease.purpose is not Purpose.PROMOTE:
             return lease, EvidenceProbeResult(None, datetime.now(timezone.utc)), None
-        probe, adapter_digest = self._probe_deployment(lease, pull_request)
+        probe, adapter_digest = self._probe_deployment(
+            lease, pull_request, repository=repository
+        )
         evidence = (
             probe.response.registry_evidence(
                 adapter_digest=adapter_digest, received_at=probe.received_at
@@ -4444,10 +4553,15 @@ class WorktreeService:
             if probe.response is not None and adapter_digest is not None
             else None
         )
-        if probe.status == "healthy":
+        if probe.is_cleanup_healthy:
             state = LeaseState.CLEANABLE
             deployment_state = DeploymentState.HEALTHY
-            summary = "Fresh deployment evidence is healthy"
+            summary = (
+                "Fresh deployment evidence confirms the subject is superseded "
+                "by a healthy production image"
+                if probe.status == "superseded_healthy"
+                else "Fresh deployment evidence is healthy"
+            )
         elif probe.status == "failed":
             state = LeaseState.BLOCKED
             deployment_state = DeploymentState.FAILED
@@ -4469,7 +4583,7 @@ class WorktreeService:
             evidence=evidence,
             warnings=warnings,
         )
-        if probe.status != "healthy":
+        if not probe.is_cleanup_healthy:
             return None, probe, None
         if recorded is None or probe.response is None:
             return (
@@ -4510,6 +4624,19 @@ class WorktreeService:
                     f"{lease.id}."
                 ),
             }
+        if probe.failure_code in {
+            "deployment_superseded_revision_missing",
+            "deployment_superseded_subject_equal",
+            "deployment_superseded_subject_not_ancestor",
+            "deployment_superseded_revision_unavailable",
+        }:
+            return {
+                "code": probe.failure_code,
+                "message": (
+                    "Fresh superseded deployment evidence could not be proven "
+                    f"for promotion lease {lease.id}."
+                ),
+            }
         return {
             "code": "deployment_evidence_unknown",
             "message": (
@@ -4529,9 +4656,24 @@ class WorktreeService:
         )
 
     def _probe_deployment(
-        self, lease: Lease, pull_request: PullRequest
+        self,
+        lease: Lease,
+        pull_request: PullRequest,
+        *,
+        repository: _RepositoryIdentity | None = None,
     ) -> tuple[EvidenceProbeResult, str | None]:
         received_at = datetime.now(timezone.utc)
+        repository, repository_blocker = self._validated_cleanup_repository(
+            lease, repository=repository
+        )
+        if repository_blocker is not None:
+            return (
+                EvidenceProbeResult(
+                    None, received_at, repository_blocker["code"]
+                ),
+                None,
+            )
+        assert repository is not None
         subject_revision = pull_request.merge_commit_sha
         if (
             not isinstance(subject_revision, str)
@@ -4546,7 +4688,7 @@ class WorktreeService:
             )
         try:
             adapter = load_deployment_adapter(
-                lease.repository_id, home_dir=self.home_dir
+                repository.repository_id, home_dir=self.home_dir
             )
         except ConfigError:
             return (
@@ -4564,7 +4706,7 @@ class WorktreeService:
             )
         try:
             request = DeploymentEvidenceRequest.create(
-                repository_id=lease.repository_id,
+                repository_id=repository.repository_id,
                 pull_request_number=pull_request.number,
                 source_head_sha=pull_request.head_sha,
                 subject_revision=subject_revision,
@@ -4577,9 +4719,12 @@ class WorktreeService:
         result = self.evidence_executor.execute(adapter, request)
         if result.response is None:
             return result, adapter.config_digest
+        result = self._verify_superseded_deployment(result)
+        if result.response is None:
+            return result, adapter.config_digest
         try:
             refreshed = (
-                self.github or GhClient(lease.repository_root)
+                self.github or GhClient(repository.repository_root)
             ).view_pr(pull_request.number)
         except (ExternalServiceError, KeyError, OSError, ValueError):
             return (
@@ -4600,6 +4745,57 @@ class WorktreeService:
                 adapter.config_digest,
             )
         return result, adapter.config_digest
+
+    def _verify_superseded_deployment(
+        self, result: EvidenceProbeResult
+    ) -> EvidenceProbeResult:
+        response = result.response
+        if response is None or response.status != "superseded_healthy":
+            return result
+        production_image_git_sha = response.production_image_git_sha
+        if production_image_git_sha is None:
+            return EvidenceProbeResult(
+                None,
+                result.received_at,
+                "deployment_superseded_revision_missing",
+            )
+        if (
+            _GIT_OBJECT_ID.fullmatch(production_image_git_sha) is None
+            or _GIT_OBJECT_ID.fullmatch(response.subject_revision) is None
+        ):
+            return EvidenceProbeResult(
+                None,
+                result.received_at,
+                "deployment_superseded_revision_unavailable",
+            )
+        if production_image_git_sha == response.subject_revision:
+            return EvidenceProbeResult(
+                None,
+                result.received_at,
+                "deployment_superseded_subject_equal",
+            )
+        try:
+            merge_base = self.git.merge_base(
+                response.subject_revision, production_image_git_sha
+            )
+        except (GitError, OSError, ValueError):
+            return EvidenceProbeResult(
+                None,
+                result.received_at,
+                "deployment_superseded_revision_unavailable",
+            )
+        if merge_base != response.subject_revision:
+            return EvidenceProbeResult(
+                None,
+                result.received_at,
+                "deployment_superseded_subject_not_ancestor",
+            )
+        return EvidenceProbeResult(
+            response,
+            result.received_at,
+            result.failure_code,
+            superseded_verified=True,
+        )
 
     def _record_cleanup_deployment_probe(
         self,
@@ -4660,9 +4856,21 @@ class WorktreeService:
         reservation: CleanupReservation,
         warnings: list[dict[str, str]],
         *,
+        repository: _RepositoryIdentity | None = None,
         removal_error: Exception | None = None,
     ) -> CommandResult:
-        path_blocker = self._cleanup_path_blocker(lease)
+        repository, repository_blocker = self._validated_cleanup_repository(
+            lease, repository=repository
+        )
+        if repository_blocker is not None:
+            return CommandResult.blocked(
+                "wt.finish",
+                blockers=(repository_blocker,),
+                lease=lease,
+                warnings=tuple(warnings),
+            )
+        assert repository is not None
+        path_blocker = self._cleanup_path_blocker(lease, repository=repository)
         if path_blocker is not None:
             return CommandResult.blocked(
                 "wt.finish",
@@ -4670,6 +4878,69 @@ class WorktreeService:
                 lease=lease,
                 warnings=tuple(warnings),
             )
+        if lease.target_pr is None:
+            return self._cleanup_blocked(
+                "wt.finish",
+                "lease_without_pr",
+                f"Lease {lease.id} has no pull request to prove merged.",
+                lease=lease,
+                warnings=warnings,
+            )
+        try:
+            pull_request = (
+                self.github or GhClient(repository.repository_root)
+            ).view_pr(lease.target_pr)
+        except ExternalServiceError as error:
+            return self._external_error(
+                "wt.finish",
+                "github_refresh_failed",
+                f"Unable to refresh pull request state: {error}",
+                lease=lease,
+                warnings=warnings,
+            )
+        except (KeyError, OSError, ValueError) as error:
+            return self._cleanup_blocked(
+                "wt.finish",
+                "github_refresh_failed",
+                f"Unable to refresh pull request state: {error}",
+                lease=lease,
+                warnings=warnings,
+            )
+        recovery_blockers = self._cleanup_recovery_reservation_blockers(
+            lease, reservation, pull_request
+        )
+        if recovery_blockers:
+            return CommandResult.blocked(
+                "wt.finish",
+                blockers=recovery_blockers,
+                lease=lease,
+                warnings=tuple(warnings),
+            )
+        if lease.purpose is Purpose.PROMOTE:
+            probe, _ = self._probe_deployment(
+                lease, pull_request, repository=repository
+            )
+            if not probe.is_cleanup_healthy:
+                return CommandResult.blocked(
+                    "wt.finish",
+                    blockers=(self._deployment_evidence_blocker(lease, probe),),
+                    lease=lease,
+                    warnings=tuple(warnings),
+                )
+            assert probe.response is not None
+            if not self._matches_deployment_subject(
+                pull_request, probe.response.subject_revision
+            ):
+                return self._cleanup_blocked(
+                    "wt.finish",
+                    "deployment_subject_changed",
+                    (
+                        f"Pull request #{lease.target_pr} merge revision changed after "
+                        "fresh deployment evidence."
+                    ),
+                    lease=lease,
+                    warnings=warnings,
+                )
         try:
             worktrees = self.git.list_worktrees()
         except (GitError, OSError) as error:
@@ -4677,6 +4948,46 @@ class WorktreeService:
                 "wt.finish",
                 "worktree_inspection_failed",
                 f"Unable to inspect reserved worktree: {error}",
+                lease=lease,
+                warnings=warnings,
+            )
+        if any(
+            worktree.path != lease.worktree_path and worktree.branch == lease.branch
+            for worktree in worktrees
+        ):
+            return self._cleanup_blocked(
+                "wt.finish",
+                "branch_in_use",
+                f"Branch {lease.branch!r} is checked out elsewhere.",
+                lease=lease,
+                warnings=warnings,
+            )
+        protected = self._cleanup_protected_branches(
+            worktrees, repository.repository_root, pull_request
+        )
+        if lease.branch in protected:
+            return self._cleanup_blocked(
+                "wt.finish",
+                "protected_branch",
+                f"Branch {lease.branch!r} is protected from cleanup.",
+                lease=lease,
+                warnings=warnings,
+            )
+        try:
+            branch_sha = self.git.resolve_ref(lease.branch)
+        except GitError as error:
+            return self._cleanup_blocked(
+                "wt.finish",
+                "branch_unavailable",
+                f"Unable to validate cleanup branch {lease.branch!r}: {error}",
+                lease=lease,
+                warnings=warnings,
+            )
+        if branch_sha != reservation.branch_sha:
+            return self._cleanup_blocked(
+                "wt.finish",
+                "branch_head_mismatch",
+                f"Branch {lease.branch!r} changed before cleanup recovery.",
                 lease=lease,
                 warnings=warnings,
             )
@@ -4749,6 +5060,80 @@ class WorktreeService:
             warnings=warnings,
         )
 
+    def _cleanup_recovery_reservation_blockers(
+        self,
+        lease: Lease,
+        reservation: CleanupReservation,
+        pull_request: PullRequest,
+    ) -> tuple[dict[str, str], ...]:
+        blockers: list[dict[str, str]] = []
+        if (
+            reservation.lease_id != lease.id
+            or reservation.reserved_version != lease.version
+            or _GIT_OBJECT_ID.fullmatch(reservation.branch_sha) is None
+            or reservation.branch_sha != lease.head_sha
+        ):
+            blockers.append(
+                {
+                    "code": "cleanup_reservation_invalid",
+                    "message": (
+                        f"Lease {lease.id} cleanup reservation does not match the "
+                        "current lease."
+                    ),
+                }
+            )
+        if (
+            not lease.managed
+            or lease.owner_kind != "awf"
+            or not lease.branch.startswith("awf/")
+        ):
+            blockers.append(
+                {
+                    "code": "unmanaged_lease",
+                    "message": f"Lease {lease.id} is not an AWF branch cleanup lease.",
+                }
+            )
+        if lease.retain:
+            blockers.append(
+                {
+                    "code": "retained_lease",
+                    "message": f"Lease {lease.id} is retained and cannot be removed.",
+                }
+            )
+        if pull_request.number != lease.target_pr:
+            blockers.append(
+                {
+                    "code": "pr_mismatch",
+                    "message": f"Lease {lease.id} does not match the refreshed pull request.",
+                }
+            )
+        if (
+            not self._is_completed_pr(pull_request)
+            or not isinstance(pull_request.merge_commit_sha, str)
+            or _GIT_OBJECT_ID.fullmatch(pull_request.merge_commit_sha) is None
+        ):
+            blockers.append(
+                {
+                    "code": "pr_not_merged",
+                    "message": f"Pull request #{lease.target_pr} is not merged.",
+                }
+            )
+        if (
+            _GIT_OBJECT_ID.fullmatch(lease.head_sha) is None
+            or pull_request.head_sha != lease.head_sha
+            or reservation.branch_sha != pull_request.head_sha
+        ):
+            blockers.append(
+                {
+                    "code": "head_mismatch",
+                    "message": (
+                        f"Pull request #{pull_request.number} does not match the "
+                        f"reserved cleanup head for lease {lease.id}."
+                    ),
+                }
+            )
+        return tuple(blockers)
+
     @staticmethod
     def _is_completed_pr(pull_request: PullRequest) -> bool:
         return pull_request.state == "MERGED" or (
@@ -4779,7 +5164,14 @@ class WorktreeService:
         pull_request: PullRequest,
         *,
         include_deployment: bool = True,
+        repository: _RepositoryIdentity | None = None,
     ) -> tuple[dict[str, str], ...]:
+        repository, repository_blocker = self._validated_cleanup_repository(
+            lease, repository=repository
+        )
+        if repository_blocker is not None:
+            return (repository_blocker,)
+        assert repository is not None
         blockers: list[dict[str, str]] = []
         if not self._is_cleanup_managed(lease):
             blockers.append(
@@ -4802,7 +5194,11 @@ class WorktreeService:
                     "message": f"Lease {lease.id} does not match the refreshed pull request.",
                 }
             )
-        if not self._is_completed_pr(pull_request):
+        if (
+            not self._is_completed_pr(pull_request)
+            or not isinstance(pull_request.merge_commit_sha, str)
+            or _GIT_OBJECT_ID.fullmatch(pull_request.merge_commit_sha) is None
+        ):
             blockers.append(
                 {
                     "code": "pr_not_merged",
@@ -4825,7 +5221,7 @@ class WorktreeService:
             and lease.deployment_state is not DeploymentState.HEALTHY
         ):
             blockers.append(self._deployment_state_blocker(lease))
-        path_blocker = self._cleanup_path_blocker(lease)
+        path_blocker = self._cleanup_path_blocker(lease, repository=repository)
         if path_blocker is not None:
             blockers.append(path_blocker)
             return tuple(blockers)
@@ -4877,7 +5273,7 @@ class WorktreeService:
                     }
                 )
             protected = self._cleanup_protected_branches(
-                worktrees, lease.repository_root, pull_request
+                worktrees, repository.repository_root, pull_request
             )
             if lease.branch in protected:
                 blockers.append(
@@ -4926,17 +5322,134 @@ class WorktreeService:
                     )
         return tuple(blockers)
 
-    def _cleanup_path_blocker(self, lease: Lease) -> dict[str, str] | None:
-        expected = self.cache_dir / lease.repository_name / lease.id
-        if (
-            not self._is_pr_adopted_import(lease)
-            and lease.worktree_path != expected
-        ):
-            return {
-                "code": "unsafe_worktree_path",
-                "message": f"Lease {lease.id} does not use its managed cache path.",
+    @staticmethod
+    def _is_canonical_cleanup_lease_id(lease: Lease) -> bool:
+        try:
+            return str(uuid.UUID(lease.id)) == lease.id
+        except (AttributeError, ValueError):
+            return False
+
+    def _live_repository_identity(self) -> _RepositoryIdentity:
+        repository_id = self.git.repository_id()
+        repository_name = self.git.repository_name()
+        repository_root = self.git.repository_root().resolve()
+        return _RepositoryIdentity(
+            repository_id=repository_id,
+            repository_name=repository_name,
+            repository_root=repository_root,
+        )
+
+    def _validated_cleanup_repository(
+        self,
+        lease: Lease,
+        *,
+        repository: _RepositoryIdentity | None = None,
+    ) -> tuple[_RepositoryIdentity | None, dict[str, str] | None]:
+        try:
+            repository = repository or self._live_repository_identity()
+            lease_root = lease.repository_root.resolve()
+        except (GitError, OSError, RuntimeError, ValueError) as error:
+            return None, {
+                "code": "repository_inspection_failed",
+                "message": (
+                    f"Lease {lease.id} repository identity could not be inspected: "
+                    f"{error}"
+                ),
             }
+        if (
+            lease.repository_id != repository.repository_id
+            or lease.repository_name != repository.repository_name
+            or lease_root != repository.repository_root
+        ):
+            return None, {
+                "code": "repository_mismatch",
+                "message": (
+                    f"Lease {lease.id} does not match the current Git repository "
+                    "identity."
+                ),
+            }
+        return repository, None
+
+    def _is_legacy_promotion_retry_cleanup_path(
+        self, lease: Lease, *, repository: _RepositoryIdentity
+    ) -> bool:
+        target_base_sha = lease.target_base_sha
+        if (
+            not lease.managed
+            or lease.owner_kind != "awf"
+            or lease.purpose is not Purpose.PROMOTE
+            or lease.promotion_mode is not PromotionMode.OUT_OF_ORDER
+            or target_base_sha is None
+            or _GIT_OBJECT_ID.fullmatch(target_base_sha) is None
+        ):
+            return False
+        suffix = f"-retry-{target_base_sha}"
+        if not lease.initiative.endswith(suffix):
+            return False
+        initiative = lease.initiative.removesuffix(suffix)
+        if not initiative:
+            return False
+        try:
+            expected = self._promotion_retry_identity(
+                repository_name=repository.repository_name,
+                initiative=initiative,
+                target_base_sha=target_base_sha,
+            )
+        except ValueError:
+            return False
+        return (
+            lease.initiative == expected.initiative
+            and lease.branch == expected.branch
+            and lease.worktree_path == expected.worktree_path
+        )
+
+    def _cleanup_path_blocker(
+        self,
+        lease: Lease,
+        *,
+        repository: _RepositoryIdentity | None = None,
+    ) -> dict[str, str] | None:
+        repository, repository_blocker = self._validated_cleanup_repository(
+            lease, repository=repository
+        )
+        if repository_blocker is not None:
+            return repository_blocker
+        assert repository is not None
         worktree_path = lease.worktree_path
+        if not self._is_pr_adopted_import(lease):
+            expected = self.cache_dir / repository.repository_name / lease.id
+            try:
+                expected_relative = expected.relative_to(self.cache_dir)
+                path_relative = worktree_path.relative_to(self.cache_dir)
+                worktree_path.resolve().relative_to(self.cache_dir.resolve())
+            except (OSError, RuntimeError, ValueError):
+                return {
+                    "code": "unsafe_worktree_path",
+                    "message": f"Lease {lease.id} does not use its managed cache path.",
+                }
+            if (
+                expected_relative.parts
+                != (repository.repository_name, lease.id)
+                or ".." in expected_relative.parts
+                or ".." in path_relative.parts
+            ):
+                return {
+                    "code": "unsafe_worktree_path",
+                    "message": f"Lease {lease.id} does not use its managed cache path.",
+                }
+            if not (
+                (
+                    self._is_canonical_cleanup_lease_id(lease)
+                    and worktree_path == expected
+                )
+                or self._is_legacy_promotion_retry_cleanup_path(
+                    lease, repository=repository
+                )
+            ):
+                return {
+                    "code": "unsafe_worktree_path",
+                    "message": f"Lease {lease.id} does not use its managed cache path.",
+                }
         current = Path(worktree_path.anchor)
         for part in worktree_path.parts[1:]:
             current /= part
@@ -4956,7 +5469,7 @@ class WorktreeService:
                 }
         return None
 
-    def _discard_sync_worktree_identity(
+    def _cleanup_worktree_identity(
         self,
         lease: Lease,
         *,
@@ -4966,18 +5479,21 @@ class WorktreeService:
         if path_blocker is not None:
             return None, (path_blocker["code"], path_blocker["message"])
         try:
+            parent_status = lease.worktree_path.parent.lstat()
             path_status = lease.worktree_path.lstat()
         except OSError as error:
             return None, (
                 "worktree_inspection_failed",
                 f"Lease {lease.id} worktree root could not be inspected: {error}",
             )
-        if stat.S_ISLNK(path_status.st_mode):
+        if stat.S_ISLNK(parent_status.st_mode) or stat.S_ISLNK(path_status.st_mode):
             return None, (
                 "unsafe_worktree_path",
                 f"Lease {lease.id} has a symlinked worktree root.",
             )
-        if not stat.S_ISDIR(path_status.st_mode):
+        if not stat.S_ISDIR(parent_status.st_mode) or not stat.S_ISDIR(
+            path_status.st_mode
+        ):
             return None, (
                 "unregistered_worktree",
                 f"Lease {lease.id} worktree root is not a directory.",
@@ -4985,6 +5501,8 @@ class WorktreeService:
         identity = _WorktreeIdentity(
             device=path_status.st_dev,
             inode=path_status.st_ino,
+            parent_device=parent_status.st_dev,
+            parent_inode=parent_status.st_ino,
         )
         if expected is not None and identity != expected:
             return None, (
@@ -5800,7 +6318,7 @@ class WorktreeService:
         )
         if path_is_absent:
             return self._complete_discard_sync_cleanup(lease, reservation)
-        identity, identity_issue = self._discard_sync_worktree_identity(lease)
+        identity, identity_issue = self._cleanup_worktree_identity(lease)
         if identity_issue is not None:
             return self._discard_sync_cleanup_reserved(
                 lease,
@@ -5865,7 +6383,7 @@ class WorktreeService:
         assert lease.source_base_sha is not None
         assert lease.source_head_sha is not None
         assert lease.target_base_sha is not None
-        _, identity_issue = self._discard_sync_worktree_identity(
+        _, identity_issue = self._cleanup_worktree_identity(
             lease, expected=identity
         )
         if identity_issue is not None:
@@ -6534,11 +7052,24 @@ class WorktreeService:
             warnings=tuple(warnings or ()),
         )
 
-    def _refresh_lease(self, lease: Lease, warnings: list[dict[str, str]]) -> None:
+    def _refresh_lease(
+        self,
+        lease: Lease,
+        warnings: list[dict[str, str]],
+        *,
+        repository: _RepositoryIdentity | None = None,
+    ) -> None:
         if lease.target_pr is None:
             return
+        repository, repository_blocker = self._validated_cleanup_repository(
+            lease, repository=repository
+        )
+        if repository_blocker is not None:
+            warnings.append(repository_blocker)
+            return
+        assert repository is not None
         try:
-            github = self.github or GhClient(lease.repository_root)
+            github = self.github or GhClient(repository.repository_root)
             pull_request = github.view_pr(lease.target_pr)
         except Exception:
             warnings.append(
@@ -6574,7 +7105,9 @@ class WorktreeService:
                 )
             elif self._is_completed_pr(pull_request):
                 if current.purpose is Purpose.PROMOTE:
-                    self._refresh_promotion(lease.id, pull_request, warnings)
+                    self._refresh_promotion(
+                        lease.id, pull_request, warnings, repository=repository
+                    )
                     self.registry.sync_release_state_for_lease(
                         lease.id,
                         ReleaseState.MERGED,
@@ -6619,11 +7152,15 @@ class WorktreeService:
         lease_id: str,
         pull_request: PullRequest,
         warnings: list[dict[str, str]],
+        *,
+        repository: _RepositoryIdentity,
     ) -> None:
         current = self._current_refresh_lease(lease_id, pull_request.number)
         if current is None:
             return
-        probe, adapter_digest = self._probe_deployment(current, pull_request)
+        probe, adapter_digest = self._probe_deployment(
+            current, pull_request, repository=repository
+        )
         if probe.response is None:
             self._transition_refresh(
                 lease_id,
@@ -6642,14 +7179,19 @@ class WorktreeService:
             adapter_digest=adapter_digest or "",
             received_at=probe.received_at,
         )
-        if probe.status == "healthy":
+        if probe.is_cleanup_healthy:
             self._transition_refresh(
                 lease_id,
                 pull_request,
                 LeaseState.CLEANABLE,
                 deployment_state=DeploymentState.HEALTHY,
                 event_type="deployment_evidence",
-                summary="Fresh deployment evidence is healthy",
+                summary=(
+                    "Fresh deployment evidence confirms the subject is superseded "
+                    "by a healthy production image"
+                    if probe.status == "superseded_healthy"
+                    else "Fresh deployment evidence is healthy"
+                ),
                 evidence=evidence,
             )
             return
@@ -10094,6 +10636,33 @@ class WorktreeService:
     def _promotion_branch(initiative: str) -> str:
         return f"awf/{initiative}/promote"
 
+    def _promotion_retry_identity(
+        self,
+        *,
+        repository_name: str,
+        initiative: str,
+        target_base_sha: str,
+    ) -> _PromotionRetryIdentity:
+        if not isinstance(repository_name, str) or not repository_name:
+            raise ValueError("promotion retry repository name is invalid")
+        _initiative_slug(initiative)
+        if _GIT_OBJECT_ID.fullmatch(target_base_sha) is None:
+            raise ValueError("promotion retry target SHA is invalid")
+        retry_initiative = f"{initiative}-retry-{target_base_sha}"
+        worktree_digest = hashlib.sha256(
+            retry_initiative.encode("utf-8")
+        ).hexdigest()[:16]
+        return _PromotionRetryIdentity(
+            initiative=retry_initiative,
+            branch=self._promotion_branch(retry_initiative),
+            worktree_path=(
+                self.cache_dir
+                / repository_name
+                / f"promotion-retry-{target_base_sha}-{worktree_digest}"
+            ),
+        )
+
+
     def _stale_precommit_promotion_retry_identity(
         self,
         lease: Lease | None,
@@ -10148,18 +10717,10 @@ class WorktreeService:
                 return None
         except (GitError, OSError, RuntimeError, sqlite3.Error):
             return None
-        retry_initiative = f"{initiative}-retry-{live_target_sha}"
-        worktree_digest = hashlib.sha256(
-            retry_initiative.encode("utf-8")
-        ).hexdigest()[:16]
-        return _PromotionRetryIdentity(
-            initiative=retry_initiative,
-            branch=self._promotion_branch(retry_initiative),
-            worktree_path=(
-                self.cache_dir
-                / lease.repository_name
-                / f"promotion-retry-{live_target_sha}-{worktree_digest}"
-            ),
+        return self._promotion_retry_identity(
+            repository_name=lease.repository_name,
+            initiative=initiative,
+            target_base_sha=live_target_sha,
         )
 
 

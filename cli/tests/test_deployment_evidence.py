@@ -252,6 +252,49 @@ def test_request_and_response_reject_invalid_oids_and_timestamps() -> None:
             max_age_seconds=300,
         )
 
+def test_superseded_healthy_requires_and_round_trips_image_revision() -> None:
+    request = _request()
+    response = DeploymentEvidenceResponse.parse(
+        _response(
+            request,
+            status="superseded_healthy",
+            production_image_git_sha="c" * 40,
+        ),
+        request,
+        max_age_seconds=300,
+    )
+
+    assert response.production_image_git_sha == "c" * 40
+    assert json.loads(response.to_bytes())["production_image_git_sha"] == "c" * 40
+    assert response.registry_evidence(
+        adapter_digest="d" * 64, received_at=datetime.now(timezone.utc)
+    )["production_image_git_sha"] == "c" * 40
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"status": "superseded_healthy"},
+        {
+            "status": "superseded_healthy",
+            "production_image_git_sha": "not-an-oid",
+        },
+        {
+            "status": "superseded_healthy",
+            "production_image_git_sha": _MERGE_SHA,
+        },
+        {"status": "healthy", "production_image_git_sha": "c" * 40},
+    ),
+)
+def test_response_rejects_invalid_superseded_image_revision(
+    overrides: dict[str, object],
+) -> None:
+    request = _request()
+    with pytest.raises(EvidenceProtocolError):
+        DeploymentEvidenceResponse.parse(
+            _response(request, **overrides), request, max_age_seconds=300
+        )
+
 
 @pytest.mark.parametrize(
     ("body", "limit", "timeout_seconds", "failure_code"),
@@ -438,5 +481,117 @@ def test_registry_round_trips_allowlisted_deployment_evidence(tmp_path: Path) ->
         connection.execute(
             "UPDATE worktree_events SET evidence = ? WHERE id = ?",
             (json.dumps(forward), events[-1].id),
+        )
+    assert registry.list_events(lease.id)[-1].evidence is None
+
+
+def test_registry_evidence_preserves_fractional_receipt_order(
+    tmp_path: Path,
+) -> None:
+    received_at = (datetime.now(timezone.utc) - timedelta(seconds=1)).replace(
+        microsecond=900_000
+    )
+    request = _request()
+    response = DeploymentEvidenceResponse.parse(
+        _response(
+            request,
+            observed_at=received_at.replace(microsecond=500_000)
+            .isoformat(timespec="microseconds")
+            .replace("+00:00", "Z"),
+        ),
+        request,
+        max_age_seconds=300,
+        now=received_at,
+    )
+    evidence = response.registry_evidence(
+        adapter_digest="c" * 64,
+        received_at=received_at,
+    )
+    assert evidence["received_at"] == received_at.isoformat(
+        timespec="microseconds"
+    ).replace("+00:00", "Z")
+
+    registry = WorktreeRegistry(tmp_path / "state.sqlite3")
+    lease = registry.create_lease(
+        Lease.new(
+            repository_id=_REPOSITORY_ID,
+            repository_name="repository",
+            repository_root=tmp_path,
+            worktree_path=tmp_path,
+            initiative="fractional-evidence",
+            purpose=Purpose.PROMOTE,
+            branch="awf/fractional-evidence/promote",
+            base_ref="main",
+            head_sha=_HEAD_SHA,
+            managed=True,
+            owner_kind="awf",
+        )
+    )
+    registry.transition(
+        lease.id,
+        LeaseState.CLEANABLE,
+        expected_version=lease.version,
+        deployment_state=DeploymentState.HEALTHY,
+        evidence=evidence,
+    )
+    assert registry.list_events(lease.id)[-1].evidence == evidence
+
+
+def test_registry_rejects_invalid_superseded_evidence_on_write_and_read(
+    tmp_path: Path,
+) -> None:
+    registry = WorktreeRegistry(tmp_path / "state.sqlite3")
+    lease = registry.create_lease(
+        Lease.new(
+            repository_id=_REPOSITORY_ID,
+            repository_name="repository",
+            repository_root=tmp_path,
+            worktree_path=tmp_path,
+            initiative="evidence",
+            purpose=Purpose.PROMOTE,
+            branch="awf/evidence/promote",
+            base_ref="main",
+            head_sha=_HEAD_SHA,
+            managed=True,
+            owner_kind="awf",
+        )
+    )
+    observed_at = datetime.now(timezone.utc) - timedelta(seconds=2)
+    received_at = observed_at + timedelta(seconds=1)
+    evidence = {
+        "protocol": PROTOCOL,
+        "subject_revision": _MERGE_SHA,
+        "status": "superseded_healthy",
+        "production_image_git_sha": "c" * 40,
+        "observed_at": observed_at.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "received_at": received_at.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "adapter_digest": "d" * 64,
+        "response_digest": "e" * 64,
+    }
+    updated = registry.transition(
+        lease.id,
+        LeaseState.CLEANABLE,
+        expected_version=lease.version,
+        deployment_state=DeploymentState.HEALTHY,
+        evidence=evidence,
+    )
+    event = registry.list_events(lease.id)[-1]
+    assert event.evidence == evidence
+
+    invalid = dict(evidence)
+    invalid["status"] = "healthy"
+    with pytest.raises(ValueError, match="invalid deployment evidence"):
+        registry.transition(
+            updated.id,
+            LeaseState.CLEANABLE,
+            expected_version=updated.version,
+            deployment_state=DeploymentState.HEALTHY,
+            evidence=invalid,
+        )
+
+    with sqlite3.connect(registry.db_path) as connection:
+        connection.execute(
+            "UPDATE worktree_events SET evidence = ? WHERE id = ?",
+            (json.dumps(invalid), event.id),
         )
     assert registry.list_events(lease.id)[-1].evidence is None

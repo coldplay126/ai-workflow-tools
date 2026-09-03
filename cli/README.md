@@ -324,20 +324,35 @@ allowlisted. AWF writes one strict JSON request to stdin:
 ```
 
 The adapter writes exactly one bounded JSON object to stdout with the same
-`protocol`, `request_id`, `repository_id`, and `subject_revision`, a `status`
-of `healthy`, `pending`, `failed`, or `unknown`, and RFC3339 UTC `observed_at`.
-It MAY include a bounded opaque `evidence_id` and `diagnostic_code`. AWF bounds
-both output streams and terminates the full adapter process group on
-timeout or overflow even if its leader already exited. It records only
-allowlisted structured evidence at response receipt time; raw stdout, stderr,
-credentials, and provider-specific fields are never recorded.
+`protocol`, `request_id`, `repository_id`, and `subject_revision`; a `status`
+of `healthy`, `superseded_healthy`, `pending`, `failed`, or `unknown`; and
+RFC3339 UTC `observed_at`. `superseded_healthy` MUST include
+`production_image_git_sha`, a lowercase 40- or 64-character Git OID different
+from `subject_revision`. Other statuses MUST NOT include that field. It MAY
+include a bounded opaque `evidence_id` and `diagnostic_code`. AWF bounds both
+output streams and terminates the full adapter process group on timeout or
+overflow even if its leader already exited. It records only allowlisted
+structured evidence at response receipt time; raw stdout, stderr, credentials,
+and provider-specific fields are never recorded.
 
 Only a fresh `healthy` response bound to the exact PR merge SHA permits cleanup.
-`status --refresh` and `finish --apply` each issue a fresh nonce; `finish`
-re-probes after preflight and compares that subject revision again both before
-and after its cleanup reservation. A changed merge revision, missing evidence,
-`pending`, `unknown`, `failed`, invalid JSON, response mismatch or replay,
-staleness, nonzero exit, timeout, or output overflow preserves the worktree.
+A `superseded_healthy` response is equivalent only after AWF proves in the
+current Git graph that `merge_base(subject_revision, production_image_git_sha)`
+equals `subject_revision`. Equal revisions, missing objects, Git errors, and
+non-ancestors preserve the worktree. `status --refresh` and `finish --apply`
+each issue a fresh nonce; `finish` re-probes after preflight and compares that
+subject revision again both before and after its cleanup reservation. A changed
+merge revision, missing evidence, `pending`, `unknown`, `failed`, invalid JSON,
+response mismatch or replay, staleness, nonzero exit, timeout, or output
+overflow preserves the worktree.
+
+Canonical AWF cache paths require a lowercase canonical UUID lease ID. AWF also
+recognizes an old out-of-order retry path only for a managed AWF `PROMOTE`
+lease in `OUT_OF_ORDER` mode. It recomputes the exact
+`promotion-retry-<target-sha>-<initiative-digest>` path from the current
+repository ID, name, resolved root, valid target SHA, exact
+`<initiative>-retry-<target-sha>` suffix, and exact promotion branch. Any
+repository, branch, suffix, digest, or path mismatch preserves the worktree.
 
 `approved_or_self_merged` is the intended policy for a solo repository: it
 accepts either an approved source PR or a PR merged by its author, so AWF does
