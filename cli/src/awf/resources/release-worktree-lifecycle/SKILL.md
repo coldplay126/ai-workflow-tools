@@ -470,19 +470,36 @@ The adapter receives one `awf.deployment-evidence/v1` JSON request on stdin:
 `protocol`, fresh `request_id`, `repository_id`, `pull_request_number`,
 `source_head_sha`, exact merge-SHA `subject_revision`, and UTC `requested_at`.
 It MUST emit one strict bounded JSON object with the same protocol, nonce,
-repository, and subject revision; `healthy|pending|failed|unknown` status; and
-RFC3339 UTC `observed_at`. Bounded opaque `evidence_id` and `diagnostic_code`
-are optional.
+repository, and subject revision; `healthy|superseded_healthy|pending|failed|unknown`
+status; and RFC3339 UTC `observed_at`. `superseded_healthy` MUST include
+`production_image_git_sha`: a lowercase 40- or 64-character Git OID different
+from `subject_revision`. Other statuses MUST NOT include that field. Bounded
+opaque `evidence_id` and `diagnostic_code` are optional.
 
 `status --refresh` and `finish --apply` each obtain a fresh response. `finish`
 MUST re-probe with a new nonce and compare the proven merge identity again
-after both its probe and cleanup reservation. Only fresh, exact-bound `healthy`
-permits cleanup. `pending`, `unknown`, `failed`, changed merge identity, invalid
+after both its probe and cleanup reservation. Fresh exact-bound `healthy`
+permits cleanup. `superseded_healthy` permits cleanup only after AWF proves in
+the current Git graph that
+`merge_base(subject_revision, production_image_git_sha) == subject_revision`.
+Equal revisions, unavailable objects, Git errors, and non-ancestors preserve
+the worktree. `pending`, `unknown`, `failed`, changed merge identity, invalid
 JSON, mismatch or replay, stale evidence, nonzero exit, timeout, or output
-overflow preserve the worktree. AWF terminates the full adapter process group
-on timeout or overflow even after the adapter leader exits, records received-at
+overflow also preserve it. AWF terminates the full adapter process group on
+timeout or overflow even after the adapter leader exits, records received-at
 time only with allowlisted structured evidence, and MUST NOT store raw stdout,
 stderr, credentials, or provider-specific fields.
+
+## Legacy out-of-order retry cleanup
+
+Canonical AWF cache paths require a lowercase canonical UUID lease ID. AWF
+accepts a legacy retry path only for a managed AWF `PROMOTE` lease in
+`OUT_OF_ORDER` mode when the current repository ID, name, and resolved root
+match the lease. It requires a valid target SHA, an initiative with the exact
+`-retry-<target-sha>` suffix, the exact promotion branch, and the exact
+recomputed `promotion-retry-<target-sha>-<sha256(initiative)[:16]>` path.
+Any repository, branch, suffix, digest, or path mismatch preserves the
+worktree.
 
 ## Imported legacy worktree cleanup
 

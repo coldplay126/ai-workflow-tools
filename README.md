@@ -160,8 +160,9 @@ AWF는 범용 배포 오케스트레이터가 아닙니다. repository config가
 고르는 것은 허용하지 않습니다. `~/.config/awf/adapters/` 아래의 regular
 non-symlink, operator-owned exact repository-id adapter만
 `awf.deployment-evidence/v1` JSON evidence를 반환할 수 있습니다. 실행 환경은
-최소 allowlist로 제한되며, exact PR merge SHA에 묶인 fresh healthy evidence만
-worktree 정리를 허용합니다.
+최소 allowlist로 제한됩니다. cleanup은 exact PR merge SHA에 묶인 fresh
+`healthy` evidence 또는 current Git graph에서 strict ancestor로 검증한
+`superseded_healthy` evidence만 허용합니다.
 
 `awf ready`는 프로젝트에서 가장 먼저 실행하는 read-only 점검입니다. 설정,
 provider, skill, scan, workflow, operations wiki 상태를 한 번에 모아 현재
@@ -493,8 +494,9 @@ AWF is not a generic deployment orchestrator. Repository configuration cannot
 select an executable. Only a regular, non-symlink, operator-owned exact
 repository-id adapter below `~/.config/awf/adapters/` may return
 `awf.deployment-evidence/v1` JSON evidence. Its environment is minimally
-allowlisted, and cleanup requires fresh healthy evidence bound to the exact PR
-merge SHA.
+allowlisted. Cleanup requires fresh exact PR merge-SHA `healthy` evidence or
+`superseded_healthy` evidence whose production image revision is a proven strict
+descendant in the current Git graph.
 
 `awf ready` is the first read-only check for a project. It combines config,
 provider, skill, scan, workflow, and operations-wiki readiness into one report,

@@ -39,6 +39,12 @@
   both probe and cleanup reservation, fresh apply probes, and allowlisted
   received-at registry evidence fail closed without retaining raw output or
   credentials.
+- `awf wt` cleanup accepts `superseded_healthy` deployment evidence only when
+  its recorded production image Git revision is a strict descendant of the
+  exact PR merge subject in the current graph. Equal, unavailable, or unrelated
+  revisions preserve the worktree. Legacy out-of-order retry worktrees are
+  removable only when the current repository identity, exact retry derivation,
+  branch, and path all match; canonical cache leases require lowercase UUID IDs.
 
 ### Added
 - `awf wt sync --from <production> --to <staging>`가 configured production의

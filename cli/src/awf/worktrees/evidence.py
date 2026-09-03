@@ -115,6 +115,7 @@ class DeploymentEvidenceResponse:
     subject_revision: str
     status: str
     observed_at: str
+    production_image_git_sha: str | None = None
     evidence_id: str | None = None
     diagnostic_code: str | None = None
 
@@ -136,7 +137,11 @@ class DeploymentEvidenceResponse:
             "status",
             "observed_at",
         }
-        optional = {"evidence_id", "diagnostic_code"}
+        optional = {
+            "evidence_id",
+            "diagnostic_code",
+            "production_image_git_sha",
+        }
         unknown = set(payload) - required - optional
         missing = required - set(payload)
         if unknown:
@@ -154,8 +159,29 @@ class DeploymentEvidenceResponse:
         _validate_identifier(payload["repository_id"], "repository_id")
         _validate_oid(payload["subject_revision"], "subject_revision")
         status = payload["status"]
-        if not isinstance(status, str) or status not in {"healthy", "pending", "failed", "unknown"}:
+        if not isinstance(status, str) or status not in {
+            "healthy",
+            "superseded_healthy",
+            "pending",
+            "failed",
+            "unknown",
+        }:
             raise EvidenceProtocolError("evidence response status is invalid")
+        production_image_git_sha = payload.get("production_image_git_sha")
+        if status == "superseded_healthy":
+            if "production_image_git_sha" not in payload:
+                raise EvidenceProtocolError(
+                    "superseded_healthy evidence requires production_image_git_sha"
+                )
+            _validate_oid(production_image_git_sha, "production_image_git_sha")
+            if production_image_git_sha == payload["subject_revision"]:
+                raise EvidenceProtocolError(
+                    "production_image_git_sha must differ from subject_revision"
+                )
+        elif "production_image_git_sha" in payload:
+            raise EvidenceProtocolError(
+                "production_image_git_sha is only valid for superseded_healthy evidence"
+            )
         observed_at = payload["observed_at"]
         observed = _parse_utc_timestamp(observed_at, "observed_at")
         received_at = now or datetime.now(timezone.utc)
@@ -182,11 +208,50 @@ class DeploymentEvidenceResponse:
             subject_revision=request.subject_revision,
             status=status,
             observed_at=observed_at,
+            production_image_git_sha=production_image_git_sha,
             evidence_id=evidence_id,
             diagnostic_code=diagnostic_code,
         )
 
+    def validate(self) -> None:
+        if self.protocol != PROTOCOL:
+            raise EvidenceProtocolError("unsupported evidence response protocol")
+        if not isinstance(self.request_id, str) or _REQUEST_ID.fullmatch(self.request_id) is None:
+            raise EvidenceProtocolError("evidence response request_id is invalid")
+        _validate_identifier(self.repository_id, "repository_id")
+        _validate_oid(self.subject_revision, "subject_revision")
+        if self.status not in {
+            "healthy",
+            "superseded_healthy",
+            "pending",
+            "failed",
+            "unknown",
+        }:
+            raise EvidenceProtocolError("evidence response status is invalid")
+        _parse_utc_timestamp(self.observed_at, "observed_at")
+        if self.status == "superseded_healthy":
+            _validate_oid(self.production_image_git_sha, "production_image_git_sha")
+            if self.production_image_git_sha == self.subject_revision:
+                raise EvidenceProtocolError(
+                    "production_image_git_sha must differ from subject_revision"
+                )
+        elif self.production_image_git_sha is not None:
+            raise EvidenceProtocolError(
+                "production_image_git_sha is only valid for superseded_healthy evidence"
+            )
+        if self.evidence_id is not None and (
+            not isinstance(self.evidence_id, str)
+            or _SAFE_EVIDENCE_ID.fullmatch(self.evidence_id) is None
+        ):
+            raise EvidenceProtocolError("evidence response evidence_id is invalid")
+        if self.diagnostic_code is not None and (
+            not isinstance(self.diagnostic_code, str)
+            or _SAFE_DIAGNOSTIC_CODE.fullmatch(self.diagnostic_code) is None
+        ):
+            raise EvidenceProtocolError("evidence response diagnostic_code is invalid")
+
     def registry_evidence(self, *, adapter_digest: str, received_at: datetime) -> dict[str, str]:
+        self.validate()
         payload = {
             "protocol": self.protocol,
             "subject_revision": self.subject_revision,
@@ -196,6 +261,8 @@ class DeploymentEvidenceResponse:
             "adapter_digest": adapter_digest,
             "response_digest": hashlib.sha256(self.to_bytes()).hexdigest(),
         }
+        if self.production_image_git_sha is not None:
+            payload["production_image_git_sha"] = self.production_image_git_sha
         if self.evidence_id is not None:
             payload["evidence_id"] = self.evidence_id
         if self.diagnostic_code is not None:
@@ -203,6 +270,7 @@ class DeploymentEvidenceResponse:
         return payload
 
     def to_bytes(self) -> bytes:
+        self.validate()
         payload: dict[str, str] = {
             "protocol": self.protocol,
             "request_id": self.request_id,
@@ -211,6 +279,8 @@ class DeploymentEvidenceResponse:
             "status": self.status,
             "observed_at": self.observed_at,
         }
+        if self.production_image_git_sha is not None:
+            payload["production_image_git_sha"] = self.production_image_git_sha
         if self.evidence_id is not None:
             payload["evidence_id"] = self.evidence_id
         if self.diagnostic_code is not None:
@@ -225,10 +295,21 @@ class EvidenceProbeResult:
     response: DeploymentEvidenceResponse | None
     received_at: datetime
     failure_code: str | None = None
+    superseded_verified: bool = False
 
     @property
     def status(self) -> str:
         return self.response.status if self.response is not None else "unknown"
+
+    @property
+    def is_cleanup_healthy(self) -> bool:
+        return self.response is not None and (
+            self.response.status == "healthy"
+            or (
+                self.response.status == "superseded_healthy"
+                and self.superseded_verified
+            )
+        )
 
 
 class DeploymentEvidenceExecutor:
@@ -483,4 +564,8 @@ def _parse_utc_timestamp(value: object, field: str) -> datetime:
 def _format_utc(value: datetime) -> str:
     if value.tzinfo is None or value.utcoffset() != timedelta(0):
         raise EvidenceProtocolError("timestamps must be UTC")
-    return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return (
+        value.astimezone(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )

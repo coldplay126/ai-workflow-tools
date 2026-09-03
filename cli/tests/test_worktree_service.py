@@ -161,8 +161,14 @@ def closed_pr(**kwargs: object) -> PullRequest:
 
 
 class StubEvidenceExecutor:
-    def __init__(self, status: str = "healthy") -> None:
+    def __init__(
+        self,
+        status: str = "healthy",
+        *,
+        production_image_git_sha: str | None = None,
+    ) -> None:
         self.status = status
+        self.production_image_git_sha = production_image_git_sha
         self.failure_code: str | None = None
         self.requests: list[object] = []
 
@@ -181,6 +187,7 @@ class StubEvidenceExecutor:
                 observed_at=datetime.now(timezone.utc)
                 .isoformat(timespec="seconds")
                 .replace("+00:00", "Z"),
+                production_image_git_sha=self.production_image_git_sha,
             ),
             received_at,
         )
@@ -7450,6 +7457,58 @@ def test_promote_retries_clean_stale_precommit_out_of_order_lease_on_advanced_ta
     assert promotion_harness.github.create_calls[0]["head"] == retried.lease.branch
 
 
+def test_finish_removes_only_exact_generated_out_of_order_retry_path(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, _stale = _blocked_clean_precommit_out_of_order_promotion(
+        promotion_harness,
+        monkeypatch,
+    )
+    _advance_promotion_target(promotion_harness)
+    retried = promotion_harness.service.promote(
+        source_pr=source.number,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+    assert retried.lease is not None
+    lease = retried.lease
+    assert lease.target_base_sha is not None
+    assert promotion_harness.service._cleanup_path_blocker(lease) is None
+
+    tampered = (
+        replace(lease, target_base_sha="d" * 40),
+        replace(lease, initiative=f"{lease.initiative}-tampered"),
+        replace(lease, branch=f"{lease.branch}-tampered"),
+        replace(lease, repository_id="different-repository"),
+        replace(
+            lease,
+            worktree_path=lease.worktree_path.parent
+            / f"promotion-retry-{lease.target_base_sha}-{'0' * 16}",
+        ),
+    )
+    for candidate in tampered:
+        blocker = promotion_harness.service._cleanup_path_blocker(candidate)
+        assert blocker is not None
+        assert blocker["code"] in {"repository_mismatch", "unsafe_worktree_path"}
+
+    assert lease.target_pr is not None
+    target = promotion_harness.github.prs[lease.target_pr]
+    promotion_harness.github.prs[lease.target_pr] = replace(
+        target,
+        state="MERGED",
+        head_sha=lease.head_sha,
+        merge_commit_sha=lease.head_sha,
+    )
+    promotion_harness.service.status(refresh=True)
+
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.decision == "removed"
+    assert not lease.worktree_path.exists()
+
+
 def test_promote_preview_and_apply_share_stale_retry_identity(
     promotion_harness: PromotionHarness,
     monkeypatch: pytest.MonkeyPatch,
@@ -8809,6 +8868,89 @@ def test_finish_removes_healthy_managed_promotion(
     assert removed.state is LeaseState.REMOVED
 
 
+def test_finish_removes_a_verified_superseded_promotion(
+    promotion_harness: PromotionHarness,
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+    git_command(
+        promotion_harness.repo,
+        "checkout",
+        "-q",
+        "-b",
+        "production-image",
+        lease.head_sha,
+    )
+    (promotion_harness.repo / "production-image.txt").write_text(
+        "current production image\n",
+        encoding="utf-8",
+    )
+    git_command(promotion_harness.repo, "add", "production-image.txt")
+    git_command(
+        promotion_harness.repo,
+        "commit",
+        "-q",
+        "-m",
+        "advance production image",
+    )
+    production_image_git_sha = git_command(
+        promotion_harness.repo, "rev-parse", "HEAD"
+    )
+    git_command(promotion_harness.repo, "checkout", "-q", "staging")
+    promotion_harness.evidence_executor.status = "superseded_healthy"
+    promotion_harness.evidence_executor.production_image_git_sha = (
+        production_image_git_sha
+    )
+
+    refreshed = promotion_harness.service.status(refresh=True)
+    current = promotion_harness.registry.get_lease(lease.id)
+
+    assert refreshed.status == "ok"
+    assert current is not None
+    assert current.state is LeaseState.CLEANABLE
+    evidence = promotion_harness.registry.list_events(lease.id)[-1].evidence
+    assert evidence is not None
+    assert evidence["status"] == "superseded_healthy"
+    assert evidence["subject_revision"] == lease.head_sha
+    assert evidence["production_image_git_sha"] == production_image_git_sha
+
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.decision == "removed"
+    assert not lease.worktree_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("image_revision", "failure_code"),
+    (
+        ("equal", "deployment_superseded_subject_equal"),
+        ("non_ancestor", "deployment_superseded_subject_not_ancestor"),
+        ("unavailable", "deployment_superseded_revision_unavailable"),
+    ),
+)
+def test_refresh_preserves_unverified_superseded_promotion(
+    promotion_harness: PromotionHarness,
+    image_revision: str,
+    failure_code: str,
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+    promotion_harness.evidence_executor.status = "superseded_healthy"
+    promotion_harness.evidence_executor.production_image_git_sha = {
+        "equal": lease.head_sha,
+        "non_ancestor": promotion_harness.source_head_sha,
+        "unavailable": "d" * 40,
+    }[image_revision]
+
+    result = promotion_harness.service.status(refresh=True)
+    current = promotion_harness.registry.get_lease(lease.id)
+
+    assert result.status == "ok"
+    assert current is not None
+    assert current.state is LeaseState.DEPLOYING
+    assert current.deployment_state is DeploymentState.UNKNOWN
+    assert failure_code in {warning["code"] for warning in result.warnings}
+    assert lease.worktree_path.exists()
+
+
 def test_finish_previews_without_mutating(
     promotion_harness: PromotionHarness,
 ) -> None:
@@ -8871,6 +9013,34 @@ def test_gc_is_preview_by_default_and_rechecks_each_candidate(
     assert applied.decision == "removed"
     assert not safe.worktree_path.exists()
     assert dirty.worktree_path.exists()
+
+
+def test_gc_preserves_unverified_superseded_promotion(
+    promotion_harness: PromotionHarness,
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+    promotion_harness.evidence_executor.status = "superseded_healthy"
+    promotion_harness.evidence_executor.production_image_git_sha = lease.head_sha
+    stale_at = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat(
+        timespec="seconds"
+    )
+    with sqlite3.connect(promotion_harness.registry.db_path) as connection:
+        connection.execute(
+            "UPDATE worktree_leases SET last_used_at = ? WHERE id = ?",
+            (stale_at, lease.id),
+        )
+
+    result = promotion_harness.service.gc(
+        merged=True,
+        older_than="7d",
+        apply=True,
+    )
+
+    assert result.status == "blocked"
+    assert "deployment_superseded_subject_equal" in {
+        item["code"] for item in result.blockers
+    }
+    assert lease.worktree_path.exists()
 
 
 @pytest.mark.parametrize(
@@ -9151,6 +9321,259 @@ def test_finish_does_not_recover_adopted_import_through_a_symlink(
         )
         == lease.head_sha
     )
+
+
+
+@pytest.mark.parametrize(
+    ("substitution", "blocker_code"),
+    (
+        ("directory", "worktree_identity_changed"),
+        ("symlink", "unsafe_worktree_path"),
+    ),
+)
+def test_finish_rechecks_worktree_identity_after_cleanup_reservation(
+    promotion_harness: PromotionHarness,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    substitution: str,
+    blocker_code: str,
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+    original_identity = promotion_harness.service._cleanup_worktree_identity
+    relocated = tmp_path / "relocated-worktree"
+    swapped = False
+    remove_calls: list[Path] = []
+
+    def recheck_identity(current: Lease, *, expected=None):
+        nonlocal swapped
+        if expected is not None and not swapped:
+            swapped = True
+            current.worktree_path.rename(relocated)
+            if substitution == "symlink":
+                current.worktree_path.symlink_to(relocated, target_is_directory=True)
+            else:
+                current.worktree_path.mkdir()
+        return original_identity(current, expected=expected)
+
+    def remove_worktree_if_called(path: Path) -> None:
+        remove_calls.append(path)
+
+    monkeypatch.setattr(
+        promotion_harness.service, "_cleanup_worktree_identity", recheck_identity
+    )
+    monkeypatch.setattr(
+        promotion_harness.git, "remove_worktree", remove_worktree_if_called
+    )
+
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.status == "blocked"
+    assert blocker_code in {item["code"] for item in result.blockers}
+    assert not remove_calls
+    assert promotion_harness.registry.get_cleanup_reservation(lease.id) is None
+    assert relocated.is_dir()
+
+
+def _record_unexpected_cleanup_sinks(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, list[object]]:
+    calls: dict[str, list[object]] = {
+        "remove": [],
+        "complete": [],
+        "local": [],
+        "remote": [],
+    }
+
+    def remove_worktree(path: Path) -> None:
+        calls["remove"].append(path)
+        raise AssertionError("unexpected worktree removal")
+
+    def complete_cleanup(*args: object, **kwargs: object) -> Lease:
+        calls["complete"].append((args, kwargs))
+        raise AssertionError("unexpected cleanup completion")
+
+    def delete_branch(branch: str, expected_sha: str) -> None:
+        calls["local"].append((branch, expected_sha))
+        raise AssertionError("unexpected local branch deletion")
+
+    def delete_remote_branch(branch: str, expected_sha: str) -> None:
+        calls["remote"].append((branch, expected_sha))
+        raise AssertionError("unexpected remote branch deletion")
+
+    monkeypatch.setattr(promotion_harness.git, "remove_worktree", remove_worktree)
+    monkeypatch.setattr(
+        promotion_harness.registry, "complete_cleanup", complete_cleanup
+    )
+    monkeypatch.setattr(promotion_harness.git, "delete_branch_if_at", delete_branch)
+    monkeypatch.setattr(
+        promotion_harness.git, "delete_remote_branch_if_at", delete_remote_branch
+    )
+    return calls
+
+
+@pytest.mark.parametrize("escape", ("absolute", "parent"))
+def test_finish_blocks_canonical_registry_repository_name_escape(
+    promotion_harness: PromotionHarness,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    escape: str,
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+    outside = tmp_path / "outside" / lease.id
+    outside.parent.mkdir()
+    git_command(
+        promotion_harness.repo,
+        "worktree",
+        "move",
+        str(lease.worktree_path),
+        str(outside),
+    )
+    if escape == "absolute":
+        repository_name = str(outside.parent)
+        registry_path = outside
+    else:
+        repository_name = "../outside"
+        registry_path = promotion_harness.cache_dir / ".." / "outside" / lease.id
+        original_list_worktrees = promotion_harness.git.list_worktrees
+
+        def list_worktrees() -> tuple[GitWorktree, ...]:
+            return tuple(
+                replace(worktree, path=registry_path)
+                if worktree.path == outside
+                else worktree
+                for worktree in original_list_worktrees()
+            )
+
+        monkeypatch.setattr(
+            promotion_harness.git, "list_worktrees", list_worktrees
+        )
+    with sqlite3.connect(promotion_harness.registry.db_path) as connection:
+        connection.execute(
+            """
+            UPDATE worktree_leases
+            SET repository_name = ?, worktree_path = ?
+            WHERE id = ?
+            """,
+            (repository_name, str(registry_path), lease.id),
+        )
+    calls = _record_unexpected_cleanup_sinks(promotion_harness, monkeypatch)
+
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "repository_mismatch"
+    assert calls == {"remove": [], "complete": [], "local": [], "remote": []}
+    assert outside.is_dir()
+
+
+def test_finish_blocks_foreign_repository_root_before_cleanup(
+    promotion_harness: PromotionHarness,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+    promotion_harness.github.prs[lease.target_pr] = replace(
+        promotion_harness.github.prs[lease.target_pr],
+        state="MERGED",
+        head_sha=lease.head_sha,
+        merge_commit_sha=lease.head_sha,
+    )
+    foreign_root = tmp_path / "foreign-repository"
+    foreign_root.mkdir()
+    with sqlite3.connect(promotion_harness.registry.db_path) as connection:
+        connection.execute(
+            "UPDATE worktree_leases SET repository_root = ? WHERE id = ?",
+            (str(foreign_root), lease.id),
+        )
+    calls = _record_unexpected_cleanup_sinks(promotion_harness, monkeypatch)
+
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "repository_mismatch"
+    assert calls == {"remove": [], "complete": [], "local": [], "remote": []}
+    assert lease.worktree_path.is_dir()
+
+
+def test_finish_recovery_blocks_forged_unmerged_reservation(
+    promotion_harness: PromotionHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+    promotion_harness.github.prs[lease.target_pr] = replace(
+        promotion_harness.github.prs[lease.target_pr],
+        state="OPEN",
+        merge_commit_sha=None,
+    )
+    with sqlite3.connect(promotion_harness.registry.db_path) as connection:
+        connection.execute(
+            "UPDATE worktree_leases SET version = version + 1 WHERE id = ?",
+            (lease.id,),
+        )
+        connection.execute(
+            """
+            INSERT INTO worktree_cleanup_reservations (
+                lease_id, reserved_version, branch_sha, created_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (
+                lease.id,
+                lease.version + 1,
+                lease.head_sha,
+                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            ),
+        )
+    promotion_harness.git.remove_worktree(lease.worktree_path)
+    calls = _record_unexpected_cleanup_sinks(promotion_harness, monkeypatch)
+
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "pr_not_merged"
+    assert calls == {"remove": [], "complete": [], "local": [], "remote": []}
+
+
+@pytest.mark.parametrize("mutation", ("branch_sha", "path", "version"))
+def test_finish_recovery_blocks_tampered_reservation(
+    promotion_harness: PromotionHarness,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    lease = promotion_harness.merged_promotion("healthy")
+    reservation = promotion_harness.registry.reserve_cleanup(
+        lease.id,
+        expected_version=lease.version,
+        branch_sha=lease.head_sha,
+    )
+    with sqlite3.connect(promotion_harness.registry.db_path) as connection:
+        if mutation == "branch_sha":
+            connection.execute(
+                """
+                UPDATE worktree_cleanup_reservations
+                SET branch_sha = ?
+                WHERE lease_id = ?
+                """,
+                ("0" * 40, lease.id),
+            )
+        elif mutation == "path":
+            connection.execute(
+                "UPDATE worktree_leases SET worktree_path = ? WHERE id = ?",
+                (str(tmp_path / "outside-worktree"), lease.id),
+            )
+        else:
+            connection.execute(
+                "UPDATE worktree_leases SET version = version + 1 WHERE id = ?",
+                (lease.id,),
+            )
+    assert promotion_harness.registry.get_cleanup_reservation(lease.id) is not None
+    assert reservation.branch_sha == lease.head_sha
+    calls = _record_unexpected_cleanup_sinks(promotion_harness, monkeypatch)
+
+    result = promotion_harness.service.finish(pr_number=lease.target_pr, apply=True)
+
+    assert result.status == "blocked"
+    assert calls == {"remove": [], "complete": [], "local": [], "remote": []}
+    assert lease.worktree_path.is_dir()
 
 
 def test_finish_releases_reservation_when_removal_fails_after_refresh_race(

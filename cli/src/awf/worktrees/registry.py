@@ -29,7 +29,9 @@ from .models import (
 )
 
 _EVIDENCE_PROTOCOL = "awf.deployment-evidence/v1"
-_EVIDENCE_STATUS = frozenset({"healthy", "pending", "failed", "unknown"})
+_EVIDENCE_STATUS = frozenset(
+    {"healthy", "superseded_healthy", "pending", "failed", "unknown"}
+)
 _EVIDENCE_OID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 _EVIDENCE_SHA256 = re.compile(r"[0-9a-f]{64}")
 _EVIDENCE_RFC3339_UTC = re.compile(
@@ -2070,6 +2072,14 @@ class WorktreeRegistry:
     def _evidence_to_json(evidence: Mapping[str, str] | None) -> str | None:
         if evidence is None:
             return None
+        WorktreeRegistry._validate_evidence(evidence)
+        encoded = json.dumps(dict(evidence), sort_keys=True, separators=(",", ":"))
+        if len(encoded.encode("utf-8")) > 2048:
+            raise ValueError("deployment evidence exceeds the maximum size")
+        return encoded
+
+    @staticmethod
+    def _validate_evidence(evidence: object) -> None:
         allowed = {
             "protocol",
             "subject_revision",
@@ -2078,23 +2088,23 @@ class WorktreeRegistry:
             "received_at",
             "adapter_digest",
             "response_digest",
+            "production_image_git_sha",
             "evidence_id",
             "diagnostic_code",
+        }
+        required = {
+            "protocol",
+            "subject_revision",
+            "status",
+            "observed_at",
+            "received_at",
+            "adapter_digest",
+            "response_digest",
         }
         if (
             not isinstance(evidence, Mapping)
             or not set(evidence).issubset(allowed)
-            or not set(evidence).issuperset(
-                {
-                    "protocol",
-                    "subject_revision",
-                    "status",
-                    "observed_at",
-                    "received_at",
-                    "adapter_digest",
-                    "response_digest",
-                }
-            )
+            or not set(evidence).issuperset(required)
             or any(
                 not isinstance(key, str)
                 or not isinstance(value, str)
@@ -2102,12 +2112,32 @@ class WorktreeRegistry:
                 or len(value.encode("utf-8")) > 512
                 for key, value in evidence.items()
             )
+            or evidence["protocol"] != _EVIDENCE_PROTOCOL
+            or evidence["status"] not in _EVIDENCE_STATUS
+            or _EVIDENCE_OID.fullmatch(evidence["subject_revision"]) is None
+            or _EVIDENCE_SHA256.fullmatch(evidence["adapter_digest"]) is None
+            or _EVIDENCE_SHA256.fullmatch(evidence["response_digest"]) is None
         ):
             raise ValueError("invalid deployment evidence")
-        encoded = json.dumps(dict(evidence), sort_keys=True, separators=(",", ":"))
-        if len(encoded.encode("utf-8")) > 2048:
-            raise ValueError("deployment evidence exceeds the maximum size")
-        return encoded
+        subject_revision = evidence["subject_revision"]
+        production_image_git_sha = evidence.get("production_image_git_sha")
+        if evidence["status"] == "superseded_healthy":
+            if (
+                _EVIDENCE_OID.fullmatch(production_image_git_sha or "") is None
+                or production_image_git_sha == subject_revision
+            ):
+                raise ValueError("invalid superseded deployment evidence")
+        elif production_image_git_sha is not None:
+            raise ValueError("invalid deployment evidence")
+        observed_at = WorktreeRegistry._evidence_timestamp(evidence["observed_at"])
+        received_at = WorktreeRegistry._evidence_timestamp(evidence["received_at"])
+        if (
+            observed_at is None
+            or received_at is None
+            or observed_at > received_at
+            or received_at > datetime.now(timezone.utc)
+        ):
+            raise ValueError("invalid deployment evidence")
 
     @staticmethod
     def _evidence_from_json(value: object) -> dict[str, str] | None:
@@ -2118,29 +2148,7 @@ class WorktreeRegistry:
             WorktreeRegistry._evidence_to_json(decoded)
             if not isinstance(decoded, dict):
                 return None
-            evidence = dict(decoded)
-            if (
-                evidence["protocol"] != _EVIDENCE_PROTOCOL
-                or evidence["status"] not in _EVIDENCE_STATUS
-                or _EVIDENCE_OID.fullmatch(evidence["subject_revision"]) is None
-                or _EVIDENCE_SHA256.fullmatch(evidence["adapter_digest"]) is None
-                or _EVIDENCE_SHA256.fullmatch(evidence["response_digest"]) is None
-            ):
-                return None
-            observed_at = WorktreeRegistry._evidence_timestamp(
-                evidence["observed_at"]
-            )
-            received_at = WorktreeRegistry._evidence_timestamp(
-                evidence["received_at"]
-            )
-            if (
-                observed_at is None
-                or received_at is None
-                or observed_at > received_at
-                or received_at > datetime.now(timezone.utc)
-            ):
-                return None
-            return evidence
+            return dict(decoded)
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             return None
 

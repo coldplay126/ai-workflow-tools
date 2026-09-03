@@ -421,6 +421,11 @@ def test_deployment_evidence_docs_use_the_operator_protocol() -> None:
         assert "environment = " in text
         assert "PATH`, `PYTHONPATH`" in text
         assert "full adapter process group" in text
+        assert "superseded_healthy" in text
+        assert "production_image_git_sha" in text
+        assert "merge_base(subject_revision, production_image_git_sha)" in text
+        assert "lowercase canonical UUID" in text
+        assert "out-of-order retry" in text
     assert canonical.read_bytes() == packaged.read_bytes()
 
 
