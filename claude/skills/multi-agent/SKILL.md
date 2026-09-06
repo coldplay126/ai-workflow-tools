@@ -79,6 +79,17 @@ protocols:
 OMP의 `task`/`hub`가 제공되면 Python team runner의 결정론적 gate를 유지하면서
 실행 계층만 host-native 기능으로 강화합니다.
 
+OMP의 native `task`/`hub` 실행에는 cmux run이 필요하지 않습니다. 실행 전
+`cmux-agent agents`를 필수 preflight로 호출하거나 `cmux-agent start`를 요구하지
+않습니다. 독립적인 스킬 호출은 현재 host의 도구를 사용하고, AWF CLI 실행은
+`.workflow/provider-config.json`의 명시적 dispatch 선택을 유지합니다.
+
+cmux 경로를 사용할 때만 `cmux-agent agents --json`으로 활성 run의 worker 목록을
+확인합니다. `run_id: null` 또는 사용 가능한 worker가 없는 결과는 cmux 미활성이지
+멀티에이전트 전체의 실패가 아닙니다. 이 경우 사용 가능한 host-native/MCP 경로를
+선택하되, `surface_preference: "cmux"`를 명시한 CLI 실행은 조용히 다른 surface로
+바꾸지 않고 준비 상태 오류를 보고합니다.
+
 1. 서로 독립적인 worker는 하나의 persisted host에서 한 번의 batch `task`로
    fan-out합니다.
 2. worker별 agent type, resolved model, output schema/mode, isolation을 보존합니다.

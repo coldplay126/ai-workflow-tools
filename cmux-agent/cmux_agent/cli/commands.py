@@ -1107,10 +1107,19 @@ def cmd_spawn(args: argparse.Namespace) -> None:
 
 def cmd_agents(args: argparse.Namespace) -> None:
     fs = _get_fs()
-    store = _get_store(fs)
-    run_id = _resolve_run_id(args, store)
-
-    agents = store.get_agents(run_id)
+    run_id = getattr(args, "run_id", None)
+    agents: list[Agent] = []
+    # A roster probe must not start a run or revive workers from a finished one.
+    if fs.db_path.exists():
+        store = _get_store(fs)
+        try:
+            if not run_id:
+                run = store.get_active_run()
+                run_id = run.run_id if run else None
+            if run_id:
+                agents = store.get_agents(run_id)
+        finally:
+            store.close()
 
     if getattr(args, "json", False):
         import json as _json

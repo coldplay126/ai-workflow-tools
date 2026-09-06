@@ -1,10 +1,4 @@
-"""`cmux-agent agents --json` for §12.5 dispatch path detection.
-
-Claude (Master) needs a fast, machine-readable answer to "is there an
-active cmux-agent run with workers?" so #precise / #cross / #critical
-can prefer broker dispatch over `mcp__codex__codex`. JSON output lets a
-single `jq .agents | length` decide.
-"""
+"""Agent roster probes must distinguish active runs from historical runs."""
 
 from __future__ import annotations
 
@@ -50,6 +44,43 @@ def test_json_empty_when_no_agents(tmp_path: Path, monkeypatch, capsys) -> None:
     command_module.cmd_agents(Namespace(run_id=None, json=True))
     payload = json.loads(capsys.readouterr().out)
     assert payload["agents"] == []
+
+
+def test_json_without_run_is_empty_and_does_not_initialize_state(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    monkeypatch.setattr(command_module, "_active_cwd", str(tmp_path))
+    command_module.cmd_agents(Namespace(run_id=None, json=True))
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"run_id": None, "agents": []}
+    assert captured.err == ""
+    assert not (tmp_path / ".agent").exists()
+
+
+@pytest.mark.parametrize("status", [RunStatus.COMPLETED, RunStatus.FAILED])
+def test_json_probe_excludes_finished_run_but_allows_explicit_history(
+    tmp_path: Path, monkeypatch, capsys, status: RunStatus,
+) -> None:
+    monkeypatch.setattr(command_module, "_active_cwd", str(tmp_path))
+    _seed_run(tmp_path)
+    store = StateStore(tmp_path / ".agent" / "control-plane.sqlite3")
+    try:
+        store.update_run_status("run-1", status)
+    finally:
+        store.close()
+
+    command_module.cmd_agents(Namespace(run_id=None, json=True))
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"run_id": None, "agents": []}
+    assert captured.err == ""
+
+    command_module.cmd_agents(Namespace(run_id="run-1", json=True))
+    historical = json.loads(capsys.readouterr().out)
+    assert historical["run_id"] == "run-1"
+    assert {agent["name"] for agent in historical["agents"]} == {
+        "orchestrator", "worker-impl",
+    }
 
 
 def test_text_output_unchanged_when_no_json_flag(tmp_path: Path, monkeypatch, capsys) -> None:
