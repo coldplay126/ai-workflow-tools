@@ -1,46 +1,50 @@
 ## Multi-Agent Protocol (Master/Slave)
 
-Claude Code(Master)가 프롬프트의 `#` 해시태그를 인식하여 Slave를 자동 디스패치합니다.
+호스트 에이전트가 프롬프트의 `#` 해시태그를 인식하여 worker를 디스패치합니다.
 
 ### 모드
 
 | 모드 | 에이전트 | 트리거 | 타임아웃 |
 |------|---------|--------|---------|
-| solo | Claude만 | 기본 | - |
-| precise | Claude + Codex | `#precise` | 90s |
-| cross | Codex + Claude Sonnet 병렬 | `#cross` | 90s |
-| critical | Codex → Claude 순차 | `#critical` | 120s |
+| solo | 현재 호스트만 | 기본 | 실행 경로 설정 |
+| precise | precision worker → primary | `#precise` | 역할별 설정 |
+| cross | plan-conformance + quality-validation 병렬 | `#cross` | 역할별 설정 |
+| critical | precision → quality-validation → primary | `#critical` | 역할별 설정 |
 
-### Slave dispatch 경로 선택 (우선순위)
+### Worker dispatch 경로 선택 (우선순위)
 
-Slave를 호출하기 전에 cmux-agent 활성 여부를 먼저 확인한다.
+1. **OMP native `task`/`hub`** (현재 host가 제공할 때):
+   - cmux run은 필요하지 않으며 `cmux-agent agents` 또는 `cmux-agent start`를 선행 조건으로 요구하지 않음
+   - 독립적인 worker는 한 번의 batch `task`로 실행하고, 의존 작업은 앞선 결과 이후 실행
+   - 실제 task ID/상태와 결과를 회수하며 `.workflow/state.json`과 gate는 parent만 변경
+2. **cmux-agent broker** (native 도구가 없고 활성 run에 worker가 있을 때):
+   - 조회: `cmux-agent agents --json`. run ID 생략 시 활성 run만 조회하며, 없으면 `{"run_id":null,"agents":[]}`와 exit 0을 반환
+   - 후보 검사: `jq -e '.run_id != null and any(.agents[]; .role == "WORKER" and (.surface_id // "") != "")'`
+   - 목록에 실제 등록된 worker 이름으로만 `cmux-agent send <worker-name> "<prompt>"` 호출. 목록은 surface/broker 생존 증명이 아니므로 전송 실패를 성공으로 간주하지 않음
+   - 조회 오류는 숨기지 않고 보고하되, 선택적 cmux 경로의 부재만으로 전체 작업을 중단하거나 run을 자동 생성하지 않음
+3. **MCP/provider 경로** (native 도구와 사용 가능한 cmux worker가 없을 때):
+   - 제공되는 `mcp__codex__codex` 등으로 실행. 분석·리뷰 worker는 read-only
+   - 사용할 실행 도구가 없으면 필요한 도구를 명시하고 중단. 실행하지 않은 결과를 만들지 않음
 
-1. **cmux-agent broker** (활성 run이 있을 때 — **권장**):
-   - 감지: `cmux-agent agents --json | jq -e '.agents | length > 0'`가 성공할 때만 활성으로 판정. cwd의 `.agent/control-plane.sqlite3` 존재만으로는 활성으로 판정하지 않음
-   - 호출: `cmux-agent send <worker-name> "<prompt>"` 로 dispatch artifact 작성 → broker가 worker surface에 자동 주입
-   - worker 이름 예: `worker-impl`, `worker-review`, `worker-verify`, `worker-investigate`
-   - 장점: claude 본 세션이 다른 작업을 계속할 수 있음 (background tab에서 진행), 결과는 result artifact로 회수, 토큰 절감
-2. **MCP fallback** (cmux-agent 미활성):
-   - `mcp__codex__codex` (sandbox: read-only — Codex Slave 규칙 참조)
-   - 단점: claude 세션 점유 + tool-call 왕복 + JSON 직렬화 오버헤드. precise/cross/critical 모드에서 응답이 수십 초 ~ 분 단위로 느려질 수 있음
-
-운영 보고 (2026-05-13 BLIP Gem cycle §12.5): cmux-agent 활성 상태에서도 MCP를 호출하면 broker dispatch 대비 평균 3-5배 느림. 활성 검출이 명확할 때는 **반드시 broker 경로**를 사용한다.
+AWF CLI의 `.workflow/provider-config.json`에 명시된 `dispatch.surface_preference`는
+이 자동 선택과 별개입니다. 명시된 surface가 unavailable/incompatible이면 실패를
+보고하며 다른 surface로 조용히 우회하지 않습니다.
 
 ### 실행 규칙
 
 **#precise** — 정확도 우선 (코드 분석, 보안 검토):
-1. cmux-agent 활성이면 `cmux-agent send worker-investigate "<분석 요청>"` (또는 review/verify worker), 미활성이면 `mcp__codex__codex` (sandbox: read-only)
-2. Codex 결과를 Claude가 검증 + 보완 (broker 경로는 result artifact의 conclusion 필드, MCP 경로는 tool result)
+1. 위 우선순위로 read-only precision worker를 실행
+2. 호스트가 worker 결과를 검증 + 보완
 3. 4-Block Format으로 최종 출력
 
 **#cross** — 교차 검증 (고위험 변경):
-1. cmux-agent 활성이면 `cmux-agent send worker-review` + `claude --print --bare --model sonnet` 병렬, 미활성이면 `mcp__codex__codex` + `claude --print --bare --model sonnet` 병렬
-2. Claude Opus가 양쪽 결과 비교 + 차이점 하이라이트
+1. 위 우선순위로 plan-conformance와 quality-validation worker를 병렬 실행
+2. 호스트가 양쪽 결과 비교 + 차이점 하이라이트
 3. 4-Block Format으로 최종 출력
 
 **#critical** — 순차 심층 분석 (프로덕션 배포, 롤백):
-1. Step 1 — Codex(Precision): cmux-agent broker 또는 `mcp__codex__codex`로 코드/설정 정밀 분석 (90s)
-2. Step 2 — Claude(Master): Codex 결과 기반 종합 판정 + 영향도 분석
+1. 위 우선순위로 precision worker의 코드/설정 분석 실행
+2. 앞선 결과로 quality-validation worker의 영향도 검증 후 primary가 종합 판정
 3. 4-Block Format: 결론/근거/리스크/실행안
 
 ### Judge Rules

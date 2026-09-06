@@ -430,16 +430,6 @@ def test_deployment_evidence_docs_use_the_operator_protocol() -> None:
 
 
 
-def test_multi_agent_snippet_requires_live_cmux_roster() -> None:
-    text = (REPO_ROOT / "snippets" / "claude-md-multi-agent.md").read_text(
-        encoding="utf-8"
-    )
-
-    assert "cmux-agent agents --json" in text
-    assert "jq -e '.agents | length > 0'" in text
-    assert "존재만으로는 활성으로 판정하지 않음" in text
-
-
 def test_default_omp_role_models_preserve_cross_provider_intent() -> None:
     config = json.loads(
         (

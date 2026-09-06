@@ -105,11 +105,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # agents
     p_agents = sub.add_parser("agents", help="등록된 agent 목록")
-    p_agents.add_argument("run_id", nargs="?", help="run ID")
+    p_agents.add_argument("run_id", nargs="?", help="run ID (생략 시 활성 run만 조회)")
     p_agents.add_argument(
         "--json",
         action="store_true",
-        help="JSON 출력 (Claude #precise/#cross 등 dispatch path 감지에 사용).",
+        help="JSON 출력 (활성 run이 없으면 run_id=null, agents=[]).",
     )
 
     # watch

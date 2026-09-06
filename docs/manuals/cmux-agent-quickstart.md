@@ -165,6 +165,14 @@ uv run --project cmux-agent cmux-agent --cwd . messages
 uv run --project cmux-agent cmux-agent --cwd . events -n 20
 ```
 
+`agents` without a run ID lists only the active run. With `--json`, no active run
+returns `{"run_id":null,"agents":[]}` and exit 0; probing a new directory does not
+create `.agent/`. Use `agents <run-id> --json` to inspect a completed run explicitly.
+For dispatch, select a `WORKER` with a non-empty `surface_id`, not just any roster
+entry. A listed surface can still be stale, so check dispatch failures.
+
+OMP-native `task`/`hub` execution does not require this cmux probe or a cmux run.
+
 The `awf cmux` commands are read-only helpers for inspecting `.agent/events.jsonl` without importing the `cmux-agent` runtime package:
 
 ```bash

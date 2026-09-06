@@ -687,20 +687,26 @@ uv run --project cmux-agent cmux-agent smoke
 uv run --project cmux-agent cmux-agent status --failures
 uv run --project cmux-agent cmux-agent failures
 uv run --project cmux-agent cmux-agent events --failures
-uv run --project cmux-agent cmux-agent agents --json    # machine-readable agent list (broker availability check)
+uv run --project cmux-agent cmux-agent agents --json    # active-run roster; no run returns an empty list
 uv run --project cli awf cmux failures --repo-root .
 ```
 
 When the cycle is finished, `cmux-agent stop` closes the cmux surfaces and workspace by default;
 pass `--keep-workspace` to retain them for debugging.
 
-### Multi-agent routing: prefer broker over MCP
+### Multi-agent routing: host-native first
 
-For `#precise` / `#cross` / `#critical` hashtag modes, Claude routes Codex worker calls
-through the active `cmux-agent` broker when available (broker dispatch is ~3–5× faster
-than `mcp__codex__codex`). Detect with `cmux-agent agents --json | jq '.agents | length'`;
-if 0, fall back to MCP. See `snippets/claude-md-multi-agent.md` and the resolution log in
-[`docs/gaps/2026-05-13-blip-gem-cycle-operational-issues.md`](docs/gaps/2026-05-13-blip-gem-cycle-operational-issues.md) §12.5.
+For `#precise` / `#cross` / `#critical`, use the current OMP host's native
+`task`/`hub` tools when available. This path does not require a cmux run.
+Without native tools, `cmux-agent agents --json` lists only the active run by
+default; no active run returns `{"run_id":null,"agents":[]}` with exit 0 and
+does not initialize `.agent/`. Pass an explicit run ID to inspect historical agents.
+Choose a registered `WORKER` with a non-empty `surface_id` before broker dispatch;
+the roster alone does not prove the surface or broker is alive.
+If no usable cmux worker exists, use an available MCP/provider path instead.
+An explicit AWF CLI `dispatch.surface_preference` remains authoritative and fails
+when unavailable rather than silently switching backends.
+See `snippets/claude-md-multi-agent.md` for the full protocol.
 
 ## Claude Code Setup
 
