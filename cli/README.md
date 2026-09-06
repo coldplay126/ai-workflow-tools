@@ -157,22 +157,31 @@ package data에 포함되므로 설치형 CLI도 release skill을 찾을 수 있
 ### OMP native role/model routing
 
 기본 설정은 `coordination_surface = "native"`,
-`execution_mode = "external_host"`이다. 역할별 worker model은
-`.workflow/provider-config.json`의 `dispatch.omp.role_models`에서 정한다:
+`execution_mode = "external_host"`, `dispatch.omp.role_models = {}`이다.
+빈 worker model map은 각 OMP agent의 역할 alias를 보존한다:
 
-```json
-{
-  "plan_conformance": "@default",
-  "precision": "@default",
-  "quality_validation": "@slow",
-  "primary": "@slow",
-  "speed": "@smol"
-}
-```
+| 역할 | OMP 모델 설정 |
+|---|---|
+| `spec-writer`, `quality-validator`, `artifact-reviewer`, `adversarial-tester` | `@plan` — `modelRoles.plan`에 Claude 모델 지정 |
+| `implementer`, `code-reviewer`, `plan-validator`, `spec-verifier`, `happy-path-tester` | `@task` — `modelRoles.task`에 Codex 모델 지정 |
 
-native batch는 이 매핑을 OMP `task.agentModelOverrides`로 전달하고 provenance에
-`requested_worker_model`을 남긴다. 같은 batch에서 동일 agent type에 서로 다른
-model을 지정하면 `omp_worker_model_conflict`로 worker 실행 전에 차단한다.
+OMP 역할 모델 변경은 현재 대화 모델을 전환하지 않는다. Codex parent는
+실질적 기획 작성을 `spec-writer`에 맡기고 native task의 resolved model을 확인한다.
+사용자는 모델 버전 대신 역할 연결을 유지하면서 `modelRoles`에서 실제 모델을
+갱신할 수 있다. 기존 `@slow`/`@smol` 설정은 이 정책이 덮어쓰지 않는다.
+
+기존 workflow의 `dispatch.omp.role_models`가 비어 있지 않으면 agent 정의보다
+우선한다. 이 명시적 매핑만 native batch의 `task.agentModelOverrides`로 전달하고
+provenance에 `requested_worker_model`을 남긴다. 같은 batch에서 동일 agent type에
+서로 다른 model을 지정하면 `omp_worker_model_conflict`로 실행 전에 차단한다.
+새 기본 profile은 provider fallback을 설정하지 않는다. 기존의 명시적 fallback
+설정은 보존되므로 이종 모델 교차 검증 시 실제 resolved model을 확인해야 한다.
+
+Standalone `awf wf next`의 primary는 여전히 provider-direct이며 OMP `modelRoles`를
+읽지 않는다. provider 선택 순서는 `--provider` > delegated phase primary >
+`phase_models.inline_model` > Agent Card가 지정한 agent의 `provider_hint` >
+global default다. 역할 기본값을 선택한 Claude primary에는 source agent의 Claude
+model을 적용하지만, Codex와 명시적 override/fallback provider에는 주입하지 않는다.
 `execution_mode = "current_host"`는 host의 `task`/`hub` bridge가 있을 때만
 유효하며, bridge가 없다고 nested subprocess나 inline으로 우회하지 않는다.
 
@@ -207,7 +216,7 @@ commands include:
 |---------|---------|
 | `awf wt acquire` | Preview or create/reuse a feature, promotion, or scratch lease. |
 | `awf wt sync` | Preview or reapply the configured production-only delta to latest staging as a managed, non-promotable PR. |
-| `awf wt promote` | Preview or promote one or more ordered, approved/accepted, merged staging PR deltas to a production branch, with optional exact reviewed-path exclusions. |
+| `awf wt promote` | Open a production PR from one tested original source branch with `--source-branch`, or reconstruct ordered staging PR deltas with optional exact reviewed-path exclusions. |
 | `awf wt release open` | Preview or open/reuse an initially empty managed cumulative release bridge from the latest target. |
 | `awf wt release add` | Preview or append one next immutable, ordered staging PR source pin and reconstruct its managed bridge. |
 | `awf wt release seal` | Preview or lock source pins after target reconstruction, prepare, and production verification. |
@@ -221,7 +230,7 @@ commands include:
 | `awf wt compact` | Preview or remove only ignored, untracked dependency/cache paths from eligible managed worktrees without changing lease, registry, branch, or worktree state. |
 | `awf wt import` | Inventory existing direct-child repository worktrees and optionally register them as imported leases. |
 | `awf wt adopt` | Preview or link a clean imported lease to an explicitly supplied, already-merged PR. |
-| `awf wt link-pr` | Preview or link an active managed feature lease to its exact already-merged PR. |
+| `awf wt link-pr` | Record a merged staging PR while retaining its feature lease; link the final production PR to make the lease eligible for cleanup. |
 | `awf wt status` | Read registered leases, optionally refreshing PR and deployment state. |
 | `awf wt doctor` | Read-only report of registry and local Git-worktree mismatches. |
 
@@ -233,6 +242,12 @@ and lease transitions in the registry, so it needs a writable state database.
 `import` records discovered worktrees as unmanaged. For PR-linked cleanup, an
 imported worktree remains unmanaged until an explicit `awf wt adopt --lease
 <id> --pr <merged-pr> --apply`. MUST NOT infer a PR automatically.
+
+일반 feature 작업의 `git add`, `git commit`, non-force push는 정상적인 개발
+작업입니다. `release/...`라는 이름만으로 봉인된 AWF release bridge가 되지
+않습니다. AWF의 직접 커밋 금지는 CLI가 관리하는 합성 promotion/release
+bridge에만 적용합니다. 사용자가 이미 요청한 작업은 preview에 blocker나
+새로운 선택이 없으면 별도 승인 대화 없이 `--apply`까지 진행할 수 있습니다.
 
 With `--json`, stdout is one versioned result envelope; diagnostics stay on
 stderr:
@@ -278,9 +293,10 @@ arrays, not shell strings:
 [worktree]
 default_base = "staging"
 production_branch = "main"
+feature_base = "main"
 
 [promotion]
-# Default: "approved". Solo repositories can accept PRs merged by their author.
+# Default: "approved_or_self_merged"; use "approved" to require an external approval.
 source_review_policy = "approved_or_self_merged"
 
 [prepare]
@@ -293,6 +309,57 @@ commands = [
   ["uv", "run", "ruff", "check", "."],
 ]
 ```
+
+#### 1인 개발: 같은 feature 브랜치를 staging에서 검증한 뒤 main에 반영
+
+`default_base`는 staging PR의 대상이며 `feature_base`는 feature 생성 기준을
+분리합니다. Feature 생성 기준은 `--base` → `feature_base` →
+`production_branch` → `default_base` → remote 기본 브랜치 순서입니다.
+기존처럼 staging 기반 feature가 필요하면 `feature_base = "staging"`을
+명시합니다. `approved_or_self_merged`는 승인받은 PR 또는 작성자 본인이
+병합한 PR을 허용합니다. 저장소가 명시한 `approved` 정책은 완화하지 않습니다.
+
+```bash
+awf wt status --refresh --json
+awf wt acquire --initiative my-change --branch feature/my-change --json
+awf wt acquire --initiative my-change --branch feature/my-change --apply --json
+
+# 반환된 lease.worktree_path에서 평소처럼 수정, add, commit, push
+git push -u origin feature/my-change
+gh pr create --base staging --head feature/my-change
+
+# staging PR 병합 및 검증 후; <id>와 <staging-pr>을 실제 값으로 치환
+awf wt link-pr --lease <id> --pr <staging-pr> --json
+awf wt link-pr --lease <id> --pr <staging-pr> --apply --json
+awf wt promote --source-pr <staging-pr> --to main --source-branch --json
+awf wt promote --source-pr <staging-pr> --to main --source-branch --apply --json
+
+# 생성된 main PR을 저장소 정책에 따라 병합한 뒤에만 최종 연결·정리
+awf wt link-pr --lease <id> --pr <production-pr> --json
+awf wt link-pr --lease <id> --pr <production-pr> --apply --json
+awf wt finish --pr <production-pr> --json
+awf wt finish --pr <production-pr> --apply --json
+```
+
+이미 작업 중인 일반 Git 브랜치는 AWF lease로 옮길 필요 없이
+`wt promote --source-branch`를 사용할 수 있습니다. Lease가 없으면 위의
+`link-pr`와 `finish` 단계는 생략하고 사용자 소유 작업 디렉터리를 유지합니다.
+
+Staging PR은 중간 단계입니다. 이때 원본 feature 브랜치를 삭제하지 않습니다.
+GitHub 자동 삭제로 원격 브랜치가 없어졌다면 검증한 HEAD를 그대로 가진
+로컬 브랜치를 일반 push로 복원한 뒤 재시도합니다. `--source-branch`는
+단일 staging PR의 검증된 원격 HEAD로 main PR을 열거나 재사용하며,
+합성 worktree·commit·force-push·자동 merge를 만들지 않습니다.
+이 경로에는 `[verify.production]` 설정이 필수가 아닙니다. 위 예시의
+prepare/production verification 설정은 합성 promotion을 사용할 때 적용합니다.
+
+검증 후 원격 feature에 커밋이 추가되면 새 staging PR로 다시 검증해야 합니다.
+Main/staging 자체를 source branch로 사용하거나, staging-only 이력이 섞인
+브랜치를 main에 올리는 것은 차단합니다. 실패·진행 중인 source checks와
+main의 branch protection은 그대로 적용합니다. `--source-branch`는
+`--out-of-order`, `--exclude-path`, 여러 `--source-pr`와 함께 쓸 수 없습니다.
+
+#### 합성 배포 및 worktree 정리 안전장치
 
 Repository `[deployment]` configuration is rejected as a migration error:
 repository content MUST NOT choose an executable. The local operator config at
@@ -565,9 +632,9 @@ awf wt status --repo-root . --initiative reward-widget --json
 
 Managed feature PR-link and finish flow:
 
-Use this when a managed feature worktree's PR was created and merged outside
-AWF before its lease recorded `target_pr`. `<id>` is the managed feature lease
-ID and `<merged-pr>` is that feature branch's already-merged PR number.
+Use this final cleanup sequence after the managed feature branch's production
+PR is merged. `<id>` is the managed feature lease ID and `<merged-pr>` is its
+final production PR, not an intermediate staging PR.
 
 ```bash
 # Link only the exact PR whose repository, branch, and head match the current worktree.
@@ -580,18 +647,25 @@ awf wt finish --repo-root <repo-root> --pr <merged-pr> --json
 awf wt finish --repo-root <repo-root> --pr <merged-pr> --apply --json
 ```
 
-`link-pr` accepts only a clean, managed `feature` lease that is `ACTIVE` with
-no PR link, or the exact already-linked `CLEANABLE` lease for idempotent reuse.
-The supplied PR must be merged and must exactly match the lease repository,
-branch, and current registered/check-out worktree HEAD. The recorded
-acquisition SHA may be older after normal feature commits. Preview is
-read-only; apply revalidates Git after the GitHub lookup, replaces the recorded
-SHA with the independently verified current PR/worktree SHA, and atomically
-records `target_pr`, `CLEANABLE`, and `not_required`. Repeating the same link
-returns `reuse`. Unknown leases, other purposes or states, an existing
-different PR, dirty or changed Git state, or any repository/branch/head/merge
-mismatch is `blocked`. A GitHub failure is exit code `4`. The command never
-guesses a PR from branch history and never mutates the branch or worktree.
+`link-pr` accepts a clean managed `feature` lease and an explicitly supplied
+merged PR whose repository, branch, and current worktree HEAD match. Normal
+feature commits may advance the recorded acquisition SHA.
+
+When staging and production are configured separately, linking the staging PR
+records intermediate source evidence and retains `ACTIVE` with no `target_pr`.
+The same staging evidence is reusable; another merged staging PR can update
+the evidence after further feature commits. Do not run `finish` for that
+intermediate PR. The final production link revalidates current Git and PR
+provenance before recording `target_pr`, `CLEANABLE`, and `not_required`.
+Without a separate production stage, the existing one-stage cleanup flow
+remains available; AWF's non-promotable sync leases also keep their final
+staging-merge cleanup behavior.
+
+Repeating an exact final link returns `reuse`. A different final PR, dirty
+worktree, unvalidated head drift, or a repository/branch/head/merge mismatch
+is blocked; a GitHub failure is exit code `4`. Linkage never guesses a PR or
+mutates the branch or worktree. Only the subsequent proven-safe `finish`
+operation removes AWF-owned local state.
 
 Imported worktree PR-link and finish flow:
 

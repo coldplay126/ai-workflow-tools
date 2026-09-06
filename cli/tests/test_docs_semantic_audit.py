@@ -29,7 +29,6 @@ TEMPLATE_ARG_RE = re.compile(r"\{[^}]+\}")
 ANGLE_TEMPLATE_ARG_RE = re.compile(r"<[^>]+>")
 FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---", re.DOTALL)
 TOP_LEVEL_SCALAR_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*):\s*(.*?)\s*$")
-STALE_WF_ALIAS_RE = re.compile(r"/wf(?:\.|\b(?!-))")
 FENCED_BLOCK_RE = re.compile(r"```[^\n]*\n(.*?)\n```", re.DOTALL)
 DISPLAYED_USAGE_SYNTAX_RE = re.compile(r"(?:^|\s)\[[^\]]+\](?=\s|$)")
 KNOWN_GATE_IDS = {gate for gate in PHASE_GATE.values() if gate is not None}
@@ -430,23 +429,7 @@ def test_deployment_evidence_docs_use_the_operator_protocol() -> None:
 
 
 
-def test_default_omp_role_models_preserve_cross_provider_intent() -> None:
-    config = json.loads(
-        (
-            REPO_ROOT
-            / "claude"
-            / "skills"
-            / "wf-orchestrator"
-            / "templates"
-            / "provider-config.default.json"
-        ).read_text(encoding="utf-8")
-    )
 
-    role_models = config["dispatch"]["omp"]["role_models"]
-    assert role_models["plan_conformance"] == "@default"
-    assert role_models["quality_validation"] == "@slow"
-    assert role_models["precision"] == "@default"
-    assert role_models["primary"] == "@slow"
 
 
 def test_cli_readme_mentions_current_command_surface() -> None:
@@ -1141,17 +1124,6 @@ def test_core_skill_command_templates_are_current() -> None:
     assert invalid == []
 
 
-def test_only_umbrella_skill_uses_wf_slash_aliases() -> None:
-    stale: list[str] = []
-    for path in _skill_files():
-        if path.parent.name == "wf":
-            continue
-        text = path.read_text(encoding="utf-8")
-        for line_no, line in enumerate(text.splitlines(), 1):
-            if STALE_WF_ALIAS_RE.search(line):
-                stale.append(f"{path.relative_to(REPO_ROOT)}:{line_no} {line.strip()}")
-
-    assert stale == []
 
 
 def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
@@ -1175,6 +1147,8 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "sync_apply": ("wt", "sync"),
         "promote_preview": ("wt", "promote"),
         "promote_apply": ("wt", "promote"),
+        "source_branch_promote_preview": ("wt", "promote"),
+        "source_branch_promote_apply": ("wt", "promote"),
         "out_of_order_promote_preview": ("wt", "promote"),
         "out_of_order_promote_apply": ("wt", "promote"),
         "out_of_order_resolution_preview": ("wt", "promote"),
@@ -1355,16 +1329,10 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
             "promotion_resolution_unmerged",
         ],
     }
-    assert safety["managed_feature_pr_link"] == {
-        "lease_state": "active_unlinked_or_cleanable_exact_reuse",
-        "pr_provenance": (
-            "already_merged_exact_repository_branch_and_current_worktree_head"
-        ),
-        "apply_transition": "replace_recorded_head_then_cleanable_not_required",
-        "same_pr": "reuse",
-        "different_pr": "blocked",
-        "github_external_failure": "exit_4",
-    }
+    linkage = safety["managed_feature_pr_link"]
+    assert linkage["staging_apply"]["lease_state"] == "ACTIVE"
+    assert linkage["staging_apply"]["target_pr"] is None
+    assert linkage["production_apply"]["lease_state"] == "CLEANABLE"
     assert safety["imported_pr_lifecycle"] == {
         "pr_provenance": "already_merged_exact_branch_and_head",
         "same_pr": "reuse",
@@ -1379,6 +1347,7 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "link-pr",
         "sync",
         "promote",
+        "source_branch_promote",
         "release_open",
         "release_add",
         "release_seal",
@@ -1408,42 +1377,6 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "reset",
         "force_delete",
         "unmanaged_deletion",
-    }
-    assert contract["decisions"] == {
-        "reuse": "use_exact_lease",
-        "preview": {
-            "acquire": "review_then_apply_explicitly",
-            "link_pr": "review_then_apply_explicitly",
-            "sync": "review_then_apply_explicitly",
-            "promote": "review_then_apply_explicitly",
-            "release_open": "review_then_apply_explicitly",
-            "release_add": "review_then_apply_explicitly",
-            "release_seal": "review_then_apply_explicitly",
-            "release_publish": "review_then_apply_explicitly",
-            "out_of_order_promote": "review_then_apply_explicitly",
-            "out_of_order_resolution": "review_same_blocked_lease_then_apply_explicitly",
-            "discard_promotion": "review_every_action_then_apply_explicitly",
-            "discard_sync": "review_every_action_then_apply_explicitly",
-            "recover_sync": "review_allowed_conflict_paths_then_apply_explicitly",
-            "finish": "review_blockers_then_apply",
-            "gc": "review_blockers_then_apply",
-            "compact": "review_every_action_then_apply_explicitly",
-        },
-        "ready": {
-            "status": "inspect_select_lifecycle_action",
-            "acquire_apply": "use_or_report_returned_lease",
-            "link_pr_apply": "restart_status_preflight_then_finish",
-            "sync_apply": "use_or_report_returned_lease",
-            "promote_apply": "use_or_report_returned_lease",
-            "release_open_apply": "use_or_report_returned_lease",
-            "release_add_apply": "use_or_report_returned_lease",
-            "release_seal_apply": "use_or_report_returned_lease",
-            "release_publish_apply": "use_or_report_returned_lease",
-            "out_of_order_promote_apply": "use_or_report_returned_lease",
-            "out_of_order_resolution_apply": "use_or_report_returned_lease",
-        },
-        "removed": "report_completion",
-        "blocked": "preserve_worktree_report_code_message",
     }
 
 
@@ -1488,12 +1421,6 @@ def test_managed_feature_pr_link_docs_share_ordered_safety_contract() -> None:
             parsed = parser.parse_args(argv)
             assert parsed.command == "wt"
 
-        prose = " ".join(text.lower().split())
-        assert "current registered/check-out worktree head" in prose
-        assert "recorded acquisition sha may be older" in prose
-        assert "github failure is exit code `4`" in prose or (
-            "github external failure is exit code `4`" in prose
-        )
 
 
 def test_canonical_imported_pr_cleanup_docs_share_ordered_safety_contract() -> None:

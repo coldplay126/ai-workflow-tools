@@ -8,7 +8,7 @@
     "review":  { "mode": "dual", "primary": "inline", "secondary": "codex" },
     "approve": { "mode": "inline" },
     "impl":    { "mode": "inline" },
-    "verify":  { "mode": "dual", "primary": "inline", "secondary": "codex" },
+    "verify":  { "mode": "dual", "primary": "inline", "secondary": "claude:sonnet" },
     "test":    { "mode": "inline" },
     "done":    { "mode": "inline" }
   },
@@ -26,13 +26,7 @@
       "coordination_surface": "native",
       "execution_mode": "external_host",
       "capacity": 8,
-      "role_models": {
-        "plan_conformance": "@default",
-        "precision": "@default",
-        "quality_validation": "@slow",
-        "primary": "@slow",
-        "speed": "@smol"
-      }
+      "role_models": {}
     }
   },
   "providers": {
@@ -51,13 +45,13 @@
       "budget_usd": 0.50
     }
   },
-  "fallback_chain": ["codex", "claude:sonnet"],
+  "fallback_chain": [],
   "phase_models": {
     "plan":   { "effort": "max",  "codex_reasoning": "xhigh" },
     "review": { "effort": "max",  "codex_reasoning": "xhigh" },
-    "impl":   { "inline_model": "sonnet", "effort": "high", "codex_reasoning": "xhigh" },
+    "impl":   { "effort": "high", "codex_reasoning": "xhigh" },
     "verify": { "effort": "max",  "codex_reasoning": "xhigh" },
-    "test":   { "inline_model": "sonnet", "effort": "high", "codex_reasoning": "xhigh" }
+    "test":   { "effort": "high", "codex_reasoning": "xhigh" }
   },
   "defaults": { "mode": "inline", "timeout_seconds": 300 }
 }

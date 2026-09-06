@@ -6,6 +6,7 @@ import json
 from awf.commands import analyze as analyze_command
 from awf.commands import wf as wf_command
 from awf.commands import wiki as wiki_command
+from awf.core.config import AwfConfig
 
 
 def test_analyze_enforces_ready_gate_before_provider_work(monkeypatch) -> None:
@@ -154,7 +155,7 @@ def test_wf_next_dry_run_writes_no_state_or_prompt(monkeypatch, capsys) -> None:
         raise AssertionError("dry-run must not write workflow state or prompt files")
 
     monkeypatch.setattr(wf_command, "enforce_ready_gate", fake_gate)
-    monkeypatch.setattr(wf_command, "load_awf_config", lambda _repo_root: object())
+    monkeypatch.setattr(wf_command, "load_awf_config", lambda _repo_root: AwfConfig.defaults())
     monkeypatch.setattr(
         wf_command, "load_workflow_state", lambda _repo_root: {"phases": {}}
     )
@@ -163,6 +164,7 @@ def test_wf_next_dry_run_writes_no_state_or_prompt(monkeypatch, capsys) -> None:
     )
     monkeypatch.setattr(wf_command, "resolve_next_phase", lambda _state, _phase: "plan")
     monkeypatch.setattr(wf_command, "build_workflow_prompt", lambda *_args: "PROMPT")
+    monkeypatch.setattr(wf_command, "_load_phase_agent_metadata", lambda *_args: {})
     monkeypatch.setattr(wf_command, "save_workflow_prompt", fail_write)
     monkeypatch.setattr("awf.core.state.save_workflow_state_snapshot", fail_write)
 
@@ -187,7 +189,7 @@ def test_wf_next_dry_run_writes_no_state_or_prompt(monkeypatch, capsys) -> None:
 
 def test_wf_next_dry_run_json_outputs_structured_prompt(monkeypatch, capsys) -> None:
     monkeypatch.setattr(wf_command, "enforce_ready_gate", lambda *args, **kwargs: 20)
-    monkeypatch.setattr(wf_command, "load_awf_config", lambda _repo_root: object())
+    monkeypatch.setattr(wf_command, "load_awf_config", lambda _repo_root: AwfConfig.defaults())
     monkeypatch.setattr(
         wf_command, "load_workflow_state", lambda _repo_root: {"phases": {}}
     )
@@ -196,6 +198,7 @@ def test_wf_next_dry_run_json_outputs_structured_prompt(monkeypatch, capsys) -> 
     )
     monkeypatch.setattr(wf_command, "resolve_next_phase", lambda _state, _phase: "plan")
     monkeypatch.setattr(wf_command, "build_workflow_prompt", lambda *_args: "PROMPT")
+    monkeypatch.setattr(wf_command, "_load_phase_agent_metadata", lambda *_args: {})
 
     rc = wf_command.run_wf_next(argparse.Namespace(
         repo_root=".",

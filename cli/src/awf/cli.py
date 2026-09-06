@@ -143,7 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument(
         "--mode",
         choices=["solo", "quick", "precise", "cross", "critical"],
-        help="Multi-agent mode. solo=default, precise=codex→primary, cross=codex+sonnet parallel+judge, critical=codex→sonnet→primary sequential.",
+        help="Multi-agent mode. solo=default, precise=precision→primary, cross=plan-conformance+quality parallel+judge, critical=precision→quality→primary sequential.",
     )
     analyze_parser.add_argument("--repo-root", help="ai-workflow-tools repo root. Defaults to current or parent directories.")
     analyze_parser.add_argument("--docs-root", help="Override AWF_DOCS_ROOT.")
@@ -294,11 +294,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     wf_next_parser.add_argument("--repo-root", help="Repository root containing .workflow/. Defaults to current or parent directories.")
     wf_next_parser.add_argument("--phase", help="Override the target phase instead of resolving from state.")
-    wf_next_parser.add_argument("--provider", help="Provider name. Defaults to config provider.default.")
+    wf_next_parser.add_argument("--provider", help="Provider override; takes precedence over phase routing and agent provider defaults.")
     wf_next_parser.add_argument(
         "--mode",
         choices=["solo", "quick", "precise", "cross", "critical"],
-        help="Multi-agent mode. solo=primary only, quick=codex fast, precise=codex→primary, cross=codex+sonnet parallel, critical=codex→sonnet→primary sequential.",
+        help="Multi-agent mode. solo=primary only, quick=speed review, precise=precision→primary, cross=plan-conformance+quality parallel, critical=precision→quality→primary sequential.",
     )
     wf_next_parser.add_argument("--yolo", action="store_true", help="Bypass configured permission checks for this run.")
     wf_next_parser.add_argument(
@@ -897,7 +897,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     wt_acquire_parser.add_argument(
         "--base",
-        help="Base branch or origin tracking ref.",
+        help="Base branch or origin tracking ref; features default to feature_base or production.",
     )
     wt_acquire_parser.add_argument(
         "--branch",
@@ -952,7 +952,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     wt_promote_parser = wt_subparsers.add_parser(
         "promote",
-        help="Promote one or more ordered staging pull request deltas to production.",
+        help="Open a production PR from a tested source branch or reconstruct staging PR deltas.",
     )
     wt_promote_parser.add_argument(
         "--source-pr",
@@ -960,6 +960,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         type=int,
         help="Merged staging pull request number. Repeat in staging merge order.",
+    )
+    wt_promote_parser.add_argument(
+        "--source-branch",
+        action="store_true",
+        help=(
+            "Open or reuse a production PR from one merged staging PR's original "
+            "branch at its tested HEAD, without a synthetic worktree or commit. "
+            "Cannot be combined with --out-of-order or --exclude-path."
+        ),
     )
     wt_promote_parser.add_argument(
         "--out-of-order",
@@ -991,7 +1000,7 @@ def build_parser() -> argparse.ArgumentParser:
     wt_promote_parser.add_argument(
         "--apply",
         action="store_true",
-        help="Create, verify, push, and open the promotion pull request.",
+        help="Apply the preview: open the source-branch PR, or verify and publish a synthetic promotion.",
     )
     wt_promote_parser.add_argument(
         "--json",

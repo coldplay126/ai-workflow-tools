@@ -2,7 +2,7 @@
   "files": [
     {
       "name": "adversarial-tester.md",
-      "sha256": "ceb24f5b121eaed772c6c39039d81b1fbfe8aa2ef5d40e85da1ae05f4abde611",
+      "sha256": "e323a07ba81d7e0c5e193ca1580c47285f55748a1bc5161b941a0e0d0b509a38",
       "source": "claude/agents/adversarial-tester.md"
     },
     {
@@ -12,12 +12,12 @@
     },
     {
       "name": "artifact-reviewer.md",
-      "sha256": "2d6fc64ffcc4fa3e591cc59bdc9f049f963c237a32bea9edda36cae55db487aa",
+      "sha256": "8c2dad5c58c7b58218055de00431774ec4c281dbbd24fc026fbab86100b9fe8a",
       "source": "claude/agents/artifact-reviewer.md"
     },
     {
       "name": "code-reviewer.md",
-      "sha256": "0340cb9828f8ea02b21bcfcf0d895c9971bf203d0baa9b6fafb448baa7781274",
+      "sha256": "25525bd183311d01132a4049cd10674a487d40f44d936db5ad01755e0929c880",
       "source": "claude/agents/code-reviewer.md"
     },
     {
@@ -32,7 +32,7 @@
     },
     {
       "name": "plan-validator.md",
-      "sha256": "f9de2c5f39f7766086fd47ca71fb401bd9a2f3c0eb90185f1d2097c771babc62",
+      "sha256": "a363b61dcd137b53a16ce828aa2c41b2489200f00ed3010cf92bc1a9f99c6da6",
       "source": "claude/agents/plan-validator.md"
     },
     {
@@ -42,12 +42,12 @@
     },
     {
       "name": "quality-validator.md",
-      "sha256": "e0341158c4ba51166f96e60a93d63d713cc558032ceb3870a4a8d820be8e5246",
+      "sha256": "25a3036ca7dffba7f9e9be3a6460643f3144aa9aceeb22e1c4dbf2de8438c525",
       "source": "claude/agents/quality-validator.md"
     },
     {
       "name": "spec-verifier.md",
-      "sha256": "0e55b7001cb6f44fe9d2c8a3dca0a32afdd50277e774b257edae37f31be2f898",
+      "sha256": "89b60271a517dba94705f4ba9e7884d96a7e4113ec3ed2e837a97d31ae279e47",
       "source": "claude/agents/spec-verifier.md"
     },
     {

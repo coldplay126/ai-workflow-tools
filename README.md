@@ -104,6 +104,16 @@ skill을 `~/.claude/skills`, `~/.agents/skills`, `~/.omp/agent/skills`에
 원본을 세 skill runtime에 모두 연결합니다. `awf wt import`로 등록한
 worktree는 `awf wt adopt`하기 전까지 unmanaged 상태입니다.
 
+1인 개발에서는 **main 기반 feature → staging 검증 → 동일 feature의 main PR**을
+기본 흐름으로 사용할 수 있습니다. `.awf/worktree.toml`의 `feature_base`로 생성
+기준을 분리하고, `awf wt promote --source-pr <staging-pr> --to main --source-branch`
+preview 후 `--apply`를 실행합니다. 원본 브랜치와 검증 HEAD를 유지하며 합성
+배포 브랜치나 별도 production verification 설정을 요구하지 않습니다.
+기본 리뷰 정책은 작성자 본인이 병합한 PR도 허용합니다. 일반 개발 커밋은
+허용하고, staging PR 연결은 중간 검증으로 기록하여 feature를 정리하지 않습니다.
+검증 뒤 추가된 커밋과 staging-only 변경 혼입은 차단하며 main의 보호 규칙은
+유지합니다. [전체 명령 순서](cli/README.md#managed-release-worktrees-awf-wt)를 참고하세요.
+
 `awf wt promote`의 `--source-pr`는 staging merge 순서대로 반복할 수
 있습니다. `--exclude-path`도 반복할 수 있지만, source PR에서 review된 정확한
 repository-relative 경로만 허용되며 전체 reviewed delta를 제외할 수는 없습니다.
@@ -237,12 +247,19 @@ awf doctor --repo-root . --probe
 awf wf next --repo-root . --mode cross
 ```
 
-기본 OMP native 설정은 역할별 모델 의도를 보존합니다.
-`plan_conformance`와 `precision`은 `@default`,
-`quality_validation`과 `primary`는 `@slow`, `speed`는 `@smol`을
-사용합니다. native coordinator는 이 값을 worker agent별 immutable model
-override로 전달합니다. 같은 agent type에 서로 다른 모델이 매핑되면 worker를
-실행하지 않고 `omp_worker_model_conflict`로 차단합니다.
+기본 OMP 설정은 `dispatch.omp.role_models`를 비워 두고 각 agent의
+`model` 역할 alias를 존중합니다. 기획·품질·위험 검토는 `@plan`,
+구현·독립 코드 검토·정상 테스트는 `@task`를 사용합니다. OMP의
+`modelRoles.plan`에는 사용할 Claude 모델을, `modelRoles.task`에는 사용할
+Codex 모델을 지정합니다. 모델 버전은 agent 파일 대신 역할 설정에서 관리합니다.
+`@plan` 설정만으로 현재 대화 모델이 전환되지는 않으므로, Codex parent의
+실질적인 기획 작성은 `spec-writer` 호출로 위임합니다. 실제 선택은 native task의
+resolved model로 확인합니다.
+
+기존 workflow의 명시적 `dispatch.omp.role_models`는 계속 우선합니다.
+역할 정의를 따르려면 해당 덮어쓰기를 제거합니다. 명시한 worker model은
+immutable per-agent override로 전달하며, 같은 agent type에 서로 다른 모델을
+지정하면 `omp_worker_model_conflict`로 실행 전에 차단합니다.
 
 `setup.sh`가 AWF용 OMP agent 정의를 사용자 영역에 이미 설치합니다. 프로젝트가
 자체 `.claude/agents/*.md`를 추가한 경우에만 다음 명령으로 project-local OMP
@@ -431,6 +448,16 @@ preserved; a collision emits `AWF_SKILL_INSTALL_RESULT ... user_owned` and
 exits with code `3`. A worktree registered by `awf wt import` remains unmanaged
 until `awf wt adopt`.
 
+For solo development, use **a main-based feature → staging validation → a main
+PR from that same feature**. Configure `worktree.feature_base`, then preview
+`awf wt promote --source-pr <staging-pr> --to main --source-branch` and apply.
+The original branch and tested HEAD stay intact; no synthetic worktree or
+additional local production-verification command is required. Source review
+defaults to accepting approved or author-merged PRs. Ordinary development
+commits remain allowed, and linking the staging PR retains the feature lease
+until its production PR is merged. Untested head drift and staging-only
+history remain blocked; production branch protections still apply.
+
 `awf wt promote` accepts repeated `--source-pr` arguments in staging merge
 order. Repeated `--exclude-path` arguments may name only exact,
 repository-relative paths reviewed in those source PRs, and at least one
@@ -558,12 +585,17 @@ execution and a hard abort at the 6th to prevent verify fix-loop spirals.
 
 OMP is an internal secondary/team-worker surface selected by AWF. The generated
 provider config uses native coordination on an external host by default.
-`dispatch.omp.role_models` preserves the intended worker model by role:
-`plan_conformance` and `precision` use `@default`,
-`quality_validation` and `primary` use `@slow`, and `speed` uses `@smol`.
-The native coordinator passes these values as immutable per-agent model
-overrides. Conflicting models for the same agent type fail before launch with
-`omp_worker_model_conflict`.
+The default `dispatch.omp.role_models` is empty so each agent retains its
+model-role alias. Planning, quality, and risk review use `@plan`; implementation,
+independent code review, and happy-path testing use `@task`. Set OMP
+`modelRoles.plan` to the desired Claude model and `modelRoles.task` to the
+desired Codex model. Updating a role does not switch the current conversation:
+a Codex parent delegates substantive planning to `spec-writer`. Verify the
+actual selection through native task resolved-model evidence.
+
+Existing explicit `dispatch.omp.role_models` entries still override agent
+defaults; remove them to follow the agent definitions. Conflicting explicit
+models for the same agent type fail before launch with `omp_worker_model_conflict`.
 
 `setup.sh` installs the AWF OMP agent definitions. Run the following only when
 the project adds its own `.claude/agents/*.md` files:

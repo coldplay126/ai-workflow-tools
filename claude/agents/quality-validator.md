@@ -2,10 +2,10 @@
 name: quality-validator
 description: "품질 검증 전문가. 엣지케이스, 사이드이펙트, 회귀 리스크, 보안 이슈 검증. #cross 모드에서 사용."
 tools: Read, Grep, Glob, Bash
-model: sonnet
+model: opus
 # awf extensions
-provider_hint: claude:sonnet
-omp_model_role: slow
+provider_hint: claude-code
+omp_model_role: plan
 codex_sandbox: read-only
 roles: [quality_validation]
 ---

@@ -1,30 +1,87 @@
 ---
 name: release-worktree-lifecycle
-version: 1.4.0
-description: Use whenever handling deploy, production release, staging-to-main or staging-to-master promotion, release PR creation or merge, managed feature PR linkage, managed deployment worktree creation or reuse, stale sync conflict disposal or recovery, or merged branch/worktree cleanup. Requires awf wt status/acquire/link-pr/sync/recover-sync/discard-sync/promote/release/discard-promotion/finish/gc and forbids bypassing CLI safety blockers.
+version: 1.5.0
+description: Use whenever handling deploy, production release, staging-to-main or staging-to-master promotion (synthetic or same-branch --source-branch), release PR creation or merge, managed feature PR linkage, managed deployment worktree creation or reuse, stale sync conflict disposal or recovery, or merged branch/worktree cleanup. Requires awf wt status/acquire/link-pr/sync/recover-sync/discard-sync/promote/release/discard-promotion/finish/gc and forbids bypassing CLI safety blockers. Ordinary commits and non-force pushes on a developer's own development branch are not lifecycle actions and are not restricted by this skill.
 type: deployment-safety
 conditions:
   trigger:
     - handling deploy, production release, promotion, release PR, managed feature PR linkage, managed deployment worktree creation or reuse, or merged worktree cleanup
   skip:
     - no release, deployment, promotion, or worktree lifecycle action is involved
+    - only ordinary add, commit, or non-force push work on a developer-owned development branch is requested
 ---
 
 # Release Worktree Lifecycle
 
 ## Overview
 
-The `awf wt` CLI is authoritative; this skill defines the operator procedure only. Use the managed lifecycle rather than direct Git worktree operations. The required status preflight is non-destructive; preview-first applies to lifecycle operations before their `--apply` mutations. Every JSON result MUST determine the next step.
+The `awf wt` CLI is authoritative; this skill defines the operator procedure only. It governs lifecycle actions: acquiring or reusing a managed worktree, linking a merged PR, synchronizing, promoting, publishing a release bridge, finishing, and collecting. Use the managed lifecycle rather than direct Git worktree operations for those actions. The required status preflight is non-destructive; preview-first applies to lifecycle operations before their `--apply` mutations. Every JSON result MUST determine the next step.
+
+This skill does not govern ordinary development commits. Read the scope
+boundary below before applying any restriction in this document to a branch.
+
+## Scope boundary: ordinary development versus AWF-owned synthetic branches
+
+Two kinds of branches appear in this workflow, and the restrictions in this
+skill apply to only one of them.
+
+**Ordinary development branches** are branches a developer commits to: the
+user's own branches in any worktree, and the checked-out branch inside a
+managed `feature` lease (`awf/<initiative>/feature` or an explicit `--branch`).
+On these branches, normal `git add`, `git commit`, `git fetch`, `git pull`,
+and non-force `git push` are ordinary work, and the repository's own hooks run
+as configured. A commit needs no separate approval turn; the task that asked
+for the change already grants commit permission. A branch whose name contains
+`feature`, `release`, `hotfix`, or a version is still an ordinary development
+branch: the name alone never makes it an AWF sealed release bridge, synthetic
+promotion branch, or protected AWF object. Do not require `awf wt` preflight,
+preview, or a JSON result before an ordinary commit or push.
+
+**AWF-owned synthetic branches and worktrees** are created by AWF itself:
+`PROMOTE` leases with their `awf/<initiative>/promote` or release-bridge
+branches, `awf/sync-<pair>-<source>/feature` synchronization branches, and any
+managed worktree that AWF reports as blocked in out-of-order conflict
+resolution or sync recovery. Their commits are reconstructed from reviewed PR
+deltas and their index entries are pinned. Only there do the immutable index
+and commit guards apply: MUST NOT `git add`, `git commit`, `git reset`,
+`git cherry-pick`, `git stash`, or `git push` in them, and MUST NOT mutate
+them outside the `awf wt` commands documented here.
+
+**Commit permission is separate from merge and deployment permission.**
+Committing to a development branch never authorizes merging into the
+production branch, publishing a promotion, or deploying. Those remain
+lifecycle actions that follow the preflight, preview, and blocker rules below.
+
+**Data-loss operations keep their evidence requirement on managed objects.**
+Removing an AWF-managed worktree, deleting an AWF-managed or AWF-owned branch,
+force-pushing or `git reset --hard` against a branch AWF tracks, and bulk
+cleanup still require the recorded PR and deployment evidence and the explicit
+user request that the relevant `awf wt` command encodes. Use `finish`, `gc`,
+`discard-promotion`, or `discard-sync`; never direct deletion.
+
+**Unmanaged user worktrees are not AWF property.** The registry protects the
+leases it records. It is not a reason to forbid ordinary Git operations in a
+worktree AWF does not manage, and a `status` warning about an unmanaged lease
+is information, not a stop condition for the user's own work.
+
+**Preview, then apply in the same turn.** When the user has already requested
+a lifecycle operation, run its preview. If the preview returns `preview` with
+no blocker, no warning that changes the outcome, and no choice the user has not
+already made, run the matching `--apply` in the same turn; a `reuse` result
+needs no apply at all. Preview-first is a verification step, not a second
+approval round. Stop and report instead when the preview is `blocked`, when it
+exposes an option the user did not choose (a different lease, branch, base,
+target, path set, or deletion), or when the user asked only for an inspection.
 
 ## Required preflight
 
-Before acquiring, linking, opening or publishing a release bridge, promoting, finishing, or collecting a worktree, MUST run:
+Before acquiring, linking, synchronizing, opening or publishing a release bridge, promoting, finishing, or collecting a worktree, MUST run:
 
 ```sh
 awf wt status --repo-root <repo-root> --refresh --json
 ```
 
-`status --refresh` is a required non-destructive state-refresh preflight. A `ready` status means inspect the refreshed leases and select the appropriate lifecycle action; it MUST NOT itself trigger `--apply`.
+`status --refresh` is a required non-destructive state-refresh preflight for lifecycle actions; it is not required before an ordinary commit or push on a development branch. A `ready` status means inspect the refreshed leases and select the appropriate lifecycle action; it MUST NOT itself trigger `--apply`.
 
 If status indicates a registry or Git mismatch, MUST inspect it without repair:
 
@@ -42,41 +99,186 @@ Preview the managed feature lease:
 awf wt acquire --initiative <initiative> --purpose feature --repo-root <repo-root> --json
 ```
 
-On `reuse`, MUST use the exact returned lease and MUST NOT create another worktree. On `preview`, inspect the returned branch, base, path, and ownership before explicitly applying it:
+The feature base resolves in this order: explicit `--base`, then
+`worktree.feature_base`, then `worktree.production_branch`, then
+`worktree.default_base`, then the remote default branch. `worktree.default_base`
+keeps its existing meaning as the staging branch that source PRs are verified
+against; set `worktree.feature_base` (or rely on `production_branch`) so that a
+solo feature branch starts from production rather than from staging.
+
+On `reuse`, MUST use the exact returned lease and MUST NOT create another worktree. On `preview`, inspect the returned branch, base, path, and ownership before applying it:
 
 ```sh
 awf wt acquire --initiative <initiative> --purpose feature --repo-root <repo-root> --apply --json
 ```
 
-If `acquire --apply` returns `ready`, MUST use or report the returned lease and MUST NOT repeat `--apply`.
+If `acquire --apply` returns `ready`, MUST use or report the returned lease and
+MUST NOT repeat `--apply`. The lease's checked-out branch is an ordinary
+development branch: commit, push, and open pull requests on it normally.
+
+## Recommended solo flow: main-based feature, staging PR, same-branch main PR
+
+This is the default path for a single developer who validates on `staging`
+and releases to `main` without a synthetic promotion branch. Configure the
+repository once:
+
+```toml
+[worktree]
+default_base = "staging"      # staging verification target for source PRs
+production_branch = "main"
+feature_base = "main"         # feature branches start from production
+
+[promotion]
+# Default: approved_or_self_merged. Set "approved" only when a reviewer exists.
+source_review_policy = "approved_or_self_merged"
+```
+
+**Step 1 — branch.** Create the feature branch from `main` with `acquire`
+above, or in your own worktree. Commit and push to it normally; no preflight or
+preview per commit.
+
+**Step 2 — staging PR.** Open a pull request from the feature branch to
+`staging` and merge it once its checks pass. Under `approved_or_self_merged`
+the author's own merge satisfies the review policy; MUST NOT request an
+unavailable external reviewer. An explicit `approved` policy is enforced as
+written. A repository without configured CI has an empty checks rollup, which
+passes; MUST NOT demand that CI be added. The staging PR is an intermediate
+step: MUST NOT merge it with `--delete-branch`, MUST NOT run `finish` against
+it, and MUST NOT delete the local or remote feature branch, because the same
+branch head becomes the production PR. For a managed feature lease, `link-pr`
+with the merged staging PR is optional bookkeeping: it records
+`record_staging_validation` (source PR, base SHA, head SHA), keeps the lease
+`ACTIVE`, and leaves `target_pr` empty, so it never makes the lease cleanable.
+Fixing the same feature, verifying it on staging again, and then promoting is
+normal: each round is one more staging PR from the same branch, and the
+production step below always names only the latest one.
+
+**Step 3 — same-branch production PR.** After the required status preflight,
+preview it:
+
+```sh
+awf wt status --repo-root <repo-root> --refresh --json
+awf wt promote --source-pr <staging-pr> --to main --source-branch --repo-root <repo-root> --json
+```
+
+The preview returns exactly one `open_pull_request` action with
+`promotion_mode: "source_branch"`, `source_branch`, `source_pr`, `tested_head`,
+`source_head_sha`, `source_base_sha`, `reviewed_base_sha`, `target_branch`, and
+`target_base_sha`, plus the ordered `source_prs`/`sources` validation chain when
+earlier staging rounds of the same branch contribute to the head. Confirm that
+`source_branch` is the feature branch, `tested_head` is the merged staging PR
+head, every listed source is a staging PR of this branch, and the target is
+the configured production branch, then apply:
+
+```sh
+awf wt promote --source-pr <staging-pr> --to main --source-branch --repo-root <repo-root> --apply --json
+```
+
+Apply opens exactly one pull request from the original remote feature branch at
+that same verified head into the target through the existing GitHub client. It
+creates no lease, worktree, synthetic commit, or push, and it never merges the
+PR. The PR body carries `Validation-*` trailers for the whole chain. `ready`
+and `reuse` return the same action with `target_pr` and `url`; an existing open
+PR from that branch to the target is reused when it matches and is
+`target_pr_mismatch` when it does not.
+
+The source gates are unchanged: the source PR MUST be `MERGED` into the
+configured staging branch, satisfy the review policy and checks, and not be a
+synchronization PR; the target MUST be the configured production branch.
+`--source-branch` accepts exactly one `--source-pr` and MUST NOT be combined
+with `--exclude-path` or `--out-of-order`; any of those is
+`invalid_source_branch_promotion`. The remote feature branch head MUST equal
+`tested_head`, or the result is `source_branch_provenance_changed`. A branch
+that carries staging commits absent from the target (for example a merge of
+`staging` back into the feature) is `source_branch_contains_staging`. The
+production candidate must start within the validated history and touch only
+its reviewed paths; changes already on main may share those files. An invalid
+candidate is `source_delta_mismatch`. No managed lease is required: proof comes from the
+PR, the remote head, and the Git graph. When a managed feature lease has
+recorded staging evidence, AWF additionally compares it, and evidence older
+than a newer local commit is `staging_evidence_stale`. This path needs no
+`prepare` or `verify.production.commands` configuration: there is no synthetic
+result to verify locally, and the head was already verified on the staging PR.
+
+**Step 4 — merge to main.** Merge the production PR only after the
+repository's `main` branch protections and required checks pass on that exact
+head. Approval is required only when branch policy requires it; a solo
+repository MUST NOT invent an unavailable reviewer. If the remote feature branch
+moves after the staging merge, the production PR head is no longer the verified
+head: the preview reports `source_branch_provenance_changed`, and a managed
+lease whose recorded staging evidence predates a new local commit reports
+`staging_evidence_stale`. MUST NOT force-push the branch back to the old head
+and MUST NOT switch to synthetic promotion to bypass the drift. Instead verify
+the new head through another staging PR from the same branch, merged under the
+same gates (then `link-pr` it if the lease keeps evidence), and replay the
+preview naming only that latest staging PR. AWF walks the validation chain
+itself: from the latest PR it finds the earlier merged staging PR of the same
+branch whose head is exactly the latest reviewed merge-base, repeats until the
+chain root is an ancestor of the production target, verifies merged state,
+review, checks, graph, and paths for every predecessor, requires the remote head
+to be the latest verified head, and exposes the chain in `source_prs`/`sources`
+and the PR body. A predecessor that no staging PR of this branch reviewed is
+`source_branch_contains_staging`; an ambiguous, reversed, or cyclic chain is
+`source_validation_chain_invalid`; exhausting the bounded PR scan fails closed
+as external `source_branch_unavailable`. Choosing the exact or cumulative
+synthetic path in any of those cases is a user decision, never an automatic
+switch.
+
+**Step 5 — deleted remote branch.** If GitHub's automatic branch deletion
+removed the remote feature branch after the staging merge, the preview stops
+with `source_branch_unavailable`. AWF MUST NOT fall back to synthetic promotion
+silently and MUST NOT force-push. When the local branch still points at the
+verified `tested_head`, restore it with an ordinary non-force
+`git push -u origin <feature-branch>` and replay the preview. If no local ref
+retains that head, stop and report; choosing synthetic `promote` instead is a
+new decision that belongs to the user.
+
+**Step 6 — cleanup.** Only after the production PR is merged and deployment
+health is proven (see Cleanup), record the production PR on the managed feature
+lease with the `link-pr` procedure below, passing the production PR number.
+That final link, not the staging link, records `target_pr` and `CLEANABLE`.
+Then run `finish` with the production PR number. `finish` removes the lease
+worktree and, for an `awf/`-prefixed managed branch, deletes its local and
+remote branch, which is why it MUST NOT run against the intermediate staging
+PR. An unmanaged worktree has no lease; its branch cleanup is the user's
+ordinary Git work.
 
 ## Managed feature PR linkage
 
-Use this only when an active managed feature worktree's PR was created and
-merged outside AWF before the lease recorded `target_pr`. After the required
-status preflight, preview the explicit link:
+Use this when an active managed feature worktree's PR was created and merged
+outside AWF. It has two outcomes. Linking the merged production PR (or, in a
+staging-only repository without a configured production branch, the merged
+staging PR) records `target_pr` and makes the lease cleanable. Linking a merged
+staging PR while `worktree.default_base` and `worktree.production_branch` are
+distinct records staging validation only. After the required status preflight,
+preview the explicit link:
 
 ```sh
 awf wt link-pr --lease <id> --pr <merged-pr> --json
 ```
 
-The preview MUST identify the intended lease, PR, branch, and exact head SHA.
-Only then explicitly apply:
+The preview MUST identify the intended lease, PR, branch, exact head SHA, and
+action kind (`record_staging_validation` or the cleanup link). Only then
+explicitly apply:
 
 ```sh
 awf wt link-pr --lease <id> --pr <merged-pr> --apply --json
 ```
 
 `link-pr` accepts only a clean, managed `feature` lease that is `ACTIVE` with
-no PR link, or the exact already-linked `CLEANABLE` lease for idempotent reuse.
-The supplied PR MUST be merged and MUST exactly match the lease repository,
-branch, and current registered/check-out worktree HEAD. The recorded
-acquisition SHA may be older after normal feature commits. Apply revalidates
-local Git after the GitHub lookup, replaces the recorded SHA with the
-independently verified current PR/worktree SHA, then atomically records
-`target_pr`, `CLEANABLE`, and `not_required`. The same linked PR returns
-`reuse`; any lease-state, repository, branch, head, cleanliness, or merge
-mismatch is `blocked`. A GitHub external failure is exit code `4`. MUST NOT
+no cleanup PR link, or the exact already-linked `CLEANABLE` lease for
+idempotent reuse. The supplied PR MUST be merged and MUST exactly match the
+lease repository, branch, and current registered/check-out worktree HEAD. The
+recorded acquisition SHA may be older after normal feature commits. Apply
+revalidates local Git after the GitHub lookup and replaces the recorded SHA with
+the independently verified current PR/worktree SHA. For the production PR it
+then atomically records `target_pr`, `CLEANABLE`, and `not_required`; for an
+intermediate staging PR it records `source_pr`, `source_base_sha`, and
+`source_head_sha`, keeps `ACTIVE`, and leaves `target_pr` empty. The same
+linked PR at the same head returns `reuse`; any lease-state, repository, branch,
+head, cleanliness, or merge mismatch is `blocked`, and a production link whose
+recorded staging evidence predates a newer local commit is
+`staging_evidence_stale`. A GitHub external failure is exit code `4`. MUST NOT
 infer a PR from branch history, adopt the lease, or use direct Git or registry
 mutation.
 
@@ -208,12 +410,22 @@ recovery commit.
 
 ## Production promotion
 
-A production promotion MUST contain only the ordered source PR deltas, never
-the entire staging branch. `--source-pr` is repeatable and MUST follow staging
-merge order. A source PR base MAY differ from the preceding PR merge SHA; AWF
-reapplies the explicitly listed deltas to one branch based on the latest target.
-Multi-source promotion MUST require every source merge SHA. Apply MUST verify
-staging merge order; reversed input is `blocked` with `source_pr_sequence_order`.
+This is the synthetic promotion path: AWF reconstructs reviewed deltas on a
+managed `PROMOTE` lease and publishes its own branch. Use it when the original
+feature branch cannot itself become the production PR (multiple sources, path
+exclusions, out-of-order shipping, or an unavailable source branch that the
+user has explicitly decided not to restore). For a single staging PR whose
+branch is still available, prefer the same-branch `--source-branch` flow above.
+Choosing the synthetic path after a `source_branch_unavailable` result is a
+user decision, never an automatic fallback.
+
+A synthetic production promotion MUST contain only the ordered source PR
+deltas, never the entire staging branch. `--source-pr` is repeatable and MUST
+follow staging merge order. A source PR base MAY differ from the preceding PR
+merge SHA; AWF reapplies the explicitly listed deltas to one branch based on the
+latest target. Multi-source promotion MUST require every source merge SHA. Apply
+MUST verify staging merge order; reversed input is `blocked` with
+`source_pr_sequence_order`.
 
 `--exclude-path` is repeatable. Every excluded value MUST be a unique, exact,
 repository-relative path reviewed in the source PRs, and at least one reviewed
@@ -233,11 +445,12 @@ configured review policy, checks, and staging base. The promotion MUST pass the
 configured prepare and production verification commands; a prepare command
 that leaves the worktree dirty is `blocked`.
 
-When `promotion.source_review_policy` is `approved_or_self_merged`, a source PR
-merged by its author satisfies the review policy; MUST NOT request an
-unavailable external reviewer. The merged state, successful checks, staging
-base, prepare, and production verification gates remain required. Only then
-explicitly create the managed promotion PR:
+`promotion.source_review_policy` defaults to `approved_or_self_merged`: a
+source PR merged by its author satisfies the review policy; MUST NOT request an
+unavailable external reviewer. An explicit `approved` policy is enforced as
+written. The merged state, successful checks, staging base, prepare, and
+production verification gates remain required for a synthetic promotion. Only
+then explicitly create the managed promotion PR:
 
 ```sh
 awf wt promote --source-pr <number> --to <branch> --repo-root <repo-root> --apply --json
@@ -400,9 +613,11 @@ would perform. The action order is `resolve_out_of_order_conflict`,
 
 A failed three-way apply stops with `out_of_order_conflict`. AWF preserves an
 unpublished managed worktree with the complete ordered source pins, target,
-reviewed-path union, and conflicted-path provenance. The operator may edit only
-the conflicted files returned by AWF. MUST NOT use `git add`, `git commit`,
-`git reset`, `git cherry-pick`, or `git push`.
+reviewed-path union, and conflicted-path provenance. Inside that managed
+promotion worktree the operator may edit only the conflicted files returned by
+AWF and MUST NOT use `git add`, `git commit`, `git reset`, `git cherry-pick`,
+or `git push`; this guard belongs to the AWF-owned worktree, not to the
+developer's own branches.
 
 Operator's unstaged edits and unmerged paths must be a subset of
 `conflicted_paths`. AWF clean-applied staged `protected_index_entries` may
@@ -605,7 +820,7 @@ For `removed`, MUST report completion and take no further cleanup action for tha
 
 ## Forbidden fallbacks
 
-MUST NOT use direct worktree creation, removal, pruning, direct Git or filesystem cleanup, or other unmanaged deletion. MUST NOT merge staging wholesale, use `git branch --merged` as cleanup proof, stash, reset, clean, force-delete, or bypass a CLI blocker. These actions are not a substitute for `awf wt` status, doctor, acquire, link-pr, promote, finish, or gc.
+These prohibitions apply to AWF-managed leases, AWF-owned synthetic branches, and the lifecycle actions this skill governs; they do not restrict ordinary commits or non-force pushes on a developer's own branch (see the scope boundary). MUST NOT use direct worktree creation, removal, pruning, direct Git or filesystem cleanup, or other unmanaged deletion of a managed lease, worktree, or AWF-owned branch. MUST NOT merge staging wholesale, use `git branch --merged` as cleanup proof, stash, reset, clean, or force-delete inside a managed synthetic worktree or against an AWF-owned branch, silently replace a blocked `--source-branch` promotion with a synthetic one, or bypass a CLI blocker. These actions are not a substitute for `awf wt` status, doctor, acquire, link-pr, promote, finish, or gc.
 
 ## JSON decision table
 
@@ -631,6 +846,8 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
     "recover_sync_apply": "awf wt recover-sync --lease <id> --repo-root <repo-root> --apply --json",
     "promote_preview": "awf wt promote --source-pr <number> --to <branch> --repo-root <repo-root> --json",
     "promote_apply": "awf wt promote --source-pr <number> --to <branch> --repo-root <repo-root> --apply --json",
+    "source_branch_promote_preview": "awf wt promote --source-pr <staging-pr> --to main --source-branch --repo-root <repo-root> --json",
+    "source_branch_promote_apply": "awf wt promote --source-pr <staging-pr> --to main --source-branch --repo-root <repo-root> --apply --json",
     "release_open_preview": "awf wt release open --release <id> --to <branch> --repo-root <repo-root> --json",
     "release_open_apply": "awf wt release open --release <id> --to <branch> --repo-root <repo-root> --apply --json",
     "release_add_preview": "awf wt release add --release <id> --source-pr <number> --repo-root <repo-root> --json",
@@ -656,6 +873,76 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
     "preflight": "required_non_destructive_status_refresh",
     "lease_reuse": "exact",
     "promotion_scope": "source_pr_delta_only",
+    "ordinary_development": {
+      "scope": "developer_owned_branches_and_managed_feature_lease_checkout",
+      "git_operations": "add_commit_fetch_pull_nonforce_push_and_project_hooks_allowed",
+      "per_commit_approval": "not_required",
+      "preflight_before_commit": "not_required",
+      "branch_name_release_or_feature": "not_an_awf_synthetic_object",
+      "commit_permission": "separate_from_merge_and_deploy_permission",
+      "unmanaged_worktrees": "registry_protection_does_not_forbid_ordinary_git",
+      "data_loss_on_managed_objects": "evidence_and_explicit_request_required",
+      "preview_then_apply": "same_turn_when_requested_and_preview_has_no_blocker_or_new_choice"
+    },
+    "immutable_index_commit_guard": {
+      "scope": "awf_owned_promote_release_bridge_and_sync_worktrees_only",
+      "forbidden_inside": ["git add", "git commit", "git reset", "git cherry-pick", "git stash", "git push"]
+    },
+    "feature_base": {
+      "resolution_order": ["--base", "worktree.feature_base", "worktree.production_branch", "worktree.default_base", "remote_default"],
+      "default_base_meaning": "staging_verification_target_unchanged"
+    },
+    "source_review_policy": {
+      "default": "approved_or_self_merged",
+      "explicit_approved": "enforced_as_written",
+      "external_reviewer": "never_invented",
+      "empty_checks_rollup": "passes_no_new_ci_required"
+    },
+    "source_branch_promotion": {
+      "mode": "explicit_opt_in",
+      "source_count": "exactly_one_latest_staging_pr",
+      "repeated_staging": "normal_flow_one_more_staging_pr_per_round",
+      "validation_chain": "predecessor_staging_pr_head_equals_latest_reviewed_merge_base_root_production_ancestor_every_link_merged_review_checks_graph_paths",
+      "validation_chain_exposure": ["source_prs", "sources", "pr_body_validation_trailers"],
+      "exclude_paths": "forbidden",
+      "out_of_order": "forbidden",
+      "publication": "one_pull_request_from_original_remote_feature_branch_at_tested_head",
+      "artifacts": "no_lease_no_worktree_no_synthetic_commit_no_push_no_merge",
+      "managed_lease": "optional_recorded_staging_evidence_compared_when_present",
+      "local_verification": "prepare_and_verify_production_not_required",
+      "target": "configured_production_branch_protections_and_checks_on_exact_head",
+      "preview_action": "open_pull_request",
+      "preview_fields": [
+        "promotion_mode",
+        "source_branch",
+        "source_pr",
+        "tested_head",
+        "source_head_sha",
+        "source_base_sha",
+        "reviewed_base_sha",
+        "target_branch",
+        "target_base_sha",
+        "source_prs",
+        "sources"
+      ],
+      "ready_fields": ["target_pr", "url"],
+      "staging_pr": "intermediate_no_delete_branch_no_finish",
+      "staging_link_pr": "record_staging_validation_lease_stays_active",
+      "cleanup_link_pr": "production_pr_only",
+      "remote_branch_deleted": "restore_verified_head_with_nonforce_push_then_retry",
+      "source_drift": "reverify_with_new_staging_pr_then_replay_naming_latest_pr",
+      "synthetic_fallback": "explicit_user_decision_never_silent",
+      "blocker_codes": [
+        "invalid_source_branch_promotion",
+        "source_branch_unavailable",
+        "source_branch_provenance_changed",
+        "source_branch_contains_staging",
+        "source_validation_chain_invalid",
+        "source_delta_mismatch",
+        "staging_evidence_stale",
+        "target_pr_mismatch"
+      ]
+    },
     "branch_sync": {
       "direction": "configured_production_to_staging_only",
       "scope": "source_only_delta_since_live_merge_base",
@@ -751,9 +1038,20 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
     "managed_feature_pr_link": {
       "lease_state": "active_unlinked_or_cleanable_exact_reuse",
       "pr_provenance": "already_merged_exact_repository_branch_and_current_worktree_head",
-      "apply_transition": "replace_recorded_head_then_cleanable_not_required",
+      "staging_apply": {
+        "lease_state": "ACTIVE",
+        "target_pr": null,
+        "source_pr": "verified_staging_pr"
+      },
+      "production_apply": {
+        "lease_state": "CLEANABLE",
+        "deployment_state": "not_required",
+        "target_pr": "verified_production_pr"
+      },
+      "one_stage_or_sync": "final_cleanup",
       "same_pr": "reuse",
-      "different_pr": "blocked",
+      "different_staging_pr": "revalidate_and_replace_source_evidence",
+      "different_final_pr": "blocked",
       "github_external_failure": "exit_4"
     },
     "imported_pr_lifecycle": {
@@ -768,6 +1066,7 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
       "link-pr",
       "sync",
       "promote",
+      "source_branch_promote",
       "release_open",
       "release_add",
       "release_seal",
@@ -797,7 +1096,9 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
       "reset",
       "force_delete",
       "unmanaged_deletion"
-    ]
+    ],
+    "forbidden_fallback_scope": "awf_managed_leases_awf_owned_synthetic_branches_and_lifecycle_actions_only",
+    "ordinary_git_on_development_branches": "not_restricted"
   },
   "decisions": {
     "reuse": "use_exact_lease",
@@ -806,6 +1107,7 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
       "link_pr": "review_then_apply_explicitly",
       "sync": "review_then_apply_explicitly",
       "promote": "review_then_apply_explicitly",
+      "source_branch_promote": "review_open_pull_request_action_then_apply_explicitly",
       "release_open": "review_then_apply_explicitly",
       "release_add": "review_then_apply_explicitly",
       "release_seal": "review_then_apply_explicitly",
@@ -823,8 +1125,10 @@ MUST NOT use direct worktree creation, removal, pruning, direct Git or filesyste
       "status": "inspect_select_lifecycle_action",
       "acquire_apply": "use_or_report_returned_lease",
       "link_pr_apply": "restart_status_preflight_then_finish",
+      "link_pr_staging_apply": "lease_stays_active_continue_to_source_branch_promote",
       "sync_apply": "use_or_report_returned_lease",
       "promote_apply": "use_or_report_returned_lease",
+      "source_branch_promote_apply": "report_returned_pull_request_no_lease",
       "release_open_apply": "use_or_report_returned_lease",
       "release_add_apply": "use_or_report_returned_lease",
       "release_seal_apply": "use_or_report_returned_lease",

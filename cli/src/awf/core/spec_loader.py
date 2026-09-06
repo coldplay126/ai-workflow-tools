@@ -248,7 +248,7 @@ def load_analysis_mode_contract(mode_name: str) -> dict[str, Any]:
 # Cache management
 # ---------------------------------------------------------------------------
 
-_AGENT_CACHE: dict[str, dict[str, Any]] = {}
+_AGENT_CACHE: dict[tuple[tuple[Path, ...], str], dict[str, Any]] = {}
 
 
 def _agent_search_paths() -> list[Path]:
@@ -305,22 +305,30 @@ def _parse_agent_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     return meta, body
 
 
-def load_agent_definition(agent_name: str) -> dict[str, Any]:
+def load_agent_definition(
+    agent_name: str, *, repo_root: str | Path | None = None
+) -> dict[str, Any]:
     """Load a complete agent definition from agents/{agent_name}.md.
 
     Returns dict with 'meta' (frontmatter) and 'instructions' (body).
-    Searches: ~/.claude/agents/ → project/claude/agents/ → project/.claude/agents/
+    Searches repo-local sources before the existing installation search paths.
+    Cache entries are isolated by search roots, including implicit cwd changes.
     """
-    if agent_name in _AGENT_CACHE:
-        return _AGENT_CACHE[agent_name]
+    search_paths = _agent_search_paths()
+    if repo_root is not None:
+        root = Path(repo_root).resolve()
+        search_paths = [root / "claude" / "agents", root / ".claude" / "agents", *search_paths]
+    cache_key = (tuple(path.resolve() for path in search_paths), agent_name)
+    if cache_key in _AGENT_CACHE:
+        return _AGENT_CACHE[cache_key]
 
-    for search_dir in _agent_search_paths():
+    for search_dir in search_paths:
         agent_path = search_dir / f"{agent_name}.md"
         if agent_path.is_file():
             text = agent_path.read_text(encoding="utf-8")
             meta, body = _parse_agent_frontmatter(text)
             result = {"meta": meta, "instructions": body, "path": str(agent_path)}
-            _AGENT_CACHE[agent_name] = result
+            _AGENT_CACHE[cache_key] = result
             return result
 
     raise FileNotFoundError(f"Agent not found: {agent_name}")

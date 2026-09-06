@@ -10,14 +10,23 @@ via inline claude-code instead of the requested provider. See CLAUDE.md
 These tests pin the new resolution order:
   CLI --provider > phase_routing.primary (when mode=delegated)
                 > phase_models.inline_model
+                > Agent Card source provider_hint
                 > global default
-plus the stderr warning surfaced when both routes are configured.
 """
 from __future__ import annotations
+
+import json
+from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
 from awf.commands.wf import _resolve_phase_provider
+from awf.commands import wf as wf_commands
+from awf.cli import build_parser
+from awf.core.config import AwfConfig
+from awf.core import spec_loader
+from awf.providers.base import ProviderResult
 
 
 class _FakeConfig:
@@ -41,16 +50,13 @@ class TestExplicitOverride:
 
 
 class TestDelegatedRouting:
-    def test_delegated_primary_wins_over_inline_model(self, capsys) -> None:
+    def test_delegated_primary_wins_over_inline_model(self) -> None:
         config = {
             "phase_routing": {"impl": {"mode": "delegated", "primary": "codex"}},
             "phase_models": {"impl": {"inline_model": "sonnet"}},
         }
         result = _resolve_phase_provider(None, config, "impl", _FakeConfig())
         assert result == "codex"
-        err = capsys.readouterr().err
-        assert "phase_routing.impl.primary='codex'" in err
-        assert "phase_models.impl.inline_model='sonnet'" in err
 
     def test_delegated_primary_without_inline_model_no_warning(self, capsys) -> None:
         config = {
@@ -140,3 +146,227 @@ class TestEdgeCases:
         config = {"phase_routing": None, "phase_models": None}
         result = _resolve_phase_provider(None, config, "impl", _FakeConfig("codex"))
         assert result == "codex"
+
+
+def _write_phase_agent(root: Path, name: str, metadata: str) -> None:
+    cards = root / ".workflow" / "agent-cards"
+    cards.mkdir(parents=True, exist_ok=True)
+    (cards / "plan.json").write_text(
+        json.dumps({"agent": {"name": name}}), encoding="utf-8"
+    )
+    agents = root / "claude" / "agents"
+    agents.mkdir(parents=True, exist_ok=True)
+    (agents / f"{name}.md").write_text(
+        f"---\nname: {name}\n{metadata}\n---\nPlan the requested change.\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.fixture
+def phase_runtime(tmp_path, monkeypatch):
+    root = tmp_path / "project"
+    _write_phase_agent(root, "spec-writer", "provider_hint: claude-code\nmodel: opus")
+    spec_loader.clear_cache()
+    # Isolate installed sources while exercising the real repo-root-aware loader.
+    monkeypatch.setattr(spec_loader, "_agent_search_paths", lambda: [])
+    config = AwfConfig.defaults().merge({
+        "provider": {
+            "default": "codex",
+            "claude-code": {"command": "claude"},
+            "codex": {"command": "codex"},
+        }
+    })
+    provider_config = {}
+    state = {
+        "id": "role-routing",
+        "currentPhase": "plan",
+        "phases": {"plan": {"status": "pending"}},
+    }
+    monkeypatch.setattr(wf_commands, "load_awf_config", lambda _root: config)
+    monkeypatch.setattr(wf_commands, "load_workflow_state", lambda _root: state)
+    monkeypatch.setattr(
+        wf_commands, "load_workflow_provider_config", lambda _root: provider_config
+    )
+    monkeypatch.setattr(
+        "awf.core.state.save_workflow_state_snapshot", lambda *_args: None
+    )
+    monkeypatch.setattr(wf_commands, "mark_phase_in_progress", lambda *_args: None)
+    monkeypatch.setattr(wf_commands, "EventProcessor", Mock())
+    monkeypatch.setattr(wf_commands, "resolve_execution_mode", lambda *_args: "legacy")
+    calls = []
+    returncodes = {}
+
+    def run_provider(provider, prompt, cwd, label, **kwargs):
+        spawn = provider.build_spawn_spec(prompt)
+        try:
+            calls.append((provider.name, spawn.argv))
+        finally:
+            spawn.cleanup()
+        return ProviderResult(
+            returncode=returncodes.get(provider.name, 0), stdout="", stderr=""
+        ), 0.0
+
+    monkeypatch.setattr(wf_commands, "_run_provider_with_heartbeat", run_provider)
+    args = build_parser().parse_args([
+        "wf", "next", "--phase", "plan", "--mode", "solo",
+        "--no-ready-gate", "--repo-root", str(root),
+    ])
+    yield args, provider_config, calls, returncodes
+    spec_loader.clear_cache()
+
+
+def test_plan_agent_hint_overrides_global_codex_in_dry_run(phase_runtime, capsys):
+    args, _, calls, _ = phase_runtime
+    args.dry_run = True
+    args.output_format = "json"
+
+    assert wf_commands.run_wf_next(args) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["provider"] == "claude-code"
+    assert payload["fallback_chain"] == ["claude-code"]
+    assert calls == []
+
+
+def test_plan_agent_hint_controls_executed_provider_and_model(phase_runtime):
+    args, _, calls, _ = phase_runtime
+
+    assert wf_commands.run_wf_next(args) == 0
+
+    assert [name for name, _ in calls] == ["claude-code"]
+    argv = calls[0][1]
+    assert argv[0] == "claude"
+    assert argv[argv.index("--model") + 1] == "opus"
+
+
+def test_agent_inherit_model_preserves_configured_claude_model(phase_runtime):
+    args, _, calls, _ = phase_runtime
+    _write_phase_agent(Path(args.repo_root), "spec-writer", "provider_hint: claude-code\nmodel: inherit")
+    config = wf_commands.load_awf_config(args.repo_root)
+    config.raw["provider"]["claude-code"]["flags"] = ["--print", "--model", "sonnet"]
+
+    assert wf_commands.run_wf_next(args) == 0
+
+    assert [name for name, _ in calls] == ["claude-code"]
+    argv = calls[0][1]
+    assert argv[argv.index("--model") + 1] == "sonnet"
+
+
+@pytest.mark.parametrize(
+    ("explicit", "settings", "expected_provider", "expected_model"),
+    [
+        ("codex", {}, "codex", None),
+        ("claude:sonnet", {}, "claude-code", "sonnet"),
+        (None, {"phase_routing": {"plan": {"mode": "delegated", "primary": "codex"}}}, "codex", None),
+        (None, {"phase_models": {"plan": {"inline_model": "sonnet"}}}, "claude-code", "sonnet"),
+    ],
+)
+def test_explicit_routes_override_agent_defaults(
+    phase_runtime, explicit, settings, expected_provider, expected_model
+):
+    args, provider_config, calls, _ = phase_runtime
+    args.provider = explicit
+    provider_config.update(settings)
+
+    assert wf_commands.run_wf_next(args) == 0
+
+    assert [name for name, _ in calls] == [expected_provider]
+    argv = calls[0][1]
+    if expected_model is None:
+        assert "--model" not in argv
+    else:
+        assert argv[argv.index("--model") + 1] == expected_model
+
+
+def test_claude_agent_model_does_not_leak_to_codex_fallback(phase_runtime):
+    args, provider_config, calls, returncodes = phase_runtime
+    provider_config["fallback_chain"] = ["codex"]
+    returncodes["claude-code"] = 1
+
+    assert wf_commands.run_wf_next(args) == 0
+
+    assert [name for name, _ in calls] == ["claude-code", "codex"]
+    claude_argv, codex_argv = calls[0][1], calls[1][1]
+    assert claude_argv[claude_argv.index("--model") + 1] == "opus"
+    assert codex_argv[0] == "codex"
+    assert "--model" not in codex_argv
+
+
+def test_codex_agent_claude_frontmatter_does_not_override_claude_fallback(phase_runtime):
+    args, provider_config, calls, returncodes = phase_runtime
+    _write_phase_agent(Path(args.repo_root), "implementer", "provider_hint: codex\nmodel: opus")
+    provider_config["fallback_chain"] = ["claude:sonnet"]
+    returncodes["codex"] = 1
+
+    assert wf_commands.run_wf_next(args) == 0
+
+    assert [name for name, _ in calls] == ["codex", "claude-code"]
+    assert "--model" not in calls[0][1]
+    claude_argv = calls[1][1]
+    assert claude_argv[claude_argv.index("--model") + 1] == "sonnet"
+
+
+@pytest.mark.parametrize("invalid_source", [False, True])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_unknown_primary_provider_does_not_silently_execute_fallback(
+    phase_runtime, invalid_source, dry_run
+):
+    args, provider_config, calls, _ = phase_runtime
+    args.dry_run = dry_run
+    provider_config["fallback_chain"] = ["codex"]
+    if invalid_source:
+        _write_phase_agent(Path(args.repo_root), "spec-writer", "provider_hint: misspelled-provider")
+    else:
+        args.provider = "misspelled-provider"
+
+    assert wf_commands.run_wf_next(args) == 2
+    assert calls == []
+
+
+@pytest.mark.parametrize("card", ['{"agent": []}', '{"agent": {"name": "../spec-writer"}}', "{"])
+def test_invalid_existing_agent_card_does_not_use_global_default(phase_runtime, card):
+    args, _, calls, _ = phase_runtime
+    (Path(args.repo_root) / ".workflow" / "agent-cards" / "plan.json").write_text(
+        card, encoding="utf-8"
+    )
+
+    assert wf_commands.run_wf_next(args) == 2
+    assert calls == []
+
+
+@pytest.mark.parametrize("missing_definition", [False, True])
+def test_legacy_agent_without_provider_metadata_retains_global_default(
+    phase_runtime, missing_definition
+):
+    args, _, calls, _ = phase_runtime
+    root = Path(args.repo_root)
+    _write_phase_agent(root, "legacy-planner", "model: opus")
+    if missing_definition:
+        (root / "claude" / "agents" / "legacy-planner.md").unlink()
+
+    assert wf_commands.run_wf_next(args) == 0
+    assert [name for name, _ in calls] == ["codex"]
+    assert "--model" not in calls[0][1]
+
+
+def test_explicit_repo_root_isolates_same_agent_name_between_projects(
+    phase_runtime, tmp_path, monkeypatch, capsys
+):
+    args, _, _, _ = phase_runtime
+    other_root = tmp_path / "other-project"
+    _write_phase_agent(other_root, "spec-writer", "provider_hint: codex\nmodel: opus")
+    monkeypatch.setattr(
+        spec_loader, "_agent_search_paths",
+        lambda: [other_root / "claude" / "agents"],
+    )
+    # The process cwd must not override --repo-root or poison its cached role.
+    monkeypatch.chdir(other_root)
+    args.dry_run = True
+    args.output_format = "json"
+
+    assert wf_commands.run_wf_next(args) == 0
+    assert json.loads(capsys.readouterr().out)["provider"] == "claude-code"
+
+    args.repo_root = str(other_root)
+    assert wf_commands.run_wf_next(args) == 0
+    assert json.loads(capsys.readouterr().out)["provider"] == "codex"

@@ -799,43 +799,35 @@ def test_wt_sync_forwards_branches_and_apply(
     }
 
 
-def test_wt_promote_forwards_out_of_order(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--out-of-order"],
+        ["--exclude-path", "README.txt"],
+        ["--source-pr", "373"],
+    ],
+)
+def test_wt_promote_rejects_ambiguous_source_branch_operations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, options: list[str]
 ) -> None:
     repo = make_repository(tmp_path)
-    received: dict[str, object] = {}
-
-    def record_promotion(*_args: object, **kwargs: object) -> CommandResult:
-        received.update(kwargs)
-        return CommandResult.ok("wt.promote", decision="preview")
-
-    monkeypatch.setattr(
-        "awf.commands.wt.WorktreeService.promote",
-        record_promotion,
-    )
+    monkeypatch.setenv("AWF_WORKTREE_STATE_DB", str(tmp_path / "state.sqlite3"))
+    monkeypatch.setenv("AWF_WORKTREE_CACHE_DIR", str(tmp_path / "worktrees"))
 
     rc, stdout, stderr = capture_main(
         [
-            "wt",
-            "promote",
-            "--source-pr",
-            "372",
-            "--source-pr",
-            "373",
-            "--out-of-order",
-            "--to",
-            "main",
-            "--repo-root",
-            str(repo),
-            "--json",
+            "wt", "promote", "--source-pr", "372", "--source-branch",
+            "--to", "main", "--repo-root", str(repo), "--json", *options,
         ]
     )
 
-    assert rc == 0
+    assert rc == 3
     assert stderr == ""
-    assert json.loads(stdout)["decision"] == "preview"
-    assert received["out_of_order"] is True
-    assert received["source_pr"] == [372, 373]
+    result = json.loads(stdout)
+    assert result["blockers"][0]["code"] == "invalid_source_branch_promotion"
+    assert result["actions"] == []
+    assert not (tmp_path / "state.sqlite3").exists()
+
 
 
 

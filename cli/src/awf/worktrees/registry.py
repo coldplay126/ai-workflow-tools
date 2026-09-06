@@ -1229,6 +1229,9 @@ class WorktreeRegistry:
         ]
         | None = None,
         evidence: Mapping[str, str] | None = None,
+        source_pr: int | None = None,
+        source_base_sha: str | None = None,
+        source_head_sha: str | None = None,
     ) -> Lease:
         if not isinstance(clear_conflict_source_ordinal, bool):
             raise ValueError("clear_conflict_source_ordinal must be a boolean")
@@ -1262,6 +1265,12 @@ class WorktreeRegistry:
                 update_values["head_sha"] = head_sha
             if target_base_sha is not None:
                 update_values["target_base_sha"] = target_base_sha
+            if source_pr is not None:
+                update_values["source_pr"] = source_pr
+            if source_base_sha is not None:
+                update_values["source_base_sha"] = source_base_sha
+            if source_head_sha is not None:
+                update_values["source_head_sha"] = source_head_sha
             if deployment_state is not None:
                 update_values["deployment_state"] = deployment_state.value
             if retain is not None:
@@ -1320,7 +1329,7 @@ class WorktreeRegistry:
                     current.state.value,
                     state.value,
                     observed_head_sha,
-                    pr_number,
+                    pr_number if pr_number is not None else source_pr,
                     self._bound_summary(summary),
                     timestamp,
                     evidence_json,

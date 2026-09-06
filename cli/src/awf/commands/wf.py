@@ -51,6 +51,7 @@ from awf.core.planning_options import (
 )
 from awf.core.readiness import maybe_doctor_hint
 from awf.core.state_updater import WorkflowStateUpdater
+from awf.core.spec_loader import load_agent_definition
 from awf.core.state import (
     PHASE_ORDER,
     apply_planning_option_selection,
@@ -1141,7 +1142,26 @@ def run_wf_next(args: argparse.Namespace) -> int:
             print(f"policy_skip: {', '.join(skip_phases)} (changeClass={state.get('changeClass', 'unknown')})", file=sys.stderr)
         prompt = build_workflow_prompt(args.repo_root, state, provider_config, phase)
         prompt += _workflow_mode_prompt_note(getattr(args, "mode", None))
-        provider_name = _resolve_phase_provider(args.provider, provider_config, phase, config)
+        agent_metadata = _load_phase_agent_metadata(args.repo_root, phase)
+        provider_name = _resolve_phase_provider(
+            args.provider, provider_config, phase, config, agent_metadata=agent_metadata
+        )
+        registry = ProviderRegistry(config)
+        if not registry.supports(provider_name):
+            raise ValueError(f"Unsupported phase provider: {provider_name}")
+        phase_model = (provider_config.get("phase_models") or {}).get(phase) or {}
+        phase_route = (provider_config.get("phase_routing") or {}).get(phase) or {}
+        has_provider_override = (
+            args.provider
+            or phase_model.get("inline_model")
+            or (phase_route.get("mode") == "delegated" and phase_route.get("primary"))
+        )
+        agent_model = (
+            agent_metadata.get("model")
+            if not has_provider_override
+            and agent_metadata.get("provider_hint") in {"claude-code", "claude:sonnet"}
+            else None
+        )
         fallback_chain = _resolve_fallback_chain(provider_name, provider_config, getattr(args, "mode", None))
         prompt_path = (
             None
@@ -1189,7 +1209,6 @@ def run_wf_next(args: argparse.Namespace) -> int:
             return 0
 
     repo_root = str(resolve_repo_root(args.repo_root))
-    registry = ProviderRegistry(config)
     ruleset = build_permission_ruleset(config.raw, yolo=getattr(args, "yolo", False))
     artifact_manager = ArtifactManager()
     state_updater = WorkflowStateUpdater(args.repo_root)
@@ -1351,7 +1370,10 @@ def run_wf_next(args: argparse.Namespace) -> int:
             continue
         try:
             provider = registry.get(candidate)
-            _apply_phase_effort(provider, provider_config, phase)
+            _apply_phase_effort(
+                provider, provider_config, phase,
+                agent_model=agent_model if candidate == provider_name else None,
+            )
             _apply_phase_sandbox(provider, phase)
             _apply_provider_permission_mode(provider, yolo=bool(getattr(args, "yolo", False)))
         except UnknownProviderError:
@@ -1707,7 +1729,10 @@ def run_wf_next(args: argparse.Namespace) -> int:
             },
         )
         primary = registry.get(selected_provider)
-        _apply_phase_effort(primary, provider_config, phase)
+        _apply_phase_effort(
+            primary, provider_config, phase,
+            agent_model=agent_model if selected_provider == provider_name else None,
+        )
         multi_result = run_phase(
             mode=exec_mode,
             prompt=prompt,
@@ -2210,7 +2235,9 @@ def _resolve_phase_effort(provider_config: dict, phase: str) -> dict[str, str | 
     }
 
 
-def _apply_phase_effort(provider, provider_config: dict, phase: str) -> None:
+def _apply_phase_effort(
+    provider, provider_config: dict, phase: str, *, agent_model: str | None = None
+) -> None:
     """Apply phase-specific effort and model settings to a provider instance.
 
     Without set_model wiring, `phase_models.{phase}.inline_model` would only
@@ -2228,6 +2255,40 @@ def _apply_phase_effort(provider, provider_config: dict, phase: str) -> None:
     inline_model = effort.get("inline_model")
     if inline_model and hasattr(provider, "set_model"):
         provider.set_model(str(inline_model))
+    elif agent_model and agent_model != "inherit" and provider.name == "claude-code":
+        # Source frontmatter models belong to Claude, not OMP modelRoles or Codex.
+        provider.set_model(agent_model)
+
+
+def _load_phase_agent_metadata(repo_root: str | None, phase: str) -> dict:
+    card_path = resolve_repo_root(repo_root) / ".workflow" / "agent-cards" / f"{phase}.json"
+    if not card_path.exists():
+        return {}
+    card = json.loads(card_path.read_text(encoding="utf-8"))
+    if not isinstance(card, dict):
+        raise ValueError(f"Invalid agent card: {card_path}")
+    if "agent" not in card:
+        return {}
+    agent = card["agent"]
+    if not isinstance(agent, dict):
+        raise ValueError(f"Invalid agent metadata: {card_path}")
+    name = agent.get("name")
+    if not isinstance(name, str) or not name.strip() or "/" in name or "\\" in name:
+        raise ValueError(f"Invalid agent.name: {card_path}")
+    try:
+        metadata = load_agent_definition(name, repo_root=resolve_repo_root(repo_root))["meta"]
+    except FileNotFoundError:
+        return {}
+    if "provider_hint" in metadata:
+        hint = metadata["provider_hint"]
+        if not isinstance(hint, str) or not hint.strip():
+            raise ValueError(f"Invalid provider_hint for agent: {name}")
+        model = metadata.get("model")
+        if hint in {"claude-code", "claude:sonnet"} and model is not None:
+            if not isinstance(model, str) or not model.strip():
+                raise ValueError(f"Invalid Claude model for agent: {name}")
+        return metadata
+    return {}
 
 
 def _resolve_phase_provider(
@@ -2235,6 +2296,8 @@ def _resolve_phase_provider(
     provider_config: dict,
     phase: str,
     config: "AwfConfig",
+    *,
+    agent_metadata: dict | None = None,
 ) -> str:
     """Resolve provider for a phase.
 
@@ -2245,7 +2308,8 @@ def _resolve_phase_provider(
          silently dispatch through ``phase_models.inline_model`` and bypass
          operator intent — see CLAUDE.md "Codex Slave 규칙")
       3. ``phase_models.{phase}.inline_model``
-      4. Global default provider
+      4. Agent Card source definition's ``provider_hint``
+      5. Global default provider (legacy agents without metadata)
 
     When ``phase_routing.{phase}.mode == "delegated"`` AND ``inline_model`` is
     also set, the delegated route wins and a one-line stderr warning surfaces
@@ -2273,6 +2337,8 @@ def _resolve_phase_provider(
 
     if inline_model:
         return _INLINE_MODEL_ALIASES.get(str(inline_model), str(inline_model))
+    if agent_metadata and agent_metadata.get("provider_hint"):
+        return str(agent_metadata["provider_hint"])
     return config.provider_name()
 
 

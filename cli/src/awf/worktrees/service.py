@@ -215,7 +215,14 @@ class WorktreeService:
             if active is not None:
                 return self._reuse(active, expected_branch, apply=apply)
 
-            base_ref, base_sha = self._resolve_base(base)
+            selected_base = base
+            if purpose is Purpose.FEATURE and selected_base is None:
+                selected_base = (
+                    self.config.feature_base
+                    if self.config.feature_base is not None
+                    else self.config.production_branch
+                )
+            base_ref, base_sha = self._resolve_base(selected_base)
             lease = Lease.new(
                 repository_id=repository_id,
                 repository_name=self.git.repository_name(),
@@ -696,6 +703,300 @@ class WorktreeService:
                 actions=verification_actions,
             )
 
+    def _source_branch_validation_chain(
+        self, github: GhClient, source: PullRequest, target_sha: str, staging_sha: str,
+        target_ref: str,
+    ) -> tuple[tuple[PullRequest, str], ...] | CommandResult:
+        chain: list[tuple[PullRequest, str]] = []
+        candidates: tuple[PullRequest, ...] | None = None
+        seen: set[int] = set()
+        current = source
+        while True:
+            if current.number in seen:
+                return self._promotion_blocked(
+                    "source_validation_chain_invalid", "staging validation chain contains a cycle"
+                )
+            seen.add(current.number)
+            blocker = self._promotion_source_blocker(current, target_ref)
+            if blocker is not None:
+                return blocker
+            invalid_oid = self._invalid_promotion_oid(current, require_merge=True)
+            if invalid_oid is not None:
+                return self._promotion_blocked(
+                    "source_pr_invalid_oid", f"invalid predecessor {invalid_oid}"
+                )
+            for oid in (current.base_sha, current.head_sha, current.merge_commit_sha):
+                self.git.resolve_ref(f"{oid}^{{commit}}")
+            if self.git.merge_base(current.merge_commit_sha, staging_sha) != current.merge_commit_sha:
+                return self._promotion_blocked(
+                    "source_pr_not_in_staging", "source merge is absent from staging history"
+                )
+            reviewed_base = self.git.merge_base(current.base_sha, current.head_sha)
+            paths = set(self.git.changed_paths(
+                self.git.repository_root(), reviewed_base, current.head_sha
+            ))
+            if not paths or paths != set(current.changed_paths):
+                return self._promotion_blocked(
+                    "source_delta_mismatch",
+                    "each staging validation must contain its exact reviewed delta and paths",
+                )
+            chain.append((current, reviewed_base))
+            if self.git.merge_base(reviewed_base, target_sha) == reviewed_base:
+                return tuple(reversed(chain))
+            if candidates is None:
+                candidates = github.find_merged_prs(head=source.head_ref, base=source.base_ref)
+            predecessors = tuple(
+                pull for pull in candidates
+                if pull.head_ref == source.head_ref and pull.base_ref == source.base_ref
+                and pull.head_sha == reviewed_base
+            )
+            if not predecessors:
+                return self._promotion_blocked(
+                    "source_branch_contains_staging",
+                    "reviewed base is outside production and has no exact earlier staging validation",
+                )
+            if len(predecessors) != 1:
+                return self._promotion_blocked(
+                    "source_validation_chain_invalid",
+                    "reviewed base has ambiguous predecessor pull requests",
+                )
+            predecessor = predecessors[0]
+            if (
+                predecessor.merge_commit_sha is None
+                or self.git.merge_base(predecessor.merge_commit_sha, current.base_sha)
+                != predecessor.merge_commit_sha
+            ):
+                return self._promotion_blocked(
+                    "source_validation_chain_invalid",
+                    "predecessor merge does not precede the next staging validation",
+                )
+            current = predecessor
+
+    def _source_branch_pins_blocker(
+        self,
+        github: GhClient,
+        sources: Sequence[PullRequest],
+        target_branch: str,
+        target_sha: str,
+    ) -> CommandResult | None:
+        source = sources[-1]
+        for pinned in sources:
+            live = github.view_pr(pinned.number)
+            blocker = self._promotion_source_blocker(live, f"origin/{target_branch}")
+            if blocker is not None:
+                return blocker
+            if (
+                live.number != pinned.number
+                or live.base_ref != pinned.base_ref
+                or live.base_sha != pinned.base_sha
+                or live.head_ref != pinned.head_ref
+                or live.head_sha != pinned.head_sha
+                or live.merge_commit_sha != pinned.merge_commit_sha
+                or set(live.changed_paths) != set(pinned.changed_paths)
+            ):
+                return self._promotion_blocked(
+                    "source_branch_provenance_changed",
+                    "staging validation chain changed; preserve the branch and PR",
+                )
+        if (
+            self.git.remote_branch_sha(source.head_ref) != source.head_sha
+            or self.git.remote_branch_sha(target_branch) != target_sha
+        ):
+            return self._promotion_blocked(
+                "source_branch_provenance_changed",
+                "tested remote head or production target changed; preserve the branch and PR",
+            )
+        for lease in self.registry.list_leases_read_only(
+            include_removed=False, repository_id=self.git.repository_id(),
+            purpose=Purpose.FEATURE,
+        ):
+            if (
+                lease.branch == source.head_ref
+                and lease.managed
+                and lease.source_pr is not None
+                and (
+                    lease.source_pr != source.number
+                    or lease.source_head_sha != source.head_sha
+                    or self.git.resolve_ref(f"refs/heads/{lease.branch}") != source.head_sha
+                )
+            ):
+                return self._promotion_blocked(
+                    "staging_evidence_stale",
+                    "managed feature changed after staging validation; link a new merged staging PR",
+                    lease=lease,
+                )
+        return None
+
+    def _promote_source_branch(
+        self, source_number: int, *, target_branch: str, apply: bool
+    ) -> CommandResult:
+        try:
+            target_ref = self._promotion_target_ref(target_branch)
+        except ConfigError as error:
+            return self._promotion_blocked("invalid_target_branch", str(error))
+        github = self.github or GhClient(self.git.repository_root())
+        actions: tuple[dict[str, object], ...] = ()
+        try:
+            with repository_lock(self.lock_dir / f"{self.git.repository_id()}.lock"):
+                source = github.view_pr(source_number)
+                if source.number != source_number:
+                    return self._promotion_blocked(
+                        "source_pr_mismatch", "GitHub returned a different source PR"
+                    )
+                blocker = self._promotion_source_blocker(source, target_ref)
+                if blocker is not None:
+                    return blocker
+                if (
+                    not self._is_safe_remote_branch(source.head_ref)
+                    or self._remote_base_ref(source.head_ref) in {
+                        target_ref, self._remote_base_ref(source.base_ref),
+                        "origin/main", "origin/master",
+                    }
+                    or (
+                        source.head_ref.startswith("awf/")
+                        and source.head_ref.endswith("/promote")
+                    )
+                ):
+                    return self._promotion_blocked(
+                        "source_pr_not_promotable",
+                        "source must be an original feature branch, not a protected or synthetic branch",
+                    )
+                invalid_oid = self._invalid_promotion_oid(source, require_merge=True)
+                if invalid_oid is not None:
+                    return self._promotion_blocked(
+                        "source_pr_invalid_oid", f"invalid source {invalid_oid}"
+                    )
+                remote_head = self.git.remote_branch_sha(source.head_ref)
+                if remote_head is None:
+                    return self._promotion_blocked(
+                        "source_branch_unavailable",
+                        "original origin feature branch is unavailable; no synthetic fallback",
+                    )
+                if remote_head != source.head_sha:
+                    return self._promotion_blocked(
+                        "source_branch_provenance_changed",
+                        "remote feature head no longer matches the staging-tested head",
+                    )
+                target_sha = self.git.fetch_ref(target_branch)
+                fetched_head = self.git.fetch_ref(source.head_ref)
+                staging_sha = self.git.fetch_ref(source.base_ref)
+                if fetched_head != source.head_sha:
+                    return self._promotion_blocked(
+                        "source_branch_provenance_changed", "source changed during fetch"
+                    )
+                validation = self._source_branch_validation_chain(
+                    github, source, target_sha, staging_sha, target_ref
+                )
+                if isinstance(validation, CommandResult):
+                    return validation
+                sources = tuple(pull for pull, _ in validation)
+                reviewed_base = validation[0][1]
+                candidate_base = self.git.merge_base(target_sha, source.head_sha)
+                reviewed_paths = {
+                    path for pull in sources for path in pull.changed_paths
+                }
+                candidate_paths = set(self.git.changed_paths(
+                    self.git.repository_root(), candidate_base, source.head_sha
+                ))
+                # The candidate must start inside the reviewed history. Changes
+                # already present on production may share a file with this feature.
+                if (
+                    not candidate_paths
+                    or not candidate_paths.issubset(reviewed_paths)
+                    or self.git.merge_base(reviewed_base, candidate_base) != reviewed_base
+                ):
+                    return self._promotion_blocked(
+                        "source_delta_mismatch",
+                        "production candidate is not the exact reviewed source delta",
+                    )
+                actions = ({
+                    "kind": "open_pull_request",
+                    "promotion_mode": "source_branch",
+                    "source_branch": source.head_ref,
+                    "source_pr": source.number,
+                    "source_prs": [pull.number for pull in sources],
+                    "sources": [
+                        {
+                            "pr": pull.number, "base_sha": pull.base_sha,
+                            "head_sha": pull.head_sha, "merge_sha": pull.merge_commit_sha,
+                            "reviewed_base_sha": base_sha,
+                            "reviewed_paths": list(pull.changed_paths),
+                        }
+                        for pull, base_sha in validation
+                    ],
+                    "tested_head": source.head_sha,
+                    "source_head_sha": source.head_sha,
+                    "source_base_sha": source.base_sha,
+                    "reviewed_base_sha": reviewed_base,
+                    "target_branch": target_branch,
+                    "target_base_sha": target_sha,
+                },)
+                existing = github.find_open_pr(head=source.head_ref, base=target_branch)
+                blocker = self._source_branch_pins_blocker(
+                    github, sources, target_branch, target_sha
+                )
+                if blocker is not None:
+                    return replace(blocker, actions=actions)
+                if existing is None and not apply:
+                    return CommandResult.ok(
+                        "wt.promote", decision="preview", actions=actions
+                    )
+                published = existing or github.create_pr(
+                    base=target_branch,
+                    head=source.head_ref,
+                    title=f"Promote #{source.number} to {target_branch}",
+                    body=(
+                        f"Original feature branch validated by staging PR #{source.number}.\n\n"
+                        f"Source-PR: #{source.number}\n"
+                        + "".join(
+                            f"Validation-PR: #{pull.number}\n"
+                            f"Validation-Base-SHA: {pull.base_sha}\n"
+                            f"Validation-Head-SHA: {pull.head_sha}\n"
+                            f"Validation-Merge-SHA: {pull.merge_commit_sha}\n"
+                            for pull in sources
+                        )
+                        +
+                        f"Source-Head-SHA: {source.head_sha}\n"
+                        f"Target-Base-SHA: {target_sha}\n"
+                    ),
+                )
+                actions = ({**actions[0], "target_pr": published.number, "url": published.url},)
+                blocker = self._source_branch_pins_blocker(
+                    github, sources, target_branch, target_sha
+                )
+                if blocker is not None:
+                    return replace(blocker, actions=actions)
+                confirmed = github.view_pr(published.number)
+                if any(
+                    pull.state != "OPEN"
+                    or pull.head_ref != source.head_ref
+                    or pull.base_ref != target_branch
+                    or pull.head_sha != source.head_sha
+                    or pull.base_sha != target_sha
+                    or pull.number != published.number
+                    for pull in (published, confirmed)
+                ):
+                    return replace(self._promotion_blocked(
+                        "target_pr_mismatch",
+                        "target PR does not match the pinned source branch, head, and production base; preserve it",
+                    ), actions=actions)
+                blocker = self._source_branch_pins_blocker(
+                    github, sources, target_branch, target_sha
+                )
+                if blocker is not None:
+                    return replace(blocker, actions=actions)
+                return CommandResult.ok(
+                    "wt.promote", decision="reuse" if existing else "ready", actions=actions
+                )
+        except (ExternalServiceError, GitRemoteError) as error:
+            return replace(self._external_error(
+                "wt.promote", "source_branch_unavailable", str(error)
+            ), actions=actions)
+        except (GitError, ValueError, sqlite3.Error) as error:
+            return replace(self._promotion_blocked(
+                "source_branch_unavailable", str(error)
+            ), actions=actions)
+
     def promote(
         self,
         *,
@@ -704,11 +1005,21 @@ class WorktreeService:
         target_branch: str,
         apply: bool,
         out_of_order: bool = False,
+        source_branch: bool = False,
     ) -> CommandResult:
         try:
             source_numbers = self._promotion_source_numbers(source_pr)
         except ValueError as error:
             return self._promotion_blocked("invalid_source_pr", str(error))
+        if source_branch:
+            if len(source_numbers) != 1 or exclude_paths or out_of_order:
+                return self._promotion_blocked(
+                    "invalid_source_branch_promotion",
+                    "source-branch requires one source PR, no exclusions, and no out-of-order mode",
+                )
+            return self._promote_source_branch(
+                source_numbers[0], target_branch=target_branch, apply=apply
+            )
         promotion_mode = (
             PromotionMode.OUT_OF_ORDER
             if out_of_order
@@ -3241,6 +3552,20 @@ class WorktreeService:
             warnings=tuple(warnings),
         )
 
+    def _is_staging_feature_link(self, lease: Lease, pull: PullRequest) -> bool:
+        if (
+            self.config.default_base is None
+            or self.config.production_branch is None
+            or _SYNC_BRANCH.fullmatch(lease.branch) is not None
+            or any(line.strip() == "AWF-No-Promote: true" for line in pull.body.splitlines())
+        ):
+            return False
+        staging = self._remote_base_ref(self.config.default_base)
+        return (
+            staging != self._remote_base_ref(self.config.production_branch)
+            and self._remote_base_ref(pull.base_ref) == staging
+        )
+
     def link_pr(
         self, lease_id: str, *, pr_number: int, apply: bool = False
     ) -> CommandResult:
@@ -3253,7 +3578,11 @@ class WorktreeService:
         if isinstance(validated, CommandResult):
             return validated
         pull_request, current_head = validated
-        if lease.target_pr == pr_number:
+        staging_link = self._is_staging_feature_link(lease, pull_request)
+        if lease.target_pr == pr_number or (
+            staging_link and lease.source_pr == pr_number
+            and lease.source_head_sha == current_head
+        ):
             return CommandResult.ok("wt.link-pr", decision="reuse", lease=lease)
         if not apply:
             return CommandResult.ok(
@@ -3262,7 +3591,7 @@ class WorktreeService:
                 lease=lease,
                 actions=(
                     {
-                        "kind": "link_pr",
+                        "kind": "record_staging_validation" if staging_link else "link_pr",
                         "lease_id": lease.id,
                         "path": str(lease.worktree_path),
                         "pr_number": pull_request.number,
@@ -3281,22 +3610,32 @@ class WorktreeService:
             if isinstance(validated, CommandResult):
                 return validated
             pull_request, current_head = validated
-            if current.target_pr == pr_number:
+            staging_link = self._is_staging_feature_link(current, pull_request)
+            if current.target_pr == pr_number or (
+                staging_link and current.source_pr == pr_number
+                and current.source_head_sha == current_head
+            ):
                 return CommandResult.ok(
                     "wt.link-pr", decision="reuse", lease=current
                 )
             try:
                 linked = self.registry.transition(
                     current.id,
-                    LeaseState.CLEANABLE,
+                    LeaseState.ACTIVE if staging_link else LeaseState.CLEANABLE,
                     expected_version=current.version,
-                    event_type="managed_lease_pr_linked",
+                    event_type=(
+                        "managed_feature_staging_validated"
+                        if staging_link else "managed_lease_pr_linked"
+                    ),
                     summary=(
                         "managed feature lease linked to pull request "
                         f"#{pull_request.number}"
                     ),
                     observed_head_sha=current_head,
-                    pr_number=pull_request.number,
+                    pr_number=None if staging_link else pull_request.number,
+                    source_pr=pull_request.number if staging_link else None,
+                    source_base_sha=pull_request.base_sha if staging_link else None,
+                    source_head_sha=current_head if staging_link else None,
                     head_sha=current_head,
                     deployment_state=DeploymentState.NOT_REQUIRED,
                 )
@@ -3312,9 +3651,15 @@ class WorktreeService:
             if (
                 stored is None
                 or stored.version != linked.version
-                or stored.target_pr != pull_request.number
+                or (
+                    stored.source_pr != pull_request.number or stored.target_pr is not None
+                    or stored.source_head_sha != current_head
+                    if staging_link else stored.target_pr != pull_request.number
+                )
                 or stored.head_sha != current_head
-                or stored.state is not LeaseState.CLEANABLE
+                or stored.state is not (
+                    LeaseState.ACTIVE if staging_link else LeaseState.CLEANABLE
+                )
                 or stored.deployment_state is not DeploymentState.NOT_REQUIRED
             ):
                 return CommandResult.error(
@@ -7681,6 +8026,21 @@ class WorktreeService:
                 f"lease {lease.id} changed while its pull request was validated",
                 lease=lease,
             )
+        if lease.source_pr is not None and not self._is_staging_feature_link(lease, pull_request):
+            if (
+                _SYNC_BRANCH.fullmatch(lease.branch) is None
+                and self.config.production_branch is not None
+                and (
+                    self._remote_base_ref(pull_request.base_ref)
+                    != self._remote_base_ref(self.config.production_branch)
+                    or lease.source_head_sha != after_head
+                )
+            ):
+                return self._managed_link_blocked(
+                    "staging_evidence_stale",
+                    "final PR must target production at the staging-validated head; link a new staging PR after changes",
+                    lease=lease,
+                )
         return pull_request, after_head
 
     def _managed_link_lease_blocker(

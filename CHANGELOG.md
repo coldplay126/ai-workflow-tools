@@ -10,6 +10,15 @@
 
 ### Fixed
 
+- staging PR을 연결한 managed feature는 `ACTIVE`와 검증 증거를 유지하며,
+  최종 production PR 연결 후에만 정리 대상이 됩니다. 같은 feature의 반복
+  staging 검증과 main에 이미 있는 동일 파일 변경도 불필요하게 차단하지 않습니다.
+- OMP 기획·품질·위험 검토는 agent의 `@plan`, 구현·독립 코드 검토는 `@task`
+  역할을 따르며, 기본 worker model map이 이를 덮어쓰지 않습니다. Codex parent의
+  실질적인 기획 작성은 `spec-writer`로 위임하고 실제 resolved model을 확인합니다.
+- `awf wf next`는 명시적 CLI/phase 설정 다음으로 Agent Card의 source
+  `provider_hint`를 적용합니다. Claude 역할 모델이 Codex fallback에 주입되지 않으며,
+  저장소별 agent cache를 분리하고 `model: inherit`는 기존 Claude 모델을 보존합니다.
 - code fallback 후 Judge evidence provenance를 최초 Writer 결과가 아니라 실제 재실행 Writer 결과와 대조해 잘못된 `unknown_claim_id`·`evidence_modified` 경고를 방지합니다.
 - Review/Verify의 multi-LLM conflict 조건이 더 이상 자동 PASS하지 않고, malformed
   또는 grounded conflict evidence를 fail-closed로 판정합니다.
@@ -47,6 +56,11 @@
   branch, and path all match; canonical cache leases require lowercase UUID IDs.
 
 ### Added
+- `awf wt promote --source-pr <staging-pr> --to main --source-branch`는 검증한
+  원본 feature 브랜치와 HEAD를 그대로 사용해 production PR을 생성·재사용합니다.
+  반복 staging은 같은 브랜치의 선행 PR 증거 체인을 자동 검증합니다. 합성
+  worktree·commit·force-push·자동 merge와 합성용 production 검증 설정은 요구하지
+  않으며, 검증 HEAD drift와 staging-only 이력 혼입은 계속 차단합니다.
 - `awf wt sync --from <production> --to <staging>`가 configured production의
   source-only delta를 latest staging에 preview/apply하고, clean 3-way 결과와 Git
   mode를 보존합니다. Prepare/production verify와 publication 전후 remote SHA를
@@ -123,6 +137,15 @@
 
 ### Changed
 
+- `worktree.feature_base`로 feature 생성 기준과 staging PR 대상을 분리했습니다.
+  `--base`가 없으면 feature_base, production_branch, default_base, remote 기본
+  브랜치 순으로 선택합니다. 명시적으로 staging 기반 개발을 선택할 수도 있습니다.
+- source PR 리뷰 정책 기본값은 `approved_or_self_merged`입니다. 작성자 본인이
+  병합한 PR을 허용하되, 저장소가 명시한 `approved` 정책은 그대로 강제합니다.
+- 일반 개발 브랜치의 add·commit·non-force push에는 매번 별도 승인을 요구하지
+  않습니다. 커밋 금지는 AWF 합성 배포 브랜치에만, read-only는 리뷰·분석 worker에만
+  적용합니다. 일반 작업에 gated workflow를 강제하지 않고, 이미 요청된 작업은
+  blocker 없는 preview 후 같은 턴에 apply할 수 있습니다.
 - 단독으로 관리하는 `ai-workflow-tools`는 source PR review 정책을
   `approved_or_self_merged`로 설정해 별도 리뷰어 없이 작성자 본인의 staging
   PR을 승격할 수 있습니다. source checks와 production verification은 유지합니다.

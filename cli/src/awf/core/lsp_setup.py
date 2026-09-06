@@ -1475,12 +1475,18 @@ def _prepare_worktree_content(path: Path) -> str:
 
 def _serialize_worktree_config(config: WorktreeConfig, prepare_command: Sequence[str]) -> str:
     lines: list[str] = []
-    if config.default_base is not None or config.production_branch is not None:
+    if (
+        config.default_base is not None
+        or config.production_branch is not None
+        or config.feature_base is not None
+    ):
         lines.append("[worktree]")
         if config.default_base is not None:
             lines.append(f"default_base = {_toml_value(config.default_base)}")
         if config.production_branch is not None:
             lines.append(f"production_branch = {_toml_value(config.production_branch)}")
+        if config.feature_base is not None:
+            lines.append(f"feature_base = {_toml_value(config.feature_base)}")
         lines.append("")
     lines.append("[prepare]")
     if config.prepare_inputs:
@@ -1488,7 +1494,7 @@ def _serialize_worktree_config(config: WorktreeConfig, prepare_command: Sequence
     lines.append(f"command = {_toml_value(list(prepare_command))}")
     if config.verify_production:
         lines += ["", "[verify.production]", f"commands = {_toml_value([list(item) for item in config.verify_production])}"]
-    if config.source_review_policy != "approved":
+    if config.source_review_policy != "approved_or_self_merged":
         lines += ["", "[promotion]", f"source_review_policy = {_toml_value(config.source_review_policy)}"]
     return "\n".join(lines) + "\n"
 

@@ -40,6 +40,21 @@ awf wf next --phase plan --repo-root . --dry-run --output-format json
 3. `createdAt`이 7일 이상 경과했으면 경고.
 4. `phases.plan.retries`가 3 이상이면: "기획 단계가 3회 실패했습니다. 수동 개입이 필요합니다." 중단.
 
+## 실행 주체
+
+OMP host에서는 4~5단계 산출물(spec/plan/tasks/test-criteria)과 6.2/6.3 decision
+artifact를 parent가 직접 쓰지 않고 `task`(`agent: "spec-writer"`, `@plan` Claude)에
+위임한다. parent는 1~3단계 컨텍스트 전달, 결과 통합, 6/6.1 allowed-files와
+expand-scope, 7단계 seal/G1과 state.json 갱신을 소유한다. task에 `model`을
+지정하지 않고 agent alias에 맡기며, 완료 task의 resolved model이 `@plan` 대상이
+아니면 산출물을 채택하지 않고 실패로 보고한다. parent의 resolved model이 이미
+`@plan` 대상이면 왕복 없이 직접 작성한다. 역할별 매핑은
+[multi-agent](../multi-agent/SKILL.md)의 표를 따른다.
+
+`awf wf next --phase plan`은 standalone AWF CLI의 provider-direct 경로이며 OMP
+modelRoles와 무관하다. 그 primary provider는
+[wf-orchestrator](../wf-orchestrator/SKILL.md)의 "모델 결정 우선순위"로 결정된다.
+
 ## 실행 흐름
 
 ### 1. 피드백 확인

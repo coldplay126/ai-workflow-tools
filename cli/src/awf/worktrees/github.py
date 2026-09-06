@@ -19,6 +19,7 @@ _MAX_CHANGED_PATH_BYTES = 1024
 _MAX_FIELD_BYTES = 2048
 _MAX_BODY_CHARACTERS = 65536
 _MAX_OPEN_PULL_REQUESTS = 1000
+_MAX_MERGED_PULL_REQUESTS = 100
 _MAX_STDERR_BYTES = 512
 _HTTP_URL_USERINFO = re.compile(r"(?P<scheme>https?://)(?P<userinfo>[^/@\s]*@)", re.IGNORECASE)
 _SECRET = re.compile(
@@ -103,6 +104,32 @@ class GhClient:
                 "gh pr list returned multiple open pull requests for the branch"
             )
         return matches[0] if matches else None
+
+    def find_merged_prs(self, *, head: str, base: str) -> tuple[PullRequest, ...]:
+        if not isinstance(head, str) or not head or not isinstance(base, str) or not base:
+            raise ValueError("pull request head and base must be non-empty strings")
+        completed = self._run(
+            "pr", "list", "--state", "merged", "--base", base, "--head", head,
+            "--json", _GH_VIEW_FIELDS, "--limit", str(_MAX_MERGED_PULL_REQUESTS),
+        )
+        try:
+            payload = json.loads(completed.stdout)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ExternalServiceError("gh pr list returned malformed JSON") from error
+        if not isinstance(payload, list) or any(not isinstance(item, dict) for item in payload):
+            raise ExternalServiceError("gh pr list returned an invalid pull request list")
+        if len(payload) >= _MAX_MERGED_PULL_REQUESTS:
+            raise ExternalServiceError(
+                "gh pr list reached the fail-closed merged pull request limit"
+            )
+        matches = tuple(
+            pull for item in payload
+            if (pull := _pull_request_from_json(json.dumps(item))).state == "MERGED"
+            and pull.head_ref == head and pull.base_ref == base
+        )
+        if len({pull.number for pull in matches}) != len(matches):
+            raise ExternalServiceError("gh pr list returned duplicate merged pull requests")
+        return matches
 
     def find_open_prs_by_prefix(
         self, *, base: str, head_prefix: str

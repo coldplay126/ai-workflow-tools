@@ -62,10 +62,6 @@ def test_load_config_rejects_repository_deployment_configuration(
         load_worktree_config(tmp_path)
 
 
-def test_load_config_defaults_to_approved_source_reviews(tmp_path: Path) -> None:
-    assert load_worktree_config(tmp_path).source_review_policy == "approved"
-
-
 def test_load_config_accepts_self_merged_source_review_policy(tmp_path: Path) -> None:
     config_dir = tmp_path / ".awf"
     config_dir.mkdir()

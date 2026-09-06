@@ -2,10 +2,10 @@
 name: artifact-reviewer
 description: "교차 검증 리뷰어. spec↔plan↔tasks 정합성, 도메인 충돌, 용어 일관성 검증."
 tools: Read, Grep, Glob
-model: sonnet
+model: opus
 # awf extensions
-provider_hint: codex
-omp_model_role: slow
+provider_hint: claude-code
+omp_model_role: plan
 codex_sandbox: read-only
 roles: [wf_reviewer, cross_artifact_reviewer, review_requirements, review_architecture, review_risk]
 ---

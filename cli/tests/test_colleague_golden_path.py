@@ -149,6 +149,8 @@ def test_colleague_onboarding_golden_path_is_deterministic(
         repo_root,
         "wf",
         "next",
+        "--provider",
+        "fixture",
         "--repo-root",
         str(repo_root),
         "--dry-run",

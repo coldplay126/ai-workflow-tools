@@ -20,7 +20,7 @@ cli:
   args:
     phase: { description: "실행할 Phase (기본: 자동 결정)" }
     mode: { choices: ["solo", "quick", "precise", "cross", "critical"], description: "멀티에이전트 모드" }
-    provider: { description: "Provider 지정 (기본: phase_models에서 결정)" }
+    provider: { description: "Provider 지정 (기본: 아래 '모델 결정 우선순위'로 결정)" }
 
 prompts:
   base: "prompts/base.md"
@@ -79,9 +79,17 @@ Dispatch Surface Policy를 따릅니다.
 1. **OMP host-native**: 현재 호스트가 `task`와 `hub`를 제공하면 독립 역할을 한
    번의 batch task로 실행합니다. Agent Card의 `agent.name`을 task의 `agent`로,
    `output_schema`를 `outputSchema`로 전달하고 write 역할은 auto-isolated workspace에서
-   실행합니다. AWF는 patch의 모든 경로를 team role `write_scope`와 대조한 뒤에만
-   parent checkout에 적용합니다. 완료된 task의 실제 ID, `agent://`/`history://`
-   URI, resolved model, worker usage를 phase evidence에 기록합니다.
+   실행합니다. task에 `model`은 지정하지 않습니다. 생성된 agent의 `@plan`/`@task`
+   alias가 모델을 정하며, 역할별 배분(spec-writer/quality-validator/
+   artifact-reviewer/adversarial-tester = Claude `@plan`, implementer/code-reviewer/
+   plan-validator/spec-verifier/happy-path-tester = Codex `@task`)은
+   [multi-agent](../multi-agent/SKILL.md)의 표를 따릅니다. plan phase의 산출물
+   작성은 parent가 `@plan` 대상 모델이 아니면 `spec-writer` task에 위임하고 parent는
+   컨텍스트 전달·결과 통합·gate만 소유합니다. AWF는 patch의 모든 경로를 team role
+   `write_scope`와 대조한 뒤에만 parent checkout에 적용합니다. 완료된 task의 실제
+   ID, `agent://`/`history://` URI, resolved model, worker usage를 phase evidence에
+   기록하며, resolved model이 역할의 alias 대상과 다르면 그 결과를 채택하지 않고
+   phase를 실패로 보고합니다. 다른 모델로 조용히 대체하지 않습니다.
 2. **AWF CLI OMP native coordinator**: `dispatch.surface_preference=omp`와
    `dispatch.omp.coordination_surface=native`이면 하나의 persisted OMP host가 한 번의
    `task` batch를 실행합니다. capacity, strict/permissive schema, isolation, structured
@@ -274,8 +282,9 @@ Schema:
 **Dispatch 경로 선택**
 
 수동으로 provider CLI나 cmux 명령을 조합하지 말고 `awf wf next`를 실행합니다.
-Primary phase는 provider-direct이며 `dispatch.surface_preference`는 독립
-secondary/team worker에만 적용됩니다.
+Primary phase는 provider-direct이며 provider는 아래 "모델 결정 우선순위"로
+결정됩니다. `dispatch.surface_preference`는 독립 secondary/team worker에만
+적용됩니다.
 
 | 설정 | worker 실행 경로 | 실패 정책 |
 |---|---|---|
@@ -308,11 +317,11 @@ OMP native coordinator는 내부 task를 병렬 실행할 수 있지만 parent A
 │   │
 │   ├── 재시도 성공 → "✓ <Provider> 완료 (format retry)"
 │   │                  provider_status: "format_retry"
-│   └── 재시도 실패 → "⚠ <Provider> format retry 실패" → fallback_chain 다음 시도
+│   └── 재시도 실패 → "⚠ <Provider> format retry 실패" → 명시된 fallback_chain 다음 시도
 │
-├── 타임아웃 → "⏱ <Provider> 타임아웃" → fallback_chain 다음 시도 (재시도 없음)
+├── 타임아웃 → "⏱ <Provider> 타임아웃" → 명시된 fallback_chain 다음 시도 (재시도 없음)
 │
-└── 전체 실패 → "✗ 위임 실패, 인라인 실행으로 전환" → Step 5A로 fallback
+└── 전체 실패 → "✗ 위임 실패: <provider>" 보고 후 중단. 사용자가 명시적으로 지시할 때만 Step 5A 인라인 실행
 ```
 
 응답 파싱:
@@ -387,7 +396,7 @@ Primary가 구현 → Secondary가 git diff 리뷰 → 피드백 반영. Phase 4
    - Artifacts: git diff + spec.md + tasks.md
    - Output: 4-Block + findings (CRITICAL/HIGH/MEDIUM/LOW)
 4. **Secondary 응답 파싱**:
-   - CRITICAL/HIGH findings → `"⚠ Post-review: N건 발견"` → Primary(Claude)가 즉시 수정 → G4 재검증
+   - CRITICAL/HIGH findings → `"⚠ Post-review: N건 발견"` → Primary가 즉시 수정 → G4 재검증
    - MEDIUM/LOW만 → `"ℹ Post-review: N건 경고"` → impl-log.md에 기록, G4 진행
 5. **History 기록**: `{ "phase": "impl", "action": "post-reviewed", "provider": "codex", "findings": N }`
 
@@ -511,12 +520,13 @@ approve와 done의 `inline` 표기는 parent HIL 요약을 뜻할 뿐 provider �
 ```json
 {
   "version": "2.3.0",
+  "team_selection": { "enabled": true },
   "phase_routing": {
     "plan":    { "mode": "inline" },
     "review":  { "mode": "dual", "primary": "inline", "secondary": "codex" },
     "approve": { "mode": "inline" },
     "impl":    { "mode": "inline" },
-    "verify":  { "mode": "dual", "primary": "inline", "secondary": "codex" },
+    "verify":  { "mode": "dual", "primary": "inline", "secondary": "claude:sonnet" },
     "test":    { "mode": "inline" },
     "done":    { "mode": "inline" }
   },
@@ -534,13 +544,7 @@ approve와 done의 `inline` 표기는 parent HIL 요약을 뜻할 뿐 provider �
       "coordination_surface": "native",
       "execution_mode": "external_host",
       "capacity": 8,
-      "role_models": {
-        "plan_conformance": "@default",
-        "precision": "@default",
-        "quality_validation": "@slow",
-        "primary": "@slow",
-        "speed": "@smol"
-      }
+      "role_models": {}
     }
   },
   "providers": {
@@ -559,10 +563,21 @@ approve와 done의 `inline` 표기는 parent HIL 요약을 뜻할 뿐 provider �
       "budget_usd": 0.50
     }
   },
-  "fallback_chain": ["codex", "claude:sonnet"],
+  "fallback_chain": [],
+  "phase_models": {
+    "plan":   { "effort": "max",  "codex_reasoning": "xhigh" },
+    "review": { "effort": "max",  "codex_reasoning": "xhigh" },
+    "impl":   { "effort": "high", "codex_reasoning": "xhigh" },
+    "verify": { "effort": "max",  "codex_reasoning": "xhigh" },
+    "test":   { "effort": "high", "codex_reasoning": "xhigh" }
+  },
   "defaults": { "mode": "inline", "timeout_seconds": 300 }
 }
 ```
+
+`dispatch.omp.role_models`는 기본 비어 있다. OMP worker의 모델은 생성된 agent
+frontmatter의 `@plan`/`@task` alias가 정하며, 사용자가 role_models를 명시한 경우만
+그 역할을 덮어쓴다.
 
 ### state.json gate 확장
 
@@ -589,9 +604,11 @@ approve와 done의 `inline` 표기는 parent HIL 요약을 뜻할 뿐 provider �
 
 ### fallback 동작
 
-- provider-config의 fallback_chain 순서대로 프로바이더 전환
-- 전체 체인 소진 → **인라인 실행으로 fallback** (Step 5A)
-- 설정 없거나 프로바이더 미설치 시: 인라인 실행
+- `fallback_chain`은 기본 비어 있어 다른 provider로 조용히 재시도하지 않는다.
+  사용자가 명시한 chain만 순서대로 전환한다.
+- 체인 소진 또는 chain 없음 → 실패한 provider를 보고하고 중단. 인라인 실행(Step 5A)은
+  사용자의 명시적 지시로만 전환한다.
+- provider 미설치는 설정 오류로 보고한다.
 
 ## 안전장치
 
@@ -602,7 +619,7 @@ approve와 done의 `inline` 표기는 parent HIL 요약을 뜻할 뿐 provider �
 - **TTL**: createdAt > 7일이면 경고 표시
 - **Bypass 감사**: `--force` 사용 시 history에 bypass 기록
 - **동기 실행**: 모든 외부 워커 호출은 foreground. `run_in_background: true` 금지.
-- **위임 fallback**: 위임 실패 시 항상 인라인 실행으로 안전하게 전환
+- **위임 실패 보고**: 위임 실패는 provider와 함께 보고하고, 다른 모델·인라인으로 조용히 전환하지 않는다.
 - **Gate 실패 Protocol 제안**: gate 실패 시 적절한 `#mode`를 제안 (자동 실행 아님):
   - G2 CRITICAL → `💡 #cross로 교차 검증 가능`
   - G4 retries ≥ 3 → `💡 #precise로 코드 분석 가능`
@@ -616,8 +633,8 @@ approve와 done의 `inline` 표기는 parent HIL 요약을 뜻할 뿐 provider �
 
 | 에러 타입 | 감지 조건 | 복구 경로 |
 |----------|----------|----------|
-| `format_error` | JSON 파싱 실패 | format retry 1회 → fallback chain → inline |
-| `timeout` | provider 응답 없음 (timeout_seconds 초과) | fallback chain → inline |
+| `format_error` | JSON 파싱 실패 | format retry 1회 → 명시된 fallback chain → 실패 보고 |
+| `timeout` | provider 응답 없음 (timeout_seconds 초과) | 명시된 fallback chain → 실패 보고 |
 | `rate_limited` | HTTP 429 + "rate" 키워드 | 60초 대기 → 동일 provider 재시도 1회 → fallback |
 | `budget_exceeded` | HTTP 429 + "billing"/"credits" 키워드 | 다음 provider로 영구 전환 (재시도 없음) |
 | `auth_failure` | HTTP 401 | 사용자에게 인증 확인 요청 → provider 전환 |
@@ -655,7 +672,7 @@ awf wf detect-class --json "concept 텍스트"
 |-------|-------|----------|-----------|
 | plan (P1) | concise (spec 간략) | standard | extended (상세 리서치) |
 | review (P2) | gate 검증만 | gate + Codex dual | gate + Codex dual + 사용자 확인 |
-| impl (P4) | Sonnet 에이전트 | Sonnet 에이전트 | Opus 에이전트 |
+| impl (P4) | `implementer` (`@task`) | `implementer` (`@task`) | `implementer` + `code-reviewer` post-review |
 | verify (P5) | scope 체크만 | scope + spec 준수 | scope + spec + 코드 품질 전체 |
 | test (P6) | 관련 테스트만 | regression + acceptance | full regression + acceptance + 수동 서명 |
 
@@ -675,12 +692,15 @@ provider-config.json에 `phase_models` 섹션이 있으면 **awf-cli가 phase별
 }
 ```
 
-- `inline_model`: phase 실행 시 사용할 모델 (기본: opus). awf-cli의 `_resolve_phase_provider()`가 읽음
+- `inline_model`: phase 실행 provider를 명시적으로 덮어쓰는 override. 생략하면 Agent Card agent의 `provider_hint`를 따름
 - `effort`: Claude CLI `--effort` 수준 (low/medium/high/max). awf-cli가 Provider에 자동 주입
 - `codex_reasoning`: Codex `-c model_reasoning_effort` 수준 (low/medium/high/xhigh). awf-cli가 Provider에 자동 주입
-- impl/test Phase는 코드 작성/실행이 주이므로 Sonnet + high로 비용 절감
-- plan/review/verify Phase는 추론 필요하므로 Opus + max 유지
+- 위 예시의 impl/test `inline_model: sonnet`은 비용 절감을 위한 explicit override 예시이며 기본값이 아님
 
-**모델 결정 우선순위**: CLI `--provider` > `phase_models.{phase}.inline_model` > 글로벌 기본 provider
+**모델 결정 우선순위** (`_resolve_phase_provider()`, standalone AWF CLI provider-direct 경로):
+CLI `--provider` > `phase_routing.{phase}.primary` (`mode: "delegated"`) >
+`phase_models.{phase}.inline_model` > Agent Card `agent.name` source frontmatter의
+`provider_hint` > 글로벌 기본 provider. 이 경로는 OMP host의 modelRoles(`@plan`/`@task`)와
+다른 런타임이며 서로의 설정을 바꾸지 않는다.
 
 **약어 매핑**: `sonnet` → `claude:sonnet`, `opus` → `claude-code`, `haiku` → `claude-sdk`, `codex` → `codex`

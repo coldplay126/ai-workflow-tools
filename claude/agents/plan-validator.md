@@ -5,7 +5,7 @@ tools: Read, Grep, Glob, Bash
 model: sonnet
 # awf extensions
 provider_hint: codex
-omp_model_role: plan
+omp_model_role: task
 codex_sandbox: read-only
 roles: [constitution_reviewer, plan_conformance]
 ---

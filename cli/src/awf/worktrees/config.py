@@ -31,7 +31,8 @@ class WorktreeConfig:
     prepare_inputs: tuple[str, ...] = ()
     prepare_command: tuple[str, ...] = ()
     verify_production: tuple[tuple[str, ...], ...] = ()
-    source_review_policy: str = "approved"
+    source_review_policy: str = "approved_or_self_merged"
+    feature_base: str | None = None
 
 
 @dataclass(frozen=True)
@@ -95,7 +96,9 @@ def load_worktree_config(repository_root: Path) -> WorktreeConfig:
     prepare = _table(loaded.get("prepare"), "prepare")
     verify = _table(loaded.get("verify"), "verify")
     promotion = _table(loaded.get("promotion"), "promotion")
-    _reject_unknown_keys(worktree, {"default_base", "production_branch"}, "worktree field")
+    _reject_unknown_keys(
+        worktree, {"default_base", "production_branch", "feature_base"}, "worktree field"
+    )
     _reject_unknown_keys(prepare, {"inputs", "command"}, "prepare field")
     _reject_unknown_keys(verify, {"production"}, "verify table")
     _reject_unknown_keys(
@@ -110,6 +113,7 @@ def load_worktree_config(repository_root: Path) -> WorktreeConfig:
         production_branch=_optional_string(
             worktree.get("production_branch"), "worktree.production_branch"
         ),
+        feature_base=_optional_string(worktree.get("feature_base"), "worktree.feature_base"),
         prepare_inputs=_string_list(prepare.get("inputs"), "prepare.inputs"),
         prepare_command=_argv(prepare.get("command"), "prepare.command"),
         verify_production=_argv_list(
@@ -119,7 +123,7 @@ def load_worktree_config(repository_root: Path) -> WorktreeConfig:
             promotion.get("source_review_policy"),
             "promotion.source_review_policy",
             {"approved", "approved_or_self_merged"},
-            default="approved",
+            default="approved_or_self_merged",
         ),
     )
 

@@ -2,10 +2,10 @@
 name: adversarial-tester
 description: "엣지케이스/취약점 탐색 전문가. 경계 조건, 실패 모드, 보안 취약점을 적극 탐색."
 tools: Read, Grep, Glob, Bash, Browser, Debug
-model: sonnet
+model: opus
 # awf extensions
-provider_hint: codex
-omp_model_role: slow
+provider_hint: claude-code
+omp_model_role: plan
 codex_sandbox: workspace-write
 roles: [adversarial]
 ---

@@ -5,7 +5,7 @@ tools: Read, Grep, Glob, Edit, Write, Bash, LSP, AST Search, AST Edit
 model: opus
 isolation: worktree
 # awf extensions
-provider_hint: claude-code
+provider_hint: codex
 omp_model_role: task
 codex_sandbox: workspace-write
 roles: [implementer]

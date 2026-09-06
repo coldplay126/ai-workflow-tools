@@ -1,7 +1,7 @@
 ---
 name: multi-agent
 version: 2.2.0
-description: "멀티에이전트 교차 검증. 서브에이전트 5모드 + 에이전트 팀 3레이어 아키텍처."
+description: "실질적인 기획·설계 요청을 Claude planning 역할로 위임하고 구현·교차 검증을 Claude/Codex 역할별로 실행. 서브에이전트 5모드 + 에이전트 팀."
 type: protocol
 
 capabilities:
@@ -11,24 +11,24 @@ capabilities:
   - agent_team
 
 conditions:
-  trigger: "--mode 옵션으로 지정하거나, 보안/프로덕션 키워드 감지 시 자동 승격"
+  trigger: "실질적인 기획·설계 산출물 작성 요청, --mode 지정, 또는 보안/프로덕션 교차 검증"
   skip: "단순 파일 읽기, 짧은 질문-답변"
 
 subagent_modes:
-  solo: { agents: 1, description: "Primary only (기본)" }
-  quick: { agents: 1, description: "Codex read-only, 45s timeout" }
-  precise: { agents: 2, description: "Codex → Primary 순차 검증" }
-  cross: { agents: 2, description: "Codex + Sonnet 병렬 → Judge" }
-  critical: { agents: 3, description: "Codex → Sonnet → Primary 3단계 순차" }
+  solo: { agents: 1, description: "parent only (기본)" }
+  quick: { agents: 1, description: "speed(code-reviewer, Codex @task) read-only, 45s timeout" }
+  precise: { agents: 2, description: "precision(code-reviewer, Codex @task) → parent 순차 검증" }
+  cross: { agents: 2, description: "plan_conformance(plan-validator, Codex @task) + quality_validation(quality-validator, Claude @plan) 병렬 → Judge" }
+  critical: { agents: 3, description: "precision(Codex @task) → quality_validation(Claude @plan) → parent 3단계 순차" }
 
 team_mode:
   description: "3레이어 에이전트 팀 (Python flow → Leader mission → Worker execution)"
   execution: "sequential 또는 parallel"
   max_turns: 3
   default_teams:
-    plan: "spec_writer + constitution_reviewer"
-    impl: "implementer + code_reviewer"
-    test: "happy_path + adversarial"
+    plan: "spec_writer(Claude @plan) + constitution_reviewer(Codex @task)"
+    impl: "implementer(Codex @task) + code_reviewer(Codex @task, 동일 모델 독립 리뷰)"
+    test: "happy_path(Codex @task) + adversarial(Claude @plan)"
 
 judge_rules:
   - "CRITICAL/HIGH finding 하나 이상 → FAIL"
@@ -74,6 +74,54 @@ protocols:
 
 워커 간 통신은 `.workflow/team/{phase}/` 디렉토리 기반 (Blackboard 패턴).
 
+## 역할별 에이전트·모델 매핑
+
+worker의 모델은 task 호출에서 `model`로 덮어쓰지 않는다. `awf agents sync-omp`가
+source agent frontmatter의 `omp_model_role`에서 생성한 `.omp/agents/<name>.md`의
+`model: "@plan"`/`"@task"` alias가 결정하며, alias가 가리키는 모델 버전은 OMP
+modelRoles 설정에만 있고 repo에 하드코딩하지 않는다.
+
+| protocol 역할 | agent (`task.agent`) | OMP model role | 담당 |
+|---|---|---|---|
+| spec_writer | `spec-writer` | `@plan` (Claude) | 기획·설계 산출물 작성 |
+| quality_validation | `quality-validator` | `@plan` (Claude) | 품질·위험 검토 |
+| wf_reviewer, review_* | `artifact-reviewer` | `@plan` (Claude) | spec↔plan↔tasks 교차 검토 |
+| adversarial | `adversarial-tester` | `@plan` (Claude) | 적대적 테스트 |
+| implementer | `implementer` | `@task` (Codex) | 구현 |
+| precision, speed, code_reviewer | `code-reviewer` | `@task` (Codex) | 독립 코드 검토 |
+| plan_conformance, constitution_reviewer | `plan-validator` | `@task` (Codex) | 계획 정합성 검토 |
+| wf_verifier, spec_compliance | `spec-verifier` | `@task` (Codex) | spec 준수 검증 |
+| happy_path | `happy-path-tester` | `@task` (Codex) | 정상 경로 테스트 |
+
+이종 모델 교차 검증은 Claude 역할과 Codex 역할이 함께 참여할 때만 해당한다
+(cross, critical, plan/test team). precise/quick과 impl team의
+implementer + code-reviewer는 같은 모델의 독립 리뷰이며, 한 모델을 여러 개 복제한
+결과를 이종 교차 검증으로 보고하지 않는다.
+
+## 기획 위임 (OMP host parent)
+
+OMP `@plan` 설정만으로는 현재 parent 모델이 바뀌지 않는다. parent가 Codex 등
+`@plan`이 가리키는 모델이 아니면 실질적인 기획·설계 작성 — spec/plan/tasks/
+test-criteria 초안, 아키텍처·설계 결정 문서화, `/wf` plan phase 산출물 — 은 parent가
+직접 쓰지 않고 `task`(`agent: "spec-writer"`)로 위임한다. parent는 요구사항·컨텍스트·
+제약 전달, 결과 통합, gate/state 소유만 맡는다.
+
+- 단순 질문·설명·코드 읽기·짧은 답변, 기존 산출물의 소규모 수정에는 위임하지 않는다.
+- 기획 위임은 7-phase workflow 시작이 아니다. `.workflow/state.json`이 없어도
+  `awf wf init`을 자동 실행하지 않는다.
+- parent의 resolved model이 이미 `@plan` 대상이면 같은 모델로 왕복하지 않고 직접 작성한다.
+
+## 모델 확인
+
+역할 이름이나 worker의 자기 보고가 아니라 task lifecycle event/결과의 resolved
+model·provider가 위 표의 model role과 일치하는지로 확인한다. alias 미해결, provider
+오류, 다른 모델로 resolve된 경우는 실패로 보고하고 중단하며 다른 모델로 조용히
+대체하지 않는다.
+
+OMP modelRoles(`@plan`/`@task`)는 OMP host의 task 런타임 설정이다. standalone
+`awf wf next`의 primary provider는 별개의 provider-direct 경로로,
+[wf-orchestrator](../wf-orchestrator/SKILL.md)의 "모델 결정 우선순위"를 따른다.
+
 ## OMP 호스트 실행
 
 OMP의 `task`/`hub`가 제공되면 Python team runner의 결정론적 gate를 유지하면서
@@ -93,6 +141,8 @@ cmux 경로를 사용할 때만 `cmux-agent agents --json`으로 활성 run의 w
 1. 서로 독립적인 worker는 하나의 persisted host에서 한 번의 batch `task`로
    fan-out합니다.
 2. worker별 agent type, resolved model, output schema/mode, isolation을 보존합니다.
+   task에 `model`을 지정하지 않고 위 매핑 표의 agent alias에 맡기며, resolved model이
+   표의 model role과 다르면 그 worker 결과를 evidence로 쓰지 않고 실패로 보고합니다.
 3. capacity를 초과하면 실행 전에 실패하고, timeout/cancel 시 완료된 partial result를
    보존하면서 host와 descendant process를 reap합니다.
 4. 실제 task lifecycle event의 ID와 상태만 성공 evidence로 인정하고

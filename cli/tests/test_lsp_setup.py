@@ -10,6 +10,7 @@ import pytest
 from awf.cli import main
 from awf.commands.lsp import _render
 from awf.core import lsp_setup
+from awf.worktrees.config import load_worktree_config
 
 
 def _git(*arguments: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -91,6 +92,33 @@ def test_setup_preview_has_no_mutation(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert not (repository / ".awf").exists()
     assert (exclude.read_text(encoding="utf-8") if exclude.exists() else "") == before
     assert all(action["status"] in {"planned", "unchanged"} for action in result["actions"])
+
+
+def test_setup_preserves_feature_base_and_strict_review_policy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repository = _repository(tmp_path)
+    _local_environment(monkeypatch, tmp_path)
+    _fake_omp(monkeypatch, tmp_path)
+    worktree = repository / ".awf" / "worktree.toml"
+    worktree.parent.mkdir()
+    worktree.write_text(
+        'prepare = { inputs = ["pyproject.toml"] }\n'
+        '[worktree]\nfeature_base = "release-base"\n'
+        'default_base = "staging"\nproduction_branch = "main"\n'
+        '[promotion]\nsource_review_policy = "approved"\n',
+        encoding="utf-8",
+    )
+
+    result = lsp_setup.setup_lsp(repository, apply=True)
+
+    assert result["decision"] == "applied"
+    configured = load_worktree_config(repository)
+    assert configured.prepare_command == ("awf", "lsp", "materialize")
+    assert configured.feature_base == "release-base"
+    assert configured.default_base == "staging"
+    assert configured.production_branch == "main"
+    assert configured.source_review_policy == "approved"
 
 
 def test_apply_is_idempotent_and_preserves_user_server_fields(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

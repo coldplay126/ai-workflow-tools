@@ -726,6 +726,30 @@ def test_transition_is_compare_and_swap_and_appends_event(tmp_path: Path) -> Non
         registry.transition(created.id, LeaseState.MERGED, expected_version=created.version)
 
 
+def test_staging_evidence_updates_atomically_without_final_pr(tmp_path: Path) -> None:
+    registry = WorktreeRegistry(tmp_path / "worktrees.sqlite3")
+    created = registry.create_lease(lease(tmp_path))
+    staged = registry.transition(
+        created.id, LeaseState.ACTIVE, expected_version=created.version,
+        event_type="managed_feature_staging_validated", source_pr=42,
+        source_base_sha="b" * 40, source_head_sha="c" * 40, head_sha="c" * 40,
+    )
+    assert registry.list_leases_read_only(target_pr=42) == []
+    assert staged.state is LeaseState.ACTIVE
+    assert registry.list_events(created.id)[-1].pr_number == 42
+    with pytest.raises(RuntimeError, match="lease changed concurrently"):
+        registry.transition(
+            created.id, LeaseState.ACTIVE, expected_version=created.version,
+            source_pr=43, source_head_sha="d" * 40,
+        )
+    final = registry.transition(
+        staged.id, LeaseState.CLEANABLE, expected_version=staged.version, pr_number=44,
+    )
+    assert final.source_pr == 42
+    assert final.source_head_sha == "c" * 40
+    assert registry.list_leases_read_only(target_pr=44) == [final]
+
+
 
 def test_cleanup_reservation_is_cas_guarded_and_completes_removal(
     tmp_path: Path,

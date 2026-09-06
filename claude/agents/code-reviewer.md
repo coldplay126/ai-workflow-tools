@@ -5,7 +5,7 @@ tools: Read, Grep, Glob, Bash
 model: sonnet
 # awf extensions
 provider_hint: codex
-omp_model_role: slow
+omp_model_role: task
 codex_sandbox: read-only
 roles: [precision, code_reviewer, speed]
 ---

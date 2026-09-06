@@ -7,9 +7,32 @@
 | 모드 | 에이전트 | 트리거 | 타임아웃 |
 |------|---------|--------|---------|
 | solo | 현재 호스트만 | 기본 | 실행 경로 설정 |
-| precise | precision worker → primary | `#precise` | 역할별 설정 |
-| cross | plan-conformance + quality-validation 병렬 | `#cross` | 역할별 설정 |
-| critical | precision → quality-validation → primary | `#critical` | 역할별 설정 |
+| precise | precision(`code-reviewer`, Codex `@task`) → primary | `#precise` | 역할별 설정 |
+| cross | plan-conformance(`plan-validator`, Codex `@task`) + quality-validation(`quality-validator`, Claude `@plan`) 병렬 | `#cross` | 역할별 설정 |
+| critical | precision(Codex `@task`) → quality-validation(Claude `@plan`) → primary | `#critical` | 역할별 설정 |
+
+### 역할·모델 라우팅과 기획 위임 (OMP host)
+
+worker 모델은 task `model`로 덮어쓰지 않고 agent frontmatter alias에 맡긴다:
+`spec-writer`/`quality-validator`/`artifact-reviewer`/`adversarial-tester` = Claude `@plan`,
+`implementer`/`code-reviewer`/`plan-validator`/`spec-verifier`/`happy-path-tester` = Codex `@task`.
+이종 교차 검증은 양쪽 모델이 참여할 때(cross/critical, plan/test team)만이며, 한 모델의
+복제 리뷰(precise, implementer + code-reviewer)는 이종 교차 검증으로 보고하지 않는다.
+
+**기획 위임**: OMP `@plan` 설정만으로 현재 parent 모델은 바뀌지 않는다. parent가
+`@plan` 대상 모델이 아니면 실질적 기획·설계 작성(spec/plan/tasks/test-criteria 초안,
+설계 결정 문서)은 `task`(`agent: "spec-writer"`)에 위임하고 parent는 요구사항 전달·
+결과 통합·gate만 맡는다. 단순 질문·설명·짧은 답변에는 위임하지 않고, 위임이 7-phase
+workflow(`awf wf init`) 시작을 뜻하지 않는다. parent가 이미 `@plan` 대상이면 왕복하지 않는다.
+
+**확인**: 역할 이름이나 worker 자기 보고가 아닌 task 결과의 resolved model/provider로
+확인한다. 불일치·alias 미해결·provider 오류는 실패로 보고하고 다른 모델로 조용히
+대체하지 않는다.
+
+이 절은 OMP host의 task 런타임에만 해당한다. standalone `awf wf next`의 primary
+provider는 별개의 provider-direct 경로로 `--provider` > delegated
+`phase_routing.{phase}.primary` > `phase_models.{phase}.inline_model` > Agent Card
+agent의 `provider_hint` > global default 순으로 결정된다.
 
 ### Worker dispatch 경로 선택 (우선순위)
 
@@ -25,7 +48,6 @@
 3. **MCP/provider 경로** (native 도구와 사용 가능한 cmux worker가 없을 때):
    - 제공되는 `mcp__codex__codex` 등으로 실행. 분석·리뷰 worker는 read-only
    - 사용할 실행 도구가 없으면 필요한 도구를 명시하고 중단. 실행하지 않은 결과를 만들지 않음
-
 AWF CLI의 `.workflow/provider-config.json`에 명시된 `dispatch.surface_preference`는
 이 자동 선택과 별개입니다. 명시된 surface가 unavailable/incompatible이면 실패를
 보고하며 다른 surface로 조용히 우회하지 않습니다.

@@ -51,6 +51,7 @@ class FakeGitHub:
     open_prs: dict[tuple[str, str], PullRequest] = field(default_factory=dict)
     repository_root: Path | None = None
     created_head_sha: str | None = None
+    merged_find_calls: list[tuple[str, str]] = field(default_factory=list)
 
     def view_pr(self, number: int) -> PullRequest:
         self.view_calls.append(number)
@@ -61,6 +62,13 @@ class FakeGitHub:
     def find_open_pr(self, *, head: str, base: str) -> PullRequest | None:
         self.find_calls.append((head, base))
         return self.open_prs.get((head, base))
+
+    def find_merged_prs(self, *, head: str, base: str) -> tuple[PullRequest, ...]:
+        self.merged_find_calls.append((head, base))
+        return tuple(
+            pull for pull in self.prs.values()
+            if pull.state == "MERGED" and pull.head_ref == head and pull.base_ref == base
+        )
 
     def find_pr(self, *, head: str, base: str) -> PullRequest | None:
         self.find_calls.append((head, base))
@@ -7117,9 +7125,10 @@ def test_promote_requires_reviewed_checked_staging_source(
     assert not promotion_harness.registry.db_path.exists()
 
 
-def test_promote_default_policy_rejects_unapproved_self_merge(
+def test_promote_explicit_approved_policy_rejects_unapproved_self_merge(
     promotion_harness: PromotionHarness,
 ) -> None:
+    promotion_harness.configure(source_review_policy="approved")
     promotion_harness.github.prs[372] = replace(
         promotion_harness.github.prs[372],
         review_decision="",
@@ -11916,3 +11925,499 @@ def test_recover_sync_rejects_stale_or_out_of_scope_conflict_changes(
     assert "sync_lease_stale" in {
         blocker["code"] for blocker in stale.blockers
     }
+
+
+def staged_main_feature(
+    harness: Harness, *, staging_based: bool = False, production_ahead: bool = False,
+) -> tuple[Lease, PullRequest]:
+    """Keep a real origin feature head while staging contains unrelated content."""
+    git_command(harness.repo, "branch", "main")
+    git_command(harness.repo, "push", "-q", "origin", "main")
+    (harness.repo / "README.txt").write_text("base\nstaging only\n", encoding="utf-8")
+    git_command(harness.repo, "add", "README.txt")
+    git_command(harness.repo, "commit", "-q", "-m", "staging only")
+    staging_base = harness.git.head_sha()
+    git_command(harness.repo, "push", "-q", "origin", "staging")
+    if production_ahead:
+        git_command(harness.repo, "checkout", "-q", "main")
+        (harness.repo / "README.txt").write_text("base\nproduction only\n", encoding="utf-8")
+        git_command(harness.repo, "add", "README.txt")
+        git_command(harness.repo, "commit", "-q", "-m", "production advance")
+        git_command(harness.repo, "push", "-q", "origin", "main")
+        git_command(harness.repo, "checkout", "-q", "staging")
+    harness.service.config = replace(
+        harness.service.config, production_branch="main", verify_production=(),
+    )
+    acquired = harness.service.acquire(
+        initiative="solo-feature", purpose=Purpose.FEATURE,
+        base="staging" if staging_based else None, branch=None, owner_id=None, apply=True,
+    )
+    assert acquired.lease is not None
+    lease = acquired.lease
+    content = "base\nstaging only\nfeature\n" if staging_based else "base\nfeature\n"
+    if production_ahead:
+        content = "base\nproduction only\nfeature\n"
+    (lease.worktree_path / "README.txt").write_text(content, encoding="utf-8")
+    git_command(lease.worktree_path, "add", "README.txt")
+    git_command(lease.worktree_path, "commit", "-q", "-m", "solo feature")
+    head = harness.git.head_sha(lease.worktree_path)
+    git_command(lease.worktree_path, "push", "-q", "origin", lease.branch)
+    # An explicit merge resolution retains both independent additions in staging,
+    # without changing the reviewed original feature head.
+    git_command(harness.repo, "merge", "--no-ff", "--no-commit", "-s", "ours", lease.branch)
+    (harness.repo / "README.txt").write_text(
+        "base\nstaging only\nfeature\n", encoding="utf-8"
+    )
+    git_command(harness.repo, "add", "README.txt")
+    git_command(harness.repo, "commit", "-q", "-m", "merged staging feature")
+    merged = harness.git.head_sha()
+    git_command(harness.repo, "push", "-q", "origin", "staging")
+    source = replace(
+        merged_pr(number=501, head_sha=head, changed_paths=("README.txt",)),
+        base_sha=staging_base, head_ref=lease.branch, merge_commit_sha=merged,
+        review_decision="", author_login="solo", merged_by_login="solo",
+    )
+    harness.github.prs[501] = source
+    harness.github.created_head_sha = head
+    return lease, source
+
+
+def test_source_branch_promotes_tested_main_head_without_staging_or_local_mutation(
+    harness: Harness,
+) -> None:
+    lease, source = staged_main_feature(harness)
+    git_command(harness.repo, "checkout", "-q", "main")
+    (harness.repo / "main-only.txt").write_text("another normal feature\n", encoding="utf-8")
+    git_command(harness.repo, "add", "main-only.txt")
+    git_command(harness.repo, "commit", "-q", "-m", "another production feature")
+    git_command(harness.repo, "push", "-q", "origin", "main")
+    (lease.worktree_path / "untracked.txt").write_text("ongoing local work\n", encoding="utf-8")
+    before_worktrees = harness.git.list_worktrees()
+    before_leases = harness.registry.list_leases_read_only()
+    preview = harness.service.promote(source_pr=501, target_branch="main", source_branch=True, apply=False)
+    assert preview.decision == "preview"
+    assert harness.github.create_calls == []
+    result = harness.service.promote(source_pr=501, target_branch="main", source_branch=True, apply=True)
+    assert result.decision == "ready"
+    assert result.lease is None
+    assert result.actions[0]["source_branch"] == lease.branch
+    assert result.actions[0]["tested_head"] == source.head_sha
+    assert result.actions[0]["target_pr"] == 900
+    assert harness.github.prs[900].head_ref == lease.branch
+    assert harness.github.prs[900].head_sha == source.head_sha
+    assert git_command(harness.repo, "show", f"{source.head_sha}:README.txt") == "base\nfeature"
+    assert harness.git.remote_branch_sha(lease.branch) == source.head_sha
+    assert harness.git.list_worktrees() == before_worktrees
+    assert harness.registry.list_leases_read_only() == before_leases
+    assert (lease.worktree_path / "untracked.txt").read_text() == "ongoing local work\n"
+
+
+def test_source_branch_accepts_current_main_changes_in_the_same_reviewed_file(
+    harness: Harness,
+) -> None:
+    lease, source = staged_main_feature(harness, production_ahead=True)
+
+    result = harness.service.promote(
+        source_pr=source.number, target_branch="main", source_branch=True, apply=True,
+    )
+
+    assert result.decision == "ready", result.blockers
+    assert harness.github.prs[900].head_sha == source.head_sha
+    assert git_command(harness.repo, "show", f"{source.head_sha}:README.txt") == (
+        "base\nproduction only\nfeature"
+    )
+    assert harness.git.remote_branch_sha(lease.branch) == source.head_sha
+
+
+def test_source_branch_rejects_same_file_staging_ancestry(harness: Harness) -> None:
+    lease, source = staged_main_feature(harness, staging_based=True)
+    assert source.changed_paths == ("README.txt",)
+    result = harness.service.promote(source_pr=501, target_branch="main", source_branch=True, apply=True)
+    assert result.blockers[0]["code"] == "source_branch_contains_staging"
+    assert harness.github.create_calls == []
+    assert harness.git.remote_branch_sha(lease.branch) == source.head_sha
+
+
+@pytest.mark.parametrize("failure,code", [
+    ("checks", "source_pr_checks_failed"),
+    ("approved", "source_pr_not_approved"),
+    ("other_merger", "source_pr_not_approved"),
+    ("missing", "source_branch_unavailable"),
+    ("head_drift", "source_branch_provenance_changed"),
+    ("paths", "source_delta_mismatch"),
+    ("protected", "source_pr_not_promotable"),
+    ("sync", "source_pr_not_promotable"),
+])
+def test_source_branch_blocks_unproven_publication(
+    harness: Harness, failure: str, code: str,
+) -> None:
+    lease, source = staged_main_feature(harness)
+    if failure == "checks":
+        harness.github.prs[501] = replace(source, checks_passed=False)
+    elif failure == "approved":
+        harness.service.config = replace(harness.service.config, source_review_policy="approved")
+    elif failure == "other_merger":
+        harness.github.prs[501] = replace(source, merged_by_login="someone-else")
+    elif failure == "missing":
+        git_command(harness.repo, "push", "-q", "origin", "--delete", lease.branch)
+    elif failure == "head_drift":
+        (lease.worktree_path / "later.txt").write_text("later\n", encoding="utf-8")
+        git_command(lease.worktree_path, "add", "later.txt")
+        git_command(lease.worktree_path, "commit", "-q", "-m", "later")
+        git_command(lease.worktree_path, "push", "-q", "origin", lease.branch)
+    elif failure == "paths":
+        harness.github.prs[501] = replace(source, changed_paths=("other.txt",))
+    elif failure == "protected":
+        harness.github.prs[501] = replace(source, head_ref="main")
+    else:
+        harness.github.prs[501] = replace(source, body="AWF-No-Promote: true")
+    result = harness.service.promote(source_pr=501, target_branch="main", source_branch=True, apply=True)
+    assert result.blockers[0]["code"] == code
+    assert harness.github.create_calls == []
+    assert lease.worktree_path.is_dir()
+
+
+@pytest.mark.parametrize("options", [
+    {"source_pr": (501, 502)},
+    {"source_pr": 501, "exclude_paths": ("README.txt",)},
+    {"source_pr": 501, "out_of_order": True},
+])
+def test_source_branch_rejects_synthetic_mode_options(harness: Harness, options: dict) -> None:
+    result = harness.service.promote(target_branch="main", source_branch=True, apply=True, **options)
+    assert result.blockers[0]["code"] == "invalid_source_branch_promotion"
+    assert harness.github.view_calls == []
+
+
+def test_source_branch_reuses_only_exact_open_pr(harness: Harness) -> None:
+    lease, source = staged_main_feature(harness)
+    first = harness.service.promote(source_pr=501, target_branch="main", source_branch=True, apply=True)
+    assert first.decision == "ready"
+    reused = harness.service.promote(source_pr=501, target_branch="main", source_branch=True, apply=True)
+    assert reused.decision == "reuse"
+    assert len(harness.github.create_calls) == 1
+    harness.github.open_prs[(lease.branch, "main")] = replace(
+        harness.github.prs[900], head_sha=source.base_sha,
+    )
+    mismatch = harness.service.promote(source_pr=501, target_branch="main", source_branch=True, apply=True)
+    assert mismatch.blockers[0]["code"] == "target_pr_mismatch"
+    assert len(harness.github.create_calls) == 1
+
+
+@pytest.mark.parametrize("drift", ("source", "target", "source_pr", "created_pr"))
+def test_source_branch_preserves_publication_on_late_drift(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, drift: str,
+) -> None:
+    lease, source = staged_main_feature(harness)
+    create = harness.github.create_pr
+
+    def create_with_drift(**kwargs: str) -> PullRequest:
+        published = create(**kwargs)
+        if drift == "source_pr":
+            harness.github.prs[501] = replace(source, base_sha=source.head_sha)
+        elif drift == "created_pr":
+            published = replace(published, head_sha=source.base_sha)
+            harness.github.prs[900] = published
+        else:
+            branch = lease.branch if drift == "source" else "main"
+            git_command(harness.repo, "push", "-q", "origin", f"staging:refs/heads/{branch}")
+        return published
+
+    monkeypatch.setattr(harness.github, "create_pr", create_with_drift)
+    result = harness.service.promote(source_pr=501, target_branch="main", source_branch=True, apply=True)
+    assert result.blockers[0]["code"] == (
+        "target_pr_mismatch" if drift == "created_pr" else "source_branch_provenance_changed"
+    )
+    assert result.actions[0]["target_pr"] == 900
+    assert harness.github.prs[900].state == "OPEN"
+    assert lease.worktree_path.is_dir()
+
+
+def test_staging_link_preserves_feature_until_final_production_link(harness: Harness) -> None:
+    lease, source = staged_main_feature(harness)
+    linked = harness.service.link_pr(lease.id, pr_number=501, apply=True)
+    assert linked.decision == "ready"
+    assert linked.lease.state is LeaseState.ACTIVE
+    assert linked.lease.source_pr == 501
+    assert linked.lease.source_head_sha == source.head_sha
+    assert linked.lease.target_pr is None
+    assert harness.service.finish(pr_number=501, apply=True).decision == "blocked"
+    harness.service.status(refresh=True)
+    assert lease.worktree_path.is_dir()
+    assert harness.service.link_pr(lease.id, pr_number=501, apply=True).decision == "reuse"
+    result = harness.service.promote(source_pr=501, target_branch="main", source_branch=True, apply=True)
+    assert result.decision == "ready"
+    harness.github.prs[900] = replace(
+        harness.github.prs[900], state="MERGED", merge_commit_sha=source.head_sha,
+    )
+    final = harness.service.link_pr(lease.id, pr_number=900, apply=True)
+    assert final.decision == "ready"
+    assert final.lease.state is LeaseState.CLEANABLE
+    assert final.lease.target_pr == 900
+    assert harness.service.link_pr(lease.id, pr_number=900, apply=True).decision == "reuse"
+    finished = harness.service.finish(pr_number=900, apply=True)
+    assert finished.decision == "removed"
+    assert not lease.worktree_path.exists()
+
+
+def test_staging_evidence_requires_revalidation_after_new_commit(harness: Harness) -> None:
+    lease, source = staged_main_feature(harness)
+    assert harness.service.link_pr(lease.id, pr_number=501, apply=True).decision == "ready"
+    (lease.worktree_path / "later.txt").write_text("later\n", encoding="utf-8")
+    git_command(lease.worktree_path, "add", "later.txt")
+    git_command(lease.worktree_path, "commit", "-q", "-m", "later feature")
+    later_head = harness.git.head_sha(lease.worktree_path)
+    stale = harness.service.promote(source_pr=501, target_branch="main", source_branch=True, apply=True)
+    assert stale.blockers[0]["code"] == "staging_evidence_stale"
+    harness.github.prs[901] = replace(
+        source, number=901, base_ref="main", head_sha=later_head,
+    )
+    final = harness.service.link_pr(lease.id, pr_number=901, apply=True)
+    assert final.blockers[0]["code"] == "staging_evidence_stale"
+    git_command(lease.worktree_path, "push", "-q", "origin", lease.branch)
+    base = harness.git.head_sha()
+    git_command(harness.repo, "merge", "--no-ff", "-q", lease.branch, "-m", "restaged feature")
+    git_command(harness.repo, "push", "-q", "origin", "staging")
+    harness.github.prs[502] = replace(
+        source, number=502, base_sha=base, head_sha=later_head,
+        merge_commit_sha=harness.git.head_sha(), changed_paths=("later.txt",),
+    )
+    refreshed = harness.service.link_pr(lease.id, pr_number=502, apply=True)
+    assert refreshed.decision == "ready"
+    assert refreshed.lease.source_pr == 502
+    assert refreshed.lease.source_head_sha == later_head
+    assert refreshed.lease.target_pr is None
+    harness.github.created_head_sha = later_head
+    promoted = harness.service.promote(
+        source_pr=502, target_branch="main", source_branch=True, apply=True,
+    )
+    assert promoted.decision == "ready"
+    assert promoted.actions[0]["source_prs"] == [501, 502]
+    assert harness.github.prs[900].head_sha == later_head
+    assert harness.service.link_pr(lease.id, pr_number=901, apply=True).decision == "ready"
+
+
+@pytest.mark.parametrize("purpose,base,feature_base,production,expected", [
+    (Purpose.FEATURE, None, None, "main", "main"),
+    (Purpose.FEATURE, None, "feature-base", "main", "feature-base"),
+    (Purpose.FEATURE, "staging", "feature-base", "main", "staging"),
+    (Purpose.SCRATCH, None, "feature-base", "main", "staging"),
+    (Purpose.FEATURE, None, None, None, "staging"),
+])
+def test_acquire_feature_base_precedence_keeps_other_purposes_on_staging(
+    harness: Harness, purpose: Purpose, base: str | None,
+    feature_base: str | None, production: str | None, expected: str,
+) -> None:
+    git_command(harness.repo, "branch", "main")
+    git_command(harness.repo, "branch", "feature-base")
+    git_command(harness.repo, "push", "-q", "origin", "main", "feature-base")
+    harness.service.config = replace(
+        harness.service.config, feature_base=feature_base, production_branch=production,
+    )
+    result = harness.service.acquire(
+        initiative="base-choice", purpose=purpose, base=base,
+        branch=None, owner_id=None, apply=True,
+    )
+    assert result.decision == "ready"
+    assert result.lease.base_ref == f"origin/{expected}"
+
+
+def test_source_branch_explicit_approval_allows_non_self_merged_source(harness: Harness) -> None:
+    _, source = staged_main_feature(harness)
+    harness.service.config = replace(harness.service.config, source_review_policy="approved")
+    harness.github.prs[501] = replace(
+        source, review_decision="APPROVED", merged_by_login="maintainer",
+    )
+    result = harness.service.promote(
+        source_pr=501, target_branch="main", source_branch=True, apply=True,
+    )
+    assert result.decision == "ready"
+    assert harness.github.prs[900].head_sha == source.head_sha
+
+
+def test_source_branch_rechecks_target_immediately_before_creation(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lease, source = staged_main_feature(harness)
+    find_open = harness.github.find_open_pr
+
+    def find_with_drift(**kwargs: str) -> PullRequest | None:
+        git_command(harness.repo, "push", "-q", "origin", "staging:refs/heads/main")
+        return find_open(**kwargs)
+
+    monkeypatch.setattr(harness.github, "find_open_pr", find_with_drift)
+    result = harness.service.promote(
+        source_pr=501, target_branch="main", source_branch=True, apply=True,
+    )
+    assert result.blockers[0]["code"] == "source_branch_provenance_changed"
+    assert harness.github.create_calls == []
+    assert harness.git.remote_branch_sha(lease.branch) == source.head_sha
+
+
+def test_link_pr_no_promote_sync_feature_remains_final_cleanup_evidence(harness: Harness) -> None:
+    git_command(harness.repo, "branch", "main")
+    git_command(harness.repo, "push", "-q", "origin", "main")
+    harness.service.config = replace(harness.service.config, production_branch="main")
+    acquired = harness.service.acquire(
+        initiative="sync-feature", purpose=Purpose.FEATURE, base="staging",
+        branch="awf/sync-0123456789abcdef-0123456789ab/feature",
+        owner_id=None, apply=True,
+    )
+    assert acquired.lease is not None
+    lease = acquired.lease
+    harness.github.prs[503] = replace(
+        merged_pr(number=503, head_sha=lease.head_sha),
+        head_ref=lease.branch, body="AWF-No-Promote: true",
+    )
+    result = harness.service.link_pr(lease.id, pr_number=503, apply=True)
+    assert result.decision == "ready"
+    assert result.lease.state is LeaseState.CLEANABLE
+    assert result.lease.target_pr == 503
+    assert result.lease.source_pr is None
+
+
+def test_acquire_feature_falls_back_to_origin_default(harness: Harness) -> None:
+    harness.service.config = WorktreeConfig()
+    result = harness.acquire("remote-default")
+    assert result.decision == "ready"
+    assert result.lease.base_ref == "origin/staging"
+
+
+def restaged_main_feature(harness: Harness) -> tuple[Lease, PullRequest, PullRequest]:
+    lease, first = staged_main_feature(harness)
+    assert harness.service.link_pr(lease.id, pr_number=501, apply=True).decision == "ready"
+    (lease.worktree_path / "README.txt").write_text("base\nfeature corrected\n", encoding="utf-8")
+    git_command(lease.worktree_path, "add", "README.txt")
+    git_command(lease.worktree_path, "commit", "-q", "-m", "correct staging issue")
+    head = harness.git.head_sha(lease.worktree_path)
+    git_command(lease.worktree_path, "push", "-q", "origin", lease.branch)
+    base = harness.git.head_sha()
+    git_command(harness.repo, "merge", "--no-ff", "--no-commit", "-s", "ours", lease.branch)
+    (harness.repo / "README.txt").write_text(
+        "base\nstaging only\nfeature corrected\n", encoding="utf-8"
+    )
+    git_command(harness.repo, "add", "README.txt")
+    git_command(harness.repo, "commit", "-q", "-m", "restage corrected feature")
+    git_command(harness.repo, "push", "-q", "origin", "staging")
+    latest = replace(
+        first, number=502, base_sha=base, head_sha=head,
+        merge_commit_sha=harness.git.head_sha(),
+    )
+    harness.github.prs[502] = latest
+    harness.github.created_head_sha = head
+    assert harness.service.link_pr(lease.id, pr_number=502, apply=True).decision == "ready"
+    return lease, first, latest
+
+
+def test_source_branch_restaging_chain_publishes_corrected_original_head(harness: Harness) -> None:
+    lease, first, latest = restaged_main_feature(harness)
+    result = harness.service.promote(
+        source_pr=502, target_branch="main", source_branch=True, apply=True,
+    )
+    assert result.decision == "ready"
+    assert result.actions[0]["source_prs"] == [501, 502]
+    assert result.actions[0]["sources"][0]["head_sha"] == first.head_sha
+    assert result.actions[0]["sources"][1]["head_sha"] == latest.head_sha
+    assert harness.github.prs[900].head_ref == lease.branch
+    assert harness.github.prs[900].head_sha == latest.head_sha
+    assert harness.git.remote_branch_sha(lease.branch) == latest.head_sha
+    assert git_command(harness.repo, "show", f"{latest.head_sha}:README.txt") == "base\nfeature corrected"
+    assert "Validation-PR: #501" in harness.github.prs[900].body
+    assert "Validation-PR: #502" in harness.github.prs[900].body
+
+
+@pytest.mark.parametrize("failure,code", [
+    ("missing", "source_branch_contains_staging"),
+    ("ambiguous", "source_validation_chain_invalid"),
+    ("checks", "source_pr_checks_failed"),
+    ("approved", "source_pr_not_approved"),
+    ("merge_order", "source_validation_chain_invalid"),
+    ("paths", "source_delta_mismatch"),
+    ("wrong_branch", "source_branch_contains_staging"),
+])
+def test_source_branch_restaging_chain_rejects_unproven_predecessor(
+    harness: Harness, failure: str, code: str,
+) -> None:
+    lease, first, latest = restaged_main_feature(harness)
+    if failure == "missing":
+        del harness.github.prs[501]
+    elif failure == "ambiguous":
+        harness.github.prs[503] = replace(first, number=503)
+    elif failure == "checks":
+        harness.github.prs[501] = replace(first, checks_passed=False)
+    elif failure == "approved":
+        harness.service.config = replace(harness.service.config, source_review_policy="approved")
+        harness.github.prs[502] = replace(latest, review_decision="APPROVED")
+    elif failure == "merge_order":
+        harness.github.prs[501] = replace(first, merge_commit_sha=latest.merge_commit_sha)
+    elif failure == "paths":
+        harness.github.prs[501] = replace(first, changed_paths=("other.txt",))
+    else:
+        harness.github.prs[501] = replace(first, head_ref="other-feature")
+    result = harness.service.promote(
+        source_pr=502, target_branch="main", source_branch=True, apply=True,
+    )
+    assert result.blockers[0]["code"] == code
+    assert harness.github.create_calls == []
+    assert harness.git.remote_branch_sha(lease.branch) == latest.head_sha
+
+
+def test_source_branch_rechecks_historical_validation_after_publication(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lease, first, latest = restaged_main_feature(harness)
+    create = harness.github.create_pr
+
+    def create_with_old_pin_drift(**kwargs: str) -> PullRequest:
+        published = create(**kwargs)
+        harness.github.prs[501] = replace(first, base_sha=first.head_sha)
+        return published
+
+    monkeypatch.setattr(harness.github, "create_pr", create_with_old_pin_drift)
+    result = harness.service.promote(
+        source_pr=502, target_branch="main", source_branch=True, apply=True,
+    )
+    assert result.blockers[0]["code"] == "source_branch_provenance_changed"
+    assert result.actions[0]["target_pr"] == 900
+    assert harness.github.prs[900].state == "OPEN"
+    assert harness.git.remote_branch_sha(lease.branch) == latest.head_sha
+
+
+def test_github_client_merged_scan_returns_only_exact_validation_candidates(harness: Harness) -> None:
+    from awf.worktrees.github import GhClient
+
+    candidate = {
+        "number": 42, "state": "MERGED", "baseRefName": "staging",
+        "baseRefOid": "a" * 40, "headRefName": "feature/solo",
+        "headRefOid": "b" * 40, "mergeCommit": {"oid": "c" * 40},
+        "reviewDecision": "APPROVED", "statusCheckRollup": [], "files": [],
+        "url": "https://github.example/acme/repo/pull/42",
+    }
+    payload = [
+        candidate, {**candidate, "number": 43, "headRefName": "other"},
+        {**candidate, "number": 44, "baseRefName": "main"},
+        {**candidate, "number": 45, "state": "OPEN", "mergeCommit": None},
+    ]
+
+    def runner(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+    matches = GhClient(harness.repo, command_runner=runner).find_merged_prs(
+        head="feature/solo", base="staging",
+    )
+    assert [pull.number for pull in matches] == [42]
+    assert matches[0].head_sha == "b" * 40
+
+
+@pytest.mark.parametrize("payload", ([{}] * 100, {"items": []}, [None]))
+def test_github_client_merged_scan_fails_closed_on_incomplete_or_invalid_results(
+    harness: Harness, payload: object,
+) -> None:
+    from awf.worktrees.github import GhClient
+
+    def runner(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+    with pytest.raises(ExternalServiceError):
+        GhClient(harness.repo, command_runner=runner).find_merged_prs(
+            head="feature/solo", base="staging",
+        )
