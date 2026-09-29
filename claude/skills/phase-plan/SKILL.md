@@ -35,7 +35,7 @@ awf wf next --phase plan --repo-root . --dry-run --output-format json
 
 ## 게이트 프리앰블
 
-1. `.workflow/state.json` 읽기. 없으면: "워크플로우가 초기화되지 않았습니다. `/wf-orchestrator`를 먼저 실행하세요." 중단.
+1. `.workflow/state.json` 읽기. 없으면: "워크플로우가 초기화되지 않았습니다. `/wf init <기능 설명>`으로 먼저 시작하세요." 중단.
 2. `.workflow/manifest.json` 읽기.
 3. `createdAt`이 7일 이상 경과했으면 경고.
 4. `phases.plan.retries`가 3 이상이면: "기획 단계가 3회 실패했습니다. 수동 개입이 필요합니다." 중단.

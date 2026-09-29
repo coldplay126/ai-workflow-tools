@@ -28,9 +28,9 @@ Claude Code 중심으로 작성된 멀티에이전트 프로토콜과 `wf-*` pip
 
 ### Claude 어댑터
 
-- 입력 UX: skill entrypoint (`/wf-orchestrator`, `/phase-review`, `/wf-status`)
-- 실행 단위: `claude/skills/*`
-- secondary provider 호출: Codex MCP, Claude CLI
+- 입력 UX: skill entrypoint (`/wf init`, `/wf`, `/wf status`, `/phase-review`) — `./setup.sh --with-wf` 설치 시
+- 실행 단위: `claude/skills/*` (기본 설치에 링크가 없어도 editable `awf wf` CLI는 source checkout에서 읽음)
+- secondary provider 호출: Codex CLI (`codex exec`), Claude CLI (`claude --print`)
 
 ### Codex 어댑터
 
@@ -143,7 +143,7 @@ Codex runner
 → primary 실행
 → 실패/타임아웃/format retry 실패
 → fallback_chain 다음 provider 조회
-→ `claude --print --bare --output-format json ...`
+→ `claude --print ...` (Claude Code provider, sandbox·출력 형식은 CLI가 결정)
 → 동일 schema로 정규화
 → gate 평가
 ```

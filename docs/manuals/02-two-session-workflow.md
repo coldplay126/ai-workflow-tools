@@ -31,11 +31,13 @@
 - spec/plan/tasks 확인
 - approve 판단
 
-예시:
+예시(`/wf` 슬래시 스킬은 `./setup.sh --with-wf` 설치 필요):
 
 ```text
-/wf-orchestrator 'README 개편'
+/wf init 'README 개편'
 ```
+
+슬래시 스킬 없이 CLI로 시작하려면 `uv run --project cli awf wf init 'README 개편' --repo-root .`를 씁니다.
 
 확인할 파일:
 - `.workflow/concept.md`
@@ -97,7 +99,7 @@ uv run --project cli awf analyze sample-api quest-challenge --repo-root . --dry-
 ## 4. 시나리오 C: Claude / Codex 분업
 
 세션 A:
-- Claude Code에서 `/wf-orchestrator`, `/analysis`
+- Claude Code에서 `/wf`(`--with-wf` 설치 시), `/analysis`
 - 필요하면 선택적으로 `awf analyze ... --provider claude-sdk --yolo`
 
 세션 B:
