@@ -7,7 +7,7 @@ import os
 import re
 import sqlite3
 import stat
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -273,7 +273,7 @@ class RemoteBranchDiscarder:
                 "backup_root_invalid", "The backup root could not be safely validated."
             )
         try:
-            repository_leases = self._repository_leases(leases, repository_id)
+            repository_leases = self._repository_leases(leases, repository_id, branch)
         except (GitError, OSError):
             return self._blocked(
                 "repository_inspection_failed", "Unable to inspect the Git common directory."
@@ -407,34 +407,42 @@ class RemoteBranchDiscarder:
         )
 
     def _repository_leases(
-        self, leases: tuple[Lease, ...], repository_id: str
+        self, leases: tuple[Lease, ...], repository_id: str, branch: str
     ) -> tuple[Lease, ...]:
-        """Match legacy linked-root leases before inspecting their Git common dir."""
-        common_dir = self.git.common_git_directory()
-        normalized_remote = _normalize_remote_url(self.git.remote_url())
+        """Match existing roots by common dir, missing legacy roots by origin hash."""
+        common_dir: Path | None = None
+        normalized_remote: str | None = None
         related: list[Lease] = []
         for lease in leases:
             if lease.repository_id == repository_id:
                 related.append(lease)
                 continue
+            if lease.branch != branch and (
+                lease.state is LeaseState.REMOVED
+                or self._strip_refs(lease.base_ref) != branch
+            ):
+                continue
+            if lease.repository_root.exists():
+                if common_dir is None:
+                    common_dir = self.git.common_git_directory()
+                try:
+                    lease_common_dir = GitClient(lease.repository_root).common_git_directory()
+                except (GitError, OSError):
+                    # An inaccessible root cannot safely release a lease guard.
+                    related.append(lease)
+                    continue
+                if lease_common_dir == common_dir:
+                    related.append(lease)
+                continue
+            if normalized_remote is None:
+                normalized_remote = _normalize_remote_url(self.git.remote_url())
             if (
                 GitClient.repository_id_from_remote(
                     normalized_remote, lease.repository_root
                 )
-                != lease.repository_id
+                == lease.repository_id
             ):
-                continue
-            if not lease.repository_root.exists():
                 # The legacy root is gone; it may still refer to this repository.
-                related.append(lease)
-                continue
-            try:
-                lease_common_dir = GitClient(lease.repository_root).common_git_directory()
-            except (GitError, OSError):
-                # An inaccessible legacy root cannot safely release a lease guard.
-                related.append(lease)
-                continue
-            if lease_common_dir == common_dir:
                 related.append(lease)
         return tuple(related)
 
@@ -498,10 +506,27 @@ class RemoteBranchDiscarder:
         )
         protected.discard("")
         if branch in protected or branch.startswith(_PROTECTED_PREFIXES):
+            stale_context = self._missing_root_context(
+                lease
+                for lease in leases
+                if lease.state is not LeaseState.REMOVED
+                and self._strip_refs(lease.base_ref) == branch
+            )
             return self._blocked(
-                "protected_branch", f"The branch is protected from {self._operation_label}."
+                "protected_branch",
+                f"The branch is protected from {self._operation_label}.{stale_context}",
             )
         return None
+
+    @staticmethod
+    def _missing_root_context(leases: Iterable[Lease]) -> str:
+        for lease in leases:
+            if not lease.repository_root.exists():
+                return (
+                    f" Lease {lease.id} has a missing recorded repository root:"
+                    f" {lease.repository_root}."
+                )
+        return ""
 
     def _lease_blocker(self, leases: tuple[Lease, ...]) -> CommandResult | None:
         try:
@@ -511,7 +536,8 @@ class RemoteBranchDiscarder:
             ):
                 return self._blocked(
                     "cleanup_reserved",
-                    "A matching worktree lease is reserved for cleanup.",
+                    f"A matching worktree lease is reserved for cleanup."
+                    f"{self._missing_root_context(leases)}",
                     leases=leases,
                 )
         except sqlite3.Error:
@@ -521,13 +547,15 @@ class RemoteBranchDiscarder:
         if any(lease.state is not LeaseState.REMOVED for lease in leases):
             return self._blocked(
                 "lease_not_removed",
-                "A matching worktree lease has not been removed.",
+                f"A matching worktree lease has not been removed."
+                f"{self._missing_root_context(leases)}",
                 leases=leases,
             )
         if any(lease.retain for lease in leases):
             return self._blocked(
                 "retained_lease",
-                "A matching worktree lease is marked for retention.",
+                f"A matching worktree lease is marked for retention."
+                f"{self._missing_root_context(leases)}",
                 leases=leases,
             )
         try:
@@ -543,7 +571,8 @@ class RemoteBranchDiscarder:
                 ):
                     return self._blocked(
                         "active_release",
-                        "The branch is associated with an active release.",
+                        f"The branch is associated with an active release."
+                        f"{self._missing_root_context(leases)}",
                         leases=leases,
                     )
         except sqlite3.Error:

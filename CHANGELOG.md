@@ -113,9 +113,10 @@
   의도적으로 제외한다. 해당 내부의 로컬 변경까지 복원되지 않지만 다른 ignored
   파일(환경 파일 포함)은 보존하며, exclusion 정책은 preview token과 manifest에
   결속된다.
-- Branch discard는 기존 경로별 `repository_id` 계산을 바꾸지 않고 linked
-  worktree의 공통 Git 디렉터리로도 lease를 검사한다. 같은 origin의 legacy
-  lease는 root가 사라져도 보수적으로 보호하고, 확인된 다른 clone의 lease만
+- Branch discard는 기존 경로별 `repository_id` 계산을 바꾸지 않는다. Root가 있는
+  lease는 origin URL 형식이 달라도 공통 Git 디렉터리로 같은 저장소인지 확인한다.
+  사라진 root는 같은 origin의 legacy identity일 때 보수적으로 보호하며, blocker에
+  lease id와 기록된 root를 표시한다. 물리적으로 다른 clone임이 확인된 lease만
   local discard에서 무시한다. Remote discard는 같은 origin의 다른 clone에
   활성·보존 lease가 있으면 차단한다. 두 명령은 origin/HEAD와 GitHub open PR을
   확인한다.

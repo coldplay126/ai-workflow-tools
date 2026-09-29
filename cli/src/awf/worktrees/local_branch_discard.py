@@ -87,7 +87,7 @@ class LocalBranchDiscarder(RemoteBranchDiscarder):
                 "backup_root_invalid", "The backup root could not be safely validated."
             )
         try:
-            repository_leases = self._repository_leases(leases, repository_id)
+            repository_leases = self._repository_leases(leases, repository_id, branch)
         except (GitError, OSError):
             return self._blocked(
                 "repository_inspection_failed", "Unable to inspect the Git common directory."

@@ -589,11 +589,40 @@ def test_remote_discard_blocks_active_legacy_lease_after_linked_root_removed(
     )
     assert preview.status == "blocked"
     assert _blocker_code(preview) == "lease_not_removed"
+    assert legacy_lease.id in preview.blockers[0]["message"]
+    assert str(linked) in preview.blockers[0]["message"]
     applied = _apply(harness, branch, expected_sha, backup_root, token)
     assert applied.status == "blocked"
     assert _blocker_code(applied) == "lease_not_removed"
     assert _remote_head(harness.repo, branch) == expected_sha
     assert not destination.exists()
+
+
+def test_remote_discard_keeps_same_store_lease_after_origin_url_format_change(
+    tmp_path: Path,
+) -> None:
+    harness = RemoteDiscardHarness.create(tmp_path)
+    branch = "retired/origin-format-change"
+    expected_sha = _create_remote_branch(harness, branch)
+    lease = _register_lease(harness, initiative="origin-format", branch=branch)
+    git(
+        harness.repo,
+        "remote",
+        "set-url",
+        "origin",
+        f"file://{tmp_path / 'origin.git'}",
+    )
+    assert lease.repository_id != harness.git.repository_id()
+
+    preview = harness.service.discard_remote_branch(
+        branch,
+        expected_sha=expected_sha,
+        backup_root=_backup_root(tmp_path),
+        reason=_REASON,
+    )
+    assert preview.status == "blocked"
+    assert _blocker_code(preview) == "lease_not_removed"
+    assert _remote_head(harness.repo, branch) == expected_sha
 
 
 def test_remote_discard_from_linked_worktree_respects_active_main_lease(tmp_path: Path) -> None:
