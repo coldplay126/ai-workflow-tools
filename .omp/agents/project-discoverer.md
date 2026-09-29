@@ -43,6 +43,8 @@ model: "@smol"
 | **보조** | 연동 변경이 필요할 수 있는 프로젝트 |
 | **참고** | 관련은 있지만 변경 불필요 |
 
+`/wf` 시작은 opt-in 스킬 설치(`setup.sh --with-wf`) 후에만 안내합니다.
+
 고려사항:
 - 마이그레이션 상태 (sample-server 이관 여부)
 - 서비스 경계 (API vs Consumer vs Batch vs Frontend)

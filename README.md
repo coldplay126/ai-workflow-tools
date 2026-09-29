@@ -88,14 +88,20 @@ awf ready --repo-root /path/to/your-project
 uv run --project cli --no-editable --reinstall-package awf-cli awf --help
 ```
 
-`setup.sh`는 `awf`를 editable `uv tool`로 설치하고, 저장소의 모든 AWF
-skill을 `~/.claude/skills`, `~/.agents/skills`, `~/.omp/agent/skills`에
-각각 연결합니다. `AGENTS_SKILLS_DIR`와 `OMP_SKILLS_DIR`로 후자의 두 설치
-루트를 바꿀 수 있습니다. 동명 사용자 파일이나 디렉터리는 덮어쓰지 않으며,
-`AWF_SKILL_INSTALL_RESULT`에 `user_owned`를 기록하고 exit `3`으로
-종료합니다. Claude agents와 생성된 AWF용 OMP task agents도 사용자 설정에
-연결됩니다. 이후 일반 사용자는 이 저장소 안에서 `uv run`을 사용할 필요가
-없습니다.
+`setup.sh`는 `awf`를 editable `uv tool`로 설치하고 기본 CORE 스킬 5개
+(`analysis`, `lsp-worktree-setup`, `multi-agent`, `release-worktree-lifecycle`,
+`wf-discovery`)만 `~/.claude/skills`, `~/.agents/skills`,
+`~/.omp/agent/skills`에 연결합니다. 기본 작업은 OMP 역할 위임(`@plan`/`@task`
+agent)과 `awf wt`를 사용합니다. 7단계 `/wf` 스킬 11개가 필요하면 이
+체크아웃에서 `./setup.sh --with-wf` 또는 `AWF_WITH_WF=1 ./setup.sh`를
+실행하세요. 기본 setup 재실행은 세 루트에서 이 체크아웃이 소유한 기존 WF
+링크만 제거하고 사용자 파일·디렉터리·다른 대상 링크는 유지합니다.
+`CLAUDE_DIR`, `AGENTS_SKILLS_DIR`, `OMP_SKILLS_DIR`로 각 설치 루트를 바꿀 수
+있습니다 (`CLAUDE_DIR`은 `skills`의 상위 디렉터리). 설치 대상에 동명 사용자
+파일이나 디렉터리가 있으면 덮어쓰지 않고 `AWF_SKILL_INSTALL_RESULT`에
+`user_owned`를 기록하며 exit `3`으로 종료합니다. Claude agents와 생성된
+AWF용 OMP task agents도 사용자 설정에 연결됩니다. 이후 일반 사용자는 이
+저장소 안에서 `uv run`을 사용할 필요가 없습니다.
 
 릴리스 작업에서 `release-worktree-lifecycle` 스킬은 agent가 어떤 `awf wt`
 명령을 호출할지 안내하고, 안전 판정·상태 기록·변경은 CLI가 수행합니다.
@@ -190,11 +196,13 @@ Gemini CLI를 기본 provider로 쓰려면 `provider.default = "gemini"`를 설�
 
 ### 첫 workflow 순서
 
-처음에는 작은 gated loop로 시작합니다.
+7단계 `/wf`는 선택 사항입니다. 일반적인 작업은 OMP 역할 위임(`@plan`/`@task`
+agent)과 `awf wt`로 진행합니다. `/wf`를 쓰려면 이 체크아웃에서 먼저
+`./setup.sh --with-wf`를 실행하세요.
 
-아래 `bash` 블록은 로컬 셸에서 실행하는 **AWF CLI** 예시입니다. `setup.sh`로
-Claude Code 스킬을 설치한 뒤에는 별도의 **slash-skill** 진입점도 사용할 수
-있으며, 두 문법을 섞지 않습니다:
+아래 `bash` 블록은 로컬 셸에서 실행하는 **AWF CLI** 예시입니다. opt-in 설치
+후에는 `wf` 스킬이 제공하는 별도 **slash-skill** 진입점도 사용할 수 있으며,
+두 문법을 섞지 않습니다:
 
 ```text
 /wf init small scoped improvement
@@ -541,11 +549,12 @@ Leave `provider.gemini.model` empty for Gemini CLI Auto, or set
 
 ### First workflow sequence
 
-Start new repositories with a small, gated loop:
-
-The `bash` block below uses the **AWF CLI** from a local shell. After
-`setup.sh` installs the Claude Code skills, the separate **slash-skill**
-entrypoint is also available; do not mix the two syntaxes:
+The seven-phase `/wf` skills are optional: use OMP role delegation
+(`@plan`/`@task` agents) and `awf wt` for ordinary work. Run
+`./setup.sh --with-wf` from this checkout before using the `/wf` skill.
+The `bash` block below uses the **AWF CLI** from a local shell. After opting in,
+the `wf` skill provides the separate **slash-skill** entrypoint; do not mix the
+two syntaxes:
 
 ```text
 /wf init small scoped improvement

@@ -1,5 +1,8 @@
 ## 워크플로우 파이프라인 (wf-orchestrator)
 
+이 섹션은 선택 사항입니다. `/wf` 스킬은 ai-workflow-tools 체크아웃에서
+`./setup.sh --with-wf` (또는 `AWF_WITH_WF=1 ./setup.sh`) 실행 후 사용할 수 있습니다.
+
 권장 진입점은 `/wf init <기능 설명>`이다. `/wf`, `/wf resume`, `/wf status`,
 `/wf reset <action>`도 같은 lifecycle dispatcher를 사용한다.
 phase 실행은 dispatcher가 `wf-orchestrator`에 위임한다.

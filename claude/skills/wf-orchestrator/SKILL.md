@@ -210,7 +210,6 @@ provider-config.json 존재?
 │   ├── "delegated" → Step 5B (위임 실행)
 │   └── "dual"      → Step 5C (인라인 + 위임 병합)
 │
-├── codex-config.json만 존재? → review/verify만 dual, 나머지 inline (하위 호환)
 └── No → 모든 Phase inline (기존 동작)
 ```
 
@@ -269,13 +268,13 @@ Schema:
 
 **Rules 임베딩 규칙** (manifest.json `context_providers` 기반):
 - `context_providers`에 AGENTS.md/CLAUDE.md가 있으면 RULES 섹션에 포함
-- `provider.file_access: true` (Codex MCP) → 경로만: `"Read and follow: ./AGENTS.md, ./CLAUDE.md"`
-- `provider.file_access: false` (Claude `--bare`) → 파일 전문 임베드
+- `provider.file_access: true` (Codex CLI `codex exec`) → 경로만: `"Read and follow: ./AGENTS.md, ./CLAUDE.md"`
+- `provider.file_access: false` (Claude CLI `claude --print`) → 파일 전문 임베드
 - 둘 다 없으면 RULES 섹션 생략
 
 **아티팩트 포함 방식**:
-- `provider.file_access: true` (Codex MCP) → 파일 경로만 포함, 워커가 직접 읽음
-- `provider.file_access: false` (Claude `--bare`) → 아티팩트 전문 임베드
+- `provider.file_access: true` (Codex CLI `codex exec`) → 파일 경로만 포함, 워커가 직접 읽음
+- `provider.file_access: false` (Claude CLI `claude --print`) → 아티팩트 전문 임베드
 
 **[Step B2: 디스패치]**
 
@@ -312,8 +311,8 @@ OMP native coordinator는 내부 task를 병렬 실행할 수 있지만 parent A
 │   │   {output_schema}
 │   │   Previous response (first 500 chars): {truncated}"
 │   │
-│   ├── Codex MCP: mcp__codex__codex-reply(threadId, FORMAT_CORRECTION_PROMPT)
-│   ├── Claude CLI: claude --print --bare ... "FORMAT_CORRECTION_PROMPT"
+│   ├── Codex CLI: codex exec --sandbox workspace-write (교정 프롬프트를 stdin으로 전달)
+│   ├── Claude CLI: claude --print --permission-mode default (교정 프롬프트를 stdin으로 전달)
 │   │
 │   ├── 재시도 성공 → "✓ <Provider> 완료 (format retry)"
 │   │                  provider_status: "format_retry"
@@ -325,9 +324,8 @@ OMP native coordinator는 내부 task를 병렬 실행할 수 있지만 parent A
 ```
 
 응답 파싱:
-- Claude JSON: `result.result` 필드
-- Codex MCP: `content` 필드
-- Codex Bash: stdout 전체
+- Claude CLI: stdout의 응답 텍스트
+- Codex CLI: stdout의 응답 텍스트
 - **공통**: 응답에서 JSON 블록 추출 시도 — `{` 로 시작하는 줄 ~ 마지막 `}` 사이를 파싱
 
 **[Step B4: Gate 평가]**
@@ -508,8 +506,7 @@ Agent Card에 `"hil": true`인 Phase는 provider/OMP에 위임하지 않습니�
 
 ### 설정 우선순위
 1. `.workflow/provider-config.json` 존재 시: Phase별 라우팅
-2. `.workflow/codex-config.json`만 존재 시: review/verify만 dual (하위 호환)
-3. 둘 다 없으면: 모든 Phase inline (기존 동작)
+2. 없으면: 모든 Phase inline (기존 동작)
 
 approve와 done의 `inline` 표기는 parent HIL 요약을 뜻할 뿐 provider 실행을 뜻하지 않는다.
 두 Phase는 provider-config와 fallback chain을 무시하고 각각 `awf wf approve`, `awf wf confirm`
@@ -549,15 +546,14 @@ approve와 done의 `inline` 표기는 parent HIL 요약을 뜻할 뿐 provider �
   },
   "providers": {
     "codex": {
-      "type": "mcp",
-      "tool": "mcp__codex__codex",
-      "fallback": "codex exec -s {sandbox}",
+      "type": "cli",
+      "command": "codex exec --sandbox workspace-write",
       "file_access": true,
       "timeout_seconds": 300
     },
     "claude:sonnet": {
       "type": "cli",
-      "command": "claude --print --bare --model sonnet --output-format json --max-budget-usd {budget}",
+      "command": "claude --print --permission-mode default",
       "file_access": false,
       "timeout_seconds": 180,
       "budget_usd": 0.50

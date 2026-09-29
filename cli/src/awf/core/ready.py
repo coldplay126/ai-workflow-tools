@@ -563,10 +563,16 @@ def evaluate_ready_gate(report: dict[str, Any], gate: str) -> dict[str, Any]:
                 decision="block",
                 reason="required workflow skills are missing",
                 required_capabilities=["workflow"],
-                recommended_next=[{
-                    "command": "awf skills list --repo-root .",
-                    "why": "inspect installed workflow skills before initializing .workflow",
-                }],
+                recommended_next=[
+                    {
+                        "command": "setup.sh --with-wf",
+                        "why": "install the opt-in /wf lifecycle skills from the ai-workflow-tools checkout",
+                    },
+                    {
+                        "command": "awf skills list --repo-root .",
+                        "why": "inspect installed workflow skills before initializing .workflow",
+                    },
+                ],
             )
         return _gate_payload(
             gate=gate,
@@ -608,10 +614,16 @@ def evaluate_ready_gate(report: dict[str, Any], gate: str) -> dict[str, Any]:
                 decision="block",
                 reason="required workflow skills are missing",
                 required_capabilities=["workflow"],
-                recommended_next=[{
-                    "command": "awf skills list --repo-root .",
-                    "why": "inspect installed workflow skills before running phases",
-                }],
+                recommended_next=[
+                    {
+                        "command": "setup.sh --with-wf",
+                        "why": "install the opt-in /wf lifecycle skills from the ai-workflow-tools checkout",
+                    },
+                    {
+                        "command": "awf skills list --repo-root .",
+                        "why": "inspect installed workflow skills before running phases",
+                    },
+                ],
             )
         if provider_status == "blocked":
             return _gate_payload(

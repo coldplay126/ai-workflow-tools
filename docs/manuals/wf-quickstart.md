@@ -2,20 +2,26 @@
 
 ## 개요
 
-`/wf-orchestrator`는 기능 개발을 7단계 게이트 파이프라인으로 관리하는 Claude Code 워크플로우입니다.
+7단계 `/wf` 스킬은 기본 설치에 포함되지 않습니다. 먼저 ai-workflow-tools
+체크아웃에서 `./setup.sh --with-wf` (또는 `AWF_WITH_WF=1 ./setup.sh`)로
+opt-in 설치하세요. 기본 사용은 OMP 역할 위임(`@plan`/`@task` agent)과
+`awf wt`입니다.
+
+`wf` 스킬의 `/wf` 진입점은 기능 개발을 7단계 게이트 파이프라인으로 관리하며,
+phase 실행은 `/wf-orchestrator`에 위임합니다.
 
 ```
-/wf-orchestrator '기능 설명' → plan → review → approve → impl → verify → test → done → PR
+/wf init '기능 설명' → plan → review → approve → impl → verify → test → done
 ```
 
-> **명령 alias 이력**: 과거 `/wf`, `/wf.plan` 같은 shortcut은 2026-02 commands 폐기 시 제거됐습니다. 현재는 모든 기능이 skill(`wf-*`, `phase-*`)로 통합되어 있습니다.
+> **명령 이력**: 2026-02에 제거된 것은 예전 commands shortcut입니다. 현재 `/wf`는 `wf` 스킬의 진입점이며, 7단계 기능은 opt-in 설치한 `wf-*`·`phase-*` 스킬로 실행됩니다.
 
 ## 시작하기
 
 ### 1. 워크플로우 초기화
 
 ```
-> /wf-orchestrator '사용자 프로필에 팔로워 수 표시 기능 추가'
+> /wf init '사용자 프로필에 팔로워 수 표시 기능 추가'
 ```
 
 실행되면:
@@ -37,6 +43,8 @@
 **Phase 7 (done)**: 최종 요약 + PR 생성 (HIL)
 
 ### 3. 상태 확인
+
+아래 상태 조회·수동 phase·초기화 명령도 위의 opt-in 설치 후 사용합니다.
 
 ```
 > /wf-status
@@ -71,7 +79,7 @@
 > /wf-discovery '팔로워 수 조회 API'
 
 # 2. sample-api에서 워크플로우 시작
-> /wf-orchestrator '팔로워 수 조회 API 추가 - GET /api/v1/users/:id/followers/count'
+> /wf init '팔로워 수 조회 API 추가 - GET /api/v1/users/:id/followers/count'
 
 # 3. Phase 1~2 자동 진행 (spec, plan, tasks 생성 + 교차 검증)
 

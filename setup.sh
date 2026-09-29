@@ -2,10 +2,20 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-CLAUDE_DIR="$HOME/.claude"
+CLAUDE_DIR="${CLAUDE_DIR:-$HOME/.claude}"
 OMP_AGENT_DIR="${OMP_AGENT_DIR:-$HOME/.omp/agent/agents}"
 AGENTS_SKILLS_DIR="${AGENTS_SKILLS_DIR:-$HOME/.agents/skills}"
 OMP_SKILLS_DIR="${OMP_SKILLS_DIR:-$HOME/.omp/agent/skills}"
+with_wf=0
+if [ "${AWF_WITH_WF:-}" = "1" ]; then
+  with_wf=1
+fi
+for arg in "$@"; do
+  case "$arg" in
+    --with-wf) with_wf=1 ;;
+    *) printf 'usage: %s [--with-wf]\n' "$0" >&2; exit 2 ;;
+  esac
+done
 
 if ! command -v uv >/dev/null 2>&1; then
   echo "error: uv가 필요합니다: https://docs.astral.sh/uv/getting-started/installation/" >&2
@@ -32,29 +42,35 @@ fi
 echo ""
 echo "[2/4] Claude Skills 설치 중..."
 
-SKILLS=(
+CORE_SKILLS=(
   analysis
   lsp-worktree-setup
   multi-agent
-  phase-approve
-  phase-done
-  phase-impl
+  release-worktree-lifecycle
+  wf-discovery
+)
+WF_SKILLS=(
+  wf
+  wf-orchestrator
+  wf-status
+  wf-reset
   phase-plan
   phase-review
-  phase-test
+  phase-approve
+  phase-impl
   phase-verify
-  release-worktree-lifecycle
-  wf
-  wf-discovery
-  wf-orchestrator
-  wf-reset
-  wf-status
+  phase-test
+  phase-done
 )
+skills=("${CORE_SKILLS[@]}")
+if [ "$with_wf" -eq 1 ]; then
+  skills+=("${WF_SKILLS[@]}")
+fi
 
 runtime_names=(claude agent-skills omp)
 runtime_roots=("$CLAUDE_DIR/skills" "$AGENTS_SKILLS_DIR" "$OMP_SKILLS_DIR")
 install_blocked=0
-for skill in "${SKILLS[@]}"; do
+for skill in "${skills[@]}"; do
   skill_source="$SCRIPT_DIR/claude/skills/$skill"
   if [ "$skill" = "release-worktree-lifecycle" ]; then
     skill_source="$SCRIPT_DIR/cli/src/awf/resources/release-worktree-lifecycle"
@@ -76,6 +92,13 @@ for skill in "${SKILLS[@]}"; do
     fi
   done
 done
+
+if [ "$with_wf" -eq 0 ]; then
+  for skill in "${WF_SKILLS[@]}"; do
+    "$SCRIPT_DIR/scripts/uninstall-skill-links.sh" \
+      "$SCRIPT_DIR/claude/skills/$skill" "${runtime_roots[@]}"
+  done
+fi
 
 if [ "$install_blocked" -ne 0 ]; then
   printf 'AWF Skill installation is BLOCKED; inspect AWF_SKILL_INSTALL_RESULT lines above.\n' >&2
@@ -165,12 +188,15 @@ echo ""
 echo "  ── CLAUDE.md 섹션 추가 (선택) ──"
 echo "  아래 파일의 내용을 ~/.claude/CLAUDE.md에 추가하세요:"
 echo "    → $SCRIPT_DIR/snippets/claude-md-multi-agent.md"
-echo "    → $SCRIPT_DIR/snippets/claude-md-wf-pipeline.md"
-echo ""
-echo "  ── Codex MCP 설치 (선택) ──"
-echo "  WF Dual Mode를 사용하려면:"
-echo "    claude mcp add --scope user codex -- codex mcp-server"
-echo ""
+if [ "$with_wf" -eq 1 ]; then
+  echo "    → $SCRIPT_DIR/snippets/claude-md-wf-pipeline.md"
+  echo ""
+  echo "  ── Codex MCP 설치 (선택) ──"
+  echo "  WF Dual Mode를 사용하려면:"
+  echo "    claude mcp add --scope user codex -- codex mcp-server"
+else
+  echo "  /wf 7단계 워크플로우가 필요하면 ./setup.sh --with-wf"
+fi
 echo "=== 설치 완료 ==="
 echo ""
 echo "검증: $AWF_BIN --help"

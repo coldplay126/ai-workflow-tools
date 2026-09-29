@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import pytest
 
 from awf.commands.ready import run_ready
 from awf.core.pi_field_smoke import write_pi_field_smoke_result
@@ -319,6 +320,28 @@ def test_evaluate_analysis_gate_blocks_without_scan_unit(tmp_path: Path, monkeyp
     assert gate["decision"] == "block"
     assert gate["exit_code"] == 20
     assert gate["recommended_next"][0]["command"] == "awf scan cli --no-ai"
+
+
+@pytest.mark.parametrize(
+    ("gate_name", "workflow_started"),
+    [("workflow-init", False), ("workflow-run", True)],
+)
+def test_workflow_gate_recommends_opt_in_for_missing_skill(
+    tmp_path: Path, monkeypatch, gate_name: str, workflow_started: bool
+) -> None:
+    repo, skills = _prepare_repo(tmp_path, workflow_started=workflow_started)
+    (skills / "phase-test" / "SKILL.md").unlink()
+    monkeypatch.setenv("AWF_SKILLS_DIR", str(skills))
+    monkeypatch.setattr("awf.core.skills.skill_search_paths", lambda _root: [skills])
+
+    gate = evaluate_ready_gate(collect_ready_report(str(repo)), gate_name)
+
+    assert gate["decision"] == "block"
+    assert gate["recommended_next"][0] == {
+        "command": "setup.sh --with-wf",
+        "why": "install the opt-in /wf lifecycle skills from the ai-workflow-tools checkout",
+    }
+    assert gate["recommended_next"][1]["command"] == "awf skills list --repo-root ."
 
 
 def test_run_ready_gate_json_returns_gate_exit(tmp_path: Path, monkeypatch, capsys) -> None:

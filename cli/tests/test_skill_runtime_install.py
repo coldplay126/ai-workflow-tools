@@ -12,6 +12,16 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SKILLS_ROOT = REPO_ROOT / "claude" / "skills"
 EXPECTED_SKILLS = sorted(path.parent.name for path in SKILLS_ROOT.glob("*/SKILL.md"))
+CORE_SKILLS = sorted(
+    [
+        "analysis",
+        "lsp-worktree-setup",
+        "multi-agent",
+        "release-worktree-lifecycle",
+        "wf-discovery",
+    ]
+)
+WF_SKILLS = sorted(set(EXPECTED_SKILLS) - set(CORE_SKILLS))
 
 
 def run_linker(source: Path, *roots: Path) -> subprocess.CompletedProcess[str]:
@@ -104,7 +114,68 @@ def test_linker_rerun_is_idempotent(tmp_path: Path) -> None:
     assert second.stdout.count("unchanged:") == 3
 
 
-def run_setup(tmp_path: Path) -> subprocess.CompletedProcess[str]:
+def run_unlinker(source: Path, *roots: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "sh",
+            str(REPO_ROOT / "scripts" / "uninstall-skill-links.sh"),
+            str(source),
+            *(str(root) for root in roots),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_unlinker_removes_only_exact_owned_links(tmp_path: Path) -> None:
+    source = SKILLS_ROOT / "wf"
+    owned, foreign, file_root, dir_root, absent = (
+        tmp_path / name for name in ("owned", "foreign", "file", "directory", "absent")
+    )
+    for root in (owned, foreign, file_root, dir_root):
+        root.mkdir()
+    (owned / "wf").symlink_to(source.resolve())
+    (foreign / "wf").symlink_to("different-target")
+    (file_root / "wf").write_text("user data")
+    (dir_root / "wf").mkdir()
+    (dir_root / "wf" / "keep").write_text("user data")
+
+    completed = run_unlinker(source, owned, foreign, file_root, dir_root, absent)
+
+    assert completed.returncode == 0, completed.stderr
+    assert not (owned / "wf").exists()
+    assert f"removed: {owned / 'wf'}" in completed.stdout
+    assert (foreign / "wf").is_symlink()
+    assert os.readlink(foreign / "wf") == "different-target"
+    assert f"kept: {foreign / 'wf'} (foreign link -> different-target)" in completed.stdout
+    assert (file_root / "wf").read_text() == "user data"
+    assert (dir_root / "wf" / "keep").read_text() == "user data"
+    assert completed.stdout.count("(user_owned)") == 2
+    assert f"absent: {absent / 'wf'}" in completed.stdout
+    assert not absent.exists()
+
+
+def test_unlinker_requires_source_and_root(tmp_path: Path) -> None:
+    missing_args = run_unlinker(SKILLS_ROOT / "wf")
+    assert missing_args.returncode == 2
+    assert "usage:" in missing_args.stderr
+    missing_source = run_unlinker(tmp_path / "missing", tmp_path / "root")
+    assert missing_source.returncode == 1
+    assert "source skill directory does not exist" in missing_source.stderr
+
+
+def runtime_roots(home: Path) -> list[Path]:
+    return [
+        home / ".claude" / "skills",
+        home / ".agents" / "skills",
+        home / ".omp" / "agent" / "skills",
+    ]
+
+
+def run_setup(
+    tmp_path: Path, *args: str, extra_env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     home = tmp_path / "home"
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir(exist_ok=True)
@@ -123,12 +194,15 @@ def run_setup(tmp_path: Path) -> subprocess.CompletedProcess[str]:
         "HOME": str(home),
         "FAKE_BIN": str(fake_bin),
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "CLAUDE_DIR": str(home / ".claude"),
         "AGENTS_SKILLS_DIR": str(home / ".agents" / "skills"),
         "OMP_SKILLS_DIR": str(home / ".omp" / "agent" / "skills"),
         "OMP_AGENT_DIR": str(home / ".omp" / "agent" / "agents"),
     }
+    env.pop("AWF_WITH_WF", None)
+    env.update(extra_env or {})
     return subprocess.run(
-        ["bash", str(REPO_ROOT / "setup.sh")],
+        ["bash", str(REPO_ROOT / "setup.sh"), *args],
         cwd=REPO_ROOT,
         env=env,
         text=True,
@@ -137,18 +211,14 @@ def run_setup(tmp_path: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_setup_installs_exact_inventory_into_three_runtime_roots(tmp_path: Path) -> None:
+def test_setup_installs_only_core_into_three_runtime_roots(tmp_path: Path) -> None:
     completed = run_setup(tmp_path)
     assert completed.returncode == 0, completed.stderr
-    home = tmp_path / "home"
-    roots = [
-        home / ".claude" / "skills",
-        home / ".agents" / "skills",
-        home / ".omp" / "agent" / "skills",
-    ]
-    for root in roots:
-        assert sorted(path.name for path in root.iterdir()) == EXPECTED_SKILLS
-        assert all((root / skill / "SKILL.md").is_file() for skill in EXPECTED_SKILLS)
+    assert "setup.sh --with-wf" in completed.stdout
+    assert "WF Dual Mode" not in completed.stdout
+    for root in runtime_roots(tmp_path / "home"):
+        assert sorted(path.name for path in root.iterdir()) == CORE_SKILLS
+        assert all((root / skill / "SKILL.md").is_file() for skill in CORE_SKILLS)
         assert (root / "release-worktree-lifecycle").resolve() == (
             REPO_ROOT
             / "cli"
@@ -157,6 +227,75 @@ def test_setup_installs_exact_inventory_into_three_runtime_roots(tmp_path: Path)
             / "resources"
             / "release-worktree-lifecycle"
         ).resolve()
+
+
+@pytest.mark.parametrize(
+    ("args", "extra_env"),
+    [(("--with-wf",), {}), ((), {"AWF_WITH_WF": "1"})],
+)
+def test_setup_opt_in_installs_all_skills(
+    tmp_path: Path, args: tuple[str, ...], extra_env: dict[str, str]
+) -> None:
+    completed = run_setup(tmp_path, *args, extra_env=extra_env)
+    assert completed.returncode == 0, completed.stderr
+    assert len(EXPECTED_SKILLS) == 16
+    assert "WF Dual Mode" in completed.stdout
+    for root in runtime_roots(tmp_path / "home"):
+        assert sorted(path.name for path in root.iterdir()) == EXPECTED_SKILLS
+
+
+def test_setup_opt_in_default_opt_in_transition_across_overridden_roots(tmp_path: Path) -> None:
+    overrides = {
+        "CLAUDE_DIR": str(tmp_path / "custom-claude"),
+        "AGENTS_SKILLS_DIR": str(tmp_path / "custom-agents"),
+        "OMP_SKILLS_DIR": str(tmp_path / "custom-omp"),
+    }
+    roots = [
+        tmp_path / "custom-claude" / "skills",
+        tmp_path / "custom-agents",
+        tmp_path / "custom-omp",
+    ]
+    first = run_setup(tmp_path, "--with-wf", extra_env=overrides)
+    assert first.returncode == 0, first.stderr
+    for root in roots:
+        assert sorted(path.name for path in root.iterdir()) == EXPECTED_SKILLS
+
+    second = run_setup(tmp_path, extra_env=overrides)
+    assert second.returncode == 0, second.stderr
+    for root in roots:
+        assert sorted(path.name for path in root.iterdir()) == CORE_SKILLS
+        assert all(f"removed: {root / skill}" in second.stdout for skill in WF_SKILLS)
+
+    third = run_setup(tmp_path, "--with-wf", extra_env=overrides)
+    assert third.returncode == 0, third.stderr
+    for root in roots:
+        assert sorted(path.name for path in root.iterdir()) == EXPECTED_SKILLS
+
+
+def test_setup_keeps_unowned_wf_paths_in_default_mode(tmp_path: Path) -> None:
+    claude, agents, omp = runtime_roots(tmp_path / "home")
+    for root in (claude, agents, omp):
+        root.mkdir(parents=True)
+    (claude / "wf").mkdir()
+    (claude / "wf" / "keep").write_text("owned directory")
+    (agents / "wf").write_text("owned file")
+    (omp / "wf").symlink_to("foreign-target")
+
+    completed = run_setup(tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    assert (claude / "wf" / "keep").read_text() == "owned directory"
+    assert (agents / "wf").read_text() == "owned file"
+    assert (omp / "wf").is_symlink()
+    assert os.readlink(omp / "wf") == "foreign-target"
+    for root in (claude, agents, omp):
+        assert f"kept: {root / 'wf'}" in completed.stdout
+
+
+def test_setup_rejects_unknown_argument(tmp_path: Path) -> None:
+    completed = run_setup(tmp_path, "--unexpected")
+    assert completed.returncode == 2
+    assert "usage:" in completed.stderr
 
 
 def test_setup_ignores_unrelated_command_files(tmp_path: Path) -> None:

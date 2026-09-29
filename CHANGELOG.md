@@ -8,6 +8,13 @@
 
 ## [Unreleased]
 
+### Changed
+
+- 기본 `setup.sh`는 CORE 스킬 5개만 설치합니다. 7단계 `/wf` 스킬 11개는
+  `--with-wf` 또는 `AWF_WITH_WF=1`로 명시적으로 설치하며, 기본 재실행 시
+  이 체크아웃 소유의 기존 WF 링크만 세 runtime에서 제거합니다. `analysis`와
+  `multi-agent` 트리거를 좁히고 ready 게이트에 opt-in 설치 안내를 추가했습니다.
+
 ### Fixed
 
 - staging PR을 연결한 managed feature는 `ACTIVE`와 검증 증거를 유지하며,
