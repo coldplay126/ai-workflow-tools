@@ -1,7 +1,7 @@
 ---
 name: analysis
 version: 2.0.0
-description: "소스코드 분석 파이프라인. .ai-context 문서를 생성하고 resume/incremental/conditional Stage 3 분석을 지원."
+description: ".ai-context 또는 도메인 분석 문서(api-spec/data-model/domain-overview) 생성·갱신, /analysis {service} {unit} 또는 awf analyze 파이프라인(Stage 1–3, resume/incremental/check/catalog) 실행 요청에 사용."
 type: analysis
 
 # LLM 중립 메타데이터
@@ -12,8 +12,8 @@ capabilities:
   - code_analysis
 
 conditions:
-  trigger: "소스코드 분석, .ai-context 문서 생성, 프로젝트 문서화가 필요할 때"
-  skip: "일반 코드 리뷰, 워크플로우 파이프라인 진행 중, PR 리뷰"
+  trigger: ".ai-context 또는 도메인 분석 문서(api-spec/data-model/domain-overview) 생성·갱신, /analysis {service} {unit} 또는 awf analyze 파이프라인(Stage 1–3, resume/incremental/check/catalog) 실행이 요청될 때만"
+  skip: "일반 코드 읽기·구조 파악, 코드/스펙/PR 리뷰, 버그 조사, 구현 작업"
 
 # CLI 실행 매핑
 cli:

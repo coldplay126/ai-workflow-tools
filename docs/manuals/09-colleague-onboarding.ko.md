@@ -140,18 +140,20 @@ pytest <관련 테스트>
 
 ## Claude Code에서 쓰기
 
-Claude Code를 쓴다면 `setup.sh`로 skill을 설치한 뒤 skill 진입점을 사용합니다.
+Claude Code를 쓴다면 `./setup.sh`로 기본 CORE 스킬을 설치합니다.
+`/wf` 7단계 슬래시 스킬은 ai-workflow-tools 체크아웃에서
+`./setup.sh --with-wf`를 실행해야 사용할 수 있습니다.
 
 ```bash
 ./setup.sh
 ```
 
-대표 진입점:
+대표 진입점(기본 설치에서는 `/analysis`만 사용 가능):
 
 ```text
 /analysis
-/wf-status
-/wf-orchestrator
+/wf init <기능 설명>   # --with-wf 설치 후
+/wf-status           # --with-wf 설치 후
 ```
 
 Claude skill도 먼저 `awf ready`와 dry-run JSON을 읽고, 실행 가능할 때만
@@ -161,6 +163,9 @@ provider-backed 작업으로 넘어가는 방향을 따릅니다.
 
 Codex CLI를 쓴다면 Claude skill UX를 그대로 복제하지 않고, `awf` CLI와 Codex
 adapter를 사용합니다.
+
+Codex adapter와 `awf wf` CLI는 editable 설치된 source checkout의 WF 스킬을
+사용하므로 기본 설치에서도 계속 실행할 수 있습니다.
 
 ```bash
 ../ai-workflow-tools/codex/run-wf.sh preflight review codex

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 from typing import Any
 
+import awf
 from awf.core.config import load_awf_config, resolve_runtime_paths
 from awf.core.readiness import collect_doctor_report
 from awf.core.scanner import PYTHON_PROJECT_MARKERS, scan_repo, scan_result_to_dict
 from awf.core.skills import discover_skills
+from awf.core.version_check import detect_source_root
 
 
 _PROJECT_MARKERS = (
@@ -103,8 +106,17 @@ def _provider_status(doctor: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _installed_source_checkout() -> Path | None:
+    installed_path = Path(awf.__file__).resolve().parent
+    source = detect_source_root(installed_path)
+    # Match version_check's editable condition; a wheel inside a checkout is not its source.
+    if source is None or source != installed_path:
+        return None
+    return source.parent.parent.parent
+
+
 def _skill_status(skills: list[Any]) -> dict[str, Any]:
-    names = sorted(str(skill.name) for skill in skills)
+    names = sorted({str(skill.name) for skill in skills})
     required_for_wf = {
         "wf-orchestrator",
         "wf-status",
@@ -504,6 +516,34 @@ def _first_recommendation(report: dict[str, Any], command_prefix: str | None = N
     return list(items[:1])
 
 
+def _missing_workflow_recommendations(
+    report: dict[str, Any], *, context: str
+) -> list[dict[str, str]]:
+    inspect = {
+        "command": "awf skills list --repo-root .",
+        "why": f"inspect installed workflow skills before {context}",
+    }
+    source_checkout = report.get("source_checkout")
+    if source_checkout is not None:
+        setup = Path(source_checkout) / "setup.sh"
+        wf_source = Path(source_checkout) / "claude" / "skills" / "wf" / "SKILL.md"
+        if setup.is_file() and wf_source.is_file():
+            return [
+                {
+                    "command": f"{shlex.quote(str(setup))} --with-wf",
+                    "why": "install the opt-in /wf lifecycle skills from the ai-workflow-tools checkout",
+                },
+                inspect,
+            ]
+    inspect["why"] += "; install the opt-in /wf skills from the ai-workflow-tools checkout"
+    return [inspect]
+
+
+def _workflow_skills_ready(report: dict[str, Any]) -> bool:
+    missing = set(report["skills"]["missing_workflow_skills"])
+    return not (missing - set(report.get("source_names", [])))
+
+
 def evaluate_ready_gate(report: dict[str, Any], gate: str) -> dict[str, Any]:
     """Return a deterministic allow/block decision for automation entrypoints."""
     if gate not in READY_GATES:
@@ -511,7 +551,6 @@ def evaluate_ready_gate(report: dict[str, Any], gate: str) -> dict[str, Any]:
 
     provider_status = str(report["provider"]["status"])
     scan_status = str(report["scan"]["status"])
-    skills_status = str(report["skills"]["status"])
     workflow_status = str(report["workflow"]["status"])
     manifest_status = str(report["workflow"].get("manifest_status") or "missing")
     manifest_error = report["workflow"].get("manifest_error")
@@ -557,16 +596,15 @@ def evaluate_ready_gate(report: dict[str, Any], gate: str) -> dict[str, Any]:
         )
 
     if gate == "workflow-init":
-        if skills_status != "ready":
+        if not _workflow_skills_ready(report):
             return _gate_payload(
                 gate=gate,
                 decision="block",
                 reason="required workflow skills are missing",
                 required_capabilities=["workflow"],
-                recommended_next=[{
-                    "command": "awf skills list --repo-root .",
-                    "why": "inspect installed workflow skills before initializing .workflow",
-                }],
+                recommended_next=_missing_workflow_recommendations(
+                    report, context="initializing .workflow"
+                ),
             )
         return _gate_payload(
             gate=gate,
@@ -602,16 +640,15 @@ def evaluate_ready_gate(report: dict[str, Any], gate: str) -> dict[str, Any]:
                     "why": "fix sibling_repos schema (docs/specs/multi-repo-scope.md §3.1)",
                 }],
             )
-        if skills_status != "ready":
+        if not _workflow_skills_ready(report):
             return _gate_payload(
                 gate=gate,
                 decision="block",
                 reason="required workflow skills are missing",
                 required_capabilities=["workflow"],
-                recommended_next=[{
-                    "command": "awf skills list --repo-root .",
-                    "why": "inspect installed workflow skills before running phases",
-                }],
+                recommended_next=_missing_workflow_recommendations(
+                    report, context="running phases"
+                ),
             )
         if provider_status == "blocked":
             return _gate_payload(
@@ -669,6 +706,15 @@ def collect_ready_report(repo_root: str | None = None, *, probe: bool = False) -
     resolved_root = Path(paths["repo_root"])
     doctor = collect_doctor_report(config, str(resolved_root), probe=probe)
     skills = discover_skills(str(resolved_root))
+    source_checkout = _installed_source_checkout()
+    source_names = (
+        sorted(
+            path.parent.name
+            for path in (source_checkout / "claude" / "skills").glob("*/SKILL.md")
+        )
+        if source_checkout is not None
+        else []
+    )
     scan = scan_result_to_dict(scan_repo(resolved_root, use_ai=False))
 
     report: dict[str, Any] = {
@@ -676,6 +722,8 @@ def collect_ready_report(repo_root: str | None = None, *, probe: bool = False) -
         "paths": paths,
         "probe_enabled": probe,
         "config": _config_status(paths),
+        "source_checkout": str(source_checkout) if source_checkout is not None else None,
+        "source_names": source_names,
         "provider": _provider_status(doctor),
         "skills": _skill_status(skills),
         "scan": _scan_status(scan, repo_root=resolved_root),

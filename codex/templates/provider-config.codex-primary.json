@@ -36,10 +36,9 @@
     },
     "claude:sonnet": {
       "type": "cli",
-      "command": "claude --print --bare --model sonnet --output-format json --max-budget-usd {budget}",
+      "command": "claude --print --permission-mode default",
       "file_access": false,
-      "timeout_seconds": 180,
-      "budget_usd": 0.50
+      "timeout_seconds": 180
     }
   },
   "fallback_chain": ["claude:sonnet", "codex"],

@@ -1,7 +1,7 @@
 ---
 name: multi-agent
 version: 2.2.0
-description: "실질적인 기획·설계 요청을 Claude planning 역할로 위임하고 구현·교차 검증을 Claude/Codex 역할별로 실행. 서브에이전트 5모드 + 에이전트 팀."
+description: "parent 조율자가 기획·구현·검토 역할을 Claude/Codex에 위임하고 결과를 통합할 때 사용하는 역할별 위임 정책."
 type: protocol
 
 capabilities:
@@ -11,8 +11,8 @@ capabilities:
   - agent_team
 
 conditions:
-  trigger: "실질적인 기획·설계 산출물 작성 요청, --mode 지정, 또는 보안/프로덕션 교차 검증"
-  skip: "단순 파일 읽기, 짧은 질문-답변"
+  trigger: "parent 조율자가 기획·구현·검토 역할을 위임하거나 --mode/#cross 교차 검증을 요청할 때"
+  skip: "위임받은 worker(implementer, code-reviewer, spec-verifier 등)로 실행 중일 때, 단순 파일 읽기, 짧은 질문-답변"
 
 subagent_modes:
   solo: { agents: 1, description: "parent only (기본)" }
@@ -106,6 +106,8 @@ test-criteria 초안, 아키텍처·설계 결정 문서화, `/wf` plan phase �
 직접 쓰지 않고 `task`(`agent: "spec-writer"`)로 위임한다. parent는 요구사항·컨텍스트·
 제약 전달, 결과 통합, gate/state 소유만 맡는다.
 
+`/wf` plan phase는 `/wf` 스킬을 opt-in 설치(`setup.sh --with-wf`)한 경우에만 사용한다.
+
 - 단순 질문·설명·코드 읽기·짧은 답변, 기존 산출물의 소규모 수정에는 위임하지 않는다.
 - 기획 위임은 7-phase workflow 시작이 아니다. `.workflow/state.json`이 없어도
   `awf wf init`을 자동 실행하지 않는다.
@@ -121,6 +123,8 @@ model·provider가 위 표의 model role과 일치하는지로 확인한다. ali
 OMP modelRoles(`@plan`/`@task`)는 OMP host의 task 런타임 설정이다. standalone
 `awf wf next`의 primary provider는 별개의 provider-direct 경로로,
 [wf-orchestrator](../wf-orchestrator/SKILL.md)의 "모델 결정 우선순위"를 따른다.
+
+`/wf` 스킬은 기본 설치에 포함되지 않으며 `setup.sh --with-wf`로 설치한다.
 
 ## OMP 호스트 실행
 

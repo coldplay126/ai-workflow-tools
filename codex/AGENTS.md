@@ -19,6 +19,10 @@ Codex가 사용자 repo의 host로 `ai-workflow-tools`의 workflow/analysis 기�
 Workflow 실행 경로는 Claude skill과 같은 deterministic preflight contract를 사용합니다:
 `claude/skills/wf-orchestrator/reference/deterministic-preflight.md`.
 
+기본 `./setup.sh`는 CORE 스킬만 링크하지만 editable 설치된 `awf wf` CLI와
+Codex adapter는 ai-workflow-tools source checkout에서 WF 스킬을 읽습니다.
+Claude Code의 `/wf` 슬래시 스킬은 `./setup.sh --with-wf`가 필요합니다.
+
 ```bash
 awf ready --gate inspect --repo-root . --json
 awf ready --gate analysis --repo-root . --json

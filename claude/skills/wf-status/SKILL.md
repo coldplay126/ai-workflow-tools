@@ -44,7 +44,7 @@ cli:
    라우팅:
    Phase    Mode       Provider          Model    Status
    plan     inline     —                 —        —
-   review   dual       codex (secondary) —        format_retry
+   review   dual       codex (secondary) —        completed
    approve  inline     —                 —        —
    impl     inline     —                 sonnet   —
    verify   dual       codex (secondary) —        —
@@ -54,7 +54,7 @@ cli:
    - Mode: provider-config.json의 `phase_routing[phase].mode`
    - Provider: `secondary` 프로바이더명 (dual), `primary` 프로바이더명 (delegated), 또는 `—` (inline)
    - Model: `phase_models[phase].inline_model` (설정된 Phase만, 예: impl=sonnet)
-   - Status: state.json `gates[G*].provider_status` (실행된 Phase만)
+   - Status: state.json `gates[G*].provider_status` (실행 시 `completed`, policy skip 시 `skipped`, 아직 없으면 `—`)
 
    범례:
    - `[✓]` = completed

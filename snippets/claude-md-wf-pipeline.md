@@ -1,5 +1,8 @@
 ## 워크플로우 파이프라인 (wf-orchestrator)
 
+이 섹션은 선택 사항입니다. `/wf` 스킬은 ai-workflow-tools 체크아웃에서
+`./setup.sh --with-wf` (또는 `AWF_WITH_WF=1 ./setup.sh`) 실행 후 사용할 수 있습니다.
+
 권장 진입점은 `/wf init <기능 설명>`이다. `/wf`, `/wf resume`, `/wf status`,
 `/wf reset <action>`도 같은 lifecycle dispatcher를 사용한다.
 phase 실행은 dispatcher가 `wf-orchestrator`에 위임한다.
@@ -27,7 +30,7 @@ deploy 권한과 분리되며, 승격·배포·branch/worktree 삭제는
 plan → review → approve → impl → verify → test → done
 
 ### Dual Mode
-review/verify Phase에서 Codex MCP를 secondary worker로 사용 가능.
+review/verify Phase에서 Codex CLI (`codex exec`)를 secondary worker로 사용 가능.
 impl Phase에서 `implement_then_review`로 post-impl 코드 리뷰 가능.
 프로젝트별 `.workflow/provider-config.json`으로 설정.
 

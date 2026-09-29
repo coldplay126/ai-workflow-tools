@@ -7,6 +7,10 @@ workflow 실행까지 단계적으로 올리는 것입니다.
 
 영어 버전: [First Workflow](./08-first-workflow.en.md)
 
+기본 `./setup.sh`는 CORE 스킬만 설치하지만 editable 설치된 `awf wf`
+CLI는 source checkout의 WF 스킬을 사용해 아래 순서를 계속 실행할 수 있습니다.
+Claude Code의 `/wf` 슬래시 스킬은 `./setup.sh --with-wf`가 필요합니다.
+
 ## 권장 순서
 
 1. `awf ready`로 현재 안전 레벨과 다음 추천 명령을 확인합니다.

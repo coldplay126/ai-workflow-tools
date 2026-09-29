@@ -210,7 +210,6 @@ provider-config.json 존재?
 │   ├── "delegated" → Step 5B (위임 실행)
 │   └── "dual"      → Step 5C (인라인 + 위임 병합)
 │
-├── codex-config.json만 존재? → review/verify만 dual, 나머지 inline (하위 호환)
 └── No → 모든 Phase inline (기존 동작)
 ```
 
@@ -269,13 +268,13 @@ Schema:
 
 **Rules 임베딩 규칙** (manifest.json `context_providers` 기반):
 - `context_providers`에 AGENTS.md/CLAUDE.md가 있으면 RULES 섹션에 포함
-- `provider.file_access: true` (Codex MCP) → 경로만: `"Read and follow: ./AGENTS.md, ./CLAUDE.md"`
-- `provider.file_access: false` (Claude `--bare`) → 파일 전문 임베드
+- `provider.file_access: true` (Codex CLI `codex exec`) → 경로만: `"Read and follow: ./AGENTS.md, ./CLAUDE.md"`
+- `provider.file_access: false` (Claude CLI `claude --print`) → 파일 전문 임베드
 - 둘 다 없으면 RULES 섹션 생략
 
 **아티팩트 포함 방식**:
-- `provider.file_access: true` (Codex MCP) → 파일 경로만 포함, 워커가 직접 읽음
-- `provider.file_access: false` (Claude `--bare`) → 아티팩트 전문 임베드
+- `provider.file_access: true` (Codex CLI `codex exec`) → 파일 경로만 포함, 워커가 직접 읽음
+- `provider.file_access: false` (Claude CLI `claude --print`) → 아티팩트 전문 임베드
 
 **[Step B2: 디스패치]**
 
@@ -298,37 +297,13 @@ OMP native coordinator는 내부 task를 병렬 실행할 수 있지만 parent A
 모든 task가 settle될 때까지 기다린 뒤 result envelope, judge, gate 순서로
 결정론적으로 처리합니다.
 
-**[Step B3: 응답 수신 + 파싱 + Format Retry]**
+**[Step B3: 응답 수신과 재실행]**
 
-```
-응답 수신 → JSON 파싱 시도
-├── 성공 → structured_result 스키마 검증 → "✓ <Provider> 완료"
-│
-├── 파싱 실패 (1차) → Format Correction 재시도 (max 1회):
-│   │
-│   │  FORMAT_CORRECTION_PROMPT 구성:
-│   │  "Your previous response could not be parsed as valid JSON.
-│   │   Respond ONLY with a JSON object matching this schema:
-│   │   {output_schema}
-│   │   Previous response (first 500 chars): {truncated}"
-│   │
-│   ├── Codex MCP: mcp__codex__codex-reply(threadId, FORMAT_CORRECTION_PROMPT)
-│   ├── Claude CLI: claude --print --bare ... "FORMAT_CORRECTION_PROMPT"
-│   │
-│   ├── 재시도 성공 → "✓ <Provider> 완료 (format retry)"
-│   │                  provider_status: "format_retry"
-│   └── 재시도 실패 → "⚠ <Provider> format retry 실패" → 명시된 fallback_chain 다음 시도
-│
-├── 타임아웃 → "⏱ <Provider> 타임아웃" → 명시된 fallback_chain 다음 시도 (재시도 없음)
-│
-└── 전체 실패 → "✗ 위임 실패: <provider>" 보고 후 중단. 사용자가 명시적으로 지시할 때만 Step 5A 인라인 실행
-```
-
-응답 파싱:
-- Claude JSON: `result.result` 필드
-- Codex MCP: `content` 필드
-- Codex Bash: stdout 전체
-- **공통**: 응답에서 JSON 블록 추출 시도 — `{` 로 시작하는 줄 ~ 마지막 `}` 사이를 파싱
+`awf wf next`가 provider 응답, 오류 및 결과를 처리합니다. 응답 형식 오류나
+provider 실패 시 수동으로 provider CLI를 조합하거나 format-retry 상태를
+기록하지 않습니다. 필요하면 `awf wf next`를 다시 실행하고 결과와 gate를
+확인합니다. 재실행의 sandbox·입출력은 CLI가 결정하며 review/verify는
+read-only입니다.
 
 **[Step B4: Gate 평가]**
 
@@ -508,99 +483,22 @@ Agent Card에 `"hil": true`인 Phase는 provider/OMP에 위임하지 않습니�
 
 ### 설정 우선순위
 1. `.workflow/provider-config.json` 존재 시: Phase별 라우팅
-2. `.workflow/codex-config.json`만 존재 시: review/verify만 dual (하위 호환)
-3. 둘 다 없으면: 모든 Phase inline (기존 동작)
+2. 없으면: 모든 Phase inline (기존 동작)
 
 approve와 done의 `inline` 표기는 parent HIL 요약을 뜻할 뿐 provider 실행을 뜻하지 않는다.
 두 Phase는 provider-config와 fallback chain을 무시하고 각각 `awf wf approve`, `awf wf confirm`
 명령으로만 기록한다.
 
-### provider-config.json 스키마
+### provider-config.json 예시
 
-```json
-{
-  "version": "2.3.0",
-  "team_selection": { "enabled": true },
-  "phase_routing": {
-    "plan":    { "mode": "inline" },
-    "review":  { "mode": "dual", "primary": "inline", "secondary": "codex" },
-    "approve": { "mode": "inline" },
-    "impl":    { "mode": "inline" },
-    "verify":  { "mode": "dual", "primary": "inline", "secondary": "claude:sonnet" },
-    "test":    { "mode": "inline" },
-    "done":    { "mode": "inline" }
-  },
-  "dispatch": {
-    "surface_preference": "omp",
-    "routing": {
-      "required_capabilities": [],
-      "estimated_cost": {},
-      "max_cost_budget": null,
-      "priority": ["omp", "inline", "cmux", "pi"]
-    },
-    "omp": {
-      "command": "omp",
-      "no_session": false,
-      "coordination_surface": "native",
-      "execution_mode": "external_host",
-      "capacity": 8,
-      "role_models": {}
-    }
-  },
-  "providers": {
-    "codex": {
-      "type": "mcp",
-      "tool": "mcp__codex__codex",
-      "fallback": "codex exec -s {sandbox}",
-      "file_access": true,
-      "timeout_seconds": 300
-    },
-    "claude:sonnet": {
-      "type": "cli",
-      "command": "claude --print --bare --model sonnet --output-format json --max-budget-usd {budget}",
-      "file_access": false,
-      "timeout_seconds": 180,
-      "budget_usd": 0.50
-    }
-  },
-  "fallback_chain": [],
-  "phase_models": {
-    "plan":   { "effort": "max",  "codex_reasoning": "xhigh" },
-    "review": { "effort": "max",  "codex_reasoning": "xhigh" },
-    "impl":   { "effort": "high", "codex_reasoning": "xhigh" },
-    "verify": { "effort": "max",  "codex_reasoning": "xhigh" },
-    "test":   { "effort": "high", "codex_reasoning": "xhigh" }
-  },
-  "defaults": { "mode": "inline", "timeout_seconds": 300 }
-}
-```
+실제 초기화에 쓰이는 [기본 템플릿](templates/provider-config.default.json)을
+참조하세요. Codex host 예시는 저장소 루트의
+`codex/templates/provider-config.codex-primary.json`을 확인하세요.
+provider CLI와 phase별 sandbox는 `awf wf next`가 결정합니다.
 
 `dispatch.omp.role_models`는 기본 비어 있다. OMP worker의 모델은 생성된 agent
 frontmatter의 `@plan`/`@task` alias가 정하며, 사용자가 role_models를 명시한 경우만
 그 역할을 덮어쓴다.
-
-### state.json gate 확장
-
-```json
-{
-  "gates": {
-    "G2": {
-      "passed": true,
-      "provider": "codex|claude:sonnet|null",
-      "provider_status": "success|format_retry|fallback|timeout|parse_error|skipped",
-      "format_retries": 0
-    }
-  }
-}
-```
-
-`provider_status` 값:
-- `success`: 첫 응답에서 정상 파싱
-- `format_retry`: 첫 파싱 실패 후 포맷 교정 재시도로 성공
-- `fallback`: fallback_chain의 다음 프로바이더로 성공
-- `timeout`: 프로바이더 타임아웃
-- `parse_error`: 모든 재시도 + fallback 실패
-- `skipped`: 위임 없이 인라인 실행
 
 ### fallback 동작
 
@@ -633,7 +531,7 @@ frontmatter의 `@plan`/`@task` alias가 정하며, 사용자가 role_models를 �
 
 | 에러 타입 | 감지 조건 | 복구 경로 |
 |----------|----------|----------|
-| `format_error` | JSON 파싱 실패 | format retry 1회 → 명시된 fallback chain → 실패 보고 |
+| `format_error` | JSON 파싱 실패 | `awf wf next` 재실행 (CLI 판정) |
 | `timeout` | provider 응답 없음 (timeout_seconds 초과) | 명시된 fallback chain → 실패 보고 |
 | `rate_limited` | HTTP 429 + "rate" 키워드 | 60초 대기 → 동일 provider 재시도 1회 → fallback |
 | `budget_exceeded` | HTTP 429 + "billing"/"credits" 키워드 | 다음 provider로 영구 전환 (재시도 없음) |
