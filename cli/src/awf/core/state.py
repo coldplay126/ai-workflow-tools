@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 from awf.core.paths import find_repo_root
+from awf.core.skills import find_skill_dir
 from awf.core.workflow_loop import (
     abort_workflow,
     continue_workflow,
@@ -605,18 +606,15 @@ def resolve_repo_root(explicit_root: Optional[str] = None) -> Path:
 
 def _find_workflow_template_root(root: Path) -> Path | None:
     env_dir = os.environ.get("AWF_WORKFLOW_TEMPLATE_DIR", "").strip()
-    candidates: list[Path] = []
     if env_dir:
-        candidates.append(Path(env_dir).expanduser())
-    candidates.append(root / "claude" / "skills" / "wf-orchestrator" / "templates")
-    candidates.extend(
-        base / "claude" / "skills" / "wf-orchestrator" / "templates"
-        for base in Path(__file__).resolve().parents
-    )
-    for candidate in candidates:
-        resolved = candidate.resolve()
-        if (resolved / "agent-cards").is_dir() and (resolved / "provider-config.default.json").is_file():
-            return resolved
+        override = Path(env_dir).expanduser().resolve()
+        if (override / "agent-cards").is_dir() and (override / "provider-config.default.json").is_file():
+            return override
+    skill_dir = find_skill_dir("wf-orchestrator", str(root))
+    if skill_dir is not None:
+        templates = skill_dir / "templates"
+        if (templates / "agent-cards").is_dir() and (templates / "provider-config.default.json").is_file():
+            return templates.resolve()
     return None
 
 

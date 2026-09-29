@@ -5,7 +5,9 @@ import os
 from pathlib import Path
 from typing import Optional
 
+import awf
 from awf.core.paths import find_repo_root
+from awf.core.version_check import detect_source_root
 
 
 @dataclass
@@ -15,6 +17,15 @@ class SkillInfo:
     path: Path
     source_dir: Path
     manifest: Optional[SkillManifest] = None
+
+
+def installed_source_checkout() -> Path | None:
+    """Return the checkout only when the imported package is its editable source."""
+    installed_path = Path(awf.__file__).resolve().parent
+    source = detect_source_root(installed_path)
+    if source is None or source != installed_path:
+        return None
+    return source.parent.parent.parent
 
 
 def skill_search_paths(explicit_root: Optional[str] = None) -> list[Path]:
@@ -56,7 +67,7 @@ def _fallback_roots() -> list[Path]:
 
 
 def find_skill_dir(skill_name: str, explicit_root: Optional[str] = None) -> Optional[Path]:
-    """Find a skill directory by name across all search paths.
+    """Find a skill directory in runtime paths, then editable source skills.
 
     When explicit_root is provided but invalid, re-raises FileNotFoundError.
     Fallback roots are only used when explicit_root is None and auto-detection fails.
@@ -69,6 +80,11 @@ def find_skill_dir(skill_name: str, explicit_root: Optional[str] = None) -> Opti
         roots = _fallback_roots()
     for base in roots:
         candidate = base / skill_name
+        if candidate.is_dir():
+            return candidate
+    checkout = installed_source_checkout()
+    if checkout is not None:
+        candidate = checkout / "claude" / "skills" / skill_name
         if candidate.is_dir():
             return candidate
     return None
