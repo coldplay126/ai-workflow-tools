@@ -1093,16 +1093,24 @@ class ArchiveDiscarder:
         warnings: list[dict[str, str]] = []
         if self._deletes_local_branch(lease):
             try:
-                self.git.delete_branch_if_at(lease.branch, evidence.head_sha)
+                current_sha = self.git.local_branch_sha(lease.branch)
+                if current_sha is None:
+                    actions.append(
+                        {
+                            **self._action("local_branch_already_absent", lease, evidence.head_sha),
+                            "idempotent": True,
+                        }
+                    )
+                else:
+                    self.git.delete_inactive_branch_if_at(lease.branch, evidence.head_sha)
+                    actions.append(self._action("delete_local_branch", lease, evidence.head_sha))
             except (GitError, OSError):
                 warnings.append(
                     {
                         "code": "local_branch_cleanup_failed",
-                        "message": "The worktree was archived and removed, but local branch deletion must be retried with the same token.",
+                        "message": "The worktree was archived and removed, but local branch deletion must be retried with the same token after resolving the checkout or branch mismatch.",
                     }
                 )
-            else:
-                actions.append(self._action("delete_local_branch", lease, evidence.head_sha))
         else:
             actions.append(self._action("preserve_local_branch", lease, evidence.head_sha))
         return CommandResult.ok(

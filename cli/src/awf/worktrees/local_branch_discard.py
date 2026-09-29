@@ -52,7 +52,7 @@ class LocalBranchDiscarder(RemoteBranchDiscarder):
         if environment_blocker is not None:
             return environment_blocker
         try:
-            repository_root = self.git.repository_root()
+            repository_root = self.git.common_repository_root()
             repository_id = self.git.repository_id()
         except (GitError, OSError):
             return self._blocked(
@@ -86,9 +86,20 @@ class LocalBranchDiscarder(RemoteBranchDiscarder):
             return self._blocked(
                 "backup_root_invalid", "The backup root could not be safely validated."
             )
+        foreign_lease = self._foreign_remote_lease_blocker(
+            branch, leases=leases, repository_id=repository_id
+        )
+        if foreign_lease is not None:
+            return foreign_lease
+        try:
+            default_remote_branch = self.git.default_remote_branch()
+        except (GitError, OSError):
+            return self._blocked(
+                "default_branch_unknown", "Unable to determine origin's default branch."
+            )
         protected = self._protected_branch_blocker(
             branch,
-            default_remote_branch="",
+            default_remote_branch=default_remote_branch,
             leases=leases,
             repository_id=repository_id,
         )

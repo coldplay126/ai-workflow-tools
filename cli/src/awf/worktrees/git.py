@@ -114,13 +114,29 @@ class GitClient:
         output = self._run("rev-parse", "--show-toplevel").stdout
         return Path(_path_from_line(output)).resolve()
 
+    def common_repository_root(self) -> Path:
+        """Return the primary worktree root shared by all linked worktrees."""
+        common_dir = Path(
+            _path_from_line(
+                self._run(
+                    "rev-parse", "--path-format=absolute", "--git-common-dir"
+                ).stdout
+            )
+        ).resolve()
+        if common_dir.name == ".git":
+            return common_dir.parent
+        worktrees = self.list_worktrees()
+        if not worktrees or worktrees[0].bare:
+            raise GitError("unable to identify the primary repository worktree")
+        return worktrees[0].path.resolve()
+
     def repository_name(self) -> str:
         return self.repository_root().name
 
     def repository_id(self) -> str:
         normalized_remote = _normalize_remote_url(self.remote_url())
         payload = normalized_remote.encode("utf-8") + b"\0" + os.fsencode(
-            self.repository_root()
+            self.common_repository_root()
         )
         return hashlib.sha256(payload).hexdigest()
 
@@ -636,7 +652,7 @@ class GitClient:
         branch: str,
         expected_sha: str,
         *,
-        before_commit: Callable[[], None],
+        before_commit: Callable[[], None] | None = None,
     ) -> None:
         """Delete an un-checked-out direct branch under prepared ref and HEAD locks."""
         self.validate_branch_name(branch)
@@ -666,7 +682,8 @@ class GitClient:
 
             with self._hold_live_worktree_heads(inventory):
                 self._revalidate_inactive_branch(inventory, branch)
-                before_commit()
+                if before_commit is not None:
+                    before_commit()
                 self._revalidate_inactive_branch(inventory, branch)
                 self._ref_transaction_command(branch_transaction, "commit")
                 committed = True

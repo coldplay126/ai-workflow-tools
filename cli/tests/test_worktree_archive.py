@@ -374,6 +374,26 @@ def test_archive_restore_recipe_preserves_absent_skip_worktree_file(
     )
 
 
+def test_archive_discard_from_other_linked_worktree_retains_repository_root_guard(
+    tmp_path: Path,
+) -> None:
+    harness = ArchiveHarness.create(tmp_path)
+    lease = harness.acquire_feature("archive-linked-root")
+    linked = tmp_path / "linked"
+    git(harness.repo, "worktree", "add", "-q", "-b", "linked-helper", str(linked), "staging")
+    harness.service.git = GitClient(linked)
+
+    result = harness.service.archive_discard(
+        lease.id,
+        backup_root=_backup_root(tmp_path),
+        reason=_REASON,
+    )
+
+    assert result.status == "blocked"
+    assert result.blockers[0]["code"] == "repository_mismatch"
+    assert lease.worktree_path.exists()
+
+
 @pytest.mark.parametrize("mutation", ("commit", "ignored"))
 def test_archive_discard_rejects_stale_preview_token_without_removing_worktree(
     tmp_path: Path, mutation: str
@@ -903,7 +923,7 @@ def test_archive_discard_retry_does_not_delete_branch_moved_after_compare_delete
     )
     backup_root = _backup_root(tmp_path)
     token, _ = _preview(harness, lease, backup_root)
-    original_delete = harness.git.delete_branch_if_at
+    original_delete = harness.git.delete_inactive_branch_if_at
 
     def move_branch_before_delete(branch: str, expected_sha: str) -> None:
         git(
@@ -916,7 +936,7 @@ def test_archive_discard_retry_does_not_delete_branch_moved_after_compare_delete
         original_delete(branch, expected_sha)
 
     monkeypatch.setattr(
-        harness.git, "delete_branch_if_at", move_branch_before_delete
+        harness.git, "delete_inactive_branch_if_at", move_branch_before_delete
     )
     removed = _apply(harness, lease, backup_root, token)
 
@@ -931,7 +951,7 @@ def test_archive_discard_retry_does_not_delete_branch_moved_after_compare_delete
     assert current is not None
     assert current.state is LeaseState.REMOVED
 
-    monkeypatch.setattr(harness.git, "delete_branch_if_at", original_delete)
+    monkeypatch.setattr(harness.git, "delete_inactive_branch_if_at", original_delete)
     retried = _apply(harness, lease, backup_root, token)
 
     assert retried.status == "ok"
@@ -940,6 +960,54 @@ def test_archive_discard_retry_does_not_delete_branch_moved_after_compare_delete
         for warning in retried.warnings
     )
     assert harness.git.resolve_ref(lease.branch) == moved_head
+
+
+def test_archive_discard_retry_preserves_branch_checked_out_after_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = ArchiveHarness.create(tmp_path)
+    lease = harness.acquire_feature("retry-checked-out")
+    expected_head = harness.git.resolve_ref(lease.branch)
+    backup_root = _backup_root(tmp_path)
+    token, _ = _preview(harness, lease, backup_root)
+    original_delete = harness.git.delete_inactive_branch_if_at
+
+    def fail_first_delete(branch: str, expected_sha: str) -> None:
+        raise GitError("injected cleanup failure")
+
+    monkeypatch.setattr(harness.git, "delete_inactive_branch_if_at", fail_first_delete)
+    first = _apply(harness, lease, backup_root, token)
+    assert first.status == "ok"
+    assert any(warning["code"] == "local_branch_cleanup_failed" for warning in first.warnings)
+    other = tmp_path / "other"
+    git(harness.repo, "worktree", "add", "-q", str(other), lease.branch)
+    monkeypatch.setattr(harness.git, "delete_inactive_branch_if_at", original_delete)
+
+    retried = _apply(harness, lease, backup_root, token)
+
+    assert retried.status == "ok"
+    assert any(warning["code"] == "local_branch_cleanup_failed" for warning in retried.warnings)
+    assert harness.git.local_branch_sha(lease.branch) == expected_head
+    assert git(other, "symbolic-ref", "HEAD") == f"refs/heads/{lease.branch}"
+
+
+def test_archive_discard_retry_reports_already_absent_branch(tmp_path: Path) -> None:
+    harness = ArchiveHarness.create(tmp_path)
+    lease = harness.acquire_feature("retry-already-absent")
+    backup_root = _backup_root(tmp_path)
+    token, _ = _preview(harness, lease, backup_root)
+    first = _apply(harness, lease, backup_root, token)
+    assert first.status == "ok"
+    assert not first.warnings
+
+    repeated = _apply(harness, lease, backup_root, token)
+
+    assert repeated.status == "ok"
+    assert not repeated.warnings
+    assert any(
+        action["kind"] == "local_branch_already_absent" and action["idempotent"]
+        for action in repeated.actions
+    )
 
 
 @pytest.mark.parametrize(

@@ -455,6 +455,82 @@ def test_remote_discard_never_retries_a_receiptless_attempt_when_remote_reappear
     assert receipt["completion"] == "remote_absent_on_retry"
 
 
+def test_remote_discard_retries_confirmed_preconnect_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = RemoteDiscardHarness.create(tmp_path)
+    branch = "retired/preconnect-failure"
+    expected_sha = _create_remote_branch(harness, branch)
+    backup_root = _backup_root(tmp_path)
+    token, destination = _preview(harness, branch, expected_sha, backup_root)
+    original_delete = harness.git.delete_remote_branch_if_at
+
+    def no_connection(*_args: object, **_kwargs: object) -> None:
+        raise GitRemoteError("git push failed: fatal: Could not resolve host: github.com")
+
+    monkeypatch.setattr(harness.git, "delete_remote_branch_if_at", no_connection)
+    failed = _apply(harness, branch, expected_sha, backup_root, token)
+    assert failed.status == "error"
+    assert _blocker_code(failed) == "remote_transport_failed"
+    assert not (destination / "attempt.json").exists()
+    assert _remote_head(harness.repo, branch) == expected_sha
+
+    monkeypatch.setattr(harness.git, "delete_remote_branch_if_at", original_delete)
+    retried = _apply(harness, branch, expected_sha, backup_root, token)
+    assert retried.status == "ok"
+    assert retried.decision == "discarded"
+    assert _remote_head(harness.repo, branch) is None
+
+
+def test_remote_discard_from_linked_worktree_respects_active_main_lease(tmp_path: Path) -> None:
+    harness = RemoteDiscardHarness.create(tmp_path)
+    branch = "retired/linked-active"
+    expected_sha = _create_remote_branch(harness, branch)
+    backup_root = _backup_root(tmp_path)
+    linked = tmp_path / "linked"
+    git(harness.repo, "worktree", "add", "-q", "-b", "linked-helper", str(linked), "staging")
+    harness.service.git = GitClient(linked)
+    token, _ = _preview(harness, branch, expected_sha, backup_root)
+    _register_lease(harness, initiative="linked-active", branch=branch)
+
+    result = harness.service.discard_remote_branch(
+        branch,
+        expected_sha=expected_sha,
+        backup_root=backup_root,
+        reason=_REASON,
+    )
+
+    assert result.status == "blocked"
+    assert _blocker_code(result) == "lease_not_removed"
+    applied = _apply(harness, branch, expected_sha, backup_root, token)
+    assert applied.status == "blocked"
+    assert _blocker_code(applied) == "lease_not_removed"
+    assert _remote_head(harness.repo, branch) == expected_sha
+
+
+def test_remote_discard_rejects_foreign_identity_sharing_origin(tmp_path: Path) -> None:
+    harness = RemoteDiscardHarness.create(tmp_path)
+    branch = "retired/shared-origin-lease"
+    expected_sha = _create_remote_branch(harness, branch)
+    foreign = tmp_path / "other-repository"
+    git(tmp_path, "clone", "-q", str(tmp_path / "origin.git"), str(foreign))
+    primary_git = harness.git
+    harness.git = GitClient(foreign)
+    _register_lease(harness, initiative="shared-origin", branch=branch)
+    harness.git = primary_git
+
+    result = harness.service.discard_remote_branch(
+        branch,
+        expected_sha=expected_sha,
+        backup_root=_backup_root(tmp_path),
+        reason=_REASON,
+    )
+
+    assert result.status == "blocked"
+    assert _blocker_code(result) == "repository_mismatch"
+    assert _remote_head(harness.repo, branch) == expected_sha
+
+
 @pytest.mark.parametrize(
     "scenario",
     (
@@ -881,8 +957,18 @@ def test_remote_discard_cas_preserves_a_real_remote_race_after_backup(
     assert _blocker_code(raced) == "remote_head_changed"
     assert _remote_head(harness.repo, branch) == advanced_sha
     assert (destination / "history.bundle").is_file()
-    assert (destination / "attempt.json").is_file()
+    assert not (destination / "attempt.json").exists()
     assert not (destination / "receipt.json").exists()
+    git(
+        harness.repo, "push", "-q",
+        f"--force-with-lease=refs/heads/{branch}:{advanced_sha}",
+        "origin", f"{expected_sha}:refs/heads/{branch}",
+    )
+    monkeypatch.setattr(harness.git, "delete_remote_branch_if_at", original_delete)
+    retried = _apply(harness, branch, expected_sha, backup_root, token)
+    assert retried.status == "ok"
+    assert retried.decision == "discarded"
+    assert _remote_head(harness.repo, branch) is None
 
 
 def test_remote_discard_refuses_unknown_remote_commit_without_fetching(

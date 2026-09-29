@@ -462,6 +462,92 @@ def test_local_discard_handles_a_local_only_branch_and_sixteen_removed_records(
         destination / "history.bundle", tmp_path / "restored-local-only.git", branch
     ) == expected_sha
 
+def test_local_discard_from_linked_worktree_respects_active_main_lease(tmp_path: Path) -> None:
+    harness = LocalDiscardHarness.create(tmp_path)
+    branch = "retired/linked-active"
+    expected_sha = _create_local_branch(harness, branch)
+    backup_root = _backup_root(tmp_path)
+    linked = tmp_path / "linked"
+    git(harness.repo, "worktree", "add", "-q", "-b", "linked-helper", str(linked), "staging")
+    harness.service.git = GitClient(linked)
+    token, _ = _preview(harness, branch, expected_sha, backup_root)
+    _register_lease(harness, initiative="linked-active", branch=branch)
+
+    result = harness.service.discard_local_branch(
+        branch,
+        expected_sha=expected_sha,
+        backup_root=backup_root,
+        reason=_REASON,
+    )
+
+    assert result.status == "blocked"
+    assert _blocker_code(result) == "lease_not_removed"
+    applied = _apply(harness, branch, expected_sha, backup_root, token)
+    assert applied.status == "blocked"
+    assert _blocker_code(applied) == "lease_not_removed"
+    assert _local_head(harness.repo, branch) == expected_sha
+
+
+
+def test_local_discard_protects_nonstandard_origin_default(tmp_path: Path) -> None:
+    harness = LocalDiscardHarness.create(tmp_path)
+    branch = "trunk-default"
+    expected_sha = _publish_local_branch(harness, branch)
+    git(tmp_path / "origin.git", "symbolic-ref", "HEAD", f"refs/heads/{branch}")
+    git(harness.repo, "remote", "set-head", "origin", "-a")
+
+    result = harness.service.discard_local_branch(
+        branch,
+        expected_sha=expected_sha,
+        backup_root=_backup_root(tmp_path),
+        reason=_REASON,
+    )
+
+    assert result.status == "blocked"
+    assert _blocker_code(result) == "protected_branch"
+    assert _local_head(harness.repo, branch) == expected_sha
+
+
+def test_local_discard_blocks_when_origin_default_cannot_be_read(tmp_path: Path) -> None:
+    harness = LocalDiscardHarness.create(tmp_path)
+    branch = "retired/unknown-default"
+    expected_sha = _create_local_branch(harness, branch)
+    git(harness.repo, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+
+    result = harness.service.discard_local_branch(
+        branch,
+        expected_sha=expected_sha,
+        backup_root=_backup_root(tmp_path),
+        reason=_REASON,
+    )
+
+    assert result.status == "blocked"
+    assert _blocker_code(result) == "default_branch_unknown"
+    assert _local_head(harness.repo, branch) == expected_sha
+
+
+def test_local_discard_rejects_foreign_identity_sharing_origin(tmp_path: Path) -> None:
+    harness = LocalDiscardHarness.create(tmp_path)
+    branch = "retired/shared-origin-lease"
+    expected_sha = _create_local_branch(harness, branch)
+    foreign = tmp_path / "other-repository"
+    git(tmp_path, "clone", "-q", str(tmp_path / "origin.git"), str(foreign))
+    primary_git = harness.git
+    harness.git = GitClient(foreign)
+    _register_lease(harness, initiative="shared-origin", branch=branch)
+    harness.git = primary_git
+
+    result = harness.service.discard_local_branch(
+        branch,
+        expected_sha=expected_sha,
+        backup_root=_backup_root(tmp_path),
+        reason=_REASON,
+    )
+
+    assert result.status == "blocked"
+    assert _blocker_code(result) == "repository_mismatch"
+    assert _local_head(harness.repo, branch) == expected_sha
+
 
 @pytest.mark.parametrize(
     "scenario",

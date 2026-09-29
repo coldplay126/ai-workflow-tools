@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from . import archive
-from .git import GitClient, GitError, GitRemoteError
+from .git import GitClient, GitError, GitRemoteError, _normalize_remote_url
 from .github import ExternalServiceError, GhClient
 from .locking import repository_lock
 from .models import CommandResult, Lease, LeaseState, ReleaseState, now_iso
@@ -51,6 +51,12 @@ _UNSAFE_GIT_ENVIRONMENT_PREFIXES = ("GIT_CONFIG_",)
 _MAX_JSON_BYTES = 1024 * 1024
 _GIT_OBJECT_ID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 _TOKEN = re.compile(r"[0-9a-f]{64}")
+_DEFINITE_PRECONNECT_FAILURES = (
+    "could not resolve host",
+    "could not resolve hostname",
+    "authentication failed for",
+    "permission denied (publickey)",
+)
 
 
 @dataclass(frozen=True)
@@ -232,7 +238,7 @@ class RemoteBranchDiscarder:
         if environment_blocker is not None:
             return environment_blocker
         try:
-            repository_root = self.git.repository_root()
+            repository_root = self.git.common_repository_root()
             repository_id = self.git.repository_id()
         except (GitError, OSError):
             return self._blocked(
@@ -266,6 +272,11 @@ class RemoteBranchDiscarder:
             return self._blocked(
                 "backup_root_invalid", "The backup root could not be safely validated."
             )
+        foreign_lease = self._foreign_remote_lease_blocker(
+            branch, leases=leases, repository_id=repository_id
+        )
+        if foreign_lease is not None:
+            return foreign_lease
         try:
             default_remote_branch = self.git.default_remote_branch()
         except (GitError, OSError):
@@ -391,6 +402,36 @@ class RemoteBranchDiscarder:
             destination=validated_backup_root / repository_id / self._namespace / token,
             leases=matching_leases,
         )
+
+    def _foreign_remote_lease_blocker(
+        self, branch: str, *, leases: tuple[Lease, ...], repository_id: str
+    ) -> CommandResult | None:
+        """A shared origin must not let a different repository identity bypass a lease."""
+        candidates = (
+            lease for lease in leases
+            if lease.repository_id != repository_id
+            and (
+                lease.branch == branch
+                or (
+                    lease.state is not LeaseState.REMOVED
+                    and self._strip_refs(lease.base_ref) == branch
+                )
+            )
+        )
+        try:
+            remote = _normalize_remote_url(self.git.remote_url())
+            for lease in candidates:
+                if _normalize_remote_url(GitClient(lease.repository_root).remote_url()) == remote:
+                    return self._blocked(
+                        "repository_mismatch",
+                        "A lease for this origin has a different repository identity.",
+                    )
+        except (GitError, OSError):
+            return self._blocked(
+                "repository_inspection_failed",
+                "Unable to verify the repository identity of a relevant lease.",
+            )
+        return None
 
     def _protected_branch_blocker(
         self,
@@ -594,14 +635,39 @@ class RemoteBranchDiscarder:
             self.git.delete_remote_branch_if_at(
                 revalidated.branch, revalidated.expected_sha, skip_hooks=True
             )
-        except GitRemoteError:
+        except GitRemoteError as error:
+            if any(marker in str(error).lower() for marker in _DEFINITE_PRECONNECT_FAILURES):
+                try:
+                    self._clear_failed_attempt(revalidated)
+                except (archive.ArchiveError, OSError):
+                    return self._blocked(
+                        "remote_delete_outcome_unknown",
+                        "The confirmed transport failure could not be recorded safely.",
+                        leases=revalidated.leases,
+                        actions=self._backup_actions(revalidated, revalidated_backup.artifact),
+                    )
+                return self._external_error(
+                    "remote_transport_failed",
+                    "The connection failed before the deletion request; retry this token after restoring connectivity.",
+                    leases=revalidated.leases,
+                    actions=self._backup_actions(revalidated, revalidated_backup.artifact),
+                )
             return self._external_error(
                 "remote_delete_failed",
-                "The remote branch deletion could not be confirmed.",
+                "The remote deletion request failed during transport; its outcome is unknown. Do not retry this token while the branch exists.",
                 leases=revalidated.leases,
                 actions=self._backup_actions(revalidated, revalidated_backup.artifact),
             )
         except GitError:
+            try:
+                self._clear_failed_attempt(revalidated)
+            except (archive.ArchiveError, OSError):
+                return self._blocked(
+                    "remote_delete_outcome_unknown",
+                    "The confirmed CAS rejection could not be recorded safely.",
+                    leases=revalidated.leases,
+                    actions=self._backup_actions(revalidated, revalidated_backup.artifact),
+                )
             return self._blocked(
                 "remote_head_changed",
                 "The remote branch changed before its deletion could be committed.",
@@ -944,6 +1010,13 @@ class RemoteBranchDiscarder:
             raise archive.ArchiveError(
                 "archive_unsafe", "remote discard destination escapes its namespace"
             )
+
+    def _clear_failed_attempt(self, evidence: _Evidence) -> None:
+        """Retire an attempt only when Git confirmed the push never deleted a ref."""
+        marker = evidence.destination / "attempt.json"
+        archive._validate_private_file(marker)
+        marker.unlink()
+        archive._fsync_directory(evidence.destination)
 
     def _write_attempt(self, evidence: _Evidence) -> None:
         self._write_marker(
