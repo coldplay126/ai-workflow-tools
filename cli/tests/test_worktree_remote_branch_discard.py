@@ -566,6 +566,36 @@ def test_remote_discard_keeps_same_identity_lease_with_missing_root(tmp_path: Pa
     assert _remote_head(harness.repo, branch) == expected_sha
 
 
+def test_remote_discard_blocks_active_legacy_lease_after_linked_root_removed(
+    tmp_path: Path,
+) -> None:
+    harness = RemoteDiscardHarness.create(tmp_path)
+    branch = "retired/missing-legacy-root"
+    expected_sha = _create_remote_branch(harness, branch)
+    backup_root = _backup_root(tmp_path)
+    token, destination = _preview(harness, branch, expected_sha, backup_root)
+    linked = tmp_path / "legacy-linked"
+    git(harness.repo, "worktree", "add", "-q", "-b", "legacy-helper", str(linked), "staging")
+    main_git = harness.git
+    harness.git = GitClient(linked)
+    legacy_lease = _register_lease(harness, initiative="legacy-active", branch=branch)
+    assert legacy_lease.repository_id != main_git.repository_id()
+    harness.git = main_git
+    git(harness.repo, "worktree", "remove", "--force", str(linked))
+    assert not linked.exists()
+
+    preview = harness.service.discard_remote_branch(
+        branch, expected_sha=expected_sha, backup_root=backup_root, reason=_REASON
+    )
+    assert preview.status == "blocked"
+    assert _blocker_code(preview) == "lease_not_removed"
+    applied = _apply(harness, branch, expected_sha, backup_root, token)
+    assert applied.status == "blocked"
+    assert _blocker_code(applied) == "lease_not_removed"
+    assert _remote_head(harness.repo, branch) == expected_sha
+    assert not destination.exists()
+
+
 def test_remote_discard_from_linked_worktree_respects_active_main_lease(tmp_path: Path) -> None:
     harness = RemoteDiscardHarness.create(tmp_path)
     branch = "retired/linked-active"
@@ -590,6 +620,45 @@ def test_remote_discard_from_linked_worktree_respects_active_main_lease(tmp_path
     assert applied.status == "blocked"
     assert _blocker_code(applied) == "lease_not_removed"
     assert _remote_head(harness.repo, branch) == expected_sha
+
+
+def test_linked_root_discard_respects_removed_release_lease_with_active_bridge(
+    tmp_path: Path,
+) -> None:
+    harness = RemoteDiscardHarness.create(tmp_path)
+    branch = "retired/linked-release-fence"
+    expected_sha = _create_remote_branch(harness, branch)
+    backup_root = _backup_root(tmp_path)
+    linked = tmp_path / "linked-release"
+    git(harness.repo, "worktree", "add", "-q", "-b", "linked-helper", str(linked), "staging")
+    harness.service.git = GitClient(linked)
+    token, destination = _preview(harness, branch, expected_sha, backup_root)
+    lease = _register_lease(harness, initiative="release-fence", branch=branch)
+    assert lease.repository_id != harness.service.git.repository_id()
+    harness.registry.create_release(
+        ReleaseBridge.new(
+            repository_id=lease.repository_id,
+            repository_name=lease.repository_name,
+            repository_root=lease.repository_root,
+            release_id="fence",
+            target_branch=branch,
+            lease_id=lease.id,
+        )
+    )
+    harness.registry.transition(
+        lease.id, LeaseState.REMOVED, expected_version=lease.version
+    )
+
+    preview = harness.service.discard_remote_branch(
+        branch, expected_sha=expected_sha, backup_root=backup_root, reason=_REASON
+    )
+    assert preview.status == "blocked"
+    assert _blocker_code(preview) == "active_release"
+    applied = _apply(harness, branch, expected_sha, backup_root, token)
+    assert applied.status == "blocked"
+    assert _blocker_code(applied) == "active_release"
+    assert _remote_head(harness.repo, branch) == expected_sha
+    assert not destination.exists()
 
 
 def test_bare_common_dir_linked_worktree_status_and_branch_previews(

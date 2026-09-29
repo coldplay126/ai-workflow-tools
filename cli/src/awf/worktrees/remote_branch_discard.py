@@ -409,19 +409,30 @@ class RemoteBranchDiscarder:
     def _repository_leases(
         self, leases: tuple[Lease, ...], repository_id: str
     ) -> tuple[Lease, ...]:
-        """Match historical linked-root leases by their physical Git common dir."""
+        """Match legacy linked-root leases before inspecting their Git common dir."""
         common_dir = self.git.common_git_directory()
+        normalized_remote = _normalize_remote_url(self.git.remote_url())
         related: list[Lease] = []
         for lease in leases:
             if lease.repository_id == repository_id:
                 related.append(lease)
                 continue
-            if lease.state is LeaseState.REMOVED and not lease.retain:
+            if (
+                GitClient.repository_id_from_remote(
+                    normalized_remote, lease.repository_root
+                )
+                != lease.repository_id
+            ):
+                continue
+            if not lease.repository_root.exists():
+                # The legacy root is gone; it may still refer to this repository.
+                related.append(lease)
                 continue
             try:
                 lease_common_dir = GitClient(lease.repository_root).common_git_directory()
             except (GitError, OSError):
-                # A missing historical root cannot prove common-store ownership.
+                # An inaccessible legacy root cannot safely release a lease guard.
+                related.append(lease)
                 continue
             if lease_common_dir == common_dir:
                 related.append(lease)

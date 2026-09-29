@@ -484,6 +484,36 @@ def test_local_discard_keeps_same_identity_lease_with_missing_root(tmp_path: Pat
     assert _local_head(harness.repo, branch) == expected_sha
 
 
+def test_local_discard_blocks_active_legacy_lease_after_linked_root_removed(
+    tmp_path: Path,
+) -> None:
+    harness = LocalDiscardHarness.create(tmp_path)
+    branch = "retired/missing-legacy-root"
+    expected_sha = _create_local_branch(harness, branch)
+    backup_root = _backup_root(tmp_path)
+    token, destination = _preview(harness, branch, expected_sha, backup_root)
+    linked = tmp_path / "legacy-linked"
+    git(harness.repo, "worktree", "add", "-q", "-b", "legacy-helper", str(linked), "staging")
+    main_git = harness.git
+    harness.git = GitClient(linked)
+    legacy_lease = _register_lease(harness, initiative="legacy-active", branch=branch)
+    assert legacy_lease.repository_id != main_git.repository_id()
+    harness.git = main_git
+    git(harness.repo, "worktree", "remove", "--force", str(linked))
+    assert not linked.exists()
+
+    preview = harness.service.discard_local_branch(
+        branch, expected_sha=expected_sha, backup_root=backup_root, reason=_REASON
+    )
+    assert preview.status == "blocked"
+    assert _blocker_code(preview) == "lease_not_removed"
+    applied = _apply(harness, branch, expected_sha, backup_root, token)
+    assert applied.status == "blocked"
+    assert _blocker_code(applied) == "lease_not_removed"
+    assert _local_head(harness.repo, branch) == expected_sha
+    assert not destination.exists()
+
+
 def test_local_discard_from_linked_worktree_respects_active_main_lease(tmp_path: Path) -> None:
     harness = LocalDiscardHarness.create(tmp_path)
     branch = "retired/linked-active"

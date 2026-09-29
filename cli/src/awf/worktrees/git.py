@@ -136,9 +136,15 @@ class GitClient:
         return self.repository_root().name
 
     def repository_id(self) -> str:
-        normalized_remote = _normalize_remote_url(self.remote_url())
+        return self.repository_id_from_remote(
+            _normalize_remote_url(self.remote_url()), self.repository_root()
+        )
+
+    @staticmethod
+    def repository_id_from_remote(normalized_remote: str, repository_root: Path) -> str:
+        """Hash the stored root with an already normalized origin URL."""
         payload = normalized_remote.encode("utf-8") + b"\0" + os.fsencode(
-            self.repository_root()
+            repository_root
         )
         return hashlib.sha256(payload).hexdigest()
 
