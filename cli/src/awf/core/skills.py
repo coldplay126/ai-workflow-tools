@@ -66,11 +66,11 @@ def _fallback_roots() -> list[Path]:
     return paths
 
 
-def find_skill_dir(skill_name: str, explicit_root: Optional[str] = None) -> Optional[Path]:
-    """Find a skill directory in runtime paths, then editable source skills.
+def iter_skill_dirs(skill_name: str, explicit_root: Optional[str] = None) -> list[Path]:
+    """Existing skill directories in runtime priority, with editable source last.
 
-    When explicit_root is provided but invalid, re-raises FileNotFoundError.
-    Fallback roots are only used when explicit_root is None and auto-detection fails.
+    An invalid explicit root still raises FileNotFoundError. Unlike
+    discover_skills, this includes source only for resource resolution.
     """
     try:
         roots = skill_search_paths(explicit_root)
@@ -78,16 +78,24 @@ def find_skill_dir(skill_name: str, explicit_root: Optional[str] = None) -> Opti
         if explicit_root is not None:
             raise
         roots = _fallback_roots()
-    for base in roots:
-        candidate = base / skill_name
-        if candidate.is_dir():
-            return candidate
     checkout = installed_source_checkout()
     if checkout is not None:
-        candidate = checkout / "claude" / "skills" / skill_name
-        if candidate.is_dir():
-            return candidate
-    return None
+        roots.append(checkout / "claude" / "skills")
+    seen: set[Path] = set()
+    candidates: list[Path] = []
+    for base in roots:
+        candidate = base / skill_name
+        resolved = candidate.resolve()
+        if resolved not in seen and candidate.is_dir():
+            seen.add(resolved)
+            candidates.append(candidate)
+    return candidates
+
+
+def find_skill_dir(skill_name: str, explicit_root: Optional[str] = None) -> Optional[Path]:
+    """Find the highest-priority skill directory, including editable source."""
+    candidates = iter_skill_dirs(skill_name, explicit_root)
+    return candidates[0] if candidates else None
 
 
 @dataclass

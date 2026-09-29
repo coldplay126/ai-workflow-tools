@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 from typing import Any, Optional
 
-from awf.core.skills import find_skill_dir
+from awf.core.skills import find_skill_dir, iter_skill_dirs
 
 _CACHE: dict[str, str] = {}
 _JSON_CACHE: dict[str, dict] = {}
@@ -35,21 +35,17 @@ _TYPE_EXTENSIONS: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 def load_manifest(skill: str) -> dict[str, Any]:
-    """Load a skill manifest from skills/{skill}/manifest.json.
-
-    The manifest declares resource categories and their types.
-    Falls back to auto-discovery if no manifest file exists.
-
-    Returns:
-        {"skill": str, "version": str, "categories": {name: {"type": str, "path": str}}}
-    """
-    if skill in _MANIFEST_CACHE:
-        return _MANIFEST_CACHE[skill]
-
+    """Load the highest-priority skill manifest (or discover its categories)."""
     skill_dir = find_skill_dir(skill)
-    if not skill_dir:
+    if skill_dir is None:
         raise FileNotFoundError(f"Skill not found: {skill}")
+    return _manifest_for_dir(skill, skill_dir)
 
+
+def _manifest_for_dir(skill: str, skill_dir: Path) -> dict[str, Any]:
+    cache_key = str(skill_dir)
+    if cache_key in _MANIFEST_CACHE:
+        return _MANIFEST_CACHE[cache_key]
     manifest_path = skill_dir / "manifest.json"
     if manifest_path.is_file():
         try:
@@ -57,10 +53,8 @@ def load_manifest(skill: str) -> dict[str, Any]:
         except json.JSONDecodeError as exc:
             raise ValueError(f"Invalid manifest JSON in {manifest_path}: {exc}") from exc
     else:
-        # Auto-discover: scan subdirectories as categories
         manifest = _auto_discover_manifest(skill, skill_dir)
-
-    _MANIFEST_CACHE[skill] = manifest
+    _MANIFEST_CACHE[cache_key] = manifest
     return manifest
 
 
@@ -101,77 +95,68 @@ def _detect_category_type(directory: Path) -> str | None:
 # ---------------------------------------------------------------------------
 
 def load_skill_resource(skill: str, category: str, name: str) -> dict[str, Any] | str:
-    """Load a resource from skills/{skill}/{category_path}/{name}.{ext}.
-
-    Uses the manifest to determine file type and path.
-    Returns dict for JSON resources, str for text resources.
-    """
-    skill_dir = find_skill_dir(skill)
-    if not skill_dir:
+    """Load the highest-priority existing resource for a skill and category."""
+    skill_dirs = iter_skill_dirs(skill)
+    if not skill_dirs:
         raise FileNotFoundError(f"Skill not found: {skill}")
 
-    manifest = load_manifest(skill)
-    cat_config = manifest.get("categories", {}).get(category)
-    if not cat_config:
+    available: set[str] = set()
+    for skill_dir in skill_dirs:
+        manifest = _manifest_for_dir(skill, skill_dir)
+        categories = manifest.get("categories", {})
+        available.update(categories)
+        cat_config = categories.get(category)
+        if not cat_config:
+            continue
+        cat_path = cat_config.get("path", category)
+        cat_type = cat_config.get("type", "json")
+        ext = _TYPE_EXTENSIONS.get(cat_type, f".{cat_type}")
+        resource_path = skill_dir / cat_path / f"{name}{ext}"
+        if not resource_path.is_file():
+            continue
+
+        cache_key = str(resource_path)
+        if cat_type == "json":
+            if cache_key not in _JSON_CACHE:
+                try:
+                    _JSON_CACHE[cache_key] = json.loads(
+                        resource_path.read_text(encoding="utf-8")
+                    )
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"Invalid JSON in resource {resource_path}: {exc}"
+                    ) from exc
+            return _JSON_CACHE[cache_key]
+        if cache_key not in _CACHE:
+            _CACHE[cache_key] = resource_path.read_text(encoding="utf-8")
+        return _CACHE[cache_key]
+
+    if category not in available:
         raise FileNotFoundError(
             f"Category '{category}' not found in skill '{skill}'. "
-            f"Available: {list(manifest.get('categories', {}).keys())}"
+            f"Available: {sorted(available)}"
         )
-
-    cat_path = cat_config.get("path", category)
-    cat_type = cat_config.get("type", "json")
-    ext = _TYPE_EXTENSIONS.get(cat_type, f".{cat_type}")
-
-    resource_path = skill_dir / cat_path / f"{name}{ext}"
-    if not resource_path.is_file():
-        raise FileNotFoundError(f"Resource not found: {resource_path}")
-
-    if cat_type == "json":
-        cache_key = f"{skill}/{category}/{name}"
-        if cache_key not in _JSON_CACHE:
-            try:
-                _JSON_CACHE[cache_key] = json.loads(
-                    resource_path.read_text(encoding="utf-8")
-                )
-            except json.JSONDecodeError as exc:
-                raise ValueError(
-                    f"Invalid JSON in resource {resource_path}: {exc}"
-                ) from exc
-        return _JSON_CACHE[cache_key]
-
-    # Text resources (md, yaml, txt)
-    cache_key = f"{skill}/{category}/{name}"
-    if cache_key not in _CACHE:
-        _CACHE[cache_key] = resource_path.read_text(encoding="utf-8")
-    return _CACHE[cache_key]
+    raise FileNotFoundError(f"Resource not found: {skill}/{category}/{name}")
 
 
 def list_skill_resources(skill: str, category: str) -> list[str]:
-    """List available resource names in a skill category.
-
-    Returns resource names without extensions.
-    """
-    skill_dir = find_skill_dir(skill)
-    if not skill_dir:
-        return []
-
-    manifest = load_manifest(skill)
-    cat_config = manifest.get("categories", {}).get(category)
-    if not cat_config:
-        return []
-
-    cat_path = cat_config.get("path", category)
-    cat_type = cat_config.get("type", "json")
-    ext = _TYPE_EXTENSIONS.get(cat_type, f".{cat_type}")
-
-    resource_dir = skill_dir / cat_path
-    if not resource_dir.is_dir():
-        return []
-
-    return sorted(
-        f.stem for f in resource_dir.iterdir()
-        if f.is_file() and f.suffix.lower() == ext
-    )
+    """List resources available across all skill directories, without duplicates."""
+    names: set[str] = set()
+    for skill_dir in iter_skill_dirs(skill):
+        manifest = _manifest_for_dir(skill, skill_dir)
+        cat_config = manifest.get("categories", {}).get(category)
+        if not cat_config:
+            continue
+        cat_path = cat_config.get("path", category)
+        cat_type = cat_config.get("type", "json")
+        ext = _TYPE_EXTENSIONS.get(cat_type, f".{cat_type}")
+        resource_dir = skill_dir / cat_path
+        if resource_dir.is_dir():
+            names.update(
+                f.stem for f in resource_dir.iterdir()
+                if f.is_file() and f.suffix.lower() == ext
+            )
+    return sorted(names)
 
 
 # ---------------------------------------------------------------------------
@@ -179,21 +164,21 @@ def list_skill_resources(skill: str, category: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def load_prompt(skill: str, prompt_name: str, **kwargs) -> str:
-    """Load a prompt template from skills/{skill}/prompts/{prompt_name}.md.
-
-    Applies str.format() with kwargs for variable substitution.
-    Returns raw template if no kwargs given.
-    """
-    cache_key = f"{skill}/{prompt_name}"
+    """Load the first available prompt template and substitute its variables."""
+    skill_dirs = iter_skill_dirs(skill)
+    if not skill_dirs:
+        raise FileNotFoundError(f"Skill not found: {skill}")
+    prompt_path = None
+    for skill_dir in skill_dirs:
+        candidate = skill_dir / "prompts" / f"{prompt_name}.md"
+        if candidate.is_file():
+            prompt_path = candidate
+            break
+    if prompt_path is None:
+        raise FileNotFoundError(f"Prompt not found: {skill}/prompts/{prompt_name}.md")
+    cache_key = str(prompt_path)
     if cache_key not in _CACHE:
-        skill_dir = find_skill_dir(skill)
-        if not skill_dir:
-            raise FileNotFoundError(f"Skill not found: {skill}")
-        prompt_path = skill_dir / "prompts" / f"{prompt_name}.md"
-        if not prompt_path.is_file():
-            raise FileNotFoundError(f"Prompt not found: {prompt_path}")
         _CACHE[cache_key] = prompt_path.read_text(encoding="utf-8")
-
     template = _CACHE[cache_key]
     if kwargs:
         result = template

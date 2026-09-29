@@ -21,8 +21,11 @@
 
 - WF 스킬 링크 없이 consumer 저장소에서 editable `awf wf next`를 실행할 때
   소스 체크아웃의 phase prompt·gate·envelope 템플릿을 마지막 검색 순위에서
-  로드합니다. 설치된 사용자 스킬 우선순위와 ready/skills의 runtime 집계는
-  유지합니다.
+  로드합니다. 부분 설치의 누락된 리소스는 다음 후보에서 찾고, 템플릿이
+  끝까지 없으면 stderr로 경고합니다. `wf init`의 템플릿 bootstrap은
+  프로젝트 로컬 우선순위를 유지하고 유효한 다음 후보를 사용합니다.
+  non-editable 설치는 상위 checkout의 템플릿을 사용하지 않으며,
+  설치된 사용자 스킬 우선순위와 ready/skills의 runtime 집계는 유지합니다.
 
 - staging PR을 연결한 managed feature는 `ACTIVE`와 검증 증거를 유지하며,
   최종 production PR 연결 후에만 정리 대상이 됩니다. 같은 feature의 반복
