@@ -107,18 +107,16 @@ def _provider_status(doctor: dict[str, Any]) -> dict[str, Any]:
 
 
 def _installed_source_checkout() -> Path | None:
-    source = detect_source_root(Path(awf.__file__))
-    return source.parent.parent.parent if source is not None else None
+    installed_path = Path(awf.__file__).resolve().parent
+    source = detect_source_root(installed_path)
+    # Match version_check's editable condition; a wheel inside a checkout is not its source.
+    if source is None or source != installed_path:
+        return None
+    return source.parent.parent.parent
 
 
-def _skill_status(skills: list[Any], source_checkout: Path | None = None) -> dict[str, Any]:
-    names = {str(skill.name) for skill in skills}
-    if source_checkout is not None:
-        names.update(
-            path.parent.name
-            for path in (source_checkout / "claude" / "skills").glob("*/SKILL.md")
-        )
-    sorted_names = sorted(names)
+def _skill_status(skills: list[Any]) -> dict[str, Any]:
+    names = sorted({str(skill.name) for skill in skills})
     required_for_wf = {
         "wf-orchestrator",
         "wf-status",
@@ -129,11 +127,11 @@ def _skill_status(skills: list[Any], source_checkout: Path | None = None) -> dic
         "phase-test",
         "phase-done",
     }
-    missing = sorted(required_for_wf - names)
+    missing = sorted(required_for_wf - set(names))
     return {
         "status": "ready" if not missing else "caution",
-        "count": len(sorted_names),
-        "names": sorted_names,
+        "count": len(names),
+        "names": names,
         "missing_workflow_skills": missing,
     }
 
@@ -528,7 +526,8 @@ def _missing_workflow_recommendations(
     source_checkout = report.get("source_checkout")
     if source_checkout is not None:
         setup = Path(source_checkout) / "setup.sh"
-        if setup.is_file():
+        wf_source = Path(source_checkout) / "claude" / "skills" / "wf" / "SKILL.md"
+        if setup.is_file() and wf_source.is_file():
             return [
                 {
                     "command": f"{shlex.quote(str(setup))} --with-wf",
@@ -540,6 +539,11 @@ def _missing_workflow_recommendations(
     return [inspect]
 
 
+def _workflow_skills_ready(report: dict[str, Any]) -> bool:
+    missing = set(report["skills"]["missing_workflow_skills"])
+    return not (missing - set(report.get("source_names", [])))
+
+
 def evaluate_ready_gate(report: dict[str, Any], gate: str) -> dict[str, Any]:
     """Return a deterministic allow/block decision for automation entrypoints."""
     if gate not in READY_GATES:
@@ -547,7 +551,6 @@ def evaluate_ready_gate(report: dict[str, Any], gate: str) -> dict[str, Any]:
 
     provider_status = str(report["provider"]["status"])
     scan_status = str(report["scan"]["status"])
-    skills_status = str(report["skills"]["status"])
     workflow_status = str(report["workflow"]["status"])
     manifest_status = str(report["workflow"].get("manifest_status") or "missing")
     manifest_error = report["workflow"].get("manifest_error")
@@ -593,7 +596,7 @@ def evaluate_ready_gate(report: dict[str, Any], gate: str) -> dict[str, Any]:
         )
 
     if gate == "workflow-init":
-        if skills_status != "ready":
+        if not _workflow_skills_ready(report):
             return _gate_payload(
                 gate=gate,
                 decision="block",
@@ -637,7 +640,7 @@ def evaluate_ready_gate(report: dict[str, Any], gate: str) -> dict[str, Any]:
                     "why": "fix sibling_repos schema (docs/specs/multi-repo-scope.md §3.1)",
                 }],
             )
-        if skills_status != "ready":
+        if not _workflow_skills_ready(report):
             return _gate_payload(
                 gate=gate,
                 decision="block",
@@ -704,6 +707,14 @@ def collect_ready_report(repo_root: str | None = None, *, probe: bool = False) -
     doctor = collect_doctor_report(config, str(resolved_root), probe=probe)
     skills = discover_skills(str(resolved_root))
     source_checkout = _installed_source_checkout()
+    source_names = (
+        sorted(
+            path.parent.name
+            for path in (source_checkout / "claude" / "skills").glob("*/SKILL.md")
+        )
+        if source_checkout is not None
+        else []
+    )
     scan = scan_result_to_dict(scan_repo(resolved_root, use_ai=False))
 
     report: dict[str, Any] = {
@@ -712,8 +723,9 @@ def collect_ready_report(repo_root: str | None = None, *, probe: bool = False) -
         "probe_enabled": probe,
         "config": _config_status(paths),
         "source_checkout": str(source_checkout) if source_checkout is not None else None,
+        "source_names": source_names,
         "provider": _provider_status(doctor),
-        "skills": _skill_status(skills, source_checkout),
+        "skills": _skill_status(skills),
         "scan": _scan_status(scan, repo_root=resolved_root),
         "workflow": _workflow_status(resolved_root),
         "operations": _operations_status(resolved_root),

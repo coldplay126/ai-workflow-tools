@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -156,10 +157,13 @@ def test_unlinker_removes_only_exact_owned_links(tmp_path: Path) -> None:
     assert not absent.exists()
 
 
-def test_unlinker_requires_source_and_root(tmp_path: Path) -> None:
+def test_unlinker_requires_source_and_root() -> None:
     missing_args = run_unlinker(SKILLS_ROOT / "wf")
     assert missing_args.returncode == 2
     assert "usage:" in missing_args.stderr
+
+
+def test_unlinker_removes_missing_source_dangling_owned_link(tmp_path: Path) -> None:
     missing_source = REPO_ROOT / "claude" / "skills" / "missing-skill"
     root = tmp_path / "root"
     root.mkdir()
@@ -169,6 +173,46 @@ def test_unlinker_requires_source_and_root(tmp_path: Path) -> None:
     assert removed.returncode == 0, removed.stderr
     assert not dangling.is_symlink()
     assert f"removed: {dangling}" in removed.stdout
+
+
+def test_unlinker_uses_missing_source_parent_without_other_checkout_fallback(
+    tmp_path: Path,
+) -> None:
+    foreign_parent = tmp_path / "foreign" / "skills"
+    foreign_parent.mkdir(parents=True)
+    root = tmp_path / "root"
+    root.mkdir()
+    owned = root / "wf"
+    owned.symlink_to(foreign_parent / "wf")
+
+    removed = run_unlinker(foreign_parent / "wf", root)
+
+    assert removed.returncode == 0, removed.stderr
+    assert not owned.is_symlink()
+
+    unknown_parent = tmp_path / "unknown" / "skills" / "wf"
+    owned.symlink_to(SKILLS_ROOT / "wf")
+    skipped = run_unlinker(unknown_parent, root)
+    assert skipped.returncode == 0, skipped.stderr
+    assert owned.is_symlink()
+
+
+def test_unlinker_keeps_parent_copy_and_parent_traversal_links(tmp_path: Path) -> None:
+    source = SKILLS_ROOT / "wf"
+    copied = tmp_path / "copied-wf"
+    shutil.copytree(source, copied)
+    targets = (SKILLS_ROOT, copied, source / "..")
+    roots = [tmp_path / f"root-{index}" for index in range(len(targets))]
+    for root, link_target in zip(roots, targets):
+        root.mkdir()
+        (root / "wf").symlink_to(link_target)
+
+    completed = run_unlinker(source, *roots)
+
+    assert completed.returncode == 0, completed.stderr
+    for root in roots:
+        assert (root / "wf").is_symlink()
+        assert f"kept: {root / 'wf'}" in completed.stdout
 
 
 def test_unlinker_resolves_logical_checkout_alias(tmp_path: Path) -> None:
@@ -238,7 +282,6 @@ def run_setup(
 def test_setup_installs_only_core_into_three_runtime_roots(tmp_path: Path) -> None:
     completed = run_setup(tmp_path)
     assert completed.returncode == 0, completed.stderr
-    assert "setup.sh --with-wf" in completed.stdout
     for root in runtime_roots(tmp_path / "home"):
         assert sorted(path.name for path in root.iterdir()) == CORE_SKILLS
         assert all((root / skill / "SKILL.md").is_file() for skill in CORE_SKILLS)

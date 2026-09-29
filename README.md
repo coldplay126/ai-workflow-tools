@@ -96,6 +96,8 @@ agent)과 `awf wt`를 사용합니다. 7단계 `/wf` 스킬 11개가 필요하�
 체크아웃에서 `./setup.sh --with-wf` 또는 `AWF_WITH_WF=1 ./setup.sh`를
 실행하세요. 기본 setup 재실행은 세 루트에서 이 체크아웃이 소유한 기존 WF
 링크만 제거하고 사용자 파일·디렉터리·다른 대상 링크는 유지합니다.
+여기서 소유 링크란 최종 물리 경로가 이 체크아웃의 해당 스킬 원본과
+같은 링크를 뜻하며, 제거 시 링크 엔트리만 삭제하고 대상 데이터는 보존합니다.
 `AGENTS_SKILLS_DIR`, `OMP_SKILLS_DIR`로 해당 두 설치 루트를 바꿀 수 있습니다.
 설치 대상에 동명 사용자 파일이나 디렉터리가 있으면 덮어쓰지 않고
 `AWF_SKILL_INSTALL_RESULT`에
@@ -456,8 +458,10 @@ and performs mutations. Its installable source is packaged at
 links the five CORE skills into `~/.claude/skills`, `~/.agents/skills`, and
 `~/.omp/agent/skills`; opt in to the eleven `/wf` lifecycle skills with
 `./setup.sh --with-wf`. A default rerun removes only WF links owned by this
-checkout. Override the latter two roots with `AGENTS_SKILLS_DIR` and
-`OMP_SKILLS_DIR`. User-owned files, directories, and foreign links are
+checkout. An owned link resolves to the same physical skill source in this
+checkout; removal deletes only the link entry, never its target data.
+Override the latter two roots with `AGENTS_SKILLS_DIR` and `OMP_SKILLS_DIR`.
+User-owned files, directories, and foreign links are
 preserved; a collision while installing emits
 `AWF_SKILL_INSTALL_RESULT ... user_owned` and
 exits with code `3`. A worktree registered by `awf wt import` remains unmanaged

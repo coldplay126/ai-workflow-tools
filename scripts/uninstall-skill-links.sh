@@ -10,8 +10,16 @@ source_input=$1
 shift
 skill_name=${source_input##*/}
 if ! source_dir=$(CDPATH= cd "$source_input" 2>/dev/null && pwd -P); then
-  repo_root=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
-  source_dir=$repo_root/claude/skills/$skill_name
+  if source_parent=$(CDPATH= cd "$(dirname "$source_input")" 2>/dev/null && pwd -P); then
+    source_dir=$source_parent/$skill_name
+  else
+    repo_root=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
+    if [ "$source_input" != "$repo_root/claude/skills/$skill_name" ]; then
+      printf 'warning: source skill directory does not exist; skipping: %s\n' "$source_input" >&2
+      exit 0
+    fi
+    source_dir=$repo_root/claude/skills/$skill_name
+  fi
   printf 'warning: source skill directory does not exist; checking owned link to %s\n' "$source_dir" >&2
 else
   skill_name=${source_dir##*/}

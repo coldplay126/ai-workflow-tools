@@ -492,9 +492,9 @@ approve와 done의 `inline` 표기는 parent HIL 요약을 뜻할 뿐 provider �
 ### provider-config.json 예시
 
 실제 초기화에 쓰이는 [기본 템플릿](templates/provider-config.default.json)을
-참조하세요. Codex host 구성은
-[Codex 기본 템플릿](../../../codex/templates/provider-config.codex-primary.json)에
-있습니다. provider CLI와 phase별 sandbox는 `awf wf next`가 결정합니다.
+참조하세요. Codex host 예시는 저장소 루트의
+`codex/templates/provider-config.codex-primary.json`을 확인하세요.
+provider CLI와 phase별 sandbox는 `awf wf next`가 결정합니다.
 
 `dispatch.omp.role_models`는 기본 비어 있다. OMP worker의 모델은 생성된 agent
 frontmatter의 `@plan`/`@task` alias가 정하며, 사용자가 role_models를 명시한 경우만
@@ -531,7 +531,7 @@ frontmatter의 `@plan`/`@task` alias가 정하며, 사용자가 role_models를 �
 
 | 에러 타입 | 감지 조건 | 복구 경로 |
 |----------|----------|----------|
-| `format_error` | JSON 파싱 실패 | format retry 1회 → 명시된 fallback chain → 실패 보고 |
+| `format_error` | JSON 파싱 실패 | `awf wf next` 재실행 (CLI 판정) |
 | `timeout` | provider 응답 없음 (timeout_seconds 초과) | 명시된 fallback chain → 실패 보고 |
 | `rate_limited` | HTTP 429 + "rate" 키워드 | 60초 대기 → 동일 provider 재시도 1회 → fallback |
 | `budget_exceeded` | HTTP 429 + "billing"/"credits" 키워드 | 다음 provider로 영구 전환 (재시도 없음) |
