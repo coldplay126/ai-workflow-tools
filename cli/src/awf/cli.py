@@ -1194,8 +1194,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help=(
-            "Ignored relative directory to omit from the backup. Repeat only for "
-            "explicitly approved disposable data such as node_modules."
+            "Omit the ignored root node_modules directory from the backup. "
+            "No other path is supported."
         ),
     )
     wt_archive_discard_parser.add_argument(
@@ -1333,8 +1333,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help=(
-            "Ignored relative directory to omit from the replacement archive. "
-            "Repeat for each path."
+            "Omit the ignored root node_modules directory from the replacement "
+            "archive. No other path is supported."
         ),
     )
     wt_archive_repack_parser.add_argument(

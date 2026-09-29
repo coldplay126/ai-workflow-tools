@@ -40,6 +40,9 @@ def _emit(result: CommandResult, *, as_json: bool) -> int:
                 or ""
             )
             print(f"{action['kind']}: {detail}")
+            for key in ("backup_directory", "preview_token"):
+                if key in action:
+                    print(f"{action['kind']}: {key}={action[key]}")
         for blocker in result.blockers:
             print(
                 f"blocked: {blocker['code']}: {blocker['message']}",
@@ -289,6 +292,7 @@ def run_wt_archive_restore(args: argparse.Namespace) -> int:
             decision = "restored"
         else:
             archive.read_verified_archive(archive_path)
+            archive.validate_restore_destination(destination)
             decision = "preview"
         result = CommandResult.ok(
             command,

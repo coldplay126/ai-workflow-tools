@@ -334,6 +334,39 @@ def test_wt_human_output_emits_refresh_warning_to_stderr(
     )
 
 
+@pytest.mark.parametrize(
+    "command,kind",
+    (
+        ("wt.discard-local-branch", "create_commit_bundle"),
+        ("wt.discard-remote-branch", "create_commit_bundle"),
+        ("wt.archive-repack", "repack_archive"),
+    ),
+)
+def test_wt_human_output_exposes_apply_token_and_backup_directory(
+    capsys: pytest.CaptureFixture[str], command: str, kind: str
+) -> None:
+    result = CommandResult.ok(
+        command,
+        decision="preview",
+        actions=(
+            {
+                "kind": kind,
+                "branch": "approved/retired",
+                "preview_token": "abc123",
+                "backup_directory": "/private/archive/approved",
+            },
+        ),
+    )
+
+    assert _emit(result, as_json=False) == 0
+    assert capsys.readouterr().out == (
+        f"{command}: preview\n"
+        f"{kind}: approved/retired\n"
+        f"{kind}: backup_directory=/private/archive/approved\n"
+        f"{kind}: preview_token=abc123\n"
+    )
+
+
 def test_wt_json_output_preserves_external_failure_exit_code(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

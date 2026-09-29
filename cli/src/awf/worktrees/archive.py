@@ -409,28 +409,13 @@ def restore_archive(
     *,
     archive_path: Path,
     destination: Path,
-    exclude_ignored_paths: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Restore one verified archive into an absent private destination."""
     source = _archive_source_path(archive_path)
     manifest = _read_verified_archive(source, git=GitClient(source))
-    source_snapshot = _normalize_snapshot_value(manifest["snapshot"])
-    requested_exclusions = _normalize_excluded_paths(exclude_ignored_paths)
-    source_exclusions = tuple(source_snapshot.get("excluded_paths", ()))
-    additions = tuple(
-        path for path in requested_exclusions if path not in source_exclusions
-    )
-    if additions:
-        _validate_archived_excluded_paths(source, manifest, additions)
-    effective_exclusions = _normalize_excluded_paths(
-        [*source_exclusions, *requested_exclusions]
-    )
-    restored_snapshot = (
-        _filtered_snapshot(source_snapshot, effective_exclusions)
-        if effective_exclusions != source_exclusions
-        else source_snapshot
-    )
-    restored_destination = _restore_destination(destination)
+    restored_snapshot = _normalize_snapshot_value(manifest["snapshot"])
+    source_exclusions = tuple(restored_snapshot.get("excluded_paths", ()))
+    restored_destination = validate_restore_destination(destination)
 
     with TemporaryDirectory(
         prefix=f".{restored_destination.name}.restore-",
@@ -448,8 +433,8 @@ def restore_archive(
                 source / "worktree.tar",
                 staging,
                 restored_snapshot,
-                excluded_paths=effective_exclusions,
-                source_snapshot=source_snapshot,
+                excluded_paths=source_exclusions,
+                source_snapshot=restored_snapshot,
             )
             git_state_snapshot = manifest.get("git_state_snapshot")
             if git_state_snapshot is not None:
@@ -1786,7 +1771,7 @@ def _archive_source_path(path: Path) -> Path:
     return parent / supplied.name
 
 
-def _restore_destination(destination: Path) -> Path:
+def validate_restore_destination(destination: Path) -> Path:
     supplied = Path(destination)
     if not supplied.is_absolute() or ".." in supplied.parts:
         raise ArchiveError(

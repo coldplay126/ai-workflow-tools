@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from awf.cli import main
 
 import awf.worktrees.archive as archive_module
 import awf.worktrees.archive_discard as archive_discard_module
@@ -269,6 +270,45 @@ def test_safe_node_modules_exclusion_restores_without_the_source_repository(
         "preserve ignored file\n"
     )
     assert not (destination / "node_modules").exists()
+
+
+@pytest.mark.parametrize("invalid", ("exists", "missing_parent", "public_parent"))
+def test_archive_restore_preview_rejects_unsafe_destination(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], invalid: str
+) -> None:
+    repository = make_repository(tmp_path)
+    git_client = GitClient(repository)
+    archive_path = _backup_root(tmp_path) / "archive"
+    create_archive(
+        destination=archive_path,
+        worktree_path=repository,
+        snapshot=snapshot_worktree(repository),
+        metadata=_metadata(git_client, repository),
+        git=git_client,
+    )
+    parent = tmp_path / "missing" if invalid == "missing_parent" else tmp_path / "restore"
+    if invalid != "missing_parent":
+        parent.mkdir(mode=0o700)
+    if invalid == "public_parent":
+        parent.chmod(0o755)
+    destination = parent / "worktree"
+    if invalid == "exists":
+        destination.mkdir()
+
+    exit_code = main([
+        "wt", "archive-restore", "--archive", str(archive_path),
+        "--destination", str(destination), "--json",
+    ])
+
+    result = json.loads(capsys.readouterr().out)
+    assert exit_code != 0
+    assert result["decision"] == "blocked"
+    assert result["blockers"][0]["code"] == {
+        "exists": "restore_destination_exists",
+        "missing_parent": "backup_root_invalid",
+        "public_parent": "backup_root_unsafe",
+    }[invalid]
+    assert destination.exists() is (invalid == "exists")
 
 
 @pytest.mark.parametrize("unsafe_case", ("tracked", "symlink"))
