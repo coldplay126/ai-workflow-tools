@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -143,6 +144,158 @@ def test_amend_commit_no_edit_bypasses_repository_hooks(tmp_path: Path) -> None:
     assert amended_head != original_head
     assert client.head_sha(repo) == amended_head
     assert git(repo, "show", f"{amended_head}:recovery.txt") == "recovered"
+
+
+def test_git_client_creates_detached_commit_bundle_without_mutating_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = make_repository(tmp_path)
+    unrelated_root = tmp_path / "unrelated-root"
+    unrelated_root.mkdir()
+    unrelated = make_repository(unrelated_root)
+    client = GitClient(repo)
+    git(repo, "checkout", "-q", "-b", "bundle-source")
+    (repo / "archived.txt").write_text("archived\n", encoding="utf-8")
+    git(repo, "add", "archived.txt")
+    git(repo, "commit", "-q", "-m", "bundle source")
+    commit_sha = client.head_sha()
+    git(repo, "checkout", "-q", "staging")
+    git_dir = repo / ".git"
+    source_objects = git_dir / "objects"
+    alternates = source_objects / "info" / "alternates"
+    before_head = (git_dir / "HEAD").read_bytes()
+    before_index = (git_dir / "index").read_bytes()
+    before_config = (git_dir / "config").read_bytes()
+    before_alternates = alternates.read_bytes() if alternates.exists() else None
+    before_refs = git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
+    before_objects = {
+        path.relative_to(source_objects): path.read_bytes()
+        for path in source_objects.rglob("*")
+        if path.is_file()
+    }
+    bundle = tmp_path / "detached.bundle"
+
+    with monkeypatch.context() as poisoned_environment:
+        poisoned_environment.setenv("GIT_DIR", str(unrelated / ".git"))
+        poisoned_environment.setenv("GIT_WORK_TREE", str(unrelated))
+        poisoned_environment.setenv("GIT_COMMON_DIR", str(unrelated / ".git"))
+        poisoned_environment.setenv("GIT_NAMESPACE", "unrelated")
+        poisoned_environment.setenv("GIT_INDEX_FILE", str(unrelated / ".git" / "index"))
+        poisoned_environment.setenv(
+            "GIT_OBJECT_DIRECTORY", str(unrelated / ".git" / "objects")
+        )
+        poisoned_environment.setenv(
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES", str(unrelated / ".git" / "objects")
+        )
+
+        client.create_detached_commit_bundle(bundle, commit_sha=commit_sha)
+
+    assert (git_dir / "HEAD").read_bytes() == before_head
+    assert (git_dir / "index").read_bytes() == before_index
+    assert (git_dir / "config").read_bytes() == before_config
+    assert (alternates.read_bytes() if alternates.exists() else None) == before_alternates
+    assert git(repo, "for-each-ref", "--format=%(refname) %(objectname)") == before_refs
+    assert {
+        path.relative_to(source_objects): path.read_bytes()
+        for path in source_objects.rglob("*")
+        if path.is_file()
+    } == before_objects
+
+    shutil.rmtree(repo)
+
+    client.verify_bundle(bundle, expected_head=commit_sha)
+
+
+def test_git_client_recovers_sha256_detached_bundle_after_source_removal(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "sha256-source"
+    git(
+        tmp_path,
+        "init",
+        "-q",
+        "--object-format=sha256",
+        "-b",
+        "staging",
+        str(source),
+    )
+    git(source, "config", "user.email", "test@example.com")
+    git(source, "config", "user.name", "AWF Test")
+    git(source, "config", "commit.gpgsign", "false")
+    (source / "README.txt").write_text("sha256 source\n", encoding="utf-8")
+    git(source, "add", "README.txt")
+    git(source, "commit", "-q", "-m", "sha256 source")
+    client = GitClient(source)
+    commit_sha = client.head_sha()
+    bundle = tmp_path / "sha256.bundle"
+
+    assert len(commit_sha) == 64
+
+    client.create_detached_commit_bundle(bundle, commit_sha=commit_sha)
+    shutil.rmtree(source)
+
+    client.verify_bundle(bundle, expected_head=commit_sha)
+
+    recovered = tmp_path / "recovered.git"
+    git(
+        tmp_path,
+        "init",
+        "-q",
+        "--bare",
+        "--object-format=sha256",
+        str(recovered),
+    )
+    git(
+        recovered,
+        "fetch",
+        "-q",
+        str(bundle),
+        "HEAD:refs/heads/archive-verify",
+    )
+    assert git(recovered, "rev-parse", "refs/heads/archive-verify") == commit_sha
+    assert git(recovered, "fsck", "--full", "--strict") == ""
+
+
+def test_git_client_rejects_missing_detached_bundle_commit(tmp_path: Path) -> None:
+    client = GitClient(make_repository(tmp_path))
+    destination = tmp_path / "missing.bundle"
+
+    with pytest.raises(GitError):
+        client.create_detached_commit_bundle(destination, commit_sha="f" * 40)
+
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize(
+    "branch",
+    (
+        "",
+        " ",
+        "name with space",
+        "name\0with-nul",
+        "refs/heads/name",
+        "bad..name",
+    ),
+)
+def test_git_client_rejects_invalid_branch_names(
+    tmp_path: Path, branch: str
+) -> None:
+    client = GitClient(make_repository(tmp_path))
+
+    client.validate_branch_name("awf/valid-branch")
+
+    with pytest.raises(GitError):
+        client.validate_branch_name(branch)
+
+
+def test_git_client_rejects_branch_at_expansion(tmp_path: Path) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    git(repo, "checkout", "-q", "-b", "previous-branch")
+    git(repo, "checkout", "-q", "staging")
+
+    with pytest.raises(GitError):
+        client.validate_branch_name("@{-1}")
 
 
 def test_git_client_reads_refs_and_nul_delimited_status(tmp_path: Path) -> None:
@@ -384,6 +537,239 @@ def test_git_client_cas_delete_preserves_a_branch_after_a_race(
     assert git(repo, "rev-parse", "awf/cas-race") == changed_head
 
 
+def test_git_client_reads_only_direct_local_branch_refs(tmp_path: Path) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    branch = "awf/local-sha"
+    git(repo, "branch", branch)
+    expected_sha = git(repo, "rev-parse", branch)
+
+    assert client.local_branch_sha(branch) == expected_sha
+    assert client.local_branch_sha("awf/missing-local-sha") is None
+
+    alias = "awf/local-sha-alias"
+    git(repo, "symbolic-ref", f"refs/heads/{alias}", "refs/heads/staging")
+
+    with pytest.raises(GitError, match="direct reference"):
+        client.local_branch_sha(alias)
+    with pytest.raises(GitError, match="direct reference"):
+        client.delete_inactive_branch_if_at(
+            alias,
+            expected_sha,
+            before_commit=lambda: None,
+        )
+
+    assert git(repo, "rev-parse", "staging") == expected_sha
+
+
+def test_git_client_inactive_branch_delete_preserves_cas_drift(
+    tmp_path: Path,
+) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    branch = "awf/inactive-cas-race"
+    git(repo, "branch", branch)
+    expected_sha = git(repo, "rev-parse", branch)
+    git(repo, "checkout", "-q", "-b", "inactive-cas-advance")
+    (repo / "advanced.txt").write_text("advanced\n", encoding="utf-8")
+    git(repo, "add", "advanced.txt")
+    git(repo, "commit", "-q", "-m", "advance inactive branch")
+    advanced_sha = git(repo, "rev-parse", "HEAD")
+    git(repo, "checkout", "-q", "staging")
+    git(repo, "branch", "-f", branch, advanced_sha)
+    callback_calls: list[None] = []
+
+    with pytest.raises(GitError, match="changed before deletion"):
+        client.delete_inactive_branch_if_at(
+            branch,
+            expected_sha,
+            before_commit=lambda: callback_calls.append(None),
+        )
+
+    assert callback_calls == []
+    assert client.local_branch_sha(branch) == advanced_sha
+
+
+def test_git_client_inactive_branch_delete_rejects_checked_out_branch(
+    tmp_path: Path,
+) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    branch = "awf/active-local-delete"
+    worktree = tmp_path / "active-local-delete"
+    expected_sha = client.head_sha()
+    client.add_worktree(worktree, branch, expected_sha)
+    callback_calls: list[None] = []
+
+    with pytest.raises(GitError, match="checked out"):
+        client.delete_inactive_branch_if_at(
+            branch,
+            expected_sha,
+            before_commit=lambda: callback_calls.append(None),
+        )
+
+    assert callback_calls == []
+    assert client.local_branch_sha(branch) == expected_sha
+
+
+def test_git_client_inactive_branch_delete_releases_locks_after_callback_error(
+    tmp_path: Path,
+) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    branch = "awf/callback-error"
+    expected_sha = client.head_sha()
+    git(repo, "branch", branch)
+
+    def fail_attempt() -> None:
+        raise RuntimeError("durable attempt failed")
+
+
+    with pytest.raises(RuntimeError, match="durable attempt failed"):
+        client.delete_inactive_branch_if_at(
+            branch,
+            expected_sha,
+            before_commit=fail_attempt,
+        )
+
+    assert client.local_branch_sha(branch) == expected_sha
+    git(repo, "switch", "-q", branch)
+    git(repo, "switch", "-q", "staging")
+
+
+def test_git_client_inactive_branch_delete_locks_every_head_and_preserves_state(
+    tmp_path: Path,
+) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    branch = "awf/locked-local-delete"
+    other_worktree = tmp_path / "other-local-delete"
+    expected_sha = client.head_sha()
+    git(repo, "branch", branch)
+    client.add_worktree(other_worktree, "awf/other-local-delete", expected_sha)
+    other_git_dir = Path(git(other_worktree, "rev-parse", "--git-dir"))
+    if not other_git_dir.is_absolute():
+        other_git_dir = other_worktree / other_git_dir
+    root_head = git(repo, "symbolic-ref", "HEAD")
+    root_index = (repo / ".git" / "index").read_bytes()
+    config = (repo / ".git" / "config").read_bytes()
+    other_head = git(other_worktree, "symbolic-ref", "HEAD")
+    other_index = (other_git_dir / "index").read_bytes()
+    switch_results: list[subprocess.CompletedProcess[str]] = []
+    conversion_results: list[subprocess.CompletedProcess[str]] = []
+
+    def record_attempts() -> None:
+        switch_results.append(
+            subprocess.run(
+                ["git", "switch", "-q", branch],
+                cwd=repo,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        )
+        conversion_results.append(
+            subprocess.run(
+                [
+                    "git",
+                    "symbolic-ref",
+                    f"refs/heads/{branch}",
+                    "refs/heads/staging",
+                ],
+                cwd=repo,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        )
+
+    client.delete_inactive_branch_if_at(
+        branch,
+        expected_sha,
+        before_commit=record_attempts,
+    )
+
+    assert len(switch_results) == 1
+    assert len(conversion_results) == 1
+    assert switch_results[0].returncode != 0
+    assert conversion_results[0].returncode != 0
+    assert client.local_branch_sha(branch) is None
+    assert git(repo, "symbolic-ref", "HEAD") == root_head
+    assert (repo / ".git" / "index").read_bytes() == root_index
+    assert (repo / ".git" / "config").read_bytes() == config
+    assert git(other_worktree, "symbolic-ref", "HEAD") == other_head
+    assert (other_git_dir / "index").read_bytes() == other_index
+
+
+def test_git_client_inactive_branch_delete_aborts_for_late_no_checkout_worktree(
+    tmp_path: Path,
+) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    branch = "awf/late-no-checkout"
+    late_worktree = tmp_path / "late-no-checkout"
+    expected_sha = client.head_sha()
+    git(repo, "branch", branch)
+    add_results: list[subprocess.CompletedProcess[str]] = []
+
+    def add_late_worktree() -> None:
+        add_results.append(
+            subprocess.run(
+                [
+                    "git",
+                    "worktree",
+                    "add",
+                    "--no-checkout",
+                    str(late_worktree),
+                    branch,
+                ],
+                cwd=repo,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        )
+
+    with pytest.raises(GitError, match="inventory changed"):
+        client.delete_inactive_branch_if_at(
+            branch,
+            expected_sha,
+            before_commit=add_late_worktree,
+        )
+
+    assert len(add_results) == 1
+    assert add_results[0].returncode == 0
+    assert client.local_branch_sha(branch) == expected_sha
+    client.remove_worktree(late_worktree, force=True)
+
+
+def test_git_client_inactive_branch_delete_isolates_reference_transaction_hook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    branch = "awf/hook-isolation"
+    expected_sha = client.head_sha()
+    git(repo, "branch", branch)
+    marker = tmp_path / "reference-transaction-ran"
+    hook = repo / ".git" / "hooks" / "reference-transaction"
+    hook.write_text(
+        "#!/bin/sh\nprintf hook > \"$AWF_TEST_HOOK_MARKER\"\n",
+        encoding="utf-8",
+    )
+    hook.chmod(0o755)
+    monkeypatch.setenv("AWF_TEST_HOOK_MARKER", str(marker))
+
+    client.delete_inactive_branch_if_at(
+        branch,
+        expected_sha,
+        before_commit=lambda: None,
+    )
+
+    assert not marker.exists()
+    assert client.local_branch_sha(branch) is None
+
+
 def test_git_client_cas_deletes_remote_branch_at_expected_head(
     tmp_path: Path,
 ) -> None:
@@ -418,6 +804,43 @@ def test_git_client_remote_cas_delete_preserves_recreated_branch(
         client.delete_remote_branch_if_at("awf/remote-cas-race", expected_head)
 
     assert git(repo, "ls-remote", "--heads", "origin", "awf/remote-cas-race").split()[0] == changed_head
+
+
+def test_git_client_selectively_skips_remote_delete_hooks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = make_repository(tmp_path)
+    client = GitClient(repo)
+    hooked_branch = "awf/hooked-remote-delete"
+    skipped_branch = "awf/skipped-remote-delete"
+    git(repo, "branch", hooked_branch)
+    git(repo, "branch", skipped_branch)
+    git(repo, "push", "-q", "origin", hooked_branch)
+    git(repo, "push", "-q", "origin", skipped_branch)
+    hooked_head = git(repo, "rev-parse", hooked_branch)
+    skipped_head = git(repo, "rev-parse", skipped_branch)
+    marker = tmp_path / "pre-push-ran"
+    hook = repo / ".git" / "hooks" / "pre-push"
+    hook.write_text(
+        "#!/bin/sh\nprintf hook > \"$AWF_TEST_HOOK_MARKER\"\nexit 1\n",
+        encoding="utf-8",
+    )
+    hook.chmod(0o755)
+    monkeypatch.setenv("AWF_TEST_HOOK_MARKER", str(marker))
+
+    with pytest.raises(GitRemoteError):
+        client.delete_remote_branch_if_at(hooked_branch, hooked_head)
+
+    assert marker.read_text(encoding="utf-8") == "hook"
+    assert git(repo, "ls-remote", "--heads", "origin", hooked_branch)
+    marker.unlink()
+
+    client.delete_remote_branch_if_at(
+        skipped_branch, skipped_head, skip_hooks=True
+    )
+
+    assert not marker.exists()
+    assert git(repo, "ls-remote", "--heads", "origin", skipped_branch) == ""
 
 
 @pytest.mark.parametrize(

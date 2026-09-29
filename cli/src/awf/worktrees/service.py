@@ -17,6 +17,10 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
+from .archive_discard import ArchiveDiscarder
+from .archive_repack import ArchiveRepacker
+from .remote_branch_discard import RemoteBranchDiscarder
+from .local_branch_discard import LocalBranchDiscarder
 from .config import (
     ConfigError,
     WorktreeConfig,
@@ -2900,6 +2904,200 @@ class WorktreeService:
                 },
             ),
         )
+
+    def archive_repack(
+        self,
+        archive_path: Path,
+        *,
+        exclude_ignored_paths: tuple[str, ...] = (),
+        preview_token: str | None = None,
+        apply: bool = False,
+    ) -> CommandResult:
+        if self.git is None:
+            return CommandResult.blocked(
+                "wt.archive-repack",
+                blockers=(
+                    {
+                        "code": "repository_unavailable",
+                        "message": "archive repack requires a Git repository",
+                    },
+                ),
+            )
+        repacker = ArchiveRepacker(
+            registry=self.registry,
+            git=self.git,
+            cache_dir=self.cache_dir,
+            lock_dir=self.lock_dir,
+        )
+        try:
+            return repacker.run(
+                archive_path,
+                exclude_ignored_paths=exclude_ignored_paths,
+                preview_token=preview_token,
+                apply=apply,
+            )
+        except (OSError, RuntimeError, ValueError, sqlite3.Error):
+            return CommandResult.blocked(
+                "wt.archive-repack",
+                blockers=(
+                    {
+                        "code": "archive_repack_failed",
+                        "message": "archive repack could not complete safely",
+                    },
+                ),
+            )
+
+
+    def archive_discard(
+        self,
+        lease_id: str,
+        *,
+        backup_root: Path,
+        reason: str,
+        preview_token: str | None = None,
+        apply: bool = False,
+        include_uncommitted: bool = False,
+        exclude_ignored_paths: tuple[str, ...] = (),
+    ) -> CommandResult:
+        if self.git is None:
+            return CommandResult.blocked(
+                "wt.archive-discard",
+                blockers=(
+                    {
+                        "code": "repository_unavailable",
+                        "message": "archive discard requires a Git repository",
+                    },
+                ),
+            )
+        discarder = ArchiveDiscarder(
+            registry=self.registry,
+            git=self.git,
+            github=self.github,
+            cache_dir=self.cache_dir,
+            lock_dir=self.lock_dir,
+            default_base=self.config.default_base,
+            production_branch=self.config.production_branch,
+        )
+        try:
+            return discarder.run(
+                lease_id,
+                backup_root=backup_root,
+                reason=reason,
+                preview_token=preview_token,
+                apply=apply,
+                include_uncommitted=include_uncommitted,
+                exclude_ignored_paths=exclude_ignored_paths,
+            )
+        except (OSError, RuntimeError, ValueError, sqlite3.Error):
+            return CommandResult.blocked(
+                "wt.archive-discard",
+                blockers=(
+                    {
+                        "code": "archive_discard_failed",
+                        "message": "archive discard could not complete safely",
+                    },
+                ),
+            )
+
+    def discard_remote_branch(
+        self,
+        branch: str,
+        *,
+        expected_sha: str,
+        backup_root: Path,
+        reason: str,
+        preview_token: str | None = None,
+        apply: bool = False,
+    ) -> CommandResult:
+        if self.git is None:
+            return CommandResult.blocked(
+                "wt.discard-remote-branch",
+                blockers=(
+                    {
+                        "code": "repository_unavailable",
+                        "message": "remote branch discard requires a Git repository",
+                    },
+                ),
+            )
+        discarder = RemoteBranchDiscarder(
+            registry=self.registry,
+            git=self.git,
+            github=self.github,
+            cache_dir=self.cache_dir,
+            lock_dir=self.lock_dir,
+            default_base=self.config.default_base,
+            production_branch=self.config.production_branch,
+            feature_base=self.config.feature_base,
+        )
+        try:
+            return discarder.run(
+                branch,
+                expected_sha=expected_sha,
+                backup_root=backup_root,
+                reason=reason,
+                preview_token=preview_token,
+                apply=apply,
+            )
+        except (OSError, RuntimeError, ValueError, sqlite3.Error):
+            return CommandResult.blocked(
+                "wt.discard-remote-branch",
+                blockers=(
+                    {
+                        "code": "remote_branch_discard_failed",
+                        "message": "remote branch discard could not complete safely",
+                    },
+                ),
+            )
+
+    def discard_local_branch(
+        self,
+        branch: str,
+        *,
+        expected_sha: str,
+        backup_root: Path,
+        reason: str,
+        preview_token: str | None = None,
+        apply: bool = False,
+    ) -> CommandResult:
+        if self.git is None:
+            return CommandResult.blocked(
+                "wt.discard-local-branch",
+                blockers=(
+                    {
+                        "code": "repository_unavailable",
+                        "message": "local branch discard requires a Git repository",
+                    },
+                ),
+            )
+        discarder = LocalBranchDiscarder(
+            registry=self.registry,
+            git=self.git,
+            github=self.github,
+            cache_dir=self.cache_dir,
+            lock_dir=self.lock_dir,
+            default_base=self.config.default_base,
+            production_branch=self.config.production_branch,
+            feature_base=self.config.feature_base,
+        )
+        try:
+            return discarder.run(
+                branch,
+                expected_sha=expected_sha,
+                backup_root=backup_root,
+                reason=reason,
+                preview_token=preview_token,
+                apply=apply,
+            )
+        except (OSError, RuntimeError, ValueError, sqlite3.Error):
+            return CommandResult.blocked(
+                "wt.discard-local-branch",
+                blockers=(
+                    {
+                        "code": "local_branch_discard_failed",
+                        "message": "local branch discard could not complete safely",
+                    },
+                ),
+            )
 
     def discard_promotion(
         self, lease_id: str, *, apply: bool = False
@@ -11606,9 +11804,9 @@ class WorktreeService:
             )
         return None
 
-    def _manual_reviewed_promotion_message(
-        self, lease: Lease, target_branch: str, *, read_only: bool = False
-    ) -> str:
+    def _manual_reviewed_promotion_sources(
+        self, lease: Lease, *, read_only: bool
+    ) -> Sequence[PullRequest | PromotionSource]:
         sources = (
             self.registry.get_promotion_sources_read_only(lease.id)
             if read_only
@@ -11618,7 +11816,17 @@ class WorktreeService:
             github = self.github or GhClient(self.git.repository_root())
             legacy_source = github.view_pr(lease.source_pr)
             if self._legacy_promotion_source_pins_match(lease, (legacy_source,)):
-                sources = (legacy_source,)
+                return (legacy_source,)
+        return sources
+
+    def _manual_reviewed_promotion_message(
+        self,
+        lease: Lease,
+        target_branch: str,
+        *,
+        sources: Sequence[PullRequest | PromotionSource],
+        legacy_subject: bool = False,
+    ) -> str:
         return self._promotion_message(
             sources=sources,
             excluded_paths=(),
@@ -11626,6 +11834,7 @@ class WorktreeService:
             lease=lease,
             target_branch=target_branch,
             resolution_state=ResolutionState.MANUAL_REVIEWED,
+            legacy_subject=legacy_subject,
         )
 
     def _manual_reviewed_promotion_message_matches(
@@ -11637,8 +11846,21 @@ class WorktreeService:
         read_only: bool,
         allow_legacy_unpinned: bool,
     ) -> bool:
+        sources = self._manual_reviewed_promotion_sources(
+            lease,
+            read_only=read_only,
+        )
         if message == self._manual_reviewed_promotion_message(
-            lease, target_branch, read_only=read_only
+            lease,
+            target_branch,
+            sources=sources,
+        ):
+            return True
+        if message == self._manual_reviewed_promotion_message(
+            lease,
+            target_branch,
+            sources=sources,
+            legacy_subject=True,
         ):
             return True
         return allow_legacy_unpinned and self._legacy_manual_reviewed_message_matches(
@@ -11658,6 +11880,16 @@ class WorktreeService:
             or _GIT_OBJECT_ID.fullmatch(source.merge_commit_sha) is None
         ):
             return False
+        if message == self._promotion_message(
+            sources=(source,),
+            excluded_paths=(),
+            target_sha=lease.target_base_sha or "",
+            lease=lease,
+            target_branch=target_branch,
+            resolution_state=ResolutionState.MANUAL_REVIEWED,
+            include_source_merge=False,
+        ):
+            return True
         return message == self._promotion_message(
             sources=(source,),
             excluded_paths=(),
@@ -11666,6 +11898,7 @@ class WorktreeService:
             target_branch=target_branch,
             resolution_state=ResolutionState.MANUAL_REVIEWED,
             include_source_merge=False,
+            legacy_subject=True,
         )
 
     @staticmethod
@@ -13056,12 +13289,28 @@ class WorktreeService:
             )
         return CommandResult.ok("wt.promote", decision="ready", lease=lease)
     @staticmethod
+    def _promotion_pr_phrase(source_prs: Sequence[int]) -> str:
+        label = "PR" if len(source_prs) == 1 else "PRs"
+        numbers = ", ".join(f"#{source_pr}" for source_pr in source_prs)
+        return f"{label} {numbers}"
+
+    @staticmethod
     def _promotion_title(
         source_prs: Sequence[int], target_branch: str
     ) -> str:
-        label = "PR" if len(source_prs) == 1 else "PRs"
-        numbers = ", ".join(f"#{source_pr}" for source_pr in source_prs)
-        return f"Promote {label} {numbers} to {target_branch}"
+        return (
+            f"Promote {WorktreeService._promotion_pr_phrase(source_prs)} "
+            f"to {target_branch}"
+        )
+
+    @staticmethod
+    def _promotion_commit_subject(
+        source_prs: Sequence[int], target_branch: str
+    ) -> str:
+        return (
+            f"chore: promote {WorktreeService._promotion_pr_phrase(source_prs)} "
+            f"to {target_branch}"
+        )
 
 
     @staticmethod
@@ -13155,15 +13404,19 @@ class WorktreeService:
         target_branch: str,
         resolution_state: ResolutionState | None = None,
         include_source_merge: bool = True,
+        legacy_subject: bool = False,
     ) -> str:
+        source_prs = tuple(
+            self._promotion_source_number(source) for source in sources
+        )
+        subject = (
+            self._promotion_title(source_prs, target_branch)
+            if legacy_subject
+            else self._promotion_commit_subject(source_prs, target_branch)
+        )
         return "\n".join(
             (
-                self._promotion_title(
-                    tuple(
-                        self._promotion_source_number(source) for source in sources
-                    ),
-                    target_branch,
-                ),
+                subject,
                 "",
                 *self._promotion_trailers(
                     include_source_merge=include_source_merge,
@@ -13203,13 +13456,18 @@ class WorktreeService:
         source_trailer_count = (
             3 if legacy_source_trailers else standard_source_trailer_count
         )
+        source_prs = tuple(source.number for source in sources)
+        subject = WorktreeService._promotion_commit_subject(
+            source_prs,
+            target_branch,
+        )
         if (
             len(lines)
             != source_trailer_count + len(excluded_paths) + 4 + mode_trailer_count
-            or lines[0]
-            != WorktreeService._promotion_title(
-                tuple(source.number for source in sources),
-                target_branch,
+            or (
+                lines[0] != subject
+                and lines[0]
+                != WorktreeService._promotion_title(source_prs, target_branch)
             )
             or lines[1] != ""
         ):

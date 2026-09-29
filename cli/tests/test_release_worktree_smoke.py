@@ -35,6 +35,7 @@ class FakeGitHub:
     prs: dict[int, PullRequest] = field(default_factory=dict)
     open_prs: dict[tuple[str, str], PullRequest] = field(default_factory=dict)
     created_pr_bodies: list[str] = field(default_factory=list)
+    created_pr_titles: list[str] = field(default_factory=list)
 
     def view_pr(self, number: int) -> PullRequest:
         return self.prs[number]
@@ -67,6 +68,7 @@ class FakeGitHub:
         self, *, base: str, head: str, title: str, body: str
     ) -> PullRequest:
         self.created_pr_bodies.append(body)
+        self.created_pr_titles.append(title)
         pull_request = PullRequest(
             number=900,
             state="OPEN",
@@ -435,6 +437,37 @@ class SmokeHarness:
 @pytest.fixture
 def smoke(tmp_path: Path) -> SmokeHarness:
     return SmokeHarness.create(tmp_path)
+
+def _install_conventional_commit_msg_hook(repo: Path) -> Path:
+    hook = repo / ".git" / "hooks" / "commit-msg"
+    marker = hook.with_name("commit-msg-subject")
+    hook.write_text(
+        "#!/bin/sh\n"
+        "sed -n '1p' \"$1\" > \"$(dirname \"$0\")/commit-msg-subject\"\n"
+        "grep -Eq '^[a-z]+(\\(.+\\))?: .+' \"$1\" || exit 1\n",
+        encoding="utf-8",
+    )
+    hook.chmod(0o755)
+    return marker
+
+
+def test_promotion_commit_passes_conventional_commit_msg_hook(
+    smoke: SmokeHarness,
+) -> None:
+    marker = _install_conventional_commit_msg_hook(smoke.repo)
+
+    promoted = smoke.service.promote(
+        source_pr=372,
+        target_branch="main",
+        apply=True,
+    )
+
+    assert promoted.decision == "ready", promoted.blockers
+    assert promoted.lease is not None
+    subject = smoke.git.commit_message(promoted.lease.worktree_path).splitlines()[0]
+    assert subject == "chore: promote PR #372 to main"
+    assert marker.read_text(encoding="utf-8") == f"{subject}\n"
+    assert smoke.github.created_pr_titles == ["Promote PR #372 to main"]
 
 
 def _prepare_counter_script(path: Path) -> str:

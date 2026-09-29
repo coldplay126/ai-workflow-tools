@@ -8,6 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from awf.core.paths import find_repo_root
+from awf.worktrees import archive
 from awf.worktrees.config import ConfigError, load_worktree_config
 from awf.worktrees.git import GitClient, GitError, GitRemoteError
 from awf.worktrees.github import GhClient
@@ -24,8 +25,16 @@ def _emit(result: CommandResult, *, as_json: bool) -> int:
         for lease in result.leases:
             print(f"{lease.id}  {lease.state.value:16}  {lease.worktree_path}")
         for action in result.actions:
+            if action["kind"] == "create_archive":
+                print(
+                    f"create_archive: backup_directory={action.get('backup_directory', '')}"
+                )
+                print(f"create_archive: preview_token={action.get('preview_token', '')}")
+                continue
             detail = (
                 action.get("path")
+                or action.get("destination")
+                or action.get("archive_directory")
                 or action.get("branch")
                 or action.get("lease_id")
                 or ""
@@ -207,6 +216,121 @@ def run_wt_recover_promotion(args: argparse.Namespace) -> int:
             apply=args.apply,
         ),
     )
+
+def run_wt_archive_discard(args: argparse.Namespace) -> int:
+    return _run(
+        args,
+        "wt.archive-discard",
+        lambda service: service.archive_discard(
+            args.lease,
+            backup_root=Path(args.backup_root),
+            reason=args.reason,
+            preview_token=args.preview_token,
+            apply=args.apply,
+            include_uncommitted=args.include_uncommitted,
+            exclude_ignored_paths=tuple(args.exclude_ignored_path),
+        ),
+    )
+
+
+def run_wt_discard_remote_branch(args: argparse.Namespace) -> int:
+    return _run(
+        args,
+        "wt.discard-remote-branch",
+        lambda service: service.discard_remote_branch(
+            args.branch,
+            expected_sha=args.expected_sha,
+            backup_root=Path(args.backup_root),
+            reason=args.reason,
+            preview_token=args.preview_token,
+            apply=args.apply,
+        ),
+    )
+
+
+def run_wt_discard_local_branch(args: argparse.Namespace) -> int:
+    return _run(
+        args,
+        "wt.discard-local-branch",
+        lambda service: service.discard_local_branch(
+            args.branch,
+            expected_sha=args.expected_sha,
+            backup_root=Path(args.backup_root),
+            reason=args.reason,
+            preview_token=args.preview_token,
+            apply=args.apply,
+        ),
+    )
+
+
+def run_wt_archive_repack(args: argparse.Namespace) -> int:
+    return _run(
+        args,
+        "wt.archive-repack",
+        lambda service: service.archive_repack(
+            Path(args.archive),
+            exclude_ignored_paths=tuple(args.exclude_ignored_path),
+            preview_token=args.preview_token,
+            apply=args.apply,
+        ),
+    )
+
+
+def run_wt_archive_restore(args: argparse.Namespace) -> int:
+    command = "wt.archive-restore"
+    archive_path = Path(args.archive)
+    destination = Path(args.destination)
+    try:
+        if args.apply:
+            archive.restore_archive(
+                archive_path=archive_path,
+                destination=destination,
+            )
+            decision = "restored"
+        else:
+            archive.read_verified_archive(archive_path)
+            decision = "preview"
+        result = CommandResult.ok(
+            command,
+            decision=decision,
+            actions=(
+                {
+                    "kind": "restore_archive",
+                    "archive_directory": str(archive_path),
+                    "destination": str(destination),
+                },
+            ),
+        )
+    except archive.ArchiveError as error:
+        result = CommandResult.blocked(
+            command,
+            blockers=({"code": error.code, "message": str(error)},),
+        )
+    except GitError as error:
+        result = CommandResult.error(
+            command,
+            code="git_error",
+            message=str(error),
+            exit_code=5,
+        )
+    except OSError as error:
+        result = CommandResult.error(
+            command,
+            code="filesystem_error",
+            message=str(error),
+            exit_code=5,
+        )
+    except ValueError:
+        result = CommandResult.blocked(
+            command,
+            blockers=(
+                {
+                    "code": "archive_restore_failed",
+                    "message": "archive restore could not complete safely",
+                },
+            ),
+        )
+    return _emit(result, as_json=bool(args.json))
 
 
 def run_wt_discard_promotion(args: argparse.Namespace) -> int:
