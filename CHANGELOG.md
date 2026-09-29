@@ -109,6 +109,9 @@
   foreign repository, 소유권·경로 증명 실패는 계속 차단한다. REMOVED 재시도에서
   local branch가 이미 없다면 idempotent 결과를 반환하고 다른 worktree가 checkout
   중이면 branch를 보존한다.
+- discard·archive 명령의 backup root는 본인 소유 `0700`이어야 하고, group/world-writable
+  조상은 root 또는 본인 소유의 sticky 디렉터리일 때만 허용한다. 백업은 discard 뒤
+  유일한 복구 수단이므로 `/tmp` 같은 자동 정리 경로가 아닌 영구 저장소에 둔다.
 - `--exclude-ignored-path node_modules`만 지원하며, 검증된 루트 ignored directory를 새 backup에서
   의도적으로 제외한다. 해당 내부의 로컬 변경까지 복원되지 않지만 다른 ignored
   파일(환경 파일 포함)은 보존하며, exclusion 정책은 preview token과 manifest에

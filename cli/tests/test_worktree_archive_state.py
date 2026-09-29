@@ -22,6 +22,7 @@ from awf.worktrees.archive import (
     read_verified_archive,
     restore_archive,
     snapshot_worktree,
+    validate_backup_root,
 )
 from awf.worktrees.archive_repack import ArchiveRepacker
 from awf.worktrees.git import GitClient, GitError
@@ -1114,3 +1115,24 @@ def test_absent_dirty_worktree_resumes_its_reservation_without_a_checkpoint_jour
     )
     assert resumed.status == "ok"
     assert not worktree.exists()
+
+
+@pytest.mark.parametrize(("parent_mode", "accepted"), ((0o1777, True), (0o777, False), (0o775, False)))
+def test_backup_root_accepts_only_sticky_shared_ancestors(
+    tmp_path: Path, parent_mode: int, accepted: bool
+) -> None:
+    shared = tmp_path.resolve() / "shared"
+    shared.mkdir()
+    root = shared / "backups"
+    root.mkdir(mode=0o700)
+    root.chmod(0o700)
+    shared.chmod(parent_mode)
+    try:
+        if accepted:
+            assert validate_backup_root(root, forbidden_roots=()) == root
+        else:
+            with pytest.raises(ArchiveError) as raised:
+                validate_backup_root(root, forbidden_roots=())
+            assert raised.value.code == "backup_root_unsafe"
+    finally:
+        shared.chmod(0o700)

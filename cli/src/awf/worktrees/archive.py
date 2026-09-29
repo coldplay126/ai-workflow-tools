@@ -639,7 +639,10 @@ def _validate_directory_component(details: os.stat_result, label: str) -> None:
         raise ArchiveError("backup_root_unsafe", f"{label} has a symlink or non-directory ancestor")
     if details.st_uid not in {0, os.getuid()}:
         raise ArchiveError("backup_root_unsafe", f"{label} has an untrusted owner")
-    if details.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+    # A sticky ancestor (for example /tmp, mode 1777) lets other users create entries
+    # but not rename or remove entries they do not own, so our owned descendants
+    # cannot be swapped. Any other group- or world-writable ancestor is unsafe.
+    if details.st_mode & (stat.S_IWGRP | stat.S_IWOTH) and not details.st_mode & stat.S_ISVTX:
         raise ArchiveError("backup_root_unsafe", f"{label} has an unsafe writable ancestor")
 
 

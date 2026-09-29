@@ -588,7 +588,11 @@ rejected path is a blocker, not permission to remove it manually.
 
 The archive can contain secrets because `worktree.tar` preserves all
 non-excluded files and `history.bundle` preserves Git history. AWF rejects
-symlinked ancestors, unsafe ownership or permissions, and unsafe locations. It
+symlinked ancestors, unsafe ownership or permissions, and unsafe locations;
+a group- or world-writable ancestor is accepted only when it is sticky and owned
+by root or the operator. The backup root MUST be durable storage: never place it
+under `/tmp`, `/var/tmp`, or another automatically cleaned location, because the
+backup is the only recovery path after a discard. It
 creates archive directories with mode `0700` and artifacts with mode `0600`.
 The requesting operator may receive the local `backup_directory` and a
 non-sensitive verification summary. Never expose archive contents, the full
