@@ -149,6 +149,7 @@ def test_nested_wheel_is_not_an_editable_source(
     monkeypatch.setattr("awf.__file__", str(installed))
     monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
     monkeypatch.delenv("AWF_SKILLS_DIR", raising=False)
+    monkeypatch.delenv("AWF_WORKFLOW_TEMPLATE_DIR", raising=False)
     monkeypatch.chdir(consumer)
 
     assert find_skill_dir("wf-orchestrator") is None
@@ -240,6 +241,8 @@ def test_missing_prompt_templates_emit_visible_warning(
 ) -> None:
     repo, env = _consumer_env(tmp_path)
     monkeypatch.setenv("HOME", env["HOME"])
+    monkeypatch.delenv("AWF_SKILLS_DIR", raising=False)
+    monkeypatch.delenv("AWF_WORKFLOW_TEMPLATE_DIR", raising=False)
     monkeypatch.chdir(repo)
     initialize_workflow(str(repo), "Missing prompt warning")
     from awf.core.workflow_prompt import build_workflow_prompt
