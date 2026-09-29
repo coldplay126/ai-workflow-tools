@@ -238,7 +238,7 @@ class RemoteBranchDiscarder:
         if environment_blocker is not None:
             return environment_blocker
         try:
-            repository_root = self.git.common_repository_root()
+            repository_root = self.git.repository_root()
             repository_id = self.git.repository_id()
         except (GitError, OSError):
             return self._blocked(
@@ -272,8 +272,15 @@ class RemoteBranchDiscarder:
             return self._blocked(
                 "backup_root_invalid", "The backup root could not be safely validated."
             )
+        try:
+            repository_leases = self._repository_leases(leases, repository_id)
+        except (GitError, OSError):
+            return self._blocked(
+                "repository_inspection_failed", "Unable to inspect the Git common directory."
+            )
         foreign_lease = self._foreign_remote_lease_blocker(
-            branch, leases=leases, repository_id=repository_id
+            branch, leases=leases, repository_leases=repository_leases,
+            repository_id=repository_id,
         )
         if foreign_lease is not None:
             return foreign_lease
@@ -284,7 +291,7 @@ class RemoteBranchDiscarder:
                 "default_branch_unknown", "Unable to determine origin's default branch."
             )
         protected = self._protected_branch_blocker(
-            branch, default_remote_branch=default_remote_branch, leases=leases, repository_id=repository_id
+            branch, default_remote_branch=default_remote_branch, leases=repository_leases
         )
         if protected is not None:
             return protected
@@ -295,15 +302,11 @@ class RemoteBranchDiscarder:
             )
         matching_leases = tuple(
             sorted(
-                (
-                    lease
-                    for lease in leases
-                    if lease.repository_id == repository_id and lease.branch == branch
-                ),
+                (lease for lease in repository_leases if lease.branch == branch),
                 key=lambda lease: lease.id,
             )
         )
-        lease_blocker = self._lease_blocker(matching_leases, repository_id=repository_id)
+        lease_blocker = self._lease_blocker(matching_leases)
         if lease_blocker is not None:
             return lease_blocker
         try:
@@ -403,34 +406,64 @@ class RemoteBranchDiscarder:
             leases=matching_leases,
         )
 
+    def _repository_leases(
+        self, leases: tuple[Lease, ...], repository_id: str
+    ) -> tuple[Lease, ...]:
+        """Match historical linked-root leases by their physical Git common dir."""
+        common_dir = self.git.common_git_directory()
+        related: list[Lease] = []
+        for lease in leases:
+            if lease.repository_id == repository_id:
+                related.append(lease)
+                continue
+            if lease.state is LeaseState.REMOVED and not lease.retain:
+                continue
+            try:
+                lease_common_dir = GitClient(lease.repository_root).common_git_directory()
+            except (GitError, OSError):
+                # A missing historical root cannot prove common-store ownership.
+                continue
+            if lease_common_dir == common_dir:
+                related.append(lease)
+        return tuple(related)
+
     def _foreign_remote_lease_blocker(
-        self, branch: str, *, leases: tuple[Lease, ...], repository_id: str
+        self, branch: str, *, leases: tuple[Lease, ...],
+        repository_leases: tuple[Lease, ...], repository_id: str,
     ) -> CommandResult | None:
-        """A shared origin must not let a different repository identity bypass a lease."""
-        candidates = (
-            lease for lease in leases
-            if lease.repository_id != repository_id
-            and (
-                lease.branch == branch
-                or (
-                    lease.state is not LeaseState.REMOVED
-                    and self._strip_refs(lease.base_ref) == branch
-                )
-            )
-        )
+        """Only remote deletion considers active leases from another clone of origin."""
         try:
             remote = _normalize_remote_url(self.git.remote_url())
-            for lease in candidates:
-                if _normalize_remote_url(GitClient(lease.repository_root).remote_url()) == remote:
-                    return self._blocked(
-                        "repository_mismatch",
-                        "A lease for this origin has a different repository identity.",
-                    )
         except (GitError, OSError):
             return self._blocked(
-                "repository_inspection_failed",
-                "Unable to verify the repository identity of a relevant lease.",
+                "repository_inspection_failed", "Unable to inspect origin for lease guards."
             )
+        related_ids = {lease.id for lease in repository_leases}
+        for lease in leases:
+            if (
+                lease.repository_id == repository_id
+                or lease.id in related_ids
+                or (lease.state is LeaseState.REMOVED and not lease.retain)
+                or not (
+                    lease.branch == branch
+                    or (
+                        lease.state is not LeaseState.REMOVED
+                        and self._strip_refs(lease.base_ref) == branch
+                    )
+                )
+            ):
+                continue
+            try:
+                other_remote = _normalize_remote_url(
+                    GitClient(lease.repository_root).remote_url()
+                )
+            except (GitError, OSError):
+                continue
+            if other_remote == remote:
+                return self._blocked(
+                    "repository_mismatch",
+                    "A lease for this origin has a different repository identity.",
+                )
         return None
 
     def _protected_branch_blocker(
@@ -439,7 +472,6 @@ class RemoteBranchDiscarder:
         *,
         default_remote_branch: str,
         leases: tuple[Lease, ...],
-        repository_id: str,
     ) -> CommandResult | None:
         protected = {
             self._strip_refs(self.default_base),
@@ -451,7 +483,7 @@ class RemoteBranchDiscarder:
         protected.update(
             self._strip_refs(lease.base_ref)
             for lease in leases
-            if lease.repository_id == repository_id and lease.state is not LeaseState.REMOVED
+            if lease.state is not LeaseState.REMOVED
         )
         protected.discard("")
         if branch in protected or branch.startswith(_PROTECTED_PREFIXES):
@@ -460,9 +492,7 @@ class RemoteBranchDiscarder:
             )
         return None
 
-    def _lease_blocker(
-        self, leases: tuple[Lease, ...], *, repository_id: str
-    ) -> CommandResult | None:
+    def _lease_blocker(self, leases: tuple[Lease, ...]) -> CommandResult | None:
         try:
             if any(
                 self.registry.get_cleanup_reservation(lease.id) is not None
@@ -494,7 +524,7 @@ class RemoteBranchDiscarder:
                 if not lease.initiative.startswith("release-"):
                     continue
                 release = self.registry.find_release_read_only(
-                    repository_id, lease.initiative[len("release-") :]
+                    lease.repository_id, lease.initiative[len("release-") :]
                 )
                 if release is not None and (
                     release.state not in _INACTIVE_RELEASE_STATES
@@ -636,7 +666,7 @@ class RemoteBranchDiscarder:
                 revalidated.branch, revalidated.expected_sha, skip_hooks=True
             )
         except GitRemoteError as error:
-            if any(marker in str(error).lower() for marker in _DEFINITE_PRECONNECT_FAILURES):
+            if self._definite_preconnect_failure(error):
                 try:
                     self._clear_failed_attempt(revalidated)
                 except (archive.ArchiveError, OSError):
@@ -777,6 +807,20 @@ class RemoteBranchDiscarder:
                 "archive_corrupt", "remote discard backup disappeared during verification"
             )
         return backup
+
+    @staticmethod
+    def _definite_preconnect_failure(error: GitRemoteError) -> bool:
+        if error.returncode != 128:
+            return False
+        lines = str(error).lower().splitlines()
+        if any(line.lstrip().startswith("to ") for line in lines):
+            return False
+        return any(
+            marker in line
+            for line in lines
+            if not re.search(r"(?:^|\s)remote:", line)
+            for marker in _DEFINITE_PRECONNECT_FAILURES
+        )
 
     def _read_existing_backup(self, evidence: _Evidence) -> _Backup | None:
         try:
@@ -1012,7 +1056,7 @@ class RemoteBranchDiscarder:
             )
 
     def _clear_failed_attempt(self, evidence: _Evidence) -> None:
-        """Retire an attempt only when Git confirmed the push never deleted a ref."""
+        """Retire an attempt only when Git confirmed deletion never occurred."""
         marker = evidence.destination / "attempt.json"
         archive._validate_private_file(marker)
         marker.unlink()

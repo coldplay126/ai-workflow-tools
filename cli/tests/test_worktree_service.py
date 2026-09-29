@@ -2668,6 +2668,32 @@ def test_adopt_apply_reports_registry_transition_conflicts(
     assert harness.github.view_calls == ([] if pr_number is None else [pr_number, pr_number])
 
 
+def test_legacy_linked_root_lease_still_status_links_and_finishes(
+    harness: Harness,
+) -> None:
+    linked = harness.make_external_worktree("linked-lease-origin")
+    harness.service.git = GitClient(linked)
+    acquired = harness.acquire("legacy-linked-identity")
+    assert acquired.lease is not None
+    lease = acquired.lease
+    assert lease.repository_root == linked
+    assert lease.repository_id == GitClient(linked).repository_id()
+    assert lease.repository_id != harness.git.repository_id()
+    assert lease in harness.service.status().leases
+
+    harness.github.prs[131] = replace(
+        merged_pr(number=131, head_sha=lease.head_sha),
+        head_ref=lease.branch,
+    )
+    linked_pr = harness.service.link_pr(lease.id, pr_number=131, apply=True)
+    assert linked_pr.decision == "ready"
+    assert linked_pr.lease is not None
+    assert linked_pr.lease.repository_id == lease.repository_id
+    finish = harness.service.finish(pr_number=131, apply=False)
+    assert finish.decision == "preview"
+    assert any(action["lease_id"] == lease.id for action in finish.actions)
+
+
 def test_link_pr_preview_validates_developed_head_without_mutation(
     harness: Harness,
 ) -> None:

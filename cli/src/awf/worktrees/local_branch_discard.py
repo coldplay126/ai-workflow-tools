@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from . import archive
-from .git import GitError
+from .git import GitBranchDeleteAborted, GitError
 from .github import ExternalServiceError, GhClient
 from .models import CommandResult, Lease
 from .remote_branch_discard import _BACKUP_KIND, _Backup, _Evidence, RemoteBranchDiscarder
@@ -52,7 +52,7 @@ class LocalBranchDiscarder(RemoteBranchDiscarder):
         if environment_blocker is not None:
             return environment_blocker
         try:
-            repository_root = self.git.common_repository_root()
+            repository_root = self.git.repository_root()
             repository_id = self.git.repository_id()
         except (GitError, OSError):
             return self._blocked(
@@ -86,11 +86,12 @@ class LocalBranchDiscarder(RemoteBranchDiscarder):
             return self._blocked(
                 "backup_root_invalid", "The backup root could not be safely validated."
             )
-        foreign_lease = self._foreign_remote_lease_blocker(
-            branch, leases=leases, repository_id=repository_id
-        )
-        if foreign_lease is not None:
-            return foreign_lease
+        try:
+            repository_leases = self._repository_leases(leases, repository_id)
+        except (GitError, OSError):
+            return self._blocked(
+                "repository_inspection_failed", "Unable to inspect the Git common directory."
+            )
         try:
             default_remote_branch = self.git.default_remote_branch()
         except (GitError, OSError):
@@ -100,8 +101,7 @@ class LocalBranchDiscarder(RemoteBranchDiscarder):
         protected = self._protected_branch_blocker(
             branch,
             default_remote_branch=default_remote_branch,
-            leases=leases,
-            repository_id=repository_id,
+            leases=repository_leases,
         )
         if protected is not None:
             return protected
@@ -112,15 +112,11 @@ class LocalBranchDiscarder(RemoteBranchDiscarder):
             )
         matching_leases = tuple(
             sorted(
-                (
-                    lease
-                    for lease in leases
-                    if lease.repository_id == repository_id and lease.branch == branch
-                ),
+                (lease for lease in repository_leases if lease.branch == branch),
                 key=lambda lease: lease.id,
             )
         )
-        lease_blocker = self._lease_blocker(matching_leases, repository_id=repository_id)
+        lease_blocker = self._lease_blocker(matching_leases)
         if lease_blocker is not None:
             return lease_blocker
         try:
@@ -313,6 +309,27 @@ class LocalBranchDiscarder(RemoteBranchDiscarder):
                 revalidated.branch,
                 revalidated.expected_sha,
                 before_commit=lambda: self._write_attempt(revalidated),
+            )
+        except GitBranchDeleteAborted:
+            try:
+                try:
+                    (revalidated.destination / "attempt.json").lstat()
+                except FileNotFoundError:
+                    pass
+                else:
+                    self._clear_failed_attempt(revalidated)
+            except (archive.ArchiveError, OSError):
+                return self._blocked(
+                    "local_delete_outcome_unknown",
+                    "The aborted transaction could not be recorded safely.",
+                    leases=revalidated.leases,
+                    actions=self._backup_actions(revalidated, revalidated_backup.artifact),
+                )
+            return self._blocked(
+                "local_delete_failed",
+                "The local branch deletion was aborted before commit; retry this token.",
+                leases=revalidated.leases,
+                actions=self._backup_actions(revalidated, revalidated_backup.artifact),
             )
         except archive.ArchiveError as error:
             return self._archive_blocked(

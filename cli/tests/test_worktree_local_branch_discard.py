@@ -276,12 +276,13 @@ def _register_lease(
     managed: bool = True,
     owner_kind: str = "awf",
     purpose: Purpose = Purpose.FEATURE,
+    repository_root: Path | None = None,
 ) -> Lease:
     return harness.registry.create_lease(
         Lease.new(
             repository_id=harness.git.repository_id(),
             repository_name=harness.git.repository_name(),
-            repository_root=harness.git.repository_root(),
+            repository_root=repository_root or harness.git.repository_root(),
             worktree_path=harness.repo.parent / f"registry-{initiative}",
             initiative=initiative,
             purpose=purpose,
@@ -462,6 +463,27 @@ def test_local_discard_handles_a_local_only_branch_and_sixteen_removed_records(
         destination / "history.bundle", tmp_path / "restored-local-only.git", branch
     ) == expected_sha
 
+def test_local_discard_keeps_same_identity_lease_with_missing_root(tmp_path: Path) -> None:
+    harness = LocalDiscardHarness.create(tmp_path)
+    branch = "retired/missing-lease-root"
+    expected_sha = _create_local_branch(harness, branch)
+    _register_lease(
+        harness,
+        initiative="missing-root",
+        branch=branch,
+        repository_root=tmp_path / "missing-root",
+    )
+    result = harness.service.discard_local_branch(
+        branch,
+        expected_sha=expected_sha,
+        backup_root=_backup_root(tmp_path),
+        reason=_REASON,
+    )
+    assert result.status == "blocked"
+    assert _blocker_code(result) == "lease_not_removed"
+    assert _local_head(harness.repo, branch) == expected_sha
+
+
 def test_local_discard_from_linked_worktree_respects_active_main_lease(tmp_path: Path) -> None:
     harness = LocalDiscardHarness.create(tmp_path)
     branch = "retired/linked-active"
@@ -526,7 +548,7 @@ def test_local_discard_blocks_when_origin_default_cannot_be_read(tmp_path: Path)
     assert _local_head(harness.repo, branch) == expected_sha
 
 
-def test_local_discard_rejects_foreign_identity_sharing_origin(tmp_path: Path) -> None:
+def test_local_discard_ignores_active_lease_in_separate_clone(tmp_path: Path) -> None:
     harness = LocalDiscardHarness.create(tmp_path)
     branch = "retired/shared-origin-lease"
     expected_sha = _create_local_branch(harness, branch)
@@ -537,16 +559,50 @@ def test_local_discard_rejects_foreign_identity_sharing_origin(tmp_path: Path) -
     _register_lease(harness, initiative="shared-origin", branch=branch)
     harness.git = primary_git
 
-    result = harness.service.discard_local_branch(
+    backup_root = _backup_root(tmp_path)
+    token, _ = _preview(harness, branch, expected_sha, backup_root)
+    applied = _apply(harness, branch, expected_sha, backup_root, token)
+
+    assert applied.status == "ok"
+    assert applied.decision == "discarded"
+    assert _local_head(harness.repo, branch) is None
+    assert harness.registry.list_leases_read_only(include_removed=False)[0].state is LeaseState.ACTIVE
+
+@pytest.mark.parametrize("foreign_case", ("missing_unrelated_root", "removed_shared_origin"))
+def test_local_discard_ignores_unretained_removed_foreign_lease(
+    tmp_path: Path, foreign_case: str
+) -> None:
+    harness = LocalDiscardHarness.create(tmp_path)
+    branch = "retired/removed-foreign-lease"
+    expected_sha = _create_local_branch(harness, branch)
+    if foreign_case == "missing_unrelated_root":
+        other_parent = tmp_path / "unrelated"
+        other_parent.mkdir()
+        foreign = make_repository(other_parent)
+    else:
+        foreign = tmp_path / "shared-origin-clone"
+        git(tmp_path, "clone", "-q", str(tmp_path / "origin.git"), str(foreign))
+    primary_git = harness.git
+    harness.git = GitClient(foreign)
+    lease = _register_lease(harness, initiative=foreign_case, branch=branch)
+    harness.git = primary_git
+    harness.registry.transition(
+        lease.id, LeaseState.REMOVED, expected_version=lease.version
+    )
+    if foreign_case == "missing_unrelated_root":
+        foreign.rename(tmp_path / "moved-unrelated")
+
+    preview = harness.service.discard_local_branch(
         branch,
         expected_sha=expected_sha,
         backup_root=_backup_root(tmp_path),
         reason=_REASON,
     )
 
-    assert result.status == "blocked"
-    assert _blocker_code(result) == "repository_mismatch"
+    assert preview.status == "ok"
+    assert preview.decision == "preview"
     assert _local_head(harness.repo, branch) == expected_sha
+
 
 
 @pytest.mark.parametrize(
@@ -780,6 +836,39 @@ def test_local_discard_writes_attempt_inside_guard_callback_and_never_retries_un
     assert rejected.status == "blocked"
     assert _blocker_code(rejected) == "local_delete_outcome_unknown"
     assert _local_head(harness.repo, branch) == expected_sha
+
+
+def test_local_discard_retries_aborted_transaction_after_attempt_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = LocalDiscardHarness.create(tmp_path)
+    branch = "retired/aborted-transaction"
+    expected_sha = _create_local_branch(harness, branch)
+    backup_root = _backup_root(tmp_path)
+    token, destination = _preview(harness, branch, expected_sha, backup_root)
+    original_revalidate = harness.git._revalidate_inactive_branch
+    inspections = 0
+
+    def fail_after_attempt(*args: object, **kwargs: object) -> None:
+        nonlocal inspections
+        inspections += 1
+        if inspections == 2:
+            assert (destination / "attempt.json").is_file()
+            raise GitError("worktree inventory changed before commit")
+        original_revalidate(*args, **kwargs)
+
+    monkeypatch.setattr(harness.git, "_revalidate_inactive_branch", fail_after_attempt)
+    aborted = _apply(harness, branch, expected_sha, backup_root, token)
+    assert aborted.status == "blocked"
+    assert _blocker_code(aborted) == "local_delete_failed"
+    assert _local_head(harness.repo, branch) == expected_sha
+    assert not (destination / "attempt.json").exists()
+
+    monkeypatch.setattr(harness.git, "_revalidate_inactive_branch", original_revalidate)
+    retried = _apply(harness, branch, expected_sha, backup_root, token)
+    assert retried.status == "ok"
+    assert retried.decision == "discarded"
+    assert _local_head(harness.repo, branch) is None
 
 
 def test_local_discard_recovers_absent_ref_after_receipt_write_crash(

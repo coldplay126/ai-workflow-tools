@@ -24,6 +24,10 @@ class GitError(RuntimeError):
         self.returncode = returncode
 
 
+class GitBranchDeleteAborted(GitError):
+    """The local ref deletion transaction was aborted before commit was attempted."""
+
+
 class GitPatchConflict(GitError):
     """Raised when an indexed three-way patch application leaves conflicts."""
 
@@ -46,8 +50,15 @@ _OBJECT_FORMATS = {"sha1": 40, "sha256": 64}
 
 
 def _is_remote_safety_rejection(error: GitError) -> bool:
-    detail = str(error).lower()
-    return any(marker in detail for marker in _REMOTE_SAFETY_REJECTION_MARKERS)
+    lines = (
+        line for line in str(error).lower().splitlines()
+        if not re.search(r"(?:^|\s)remote:", line)
+    )
+    return any(
+        marker in line
+        for line in lines
+        for marker in _REMOTE_SAFETY_REJECTION_MARKERS
+    )
 
 @dataclass(frozen=True)
 class GitCompleted:
@@ -114,21 +125,12 @@ class GitClient:
         output = self._run("rev-parse", "--show-toplevel").stdout
         return Path(_path_from_line(output)).resolve()
 
-    def common_repository_root(self) -> Path:
-        """Return the primary worktree root shared by all linked worktrees."""
-        common_dir = Path(
-            _path_from_line(
-                self._run(
-                    "rev-parse", "--path-format=absolute", "--git-common-dir"
-                ).stdout
-            )
-        ).resolve()
-        if common_dir.name == ".git":
-            return common_dir.parent
-        worktrees = self.list_worktrees()
-        if not worktrees or worktrees[0].bare:
-            raise GitError("unable to identify the primary repository worktree")
-        return worktrees[0].path.resolve()
+    def common_git_directory(self) -> Path:
+        """Identify one Git object/ref store across its linked worktrees, including bare."""
+        output = self._run(
+            "rev-parse", "--path-format=absolute", "--git-common-dir"
+        ).stdout
+        return Path(_path_from_line(output)).resolve()
 
     def repository_name(self) -> str:
         return self.repository_root().name
@@ -136,7 +138,7 @@ class GitClient:
     def repository_id(self) -> str:
         normalized_remote = _normalize_remote_url(self.remote_url())
         payload = normalized_remote.encode("utf-8") + b"\0" + os.fsencode(
-            self.common_repository_root()
+            self.repository_root()
         )
         return hashlib.sha256(payload).hexdigest()
 
@@ -670,6 +672,7 @@ class GitClient:
             self.cwd, isolate_hooks=True
         )
         committed = False
+        commit_started = False
         try:
             self._ref_transaction_command(branch_transaction, "start")
             self._ref_transaction_command(
@@ -685,8 +688,13 @@ class GitClient:
                 if before_commit is not None:
                     before_commit()
                 self._revalidate_inactive_branch(inventory, branch)
+                commit_started = True
                 self._ref_transaction_command(branch_transaction, "commit")
                 committed = True
+        except GitError as error:
+            if not commit_started:
+                raise GitBranchDeleteAborted(str(error)) from error
+            raise
         finally:
             if committed:
                 self._close_ref_transaction(branch_transaction)
@@ -777,7 +785,7 @@ class GitClient:
         except GitError as error:
             if _is_remote_safety_rejection(error):
                 raise
-            raise GitRemoteError(str(error)) from error
+            raise GitRemoteError(str(error), returncode=error.returncode) from error
 
     @contextmanager
     def hold_branch_if_at(self, branch: str, expected_sha: str) -> Iterator[None]:

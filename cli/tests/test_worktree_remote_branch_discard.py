@@ -222,12 +222,13 @@ def _register_lease(
     initiative: str,
     branch: str,
     base_ref: str = "staging",
+    repository_root: Path | None = None,
 ) -> Lease:
     return harness.registry.create_lease(
         Lease.new(
             repository_id=harness.git.repository_id(),
             repository_name=harness.git.repository_name(),
-            repository_root=harness.git.repository_root(),
+            repository_root=repository_root or harness.git.repository_root(),
             worktree_path=harness.repo.parent / f"registry-{initiative}",
             initiative=initiative,
             purpose=(
@@ -466,7 +467,10 @@ def test_remote_discard_retries_confirmed_preconnect_failure(
     original_delete = harness.git.delete_remote_branch_if_at
 
     def no_connection(*_args: object, **_kwargs: object) -> None:
-        raise GitRemoteError("git push failed: fatal: Could not resolve host: github.com")
+        raise GitRemoteError(
+            "git push failed (128): fatal: Could not resolve host: github.com",
+            returncode=128,
+        )
 
     monkeypatch.setattr(harness.git, "delete_remote_branch_if_at", no_connection)
     failed = _apply(harness, branch, expected_sha, backup_root, token)
@@ -480,6 +484,86 @@ def test_remote_discard_retries_confirmed_preconnect_failure(
     assert retried.status == "ok"
     assert retried.decision == "discarded"
     assert _remote_head(harness.repo, branch) is None
+
+
+def test_remote_discard_does_not_retry_transport_failure_with_remote_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = RemoteDiscardHarness.create(tmp_path)
+    branch = "retired/remote-status"
+    expected_sha = _create_remote_branch(harness, branch)
+    backup_root = _backup_root(tmp_path)
+    token, destination = _preview(harness, branch, expected_sha, backup_root)
+
+    def rejected_after_status(*_args: object, **_kwargs: object) -> None:
+        raise GitRemoteError(
+            "git push failed (128): fatal: Authentication failed for remote\n"
+            "To https://example.test/repo.git\n"
+            " ! [remote rejected] retired/remote-status",
+            returncode=128,
+        )
+
+    monkeypatch.setattr(harness.git, "delete_remote_branch_if_at", rejected_after_status)
+    failed = _apply(harness, branch, expected_sha, backup_root, token)
+    assert failed.status == "error"
+    assert _blocker_code(failed) == "remote_delete_failed"
+    assert (destination / "attempt.json").is_file()
+    retry = _apply(harness, branch, expected_sha, backup_root, token)
+    assert retry.status == "blocked"
+    assert _blocker_code(retry) == "remote_delete_outcome_unknown"
+
+
+def test_remote_discard_preserves_attempt_after_remote_hook_rejects_post_delete(
+    tmp_path: Path,
+) -> None:
+    harness = RemoteDiscardHarness.create(tmp_path)
+    branch = "retired/remote-hook-delete"
+    expected_sha = _create_remote_branch(harness, branch)
+    backup_root = _backup_root(tmp_path)
+    token, destination = _preview(harness, branch, expected_sha, backup_root)
+    hook = tmp_path / "origin.git" / "hooks" / "pre-receive"
+    hook.write_text(
+        "#!/bin/sh\n"
+        "read old new ref\n"
+        "git update-ref -d \"$ref\" \"$old\"\n"
+        "printf '%s\\n' 'Authentication failed for remote; stale info' >&2\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    hook.chmod(0o700)
+
+    failed = _apply(harness, branch, expected_sha, backup_root, token)
+    assert failed.status == "error"
+    assert _blocker_code(failed) == "remote_delete_failed"
+    assert (destination / "attempt.json").is_file()
+    assert _remote_head(harness.repo, branch) is None
+    hook.unlink()
+    git(harness.repo, "push", "-q", "origin", f"{branch}:refs/heads/{branch}")
+    retry = _apply(harness, branch, expected_sha, backup_root, token)
+    assert retry.status == "blocked"
+    assert _blocker_code(retry) == "remote_delete_outcome_unknown"
+    assert _remote_head(harness.repo, branch) == expected_sha
+
+
+def test_remote_discard_keeps_same_identity_lease_with_missing_root(tmp_path: Path) -> None:
+    harness = RemoteDiscardHarness.create(tmp_path)
+    branch = "retired/missing-lease-root"
+    expected_sha = _create_remote_branch(harness, branch)
+    _register_lease(
+        harness,
+        initiative="missing-root",
+        branch=branch,
+        repository_root=tmp_path / "missing-root",
+    )
+    result = harness.service.discard_remote_branch(
+        branch,
+        expected_sha=expected_sha,
+        backup_root=_backup_root(tmp_path),
+        reason=_REASON,
+    )
+    assert result.status == "blocked"
+    assert _blocker_code(result) == "lease_not_removed"
+    assert _remote_head(harness.repo, branch) == expected_sha
 
 
 def test_remote_discard_from_linked_worktree_respects_active_main_lease(tmp_path: Path) -> None:
@@ -508,6 +592,58 @@ def test_remote_discard_from_linked_worktree_respects_active_main_lease(tmp_path
     assert _remote_head(harness.repo, branch) == expected_sha
 
 
+def test_bare_common_dir_linked_worktree_status_and_branch_previews(
+    tmp_path: Path,
+) -> None:
+    harness = RemoteDiscardHarness.create(tmp_path)
+    remote_branch = "retired/bare-remote"
+    remote_sha = _create_remote_branch(harness, remote_branch)
+    bare = tmp_path / "bare-clone.git"
+    linked = tmp_path / "bare-linked"
+    git(tmp_path, "clone", "--bare", "-q", str(tmp_path / "origin.git"), str(bare))
+    git(bare, "worktree", "add", "-q", "-b", "bare-helper", str(linked), "staging")
+    git(bare, "fetch", "-q", "origin", "staging:refs/remotes/origin/staging")
+    git(bare, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/staging")
+    linked_git = GitClient(linked)
+    harness.service.git = linked_git
+    assert linked_git.common_git_directory() == bare.resolve()
+    assert harness.service.status().decision == "no_op"
+
+    backup_root = _backup_root(tmp_path)
+    remote_preview = harness.service.discard_remote_branch(
+        remote_branch,
+        expected_sha=remote_sha,
+        backup_root=backup_root,
+        reason=_REASON,
+    )
+    assert remote_preview.status == "ok"
+    assert remote_preview.decision == "preview"
+    local_branch = "retired/bare-local"
+    git(linked, "branch", local_branch, "staging")
+    local_sha = linked_git.local_branch_sha(local_branch)
+    assert local_sha is not None
+    local_preview = harness.service.discard_local_branch(
+        local_branch,
+        expected_sha=local_sha,
+        backup_root=backup_root,
+        reason=_REASON,
+    )
+    assert local_preview.status == "ok"
+    assert local_preview.decision == "preview"
+    acquired = harness.service.acquire(
+        initiative="bare-clone-feature",
+        purpose=Purpose.FEATURE,
+        base="staging",
+        branch=None,
+        owner_id="bare-test",
+        apply=True,
+    )
+    assert acquired.status == "ok"
+    assert acquired.decision == "ready"
+    assert acquired.lease is not None
+    assert acquired.lease.repository_root == linked.resolve()
+
+
 def test_remote_discard_rejects_foreign_identity_sharing_origin(tmp_path: Path) -> None:
     harness = RemoteDiscardHarness.create(tmp_path)
     branch = "retired/shared-origin-lease"
@@ -526,6 +662,66 @@ def test_remote_discard_rejects_foreign_identity_sharing_origin(tmp_path: Path) 
         reason=_REASON,
     )
 
+    assert result.status == "blocked"
+    assert _blocker_code(result) == "repository_mismatch"
+    assert _remote_head(harness.repo, branch) == expected_sha
+
+
+@pytest.mark.parametrize("foreign_case", ("missing_unrelated_root", "removed_shared_origin"))
+def test_remote_discard_ignores_unretained_removed_foreign_lease(
+    tmp_path: Path, foreign_case: str
+) -> None:
+    harness = RemoteDiscardHarness.create(tmp_path)
+    branch = "retired/removed-foreign-lease"
+    expected_sha = _create_remote_branch(harness, branch)
+    if foreign_case == "missing_unrelated_root":
+        other_parent = tmp_path / "unrelated"
+        other_parent.mkdir()
+        foreign = make_repository(other_parent)
+    else:
+        foreign = tmp_path / "shared-origin-clone"
+        git(tmp_path, "clone", "-q", str(tmp_path / "origin.git"), str(foreign))
+    primary_git = harness.git
+    harness.git = GitClient(foreign)
+    lease = _register_lease(harness, initiative=foreign_case, branch=branch)
+    harness.git = primary_git
+    harness.registry.transition(
+        lease.id, LeaseState.REMOVED, expected_version=lease.version
+    )
+    if foreign_case == "missing_unrelated_root":
+        foreign.rename(tmp_path / "moved-unrelated")
+
+    preview = harness.service.discard_remote_branch(
+        branch,
+        expected_sha=expected_sha,
+        backup_root=_backup_root(tmp_path),
+        reason=_REASON,
+    )
+
+    assert preview.status == "ok"
+    assert preview.decision == "preview"
+    assert _remote_head(harness.repo, branch) == expected_sha
+
+
+def test_remote_discard_blocks_retained_lease_in_separate_clone(tmp_path: Path) -> None:
+    harness = RemoteDiscardHarness.create(tmp_path)
+    branch = "retired/retained-foreign"
+    expected_sha = _create_remote_branch(harness, branch)
+    foreign = tmp_path / "shared-origin-clone"
+    git(tmp_path, "clone", "-q", str(tmp_path / "origin.git"), str(foreign))
+    primary_git = harness.git
+    harness.git = GitClient(foreign)
+    lease = _register_lease(harness, initiative="retained-foreign", branch=branch)
+    harness.git = primary_git
+    harness.registry.transition(
+        lease.id, LeaseState.REMOVED, expected_version=lease.version, retain=True
+    )
+    result = harness.service.discard_remote_branch(
+        branch,
+        expected_sha=expected_sha,
+        backup_root=_backup_root(tmp_path),
+        reason=_REASON,
+    )
     assert result.status == "blocked"
     assert _blocker_code(result) == "repository_mismatch"
     assert _remote_head(harness.repo, branch) == expected_sha
