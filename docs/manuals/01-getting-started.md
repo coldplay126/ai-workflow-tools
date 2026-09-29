@@ -40,10 +40,11 @@
 cd ~/Documents/GitHub/ai-workflow-tools
 ```
 
-Claude 중심 설치가 되어 있다면:
+Claude 중심 설치에서 `/wf*` 슬래시 스킬을 쓰려면 `./setup.sh --with-wf`로 설치해야 합니다.
+기본 `./setup.sh`는 `/analysis` 등 CORE 스킬만 설치합니다. 설치 후:
 
 ```text
-/wf-status
+/wf status
 ```
 
 Python CLI를 같이 보고 싶다면:
@@ -63,10 +64,10 @@ root-level에 있는 소스 디렉토리도 분석 단위 후보로 볼 수 있�
 
 먼저 현재 workflow 상태를 봅니다.
 
-Claude:
+Claude(`--with-wf` 설치 시):
 
 ```text
-/wf-status
+/wf status
 ```
 
 CLI:

@@ -26,6 +26,10 @@
   프로젝트 로컬 우선순위를 유지하고 유효한 다음 후보를 사용합니다.
   non-editable 설치는 상위 checkout의 템플릿을 사용하지 않으며,
   설치된 사용자 스킬 우선순위와 ready/skills의 runtime 집계는 유지합니다.
+- `wf-status`, `wf-reset`, `phase-plan`의 "워크플로우 없음" 안내가 실제 초기화
+  진입점인 `/wf init <기능 설명>`을 가리킵니다. 시작 매뉴얼, 두 세션 매뉴얼,
+  Codex 이식성 문서와 `claude-md-wf-pipeline` snippet에 `--with-wf` 설치 전제와
+  Codex CLI(`codex exec`) 기반 secondary provider를 반영했습니다.
 
 - staging PR을 연결한 managed feature는 `ACTIVE`와 검증 증거를 유지하며,
   최종 production PR 연결 후에만 정리 대상이 됩니다. 같은 feature의 반복

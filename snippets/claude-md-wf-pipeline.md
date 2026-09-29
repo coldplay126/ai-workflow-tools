@@ -6,8 +6,9 @@
 권장 진입점은 `/wf init <기능 설명>`이다. `/wf`, `/wf resume`, `/wf status`,
 `/wf reset <action>`도 같은 lifecycle dispatcher를 사용한다.
 phase 실행은 dispatcher가 `wf-orchestrator`에 위임한다.
-스킬은 `~/.claude/skills/wf*/`, `~/.claude/skills/phase-*/`,
-`~/.claude/skills/analysis/`에서 찾는다.
+`--with-wf`로 설치하면 슬래시 스킬은 `~/.claude/skills/wf*/`, `~/.claude/skills/phase-*/`에
+연결된다. 기본 설치(`./setup.sh`)에는 이 링크가 없으며, editable 설치된 `awf wf` CLI는
+source checkout의 `claude/skills`에서 phase prompt와 템플릿을 읽는다.
 
 파이프라인은 opt-in이다. 사용자가 `/wf`, `ultracode`, `workflow`로 명시 요청한
 작업에만 scope 잠금과 G1~G7 승인이 적용된다. 짧은 일반 작업(버그 수정, 작은

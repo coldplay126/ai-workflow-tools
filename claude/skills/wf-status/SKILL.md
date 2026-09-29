@@ -22,7 +22,7 @@ cli:
 
 ### 실행 흐름
 
-1. **`.workflow/state.json` 읽기**: 없으면 "활성 워크플로우가 없습니다. `/wf-orchestrator`로 시작하세요." 출력.
+1. **`.workflow/state.json` 읽기**: 없으면 "활성 워크플로우가 없습니다. `/wf init <기능 설명>`으로 시작하세요." 출력.
 
 2. **manifest.json 읽기**: 프로젝트 설정 요약.
 
