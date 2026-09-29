@@ -508,6 +508,46 @@ def test_all_displayed_skill_awf_commands_parse_with_current_cli() -> None:
     assert invalid == []
 
 
+def test_lsp_worktree_setup_docs_keep_local_mutation_in_cli() -> None:
+    reference_path = REPO_ROOT / "docs" / "reference" / "lsp-worktree-setup.md"
+    skill_path = (
+        REPO_ROOT / "claude" / "skills" / "lsp-worktree-setup" / "SKILL.md"
+    )
+    reference = reference_path.read_text(encoding="utf-8")
+    skill = skill_path.read_text(encoding="utf-8")
+
+    for command in (
+        "awf lsp setup --repo-root <repo> --json",
+        "awf lsp setup --apply --repo-root <repo> --json",
+        "awf lsp status --repo-root <repo> --json",
+        "awf lsp materialize --repo-root <repo> --json",
+    ):
+        assert command in reference
+    for field in (
+        "schema_version",
+        "command",
+        "decision",
+        "languages",
+        "servers",
+        "actions",
+        "blockers",
+        "warnings",
+    ):
+        assert f"`{field}`" in reference
+
+    assert "task.isolation.enabled=true" in reference
+    assert "task.isolation.apply=false" in reference
+    assert "task.isolation.merge=patch" in reference
+    assert "custom prepare" in reference
+    normalized_skill = " ".join(skill.split())
+    assert "직접 만들거나 수정하지 않습니다." in normalized_skill
+    assert "LSP server binary도 설치하지 않습니다." in normalized_skill
+    assert _skill_frontmatter(skill_path)["type"] == "repository-setup"
+    assert _skill_command_template(skill_path) == (
+        "awf lsp setup --repo-root <repo> --json"
+    )
+
+
 PLANNING_OPTION_SELECTION_COMMAND = (
     'awf wf select-option --decision-id D-001 --option-id O-001 '
     '--actor "${AWF_OPERATOR:?set operator identity}" --repo-root . --json'
@@ -1090,6 +1130,303 @@ def test_core_skill_command_templates_are_current() -> None:
 
 
 
+def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
+    path = REPO_ROOT / "claude" / "skills" / "release-worktree-lifecycle" / "SKILL.md"
+    text = path.read_text(encoding="utf-8")
+    contract = _release_worktree_lifecycle_contract(text)
+
+    commands = contract["commands"]
+    expected_commands = {
+        "status": ("wt", "status"),
+        "doctor": ("wt", "doctor"),
+        "import_preview": ("wt", "import"),
+        "import_apply": ("wt", "import"),
+        "adopt_preview": ("wt", "adopt"),
+        "adopt_apply": ("wt", "adopt"),
+        "acquire_preview": ("wt", "acquire"),
+        "acquire_apply": ("wt", "acquire"),
+        "link_pr_preview": ("wt", "link-pr"),
+        "link_pr_apply": ("wt", "link-pr"),
+        "sync_preview": ("wt", "sync"),
+        "sync_apply": ("wt", "sync"),
+        "promote_preview": ("wt", "promote"),
+        "promote_apply": ("wt", "promote"),
+        "source_branch_promote_preview": ("wt", "promote"),
+        "source_branch_promote_apply": ("wt", "promote"),
+        "out_of_order_promote_preview": ("wt", "promote"),
+        "out_of_order_promote_apply": ("wt", "promote"),
+        "out_of_order_resolution_preview": ("wt", "promote"),
+        "out_of_order_resolution_apply": ("wt", "promote"),
+        "release_open_preview": ("wt", "release"),
+        "release_open_apply": ("wt", "release"),
+        "release_add_preview": ("wt", "release"),
+        "release_add_apply": ("wt", "release"),
+        "release_seal_preview": ("wt", "release"),
+        "release_seal_apply": ("wt", "release"),
+        "release_publish_preview": ("wt", "release"),
+        "release_publish_apply": ("wt", "release"),
+        "discard_promotion_preview": ("wt", "discard-promotion"),
+        "discard_promotion_apply": ("wt", "discard-promotion"),
+        "archive_discard_preview": ("wt", "archive-discard"),
+        "archive_discard_apply": ("wt", "archive-discard"),
+        "discard_remote_branch_preview": ("wt", "discard-remote-branch"),
+        "discard_remote_branch_apply": ("wt", "discard-remote-branch"),
+        "discard_local_branch_preview": ("wt", "discard-local-branch"),
+        "discard_local_branch_apply": ("wt", "discard-local-branch"),
+        "archive_repack_preview": ("wt", "archive-repack"),
+        "archive_repack_apply": ("wt", "archive-repack"),
+        "archive_restore_preview": ("wt", "archive-restore"),
+        "archive_restore_apply": ("wt", "archive-restore"),
+        "discard_sync_preview": ("wt", "discard-sync"),
+        "discard_sync_apply": ("wt", "discard-sync"),
+        "recover_sync_preview": ("wt", "recover-sync"),
+        "recover_sync_apply": ("wt", "recover-sync"),
+        "finish_preview": ("wt", "finish"),
+        "finish_apply": ("wt", "finish"),
+        "gc_preview": ("wt", "gc"),
+        "gc_apply": ("wt", "gc"),
+        "compact_preview": ("wt", "compact"),
+        "compact_apply": ("wt", "compact"),
+    }
+    assert set(commands) == set(expected_commands)
+    parser = build_parser()
+    for name, expected in expected_commands.items():
+        argv = _argv_from_skill_command(commands[name])
+        parsed = parser.parse_args(argv)
+        assert (parsed.command, parsed.wt_command) == expected
+
+    assert "--refresh" in commands["status"]
+    assert "--json" in commands["status"]
+    assert "--dry-run" in commands["import_preview"]
+    assert "--apply" not in commands["import_preview"]
+    assert "--apply" in commands["import_apply"]
+    assert "--pr" in commands["adopt_preview"]
+    assert "--apply" not in commands["adopt_preview"]
+    assert "--pr" in commands["adopt_apply"]
+    assert "--apply" in commands["adopt_apply"]
+    assert "--apply" not in commands["acquire_preview"]
+    assert "--apply" in commands["acquire_apply"]
+    assert "--lease" in commands["link_pr_preview"]
+    assert "--pr" in commands["link_pr_preview"]
+    assert "--apply" not in commands["link_pr_preview"]
+    assert "--lease" in commands["link_pr_apply"]
+    assert "--pr" in commands["link_pr_apply"]
+    assert "--apply" in commands["link_pr_apply"]
+    assert "--from main" in commands["sync_preview"]
+    assert "--to staging" in commands["sync_preview"]
+    assert "--apply" not in commands["sync_preview"]
+    assert "--from main" in commands["sync_apply"]
+    assert "--to staging" in commands["sync_apply"]
+    assert "--apply" in commands["sync_apply"]
+    assert "--apply" not in commands["promote_preview"]
+    assert "--apply" in commands["promote_apply"]
+
+    assert "--out-of-order" in commands["out_of_order_promote_preview"]
+    assert "--apply" not in commands["out_of_order_promote_preview"]
+    assert "--out-of-order" in commands["out_of_order_promote_apply"]
+    assert "--apply" in commands["out_of_order_promote_apply"]
+    assert (
+        commands["out_of_order_resolution_preview"]
+        == commands["out_of_order_promote_preview"]
+    )
+    assert (
+        commands["out_of_order_resolution_apply"]
+        == commands["out_of_order_promote_apply"]
+    )
+    assert "--lease" in commands["discard_promotion_preview"]
+    assert "--apply" not in commands["discard_promotion_preview"]
+    assert "--lease" in commands["discard_promotion_apply"]
+    assert "--apply" in commands["discard_promotion_apply"]
+    for name in (
+        "archive_discard", "discard_remote_branch", "discard_local_branch",
+        "archive_repack", "archive_restore", "release_open", "release_add",
+        "release_seal", "release_publish",
+    ):
+        assert "--apply" not in commands[f"{name}_preview"]
+        assert "--apply" in commands[f"{name}_apply"]
+    for name in ("archive_discard", "discard_remote_branch", "discard_local_branch"):
+        assert "--backup-root" in commands[f"{name}_preview"]
+        assert "--reason" in commands[f"{name}_preview"]
+        assert "--preview-token" in commands[f"{name}_apply"]
+    for name in ("discard_remote_branch", "discard_local_branch"):
+        assert "--branch" in commands[f"{name}_preview"]
+        assert "--expected-sha" in commands[f"{name}_preview"]
+    assert "--exclude-ignored-path node_modules" in commands["archive_repack_preview"]
+    assert "--preview-token" in commands["archive_repack_apply"]
+    assert "--archive" in commands["archive_restore_preview"]
+    assert "--destination" in commands["archive_restore_preview"]
+    assert "--lease" in commands["discard_sync_preview"]
+    assert "--apply" not in commands["discard_sync_preview"]
+    assert "--lease" in commands["discard_sync_apply"]
+    assert "--apply" in commands["discard_sync_apply"]
+    assert "--lease" in commands["recover_sync_preview"]
+    assert "--apply" not in commands["recover_sync_preview"]
+    assert "--lease" in commands["recover_sync_apply"]
+    assert "--apply" in commands["recover_sync_apply"]
+    assert "--apply" not in commands["finish_preview"]
+    assert "--apply" in commands["finish_apply"]
+    assert "--merged" in commands["gc_preview"]
+    assert "--older-than 7d" in commands["gc_preview"]
+    assert "--apply" not in commands["gc_preview"]
+    assert "--apply" in commands["gc_apply"]
+    assert "--path node_modules" in commands["compact_preview"]
+    assert "--older-than 7d" in commands["compact_preview"]
+    assert "--dry-run" in commands["compact_preview"]
+    assert "--apply" in commands["compact_apply"]
+
+    safety = contract["safety"]
+    assert safety["preflight"] == "required_non_destructive_status_refresh"
+    assert safety["lease_reuse"] == "exact"
+    assert safety["promotion_scope"] == "source_pr_delta_only"
+    assert safety["branch_sync"] == {
+        "direction": "configured_production_to_staging_only",
+        "scope": "source_only_delta_since_live_merge_base",
+        "provenance": "pinned_source_target_reserved_branch_and_no_promote_marker",
+        "remote_drift": "blocked_before_and_after_publish",
+        "promotion_loop": "source_pr_not_promotable",
+    }
+    assert safety["deployment_health"] == "repository_rollout_evidence"
+    assert safety["blocked_action"] == "preserve_worktree_report_code_message"
+    assert safety["discard_promotion"] == {
+        "scope": "one_awf_owned_blocked_empty_exact_promotion_apply_failure_only",
+        "legacy_target_base": (
+            "null_requires_recorded_lease_head_to_be_ancestor_of_current_base"
+        ),
+        "preview_actions": ["remove_worktree", "delete_local_branch"],
+        "apply": "lock_revalidate_reserve_hold_remove_complete_compare_delete_local",
+        "remote_branch": "must_be_absent_and_never_deleted",
+    }
+    assert safety["archive_discard"]["preview"] == (
+        "read_only_create_archive_action_with_token_destination_and_full_snapshot"
+    )
+    assert safety["archive_discard"]["apply"] == (
+        "matching_token_lock_revalidate_verified_private_backup_reserve_hold_nonforce_remove_complete_compare_delete_local"
+    )
+    assert safety["archive_discard"]["remote_branch"] == (
+        "preserved_remote_sha_evidence_remote_presence_not_alone_blocker"
+    )
+    assert safety["archive_discard"]["dirty_opt_in"] == (
+        "include_uncommitted_only_for_eligible_dirty_awf_feature_or_imported_scratch_or_registered_blocked_manual_legacy_retry_with_proven_ownership_and_path"
+    )
+    for name, scope in (
+        ("discard_remote_branch", "one_explicit_approved_origin_branch_remote_ref_only"),
+        ("discard_local_branch", "one_explicit_approved_direct_local_refs_heads_ref_only"),
+    ):
+        assert safety[name]["scope"] == scope
+        assert safety[name]["required_arguments"] == [
+            "branch", "expected_sha", "backup_root", "reason"
+        ]
+        assert safety[name]["unknown_delete_observation"].endswith("_fail_closed")
+        assert safety[name]["recreation_defense"].startswith("fsynced_attempt_before_delete")
+    assert safety["discard_remote_branch"]["apply"] == (
+        "matching_token_locked_revalidation_verified_detached_commit_bundle_then_remote_cas_delete_only"
+    )
+    assert safety["discard_local_branch"]["apply"] == (
+        "matching_local_token_branch_and_all_worktree_head_symref_locks_reinventory_revalidate_verified_current_head_reachable_commit_bundle_then_local_cas_delete_only"
+    )
+    assert safety["archive_repack"]["apply"] == (
+        "archive_specific_lock_revalidate_verified_sibling_create_atomic_publish"
+    )
+    assert safety["archive_restore"]["scope"] == (
+        "verified_private_archive_to_absent_private_destination_without_source_repository_or_registry"
+    )
+    assert safety["archive_restore"]["preview"] == (
+        "read_verified_archive_and_validate_absent_private_destination"
+    )
+    assert safety["discard_sync"] == {
+        "scope": "one_awf_owned_blocked_stale_unpublished_sync_target_conflict_only",
+        "preview_actions": ["remove_worktree", "delete_local_branch"],
+        "apply": (
+            "lock_revalidate_reserve_hold_normalize_nonforce_remove_rebuild_"
+            "recorded_conflict_on_failure_complete_compare_delete_local"
+        ),
+        "remote_branch": "must_be_absent_and_never_deleted",
+        "conflict_scope": (
+            "all_git_unmerged_classes_within_reviewed_paths_and_clean_staged_"
+            "source_pin_entries"
+        ),
+    }
+    assert safety["recover_sync"] == {
+        "scope": "one_awf_owned_blocked_current_pin_unpublished_sync_target_conflict_only",
+        "operator_scope": "recorded_uu_conflicted_paths_subset_of_reviewed_paths",
+        "clean_index": "clean_applied_entries_match_source_pin",
+        "commit": "controlled_two_parent_target_then_source_synthetic_sync_commit",
+        "publication": "revalidate_drift_prepare_verify_exact_commit_atomic_create_pr",
+    }
+    assert safety["out_of_order"] == {
+        "mode": "explicit_opt_in",
+        "exact_mode": "default",
+        "source_order": "one_or_more_unique_sources_in_staging_merge_order",
+        "source_pins": "ordered_immutable_ordinal_pr_base_ref_base_head_merge_paths",
+        "exclude_paths": "forbidden",
+        "production_pr_review": "required",
+        "production_pr_checks": "required",
+        "direct_cherry_pick": "forbidden",
+        "staging_squash_input": "forbidden",
+        "conflict_resolution": (
+            "durable_source_ordinal_then_remaining_ordered_sources_before_"
+            "single_synthetic_commit"
+        ),
+        "legacy_single_source_pins": (
+            "verified_live_scalar_provenance_and_exact_three_trailer_message_"
+            "backfilled_on_apply_only"
+        ),
+        "dependency": "allowed_when_prerequisite_precedes_dependent_source",
+        "rename": "unsupported",
+        "initial_preview_fields": [
+            "sources", "source_base_sha", "source_head_sha", "target_base_sha", "reviewed_paths",
+        ],
+        "resolution_preview_actions": [
+            "resolve_out_of_order_conflict", "stage_paths", "commit",
+            "verify_production", "push_branch", "open_pull_request",
+        ],
+        "operator_edit_scope": "unstaged_unmerged_subset_of_conflicted_paths",
+        "final_indexed_delta": "non_empty_ordered_reviewed_path_union_subset",
+        "conflict_marker_policy": "markers_only_trailing_whitespace_allowed",
+        "live_target_recheck": "all_source_pins_and_target_after_verification_before_publish",
+        "protected_index_entries": {
+            "paths": "clean_applied_reviewed_paths_outside_conflicted_paths",
+            "entry": "stage_zero_mode_blob_oid_or_null",
+            "pin": "exact_preview_apply_retry",
+            "tamper": "promotion_resolution_scope_mismatch",
+        },
+        "blocker_codes": [
+            "invalid_out_of_order_promotion", "unsupported_out_of_order_rename",
+            "out_of_order_conflict", "promotion_provenance_changed",
+            "promotion_resolution_scope_mismatch", "promotion_resolution_unmerged",
+        ],
+    }
+    linkage = safety["managed_feature_pr_link"]
+    assert linkage["staging_apply"]["lease_state"] == "ACTIVE"
+    assert linkage["staging_apply"]["target_pr"] is None
+    assert linkage["production_apply"]["lease_state"] == "CLEANABLE"
+    assert safety["imported_pr_lifecycle"] == {
+        "pr_provenance": "already_merged_exact_branch_and_head",
+        "same_pr": "reuse",
+        "different_pr": "blocked",
+        "github_external_failure": "exit_4",
+        "runtime_source_before_removal": (
+            "install_cli_and_skill_from_stable_merged_main_and_verify_links"
+        ),
+    }
+    assert safety["preview_before_apply"] == [
+        "acquire", "link-pr", "sync", "promote", "source_branch_promote",
+        "release_open", "release_add", "release_seal", "release_publish",
+        "out_of_order_promote", "out_of_order_resolution", "import", "adopt",
+        "discard_promotion", "archive_discard", "discard_remote_branch",
+        "discard_local_branch", "archive_repack", "archive_restore",
+        "discard_sync", "recover_sync", "finish", "gc", "compact",
+    ]
+    assert safety["stop_conditions"] == [
+        "deployment_health_unknown", "closed_unmerged", "dirty_worktree",
+    ]
+    assert set(safety["forbidden_fallbacks"]) == {
+        "direct_worktree_mutation", "staging_wholesale_merge",
+        "branch_merged_heuristic", "direct_cherry_pick", "stash",
+        "reset", "force_delete", "unmanaged_deletion",
+    }
+
+
 def test_release_worktree_lifecycle_contract_rejects_duplicate_json_keys() -> None:
     text = """```json
 {"schema": "awf.release-worktree-lifecycle/v1", "schema": "duplicate"}
@@ -1217,6 +1554,27 @@ def test_imported_pr_cleanup_raw_sequence_rejects_placeholder_role_swaps() -> No
         )
 
 
+
+
+def test_release_worktree_lifecycle_shell_examples_match_contract() -> None:
+    path = REPO_ROOT / "claude" / "skills" / "release-worktree-lifecycle" / "SKILL.md"
+    text = path.read_text(encoding="utf-8")
+    contract = next(
+        json.loads(match.group(1))
+        for match in re.finditer(r"```json\n(.*?)\n```", text, re.DOTALL)
+        if json.loads(match.group(1)).get("schema")
+        == "awf.release-worktree-lifecycle/v1"
+    )
+    commands = contract["commands"]
+    displayed_commands = _shell_fenced_awf_commands(text)
+
+    assert displayed_commands[0] == commands["status"]
+    assert set(displayed_commands) == set(commands.values())
+
+    parser = build_parser()
+    for command in displayed_commands:
+        parsed = parser.parse_args(_argv_from_skill_command(command))
+        assert parsed.command == "wt"
 
 
 def test_out_of_order_promotion_docs_share_operator_contract() -> None:

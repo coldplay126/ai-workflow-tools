@@ -51,12 +51,13 @@ def _local_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple
 def _fake_omp(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    state_path = tmp_path / "omp.state"
+    log_path = tmp_path / "omp.log"
     executable = bin_dir / "omp"
     executable.write_text(
         "#!/bin/sh\n"
         "set -eu\n"
-        "state=\"$OMP_STATE\"\n"
+        "state=\"$OMP_LOG.state\"\n"
+        "printf '%s\\n' \"$*\" >> \"$OMP_LOG\"\n"
         "case \"${3:-}\" in\n"
         "  task.isolation.apply|task.isolation.merge|task.isolation.enabled)\n"
         "    ;;\n"
@@ -75,9 +76,9 @@ def _fake_omp(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     executable.chmod(0o755)
-    monkeypatch.setenv("OMP_STATE", str(state_path))
+    monkeypatch.setenv("OMP_LOG", str(log_path))
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-    return state_path
+    return log_path
 
 
 def _blocker_codes(result: dict) -> set[str]:
@@ -131,7 +132,7 @@ def test_setup_preserves_feature_base_and_strict_review_policy(
 def test_apply_is_idempotent_and_preserves_user_server_fields(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     repository = _repository(tmp_path)
     home, xdg = _local_environment(monkeypatch, tmp_path)
-    omp_state = _fake_omp(monkeypatch, tmp_path)
+    omp_log = _fake_omp(monkeypatch, tmp_path)
     user_lsp = home / ".omp" / "agent" / "lsp.json"
     user_lsp.parent.mkdir(parents=True)
     user_lsp.write_text(
@@ -154,7 +155,7 @@ def test_apply_is_idempotent_and_preserves_user_server_fields(monkeypatch: pytes
     first_user_lsp = user_lsp.read_text(encoding="utf-8")
     first_exclude = (repository / ".git" / "info" / "exclude").read_text(encoding="utf-8")
 
-    first_omp_state = omp_state.read_text(encoding="utf-8")
+    first_omp_state = (tmp_path / "omp.log.state").read_text(encoding="utf-8")
     assert (profile_directory / "profile.json").is_file()
     assert (profile_directory / "lsp.json").is_file()
     assert (repository / ".omp" / "lsp.json").is_symlink()
@@ -188,7 +189,18 @@ def test_apply_is_idempotent_and_preserves_user_server_fields(monkeypatch: pytes
     assert user_lsp.read_text(encoding="utf-8") == first_user_lsp
     assert (repository / ".git" / "info" / "exclude").read_text(encoding="utf-8") == first_exclude
     assert (repository / ".git" / "info" / "exclude").read_text(encoding="utf-8").count(".omp/lsp.json") == 1
-    assert omp_state.read_text(encoding="utf-8") == first_omp_state
+    assert (tmp_path / "omp.log.state").read_text(encoding="utf-8") == first_omp_state
+    assert omp_log.read_text(encoding="utf-8").splitlines() == [
+        "config get task.isolation.apply",
+        "config set task.isolation.apply false",
+        "config get task.isolation.merge",
+        "config set task.isolation.merge patch",
+        "config get task.isolation.enabled",
+        "config set task.isolation.enabled true",
+        "config get task.isolation.apply",
+        "config get task.isolation.merge",
+        "config get task.isolation.enabled",
+    ]
 
 
 def test_status_reports_exact_configured_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -352,7 +364,7 @@ def test_setup_preserves_wrapped_user_lsp_config_and_pi_config_dir(
 ) -> None:
     repository = _repository(tmp_path)
     home, _ = _local_environment(monkeypatch, tmp_path)
-    _fake_omp(monkeypatch, tmp_path)
+    omp_log = _fake_omp(monkeypatch, tmp_path)
     config_dir = home / "profiles" / "work"
     monkeypatch.setenv("PI_CONFIG_DIR", str(config_dir))
     user_lsp = config_dir / "lsp.json"
@@ -388,6 +400,7 @@ def test_setup_preserves_wrapped_user_lsp_config_and_pi_config_dir(
         "requirements.txt",
         "Pipfile",
     ]
+    assert omp_log.is_file()
 
 
 def test_nested_language_markers_are_repo_relative_and_not_generic_git(

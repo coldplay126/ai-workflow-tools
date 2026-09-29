@@ -1,6 +1,6 @@
 ---
 name: release-worktree-lifecycle
-version: 1.5.0
+version: 1.6.0
 description: Use whenever handling deploy, production release, staging-to-main or staging-to-master promotion (synthetic or same-branch --source-branch), release PR creation or merge, managed feature PR linkage, managed deployment worktree creation or reuse, archive-backed explicit abandonment, local or remote branch discard, archive repack or restore, stale sync conflict disposal or recovery, or merged branch/worktree cleanup. Requires awf wt status/acquire/link-pr/sync/recover-sync/discard-sync/promote/release/discard-promotion/archive-discard/discard-local-branch/discard-remote-branch/archive-repack/archive-restore/finish/gc and forbids bypassing CLI safety blockers. Ordinary commits and non-force pushes on a developer's own development branch are not lifecycle actions and are not restricted by this skill.
 type: deployment-safety
 conditions:
@@ -53,11 +53,14 @@ production branch, publishing a promotion, or deploying. Those remain
 lifecycle actions that follow the preflight, preview, and blocker rules below.
 
 **Data-loss operations keep their evidence requirement on managed objects.**
-Removing an AWF-managed worktree, deleting an AWF-managed or AWF-owned branch,
-force-pushing or `git reset --hard` against a branch AWF tracks, and bulk
-cleanup still require the recorded PR and deployment evidence and the explicit
-user request that the relevant `awf wt` command encodes. Use `finish`, `gc`,
-`discard-promotion`, or `discard-sync`; never direct deletion.
+Ordinary managed cleanup requires recorded PR and deployment evidence and an
+explicit request: use `finish`, `gc`, `discard-promotion`, or `discard-sync`,
+never direct deletion. Explicit abandonment is different: `archive-discard`
+may remove an eligible lease without PR/deployment evidence only after a
+verified private archive; `discard-local-branch` and
+`discard-remote-branch` may delete one approved ref without that evidence only
+after a verified commit bundle, matching token, and all command blockers.
+Neither exception permits force-pushing, `git reset --hard`, or bulk cleanup.
 
 **Unmanaged user worktrees are not AWF property.** The registry protects the
 leases it records. It is not a reason to forbid ordinary Git operations in a
@@ -563,16 +566,16 @@ for a manifest automatically or permits arbitrary manual registry recovery.
 
 The default blocks dirty, untracked, conflicted, and manual-resolution state.
 `--include-uncommitted` is a guarded, explicit opt-in only for an eligible
-dirty AWF-managed lease, an imported scratch lease, or a registered BLOCKED
-manual/legacy retry with
+dirty ACTIVE AWF feature lease, an imported scratch lease, or a registered
+BLOCKED manual/legacy retry with
 proven ownership and worktree path. It never bypasses the root checkout,
 protected ref, retained lease, open PR, canonical reserved synchronization
 identity, active release, foreign-repository, ownership, or path-evidence
 blockers. Do not use direct Git, filesystem, or registry cleanup to bypass a
 blocked result.
 
-`--exclude-ignored-path` is an intentional data-loss boundary. Each requested
-path MUST be a normalized relative, present non-symlink directory with no
+`--exclude-ignored-path` accepts only the root `node_modules` directory. It
+MUST be a normalized relative, present non-symlink directory with no
 tracked descendants. AWF MUST verify ignored status and index only against the
 specified repository in a neutral Git environment; global or XDG ignore files
 and ambient `GIT_DIR` or `GIT_INDEX_FILE` never qualify a path. Use
@@ -629,7 +632,7 @@ destination parent must already be canonical private directories with mode
 directories, files, and symlinks are never overwritten.
 
 ```sh
-# Preview verifies every archive artifact and writes no destination.
+# Preview verifies the archive and destination parent/absence without writing.
 awf wt archive-restore \
   --archive /absolute/private/awf-archives/<archive> \
   --destination /absolute/private/restores/restored-worktree --json
@@ -663,6 +666,11 @@ The branch MUST pass Git's `check-ref-format --branch` validation.
 `--expected-sha` is required and MUST be the approved 40- or 64-hex remote
 HEAD, not a ref to resolve later. `origin` MUST resolve to exactly one push URL
 equal to its fetch URL; a separate or multiple push URL blocks the command.
+Both branch discard commands require a GitHub `origin` for the open-PR
+preflight, including local-only ref deletion. An absent or non-GitHub origin
+blocks them; use a separately approved workflow instead of bypassing the
+preflight.
+
 Before preview, create an existing, canonical, operator-owned `0700` backup
 root outside the repository, AWF cache, and every managed worktree:
 
@@ -701,12 +709,20 @@ integration branches and branch names beginning `release/`, `release-archive-`,
 or `staging-archive-`; any live worktree, non-removed or retained lease,
 reservation, active release, or open PR are blockers.
 
-Before a delete attempt, AWF persists and fsyncs immutable `attempt.json`;
-neither it nor a completion receipt is changed or deleted after creation. AWF
-writes the receipt only after observing the remote ref absent. A receipt makes
-later preview or apply idempotent: AWF MUST NOT delete again, and a recreated
-branch is reported untouched even if it has the same SHA. A present remote with
-an attempt but no receipt, including one at the expected SHA, is
+The remote CAS push uses `--no-verify` and does not invoke local pre-push
+hooks; repository policy must therefore be enforced by remote protections
+and the AWF preview blockers, not solely by that hook.
+
+Before a delete attempt, AWF persists and fsyncs `attempt.json`. A confirmed
+CAS rejection clears that attempt marker after the rejected push returns, so
+the same intent can be retried if the remote again matches the approved SHA.
+A definite pre-connection DNS or authentication failure also clears the marker
+and permits a retry with the same token after restoring access. An ambiguous
+transport failure or unobserved result keeps the marker and fails closed while
+the remote ref exists. AWF writes the receipt only after observing the
+remote ref absent. A receipt makes later preview or apply idempotent: AWF MUST
+NOT delete again, and a recreated branch is reported untouched even if it has
+the same SHA. A present remote with a pending attempt and no receipt is
 `remote_delete_outcome_unknown` and fail-closed; MUST NOT retry with direct Git
 deletion. A newly intended or recreated branch requires a new reason or
 approved SHA, a new preview, and its new token.
@@ -1181,16 +1197,16 @@ These prohibitions apply to AWF-managed leases, AWF-owned synthetic branches, an
     "out_of_order_resolution_apply": "awf wt promote --source-pr <first> --source-pr <second> --to <branch> --out-of-order --repo-root <repo-root> --apply --json",
     "discard_promotion_preview": "awf wt discard-promotion --lease <id> --repo-root <repo-root> --json",
     "discard_promotion_apply": "awf wt discard-promotion --lease <id> --repo-root <repo-root> --apply --json",
-    "archive_discard_preview": "awf wt archive-discard --lease <id> --backup-root <absolute-private-path> --reason <text> --repo-root <repo-root> --json",
-    "archive_discard_apply": "awf wt archive-discard --lease <id> --backup-root <absolute-private-path> --reason <text> --preview-token <sha256> --apply --repo-root <repo-root> --json",
-    "discard_remote_branch_preview": "awf wt discard-remote-branch --branch <branch> --expected-sha <approved-sha> --backup-root <absolute-private-0700-path> --reason <text> --repo-root <repo-root> --json",
-    "discard_remote_branch_apply": "awf wt discard-remote-branch --branch <branch> --expected-sha <approved-sha> --backup-root <absolute-private-0700-path> --reason <text> --preview-token <sha256> --apply --repo-root <repo-root> --json",
-    "discard_local_branch_preview": "awf wt discard-local-branch --branch <branch> --expected-sha <approved-sha> --backup-root <absolute-private-0700-path> --reason <text> --repo-root <repo-root> --json",
-    "discard_local_branch_apply": "awf wt discard-local-branch --branch <branch> --expected-sha <approved-sha> --backup-root <absolute-private-0700-path> --reason <text> --preview-token <sha256> --apply --repo-root <repo-root> --json",
-    "archive_repack_preview": "awf wt archive-repack --archive <absolute-private-archive> --exclude-ignored-path node_modules --repo-root <repo-root> --json",
-    "archive_repack_apply": "awf wt archive-repack --archive <absolute-private-archive> --exclude-ignored-path node_modules --preview-token <sha256> --apply --repo-root <repo-root> --json",
-    "archive_restore_preview": "awf wt archive-restore --archive <absolute-private-archive> --destination <absent-private-path> --json",
-    "archive_restore_apply": "awf wt archive-restore --archive <absolute-private-archive> --destination <absent-private-path> --apply --json",
+    "archive_discard_preview": "awf wt archive-discard --lease <id> --backup-root /absolute/private/awf-archives --reason \"work intentionally abandoned\" --repo-root <repo-root> --json",
+    "archive_discard_apply": "awf wt archive-discard --lease <id> --backup-root /absolute/private/awf-archives --reason \"work intentionally abandoned\" --preview-token <token-from-preview> --apply --repo-root <repo-root> --json",
+    "discard_remote_branch_preview": "awf wt discard-remote-branch --branch <branch> --expected-sha <approved-40-or-64-hex-sha> --backup-root /absolute/private/awf-remote-branch-backups --reason \"approved branch retirement\" --repo-root <repo-root> --json",
+    "discard_remote_branch_apply": "awf wt discard-remote-branch --branch <branch> --expected-sha <approved-40-or-64-hex-sha> --backup-root /absolute/private/awf-remote-branch-backups --reason \"approved branch retirement\" --preview-token <token-from-preview> --apply --repo-root <repo-root> --json",
+    "discard_local_branch_preview": "awf wt discard-local-branch --branch <branch> --expected-sha <approved-40-or-64-hex-sha> --backup-root /absolute/private/awf-local-branch-backups --reason \"approved local branch retirement\" --repo-root <repo-root> --json",
+    "discard_local_branch_apply": "awf wt discard-local-branch --branch <branch> --expected-sha <approved-40-or-64-hex-sha> --backup-root /absolute/private/awf-local-branch-backups --reason \"approved local branch retirement\" --preview-token <local-token-from-preview> --apply --repo-root <repo-root> --json",
+    "archive_repack_preview": "awf wt archive-repack --archive /absolute/private/awf-archives/<archive> --exclude-ignored-path node_modules --repo-root <repo-root> --json",
+    "archive_repack_apply": "awf wt archive-repack --archive /absolute/private/awf-archives/<archive> --exclude-ignored-path node_modules --preview-token <token-from-preview> --apply --repo-root <repo-root> --json",
+    "archive_restore_preview": "awf wt archive-restore --archive /absolute/private/awf-archives/<archive> --destination /absolute/private/restores/restored-worktree --json",
+    "archive_restore_apply": "awf wt archive-restore --archive /absolute/private/awf-archives/<archive> --destination /absolute/private/restores/restored-worktree --apply --json",
     "finish_preview": "awf wt finish --repo-root <repo-root> --pr <merged-pr> --json",
     "finish_apply": "awf wt finish --repo-root <repo-root> --pr <merged-pr> --apply --json",
     "gc_preview": "awf wt gc --repo-root <repo-root> --merged --older-than 7d --dry-run --json",
@@ -1297,7 +1313,7 @@ These prohibitions apply to AWF-managed leases, AWF-owned synthetic branches, an
     "archive_discard": {
       "scope": "explicit_user_abandonment_only_not_merged_deployed_or_finish_substitute",
       "default": "clean_only",
-      "dirty_opt_in": "include_uncommitted_only_for_eligible_dirty_imported_scratch_or_registered_blocked_manual_legacy_retry_with_proven_ownership_and_path",
+      "dirty_opt_in": "include_uncommitted_only_for_eligible_dirty_awf_feature_or_imported_scratch_or_registered_blocked_manual_legacy_retry_with_proven_ownership_and_path",
       "excluded_ignored_paths": "explicit_normalized_present_non_symlink_git_ignored_directory_without_tracked_descendants_policy_bound_to_token_and_manifest",
       "continued_blockers": "root_protected_ref_retained_open_pr_canonical_sync_active_release_foreign_repository_or_unproven_ownership_path",
       "preview": "read_only_create_archive_action_with_token_destination_and_full_snapshot",
@@ -1341,7 +1357,7 @@ These prohibitions apply to AWF-managed leases, AWF-owned synthetic branches, an
     },
     "archive_restore": {
       "scope": "verified_private_archive_to_absent_private_destination_without_source_repository_or_registry",
-      "preview": "read_verified_archive_only",
+      "preview": "read_verified_archive_and_validate_absent_private_destination",
       "apply": "verify_again_restore_archive_only",
       "output": "no_manifest_contents_artifact_hashes_or_secrets"
     },

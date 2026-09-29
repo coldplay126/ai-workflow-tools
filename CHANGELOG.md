@@ -103,14 +103,27 @@
   건너뛰며, 기본값 `False`와 기존 finish/gc 동작은 변하지 않습니다.
 - `awf wt archive-discard`는 명시적으로 포기한 worktree를 백업한 뒤 정리한다.
   기본은 clean-only이고 dirty·untracked·conflict·manual 상태는 명시적인
-  `--include-uncommitted`가 있어야 eligible imported scratch 또는 등록된 BLOCKED
-  manual/legacy retry에서만 보관할 수 있다. root, protected ref, retained lease,
-  open PR, canonical sync, active release, foreign repository, 소유권·경로 증명
-  실패는 계속 차단한다.
-- `--exclude-ignored-path node_modules`는 검증된 ignored directory만 새 backup에서
+  `--include-uncommitted`가 있어야 eligible dirty ACTIVE AWF feature lease,
+  imported scratch 또는 등록된 BLOCKED manual/legacy retry에서 보관한다.
+  root, protected ref, retained lease, open PR, canonical sync, active release,
+  foreign repository, 소유권·경로 증명 실패는 계속 차단한다. REMOVED 재시도에서
+  local branch가 이미 없다면 idempotent 결과를 반환하고 다른 worktree가 checkout
+  중이면 branch를 보존한다.
+- `--exclude-ignored-path node_modules`만 지원하며, 검증된 루트 ignored directory를 새 backup에서
   의도적으로 제외한다. 해당 내부의 로컬 변경까지 복원되지 않지만 다른 ignored
   파일(환경 파일 포함)은 보존하며, exclusion 정책은 preview token과 manifest에
   결속된다.
+- Branch discard는 linked worktree에서도 main worktree의 공통 Git identity로
+  lease를 검사하며, 같은 origin을 가리키는 다른 repository identity의 lease는
+  차단한다. Local discard도 origin/HEAD를 보호하고 읽을 수 없으면 차단한다.
+  두 명령은 GitHub origin의 open PR 조회가 필요하다. Remote CAS 거부가 확정된
+  경우 attempt marker를 안전하게 지워 동일 intent 재시도를 허용하지만, 전송
+  결과가 불명확하면 그대로 fail-closed로 보존한다.
+
+- 비 JSON preview에서도 모든 action의 `preview_token`과 `backup_directory`를
+  출력한다. `archive-restore` preview는 destination의 private 부모와 부재를
+  apply 전에 검사한다. 내부 restore의 미사용 제외 옵션을 제거했다.
+
 - `awf wt archive-repack`은 `REMOVED`이고 cleanup reservation이 없는 matching
   archive만 경량 archive로 교체한다. 기존 archive는 새 sibling archive의 생성,
   복원 검증, atomic publish가 끝날 때까지 보존한다.
