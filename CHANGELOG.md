@@ -113,17 +113,16 @@
   의도적으로 제외한다. 해당 내부의 로컬 변경까지 복원되지 않지만 다른 ignored
   파일(환경 파일 포함)은 보존하며, exclusion 정책은 preview token과 manifest에
   결속된다.
-- Branch discard는 linked worktree에서도 main worktree의 공통 Git identity로
-  lease를 검사하며, 같은 origin을 가리키는 다른 repository identity의 lease는
-  차단한다. Local discard도 origin/HEAD를 보호하고 읽을 수 없으면 차단한다.
-  두 명령은 GitHub origin의 open PR 조회가 필요하다. Remote CAS 거부가 확정된
-  경우 attempt marker를 안전하게 지워 동일 intent 재시도를 허용하지만, 전송
-  결과가 불명확하면 그대로 fail-closed로 보존한다.
-
+- Branch discard는 기존 경로별 `repository_id` 계산을 바꾸지 않고 linked
+  worktree의 공통 Git 디렉터리로도 lease를 검사한다. Local discard는 다른 clone의
+  lease를 무시하고, remote discard는 같은 origin을 가리키는 다른 clone의
+  활성·보존 lease를 차단한다. 두 명령은 origin/HEAD와 GitHub open PR을 확인한다.
+  Remote CAS 거부 또는 연결 이전 실패가 확정되거나 local ref transaction이
+  commit 전에 중단되면 attempt marker를 지워 동일 token 재시도를 허용한다.
+  삭제 결과가 불명확하면 marker를 보존하고 재시도를 차단한다.
 - 비 JSON preview에서도 모든 action의 `preview_token`과 `backup_directory`를
   출력한다. `archive-restore` preview는 destination의 private 부모와 부재를
   apply 전에 검사한다. 내부 restore의 미사용 제외 옵션을 제거했다.
-
 - `awf wt archive-repack`은 `REMOVED`이고 cleanup reservation이 없는 matching
   archive만 경량 archive로 교체한다. 기존 archive는 새 sibling archive의 생성,
   복원 검증, atomic publish가 끝날 때까지 보존한다.

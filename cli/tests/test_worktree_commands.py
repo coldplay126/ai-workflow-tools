@@ -339,7 +339,7 @@ def test_wt_human_output_emits_refresh_warning_to_stderr(
     (
         ("wt.discard-local-branch", "create_commit_bundle"),
         ("wt.discard-remote-branch", "create_commit_bundle"),
-        ("wt.archive-repack", "repack_archive"),
+        ("wt.archive-repack", "repack_archive_contents"),
     ),
 )
 def test_wt_human_output_exposes_apply_token_and_backup_directory(
