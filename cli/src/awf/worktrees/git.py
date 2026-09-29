@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import ExitStack, contextmanager
 
 import hashlib
 import os
@@ -12,7 +12,8 @@ import subprocess
 import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from tempfile import mkstemp
+from tempfile import TemporaryDirectory, mkstemp
+from typing import overload
 
 
 class GitError(RuntimeError):
@@ -21,6 +22,10 @@ class GitError(RuntimeError):
     def __init__(self, detail: str, *, returncode: int | None = None) -> None:
         super().__init__(detail)
         self.returncode = returncode
+
+
+class GitBranchDeleteAborted(GitError):
+    """The local ref deletion transaction was aborted before commit was attempted."""
 
 
 class GitPatchConflict(GitError):
@@ -40,11 +45,20 @@ _REMOTE_SAFETY_REJECTION_MARKERS = (
     "force-with-lease",
     "stale info",
 )
+_OBJECT_FORMATS = {"sha1": 40, "sha256": 64}
+
 
 
 def _is_remote_safety_rejection(error: GitError) -> bool:
-    detail = str(error).lower()
-    return any(marker in detail for marker in _REMOTE_SAFETY_REJECTION_MARKERS)
+    lines = (
+        line for line in str(error).lower().splitlines()
+        if not re.search(r"(?:^|\s)remote:", line)
+    )
+    return any(
+        marker in line
+        for line in lines
+        for marker in _REMOTE_SAFETY_REJECTION_MARKERS
+    )
 
 @dataclass(frozen=True)
 class GitCompleted:
@@ -84,6 +98,21 @@ class GitIndexBackup:
     backup_path: Path
     existed: bool
 
+def _bundle_verification_environment() -> dict[str, str]:
+    environment = {
+        name: value for name, value in os.environ.items() if not name.startswith("GIT_")
+    }
+    environment.update(
+        {
+            "GIT_ALLOW_PROTOCOL": "file",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+    )
+    return environment
+
+
 
 class GitClient:
     def __init__(self, cwd: Path, *, timeout: float = 30.0) -> None:
@@ -96,13 +125,26 @@ class GitClient:
         output = self._run("rev-parse", "--show-toplevel").stdout
         return Path(_path_from_line(output)).resolve()
 
+    def common_git_directory(self) -> Path:
+        """Identify one Git object/ref store across its linked worktrees, including bare."""
+        output = self._run(
+            "rev-parse", "--path-format=absolute", "--git-common-dir"
+        ).stdout
+        return Path(_path_from_line(output)).resolve()
+
     def repository_name(self) -> str:
         return self.repository_root().name
 
     def repository_id(self) -> str:
-        normalized_remote = _normalize_remote_url(self.remote_url())
+        return self.repository_id_from_remote(
+            _normalize_remote_url(self.remote_url()), self.repository_root()
+        )
+
+    @staticmethod
+    def repository_id_from_remote(normalized_remote: str, repository_root: Path) -> str:
+        """Hash the stored root with an already normalized origin URL."""
         payload = normalized_remote.encode("utf-8") + b"\0" + os.fsencode(
-            self.repository_root()
+            repository_root
         )
         return hashlib.sha256(payload).hexdigest()
 
@@ -111,6 +153,207 @@ class GitClient:
 
     def head_sha(self, cwd: Path | None = None) -> str:
         return self._text(self._run("rev-parse", "HEAD", cwd=cwd).stdout)
+
+    def validate_branch_name(self, branch: str) -> None:
+        """Validate a literal local branch name with Git's ref-format parser."""
+        if (
+            not branch
+            or any(character.isspace() for character in branch)
+            or "\0" in branch
+            or branch.startswith("refs/")
+        ):
+            raise GitError("branch name must be a non-empty local branch name")
+        normalized = self._text(
+            self._run("check-ref-format", "--branch", branch).stdout
+        )
+        if normalized != branch:
+            raise GitError("branch name must not use branch expansion")
+
+    def create_bundle(self, destination: Path, *, cwd: Path) -> None:
+        """Create a self-contained bundle containing HEAD and its ancestry."""
+        try:
+            details = destination.lstat()
+        except FileNotFoundError:
+            details = None
+        except OSError as error:
+            raise GitError(f"unable to inspect bundle destination: {error}") from error
+        if details is not None:
+            raise GitError("bundle destination already exists")
+        if not cwd.is_dir():
+            raise GitError(f"bundle source directory is unavailable: {cwd}")
+        self._run("bundle", "create", str(destination), "HEAD", cwd=cwd)
+        try:
+            details = destination.lstat()
+        except OSError as error:
+            raise GitError("git bundle creation did not produce an artifact") from error
+        if not stat.S_ISREG(details.st_mode):
+            raise GitError("git bundle creation produced a non-regular artifact")
+
+    def create_detached_commit_bundle(
+        self, destination: Path, *, commit_sha: str
+    ) -> None:
+        """Create a self-contained commit bundle without mutating the source repo."""
+        if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit_sha) is None:
+            raise GitError("commit bundle head must be an object identifier")
+        try:
+            details = destination.lstat()
+        except FileNotFoundError:
+            details = None
+        except OSError as error:
+            raise GitError(f"unable to inspect bundle destination: {error}") from error
+        if details is not None:
+            raise GitError("bundle destination already exists")
+
+        source_environment = _bundle_verification_environment()
+        source_object_format = self._text(
+            self._run(
+                "rev-parse",
+                "--show-object-format",
+                env=source_environment,
+            ).stdout
+        )
+        source_oid_length = _OBJECT_FORMATS.get(source_object_format)
+        if source_oid_length is None:
+            raise GitError("Git uses an unsupported object format")
+        if len(commit_sha) != source_oid_length:
+            raise GitError("commit bundle head does not match source object format")
+
+        common_directory = Path(
+            self._text(
+                self._run(
+                    "rev-parse",
+                    "--git-common-dir",
+                    env=source_environment,
+                ).stdout
+            )
+        )
+        if not common_directory.is_absolute():
+            common_directory = self.cwd / common_directory
+        objects = common_directory.resolve() / "objects"
+        if not objects.is_dir():
+            raise GitError("bundle source objects directory is unavailable")
+
+        with TemporaryDirectory(prefix="awf-bundle-source-") as temporary:
+            temporary_path = Path(temporary)
+            isolated_directory = temporary_path / "isolated"
+            isolated_directory.mkdir(mode=0o700)
+            source = temporary_path / "source.git"
+            environment = _bundle_verification_environment()
+            environment["GIT_TEMPLATE_DIR"] = str(isolated_directory)
+            environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = str(objects)
+            command_prefix = ("-c", f"core.hooksPath={isolated_directory}")
+            self._run(
+                *command_prefix,
+                "init",
+                "--bare",
+                f"--object-format={source_object_format}",
+                f"--template={isolated_directory}",
+                str(source),
+                cwd=temporary_path,
+                env=environment,
+            )
+            self._run(
+                *command_prefix,
+                "update-ref",
+                "HEAD",
+                commit_sha,
+                cwd=source,
+                env=environment,
+            )
+            self._run(
+                *command_prefix,
+                "bundle",
+                "create",
+                str(destination),
+                "HEAD",
+                cwd=source,
+                env=environment,
+            )
+        try:
+            details = destination.lstat()
+        except OSError as error:
+            raise GitError("git bundle creation did not produce an artifact") from error
+        if not stat.S_ISREG(details.st_mode):
+            raise GitError("git bundle creation produced a non-regular artifact")
+
+    def verify_bundle(self, bundle: Path, *, expected_head: str) -> None:
+        """Recover a bundle into a fresh bare repository and verify its objects."""
+        if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", expected_head) is None:
+            raise GitError("expected bundle head must be an object identifier")
+        expected_object_format = (
+            "sha1"
+            if len(expected_head) == _OBJECT_FORMATS["sha1"]
+            else "sha256"
+        )
+
+        try:
+            details = bundle.lstat()
+        except OSError as error:
+            raise GitError(f"bundle artifact is unavailable: {bundle}") from error
+        if not stat.S_ISREG(details.st_mode):
+            raise GitError("bundle artifact must be a regular file")
+
+        with TemporaryDirectory(prefix="awf-bundle-verify-") as temporary:
+            temporary_path = Path(temporary)
+            isolated_directory = temporary_path / "isolated"
+            isolated_directory.mkdir(mode=0o700)
+            environment = _bundle_verification_environment()
+            environment["GIT_TEMPLATE_DIR"] = str(isolated_directory)
+            recovered = temporary_path / "recovered.git"
+            command_prefix = (
+                "-c",
+                f"core.hooksPath={isolated_directory}",
+                "-c",
+                "protocol.file.allow=always",
+            )
+            self._run(
+                *command_prefix,
+                "init",
+                "--bare",
+                f"--object-format={expected_object_format}",
+                f"--template={isolated_directory}",
+                str(recovered),
+                cwd=temporary_path,
+                env=environment,
+            )
+            self._run(
+                *command_prefix,
+                "bundle",
+                "verify",
+                str(bundle.resolve()),
+                cwd=recovered,
+                env=environment,
+            )
+            self._run(
+                *command_prefix,
+                "fetch",
+                "--no-tags",
+                str(bundle.resolve()),
+                "HEAD:refs/heads/archive-verify",
+                cwd=recovered,
+                env=environment,
+            )
+            recovered_head = self._text(
+                self._run(
+                    *command_prefix,
+                    "rev-parse",
+                    "refs/heads/archive-verify",
+                    cwd=recovered,
+                    env=environment,
+                ).stdout
+            )
+            if recovered_head != expected_head:
+                raise GitError(
+                    "independent bundle recovery does not match the expected HEAD"
+                )
+            self._run(
+                *command_prefix,
+                "fsck",
+                "--full",
+                "--strict",
+                cwd=recovered,
+                env=environment,
+            )
 
     def status_porcelain(self, cwd: Path | None = None) -> tuple[str, ...]:
         completed = self._run(
@@ -343,13 +586,19 @@ class GitClient:
                 raise creation_error
         self._run("worktree", "add", str(path), branch)
 
-    def remove_worktree(self, path: Path, *, force: bool = False) -> None:
+    def remove_worktree(
+        self,
+        path: Path,
+        *,
+        force: bool = False,
+        env: Mapping[str, str] | None = None,
+    ) -> None:
         arguments = ("worktree", "remove", "--force", str(path)) if force else (
             "worktree",
             "remove",
             str(path),
         )
-        self._run(*arguments)
+        self._run(*arguments, env=env)
 
     def restore_paths_to_ref(
         self, cwd: Path, ref: str, paths: tuple[str, ...]
@@ -369,23 +618,195 @@ class GitClient:
             cwd=cwd,
         )
 
+    def local_branch_sha(self, branch: str) -> str | None:
+        """Return a direct local branch's exact object ID, or None when absent."""
+        self.validate_branch_name(branch)
+        ref = f"refs/heads/{branch}"
+        completed = self._run(
+            "for-each-ref",
+            "--format=%(refname)\t%(objectname)\t%(symref)",
+            ref,
+        )
+        try:
+            records = completed.stdout.decode("utf-8", errors="strict").splitlines()
+        except UnicodeDecodeError as error:
+            raise GitError(
+                "git for-each-ref returned an invalid local branch record"
+            ) from error
+
+        matching_records: list[tuple[str, str, str]] = []
+        for record in records:
+            fields = record.split("\t")
+            if len(fields) != 3:
+                raise GitError("git for-each-ref returned an invalid local branch record")
+            returned_ref, object_id, symref = fields
+            if returned_ref == ref:
+                matching_records.append((returned_ref, object_id, symref))
+        if not matching_records:
+            return None
+        if len(matching_records) != 1:
+            raise GitError("git for-each-ref returned multiple local branch records")
+        _, object_id, symref = matching_records[0]
+        if symref:
+            raise GitError("local branch must be a direct reference")
+        self._require_object_id(
+            object_id,
+            "git for-each-ref returned an invalid local branch",
+        )
+        return object_id
+
+    def delete_inactive_branch_if_at(
+        self,
+        branch: str,
+        expected_sha: str,
+        *,
+        before_commit: Callable[[], None] | None = None,
+    ) -> None:
+        """Delete an un-checked-out direct branch under prepared ref and HEAD locks."""
+        self.validate_branch_name(branch)
+        self._require_object_id(expected_sha, "expected branch head")
+        current_sha = self.local_branch_sha(branch)
+        if current_sha is None:
+            raise GitError("local branch is absent")
+        if current_sha != expected_sha:
+            raise GitError("local branch changed before deletion")
+
+        inventory = self.list_worktrees()
+        self._require_branch_inactive(inventory, branch)
+        ref = f"refs/heads/{branch}"
+        branch_transaction = self._start_ref_transaction(
+            self.cwd, isolate_hooks=True
+        )
+        committed = False
+        commit_started = False
+        try:
+            self._ref_transaction_command(branch_transaction, "start")
+            self._ref_transaction_command(
+                branch_transaction, "option no-deref", response=False
+            )
+            self._ref_transaction_command(
+                branch_transaction, f"delete {ref} {expected_sha}", response=False
+            )
+            self._ref_transaction_command(branch_transaction, "prepare")
+
+            with self._hold_live_worktree_heads(inventory):
+                self._revalidate_inactive_branch(inventory, branch)
+                if before_commit is not None:
+                    before_commit()
+                self._revalidate_inactive_branch(inventory, branch)
+                commit_started = True
+                self._ref_transaction_command(branch_transaction, "commit")
+                committed = True
+        except GitError as error:
+            if not commit_started:
+                raise GitBranchDeleteAborted(str(error)) from error
+            raise
+        finally:
+            if committed:
+                self._close_ref_transaction(branch_transaction)
+            else:
+                self._abort_ref_transaction(branch_transaction)
+
+    @staticmethod
+    def _require_object_id(value: str, description: str) -> None:
+        if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value) is None:
+            raise GitError(f"{description} must be an object identifier")
+
+    @staticmethod
+    def _require_branch_inactive(
+        inventory: tuple[GitWorktree, ...], branch: str
+    ) -> None:
+        if any(worktree.branch == branch for worktree in inventory):
+            raise GitError("local branch is checked out by a registered worktree")
+
+    def _revalidate_inactive_branch(
+        self, expected_inventory: tuple[GitWorktree, ...], branch: str
+    ) -> None:
+        inventory = self.list_worktrees()
+        if inventory != expected_inventory:
+            raise GitError(
+                "registered worktree inventory changed before local branch deletion"
+            )
+        self._require_branch_inactive(inventory, branch)
+
+    @contextmanager
+    def _hold_live_worktree_heads(
+        self, inventory: tuple[GitWorktree, ...]
+    ) -> Iterator[None]:
+        with ExitStack() as cleanup:
+            for worktree in inventory:
+                if worktree.prunable is not None:
+                    continue
+                transaction = self._start_ref_transaction(
+                    worktree.path, isolate_hooks=True
+                )
+                cleanup.callback(self._abort_ref_transaction, transaction)
+                self._ref_transaction_command(transaction, "start")
+                self._ref_transaction_command(
+                    transaction, "option no-deref", response=False
+                )
+                if worktree.branch is not None:
+                    self._ref_transaction_command(
+                        transaction,
+                        f"symref-verify HEAD refs/heads/{worktree.branch}",
+                        response=False,
+                    )
+                elif worktree.detached and worktree.head_sha is not None:
+                    self._require_object_id(
+                        worktree.head_sha,
+                        "registered worktree HEAD",
+                    )
+                    self._ref_transaction_command(
+                        transaction,
+                        f"verify HEAD {worktree.head_sha}",
+                        response=False,
+                    )
+                else:
+                    raise GitError(
+                        "registered worktree HEAD is neither a branch symref nor detached"
+                    )
+                self._ref_transaction_command(transaction, "prepare")
+            yield
+
     def delete_branch_if_at(self, branch: str, expected_sha: str) -> None:
         self._run("update-ref", "-d", f"refs/heads/{branch}", expected_sha)
 
 
-    def delete_remote_branch_if_at(self, branch: str, expected_sha: str) -> None:
+    def delete_remote_branch_if_at(
+        self, branch: str, expected_sha: str, *, skip_hooks: bool = False
+    ) -> None:
         ref = f"refs/heads/{branch}"
-        try:
-            self._run(
-                "push",
+        arguments = ["push"]
+        if skip_hooks:
+            arguments.append("--no-verify")
+        arguments.extend(
+            (
                 f"--force-with-lease={ref}:{expected_sha}",
                 "origin",
                 f":{ref}",
             )
+        )
+        try:
+            self._run(*arguments)
         except GitError as error:
             if _is_remote_safety_rejection(error):
                 raise
-            raise GitRemoteError(str(error)) from error
+            raise GitRemoteError(str(error), returncode=error.returncode) from error
+
+    @contextmanager
+    def hold_branch_if_at(self, branch: str, expected_sha: str) -> Iterator[None]:
+        """Hold one local branch while a caller owns the worktree HEAD boundary."""
+        ref = f"refs/heads/{branch}"
+        branch_transaction = self._start_ref_transaction(self.cwd)
+        try:
+            self._ref_transaction_command(branch_transaction, "start")
+            self._ref_transaction_command(
+                branch_transaction, f"verify {ref} {expected_sha}", response=False
+            )
+            self._ref_transaction_command(branch_transaction, "prepare")
+            yield
+        finally:
+            self._abort_ref_transaction(branch_transaction)
 
     @contextmanager
     def hold_worktree_branch_if_at(
@@ -419,10 +840,18 @@ class GitClient:
                 self._abort_ref_transaction(head_transaction)
             self._abort_ref_transaction(branch_transaction)
 
-    def _start_ref_transaction(self, cwd: Path) -> subprocess.Popen[str]:
+    def _start_ref_transaction(
+        self, cwd: Path, *, isolate_hooks: bool = False
+    ) -> subprocess.Popen[str]:
+        command = ["git"]
+        environment: dict[str, str] | None = None
+        if isolate_hooks:
+            command.extend(("-c", "core.hooksPath=/dev/null"))
+            environment = _bundle_verification_environment()
+        command.extend(("update-ref", "--stdin"))
         try:
             return subprocess.Popen(
-                ["git", "update-ref", "--stdin"],
+                command,
                 cwd=str(cwd),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -430,22 +859,38 @@ class GitClient:
                 text=True,
                 bufsize=1,
                 start_new_session=True,
+                env=environment,
             )
         except OSError as error:
             raise GitError(f"git update-ref failed to launch: {error}") from error
 
     def _abort_ref_transaction(self, process: subprocess.Popen[str]) -> None:
-        if process.poll() is None:
-            try:
-                self._ref_transaction_command(process, "abort")
-            except GitError:
-                _stop_process_group(process)
+        try:
+            if process.poll() is None:
+                try:
+                    self._ref_transaction_command(process, "abort")
+                except GitError:
+                    _stop_process_group(process)
+        finally:
+            self._close_ref_transaction(process)
+
+    def _close_ref_transaction(self, process: subprocess.Popen[str]) -> None:
         if process.stdin is not None and not process.stdin.closed:
-            process.stdin.close()
+            try:
+                process.stdin.close()
+            except (OSError, ValueError):
+                pass
         try:
             process.wait(timeout=self.timeout)
         except subprocess.TimeoutExpired:
             _stop_process_group(process)
+        finally:
+            for pipe in (process.stdout, process.stderr):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except (OSError, ValueError):
+                        pass
 
     def _ref_transaction_command(
         self,
@@ -941,6 +1386,7 @@ class GitClient:
         *args: str,
         cwd: Path | None = None,
         input_bytes: bytes | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> GitCompleted:
         command = args[0] if args else "git"
         try:
@@ -951,6 +1397,7 @@ class GitClient:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 start_new_session=True,
+                env=dict(env) if env is not None else None,
             )
             stdout, stderr = process.communicate(
                 input=input_bytes, timeout=self.timeout
@@ -1048,7 +1495,17 @@ def _truncate_utf8(value: str, maximum_bytes: int) -> str:
     return value.encode("utf-8")[:maximum_bytes].decode("utf-8", errors="ignore")
 
 
-def _stop_process_group(process: subprocess.Popen[bytes]) -> tuple[bytes, bytes]:
+@overload
+def _stop_process_group(process: subprocess.Popen[bytes]) -> tuple[bytes, bytes]: ...
+
+
+@overload
+def _stop_process_group(process: subprocess.Popen[str]) -> tuple[str, str]: ...
+
+
+def _stop_process_group(
+    process: subprocess.Popen[bytes] | subprocess.Popen[str],
+) -> tuple[bytes | str, bytes | str]:
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:

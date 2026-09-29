@@ -121,6 +121,12 @@ awf wf seal-plan --repo-root . --json
 - `awf wt discard-sync --lease <id> [--repo-root <path>] [--apply] [--json]`: stale source 또는 target pin 때문에 재개 불가능한 unpublished `sync_target_conflict` lease만 preview/apply로 제거한다. `status --refresh` 뒤 `remove_worktree`·`delete_local_branch` preview action을 검토해야 한다. AWF-created production→staging identity, registered non-symlink worktree, target-pinned HEAD/local branch, reviewed paths 안의 valid unmerged state, source pin과 동일한 clean staged entries, 모든 상태의 remote branch/PR 부재를 요구한다. Apply는 lock/revalidation/reservation과 registered root symlink/device/inode 재확인 뒤 reviewed conflict path만 target pin으로 정리하고 non-force remove한다. Late untracked/out-of-scope change가 Git removal을 거부하면 source-only binary patch로 exact recorded conflict를 재구성한 경우에만 reservation을 해제하며, identity/rebuild 불일치는 `cleanup_reserved`로 보존한다. remote branch/PR는 절대 삭제하지 않는다.
 - `awf wt recover-sync --lease <id> [--repo-root <path>] [--apply] [--json]`: configured production verification이 있는 current-pinned unpublished `sync_target_conflict` lease만 복구한다. Preview의 recorded `UU` conflict path만 편집한 뒤 같은 lease를 apply한다. AWF는 해당 path만 stage하고 final stage-0 blob marker와 source-only reviewed delta를 확인한 뒤 target→source 두 parent controlled synthetic commit을 생성하며, marker/delta 거부 때 prior conflict index를 복구한다. prepare/verify 뒤 exact commit verification, atomic create-if-absent push, exact PR gates를 수행한다. publication 전 commit transition 중단은 `awf wt sync --from <production> --to <staging> --apply --json`으로 재개한다. stale pin, extra/untracked/rename path, 모든 상태의 remote branch/PR, parent mismatch는 fail-closed다.
 - `awf wt discard-promotion --lease <id> [--repo-root <path>] [--apply] [--json]`: commit 전 empty exact `promotion_apply_failed` lease만 preview/apply로 제거한다. 반드시 `status --refresh` 뒤 preview의 `remove_worktree`·`delete_local_branch` action을 검토한다. AWF 소유 `PROMOTE`/`EXACT`/`BLOCKED` lease가 clean이고 recorded HEAD/local branch/registered worktree가 같은 pre-commit SHA를 가리키며, PR·remote branch·conflict·protected index·cleanup reservation이 없고 마지막 failure event가 정확해야 한다. `target_base_sha`가 있는 lease는 recorded HEAD와 같아야 하며, legacy null pin은 recorded HEAD가 현재 `base_ref`의 ancestor임을 Git graph로 증명할 때만 허용한다. Apply는 lock 안에서 재검증하고 remote branch는 절대 삭제하지 않는다. 모든 blocker와 drift는 보존하며 Git·SQLite·filesystem 우회 cleanup은 금지한다.
+- `awf wt archive-discard --lease <id> --backup-root <absolute-private-path> --reason <text> [--include-uncommitted] [--exclude-ignored-path node_modules] [--preview-token <sha256>] [--apply] [--repo-root <path>] [--json]`: 명시적으로 포기한 eligible lease를 검증된 private archive로 보관한 뒤 폐기한다. 기본은 clean-only이며 `--include-uncommitted`는 eligible dirty ACTIVE AWF feature, imported scratch 또는 등록된 BLOCKED manual/legacy retry에만 적용한다. `--exclude-ignored-path`는 검증된 루트 `node_modules`만 제외할 수 있다. Preview는 read-only이고 apply에는 같은 token이 필수다. Remote ref는 보존한다. 완료 뒤 local branch가 이미 없으면 idempotent action을 반환하며, 재시도 전에 branch가 다른 worktree에서 checkout되면 삭제하지 않고 경고한다.
+- `awf wt discard-remote-branch --branch <name> --expected-sha <40-or-64-hex> --backup-root <absolute-private-0700-path> --reason <text> [--preview-token <sha256>] [--apply] [--repo-root <path>] [--json]`: 승인한 origin branch 하나의 commit-only bundle을 검증한 뒤 CAS로 remote ref만 삭제한다. local branch·worktree·HEAD·index·config는 그대로 둔다. CAS 거부가 확정되면 안전하게 재시도할 수 있지만 전송 결과가 모호하면 fail-closed다. CAS push는 `--no-verify`로 local pre-push hook을 우회한다.
+- `awf wt discard-local-branch --branch <name> --expected-sha <40-or-64-hex> --backup-root <absolute-private-0700-path> --reason <text> [--preview-token <sha256>] [--apply] [--repo-root <path>] [--json]`: 승인한 direct local branch의 HEAD 이력을 commit-only bundle로 검증한 뒤 해당 local `refs/heads` ref만 CAS 삭제한다. Remote와 `refs/remotes/*`, 모든 worktree, HEAD, index, config는 유지한다. 두 discard token은 별도 scope다. 두 branch discard 명령 모두 open PR 검사를 위해 GitHub origin이 필수이며 origin이 없거나 GitHub가 아니면 사용할 수 없다.
+- 위 discard·archive 명령의 `--backup-root`는 본인 소유 `0700` 디렉터리여야 하며, 조상 디렉터리가 group/world-writable이면 sticky이고 root 또는 본인 소유일 때만 허용한다. 백업은 discard 이후 유일한 복구 수단이므로 `/tmp`, `/var/tmp` 같은 자동 정리 경로가 아닌 영구 저장소에 둔다.
+- `awf wt archive-repack --archive <absolute-private-archive> [--exclude-ignored-path node_modules] [--preview-token <sha256>] [--apply] --repo-root <path> --json`: `REMOVED`이고 cleanup reservation이 없는 matching archive만 preview/apply로 경량화한다. 제외 가능한 경로는 검증된 루트 `node_modules`뿐이다. 새 archive가 완전히 검증되어 atomic publish되기 전까지 기존 archive를 보존한다.
+- `awf wt archive-restore --archive <absolute-private-archive> --destination <absent-private-path> [--apply] --json`: 원본 repository나 registry 없이 verified private archive를 검사하고 새 private destination으로 복원한다. Preview부터 private 부모 경로와 destination 부재를 검증한다. 기존 경로나 symlink 경로는 덮어쓰지 않으며 manifest·파일 내용·비밀은 출력하지 않는다.
 - `awf wt release open|add|seal|publish --release <id> [--to <branch>] [--repo-root <path>] [--apply] [--json]`: 처음부터 누적 여부를 선택하는 managed release bridge. `open` 후 staging merge 순서대로 `add`하고, `seal`의 prepare/production verify를 통과한 뒤 `publish`로 정확히 하나의 production PR을 연다.
 - `awf wt compact --repo-root <path> [--lease <id>] --path <relative>... --older-than <duration> [--dry-run|--apply] --json`: lifecycle, branch, registry를 바꾸지 않고 eligible AWF worktree의 ignored dependency/cache path만 preview/apply로 제거한다. Preview와 apply JSON action은 `lease_id`, `worktree_path`, `path`, 실제 allocated `bytes`, `entry_count`를 포함한다.
 - `awf ready [--probe] [--gate inspect|analysis|workflow-init|workflow-run|operations]`: repo별 자동화 준비 상태를 read-only로 요약한다. `doctor`/heuristic `scan`/skill discovery/workflow/operations 상태를 한 보고서로 모아 automation level(L0 inspect → L3 workflow)과 다음 추천 명령을 출력한다. `--gate`는 `decision: allow|dry_run_only|block`을 JSON에 포함하고 `allow` 외에는 non-zero exit로 Claude/Codex entrypoint와 내부 실행 명령을 중단시킨다. `.workflow/`가 target repo의 `.gitignore`에 있으면 workflow state가 local-only라는 경고를 함께 표시한다
@@ -234,6 +240,11 @@ commands include:
 | `awf wt release publish` | Preview or publish a sealed bridge as exactly one managed production PR, rebuilding on target drift. |
 | `awf wt recover-promotion` | Preview or safely amend a blocked out-of-order promotion's committed manual resolution; publication remains a separate `wt promote` step. |
 | `awf wt discard-promotion` | Preview or remove only an empty, blocked exact promotion apply failure; it never deletes a remote branch. |
+| `awf wt archive-discard` | Explicitly abandon one eligible lease only after creating and verifying a private recovery archive; it preserves every remote ref. |
+| `awf wt discard-remote-branch` | Back up one explicitly approved origin branch as a verified commit-only bundle, then CAS-delete only that remote ref; it never deletes local branches or worktrees. |
+| `awf wt discard-local-branch` | Back up one approved local branch's current-HEAD-reachable history as a verified commit-only bundle, then CAS-delete only that direct local ref. It leaves remotes, `refs/remotes/*`, worktrees, HEAD, index, and config unchanged. |
+| `awf wt archive-repack` | Preview or atomically replace only a verified, unreserved REMOVED lease archive with a filtered derivative; the old archive remains until verification succeeds. |
+| `awf wt archive-restore` | Verify and restore a private archive into an absent private path without requiring the original repository or registry. |
 | `awf wt discard-sync` | Preview or remove only a stale, unpublished, guarded sync target-conflict worktree after target normalization and root identity revalidation; late removal failure rebuilds its exact recorded conflict or retains `cleanup_reserved`, and it never deletes a remote branch or PR. |
 | `awf wt recover-sync` | Preview or stage only recorded current `UU` sync-conflict paths, then publish a verified target-then-source two-parent synthetic synchronization commit through atomic branch creation. |
 | `awf wt finish` | Preview or remove one proven-safe managed lease for a merged PR. |
@@ -532,6 +543,305 @@ plus `entry_count`; apply leaves the lease row/version/state/events, Git HEAD,
 Git status, branch, and worktree registration unchanged. If filesystem removal
 fails after deletion starts, `compact_remove_failed` reports only actions that
 completed before the failure.
+
+#### Archive-backed worktree abandonment, repack, and restore
+
+`archive-discard` is for an explicit decision to abandon one lease. It does
+not claim that a pull request merged or deployed, and it does not replace
+`finish`, `discard-promotion`, or their evidence gates. The default remains
+clean-only.
+
+Create the absolute, user-controlled private backup root before preview. AWF
+accepts only an existing, canonical directory that the operator owns, has mode
+`0700`, and is outside the repository, every managed worktree, and the AWF
+worktree cache:
+
+```bash
+# AWF never creates the backup root.
+install -d -m 700 /absolute/private/awf-archives
+
+awf wt status --repo-root <repo-root> --refresh --json
+awf wt archive-discard --lease <id> \
+  --backup-root /absolute/private/awf-archives \
+  --reason "work intentionally abandoned" \
+  --repo-root <repo-root> --json
+```
+
+Preview creates neither the backup root nor an archive directory and changes no
+registry row. Review its `create_archive` action: exact lease, worktree path,
+branch, current HEAD, `preview_token`, deterministic `backup_directory`, and
+complete snapshot fingerprint, entry count, and byte count. Apply repeats the
+same lease, backup root, reason, and token:
+
+```bash
+awf wt archive-discard --lease <id> \
+  --backup-root /absolute/private/awf-archives \
+  --reason "work intentionally abandoned" \
+  --preview-token <token-from-preview> --apply \
+  --repo-root <repo-root> --json
+```
+
+`--apply` without that exact SHA-256 token is blocked. AWF locks and
+revalidates the lease identity/version, current HEAD, full snapshot, PR state,
+remote SHA, reason, and backup root. It writes and verifies the archive before
+reserving cleanup or removing the worktree without force. A failed verification
+or any drift preserves the worktree and local branch. If removal succeeded but
+registry completion failed, retry only with the original token and identical
+arguments; a preview reports `cleanup_reserved`. Do not edit Git, the
+filesystem, or the registry to work around a blocker.
+
+By default, dirty, untracked, conflicted, and manual-resolution state remains
+blocked. `--include-uncommitted` is a narrow, explicit opt-in for an eligible
+dirty ACTIVE AWF feature lease, an imported scratch lease, or a registered
+BLOCKED manual/legacy retry whose ownership and worktree path are proven.
+It does not waive any other gate. Root
+checkouts, protected refs, retained leases, open pull requests, canonical
+reserved synchronization identities, active releases, foreign repositories,
+and failed ownership or path evidence remain blocked. A remote ref alone is
+not a blocker and AWF never deletes or changes one.
+
+An exclusion is a data-loss decision. Only the root `node_modules` directory
+is supported by `--exclude-ignored-path`; use it only after the operator has
+approved discarding every file below it, including local changes. It must be a
+normalized relative, present non-symlink directory with no tracked
+descendants. AWF verifies its ignored status and index only against the
+specified repository in a neutral Git environment; global or XDG ignore files
+and ambient `GIT_DIR` or `GIT_INDEX_FILE` never qualify a path. The exclusion
+is bound to the preview token and manifest. An approved `node_modules`
+exclusion applies both to the archive and to the private removal checkpoint.
+Every other ignored file remains in the backup and checkpoint, including
+environment files. A rejected path is a blocker, not an invitation to remove it
+manually.
+
+Use `archive-repack` to replace an existing archive with a filtered derivative
+only after the lease is `REMOVED`, has no cleanup reservation, and the current
+repository and archive provenance match. Start with a JSON preview:
+
+```bash
+awf wt archive-repack \
+  --archive /absolute/private/awf-archives/<archive> \
+  --exclude-ignored-path node_modules \
+  --repo-root <repo-root> --json
+```
+
+Review `repack_archive_contents`, including its exact archive directory,
+exclusion policy, and token. Then use that token:
+
+```bash
+awf wt archive-repack \
+  --archive /absolute/private/awf-archives/<archive> \
+  --exclude-ignored-path node_modules \
+  --preview-token <token-from-preview> --apply \
+  --repo-root <repo-root> --json
+```
+
+Repack verifies the old archive, builds and verifies a sibling private
+replacement, and publishes it atomically. It preserves source metadata, Git
+history, and Git-state artifacts, and records the source manifest hash and
+exclusion policy in the derivative. The old archive remains available until
+that sequence succeeds. If an interrupted transaction reports
+`repack_recovery_required`, preserve both backups and follow the reported AWF
+retry path; never delete or rename an archive manually.
+
+Use `archive-restore` when a trusted private archive must be recovered. It
+does not need the original repository, a checked-out Git worktree, or the
+registry. The backup parent and the destination's parent must already be
+canonical private `0700` directories. The destination itself must be an absent,
+absolute direct child; AWF refuses existing files, directories, and symlinks.
+
+```bash
+# Preview only: validates every artifact without writing a destination.
+awf wt archive-restore \
+  --archive /absolute/private/awf-archives/<archive> \
+  --destination /absolute/private/restores/restored-worktree --json
+
+# Apply: validates again and restores only into the new destination.
+awf wt archive-restore \
+  --archive /absolute/private/awf-archives/<archive> \
+  --destination /absolute/private/restores/restored-worktree \
+  --apply --json
+```
+
+The default archive restores every captured file, modes, symlinks, history
+reachable from the captured HEAD, and, when present, the recorded raw Git
+index and supported conflict/operation state. Worktree reflogs, worktree-only
+refs/configuration, and `MERGE_AUTOSTASH` are not archived. A derivative
+archive intentionally cannot restore its excluded ignored path. Restore never
+changes the source archive. A partial failure affects only the new temporary
+destination and is reported fail-closed; preserve the archive and do not use
+manual extraction as a blocker workaround. JSON results contain only the
+command envelope and safe paths/actions, never the manifest, archived file
+contents, artifact hashes, or secrets.
+
+#### Commit-only origin remote-branch discard
+
+`discard-remote-branch` is a separate, narrow operation for an explicit,
+approved decision to delete exactly one `origin` branch. It is not
+`archive-discard`: `archive-discard` preserves every remote ref, whereas this
+command never archives or removes a worktree, local branch, local `refs/heads`,
+`HEAD`, index, configuration, hooks, or working-tree file.
+
+The selected branch must pass Git's `check-ref-format --branch` validation, and
+`--expected-sha` is required: it is the approved 40- or 64-hex remote HEAD, not
+a ref to resolve later. `origin` must resolve to exactly one push URL equal to
+its fetch URL; a separate or multiple push URL blocks the command. Before
+preview, create an existing, canonical, operator-owned `0700` backup root
+outside the repository, AWF cache, and every managed worktree:
+
+```bash
+install -d -m 700 /absolute/private/awf-remote-branch-backups
+
+awf wt discard-remote-branch \
+  --branch <branch> \
+  --expected-sha <approved-40-or-64-hex-sha> \
+  --backup-root /absolute/private/awf-remote-branch-backups \
+  --reason "approved branch retirement" \
+  --repo-root <repo-root> --json
+```
+
+Preview is read-only. Review the exact branch, observed remote SHA, private
+backup directory, and token. Apply repeats all of them, adding that exact
+token:
+
+```bash
+awf wt discard-remote-branch \
+  --branch <branch> \
+  --expected-sha <approved-40-or-64-hex-sha> \
+  --backup-root /absolute/private/awf-remote-branch-backups \
+  --reason "approved branch retirement" \
+  --preview-token <token-from-preview> --apply \
+  --repo-root <repo-root> --json
+```
+
+Apply first creates and independently verifies a private, detached
+commit-only bundle for the approved commit's reachable Git history. It does not
+contain a worktree snapshot, uncommitted changes, index, local refs, reflogs,
+tags, or PR metadata. It then rechecks repository identity, the protected
+branch set, live worktrees, matching leases and cleanup reservations, active
+release state, open pull requests, and the exact remote SHA immediately before
+CAS deletion. Protected/default/integration branches and branch names beginning
+`release/`, `release-archive-`, or `staging-archive-`; any live worktree,
+non-removed or retained lease, reservation, active release, or open PR blocks
+the operation.
+
+Before the delete attempt AWF persists and fsyncs an immutable `attempt.json`;
+neither it nor a completion receipt is changed or deleted after creation. AWF
+writes the receipt only after observing the remote ref absent. A receipt makes
+later preview or apply idempotent: AWF does not delete again, and a recreated
+branch is reported as untouched even if it has the same SHA. A present remote
+with an attempt but no receipt, including one at the expected SHA, is
+`remote_delete_outcome_unknown` and fail-closed; do not retry with direct Git
+deletion. To delete a newly intended or recreated branch, use a new reason or
+approved SHA, run a new preview, and use its new token.
+
+This command has an independent, selected-branch evidence scope because it
+does not mutate a checked-out worktree. It does not repair or waive global
+registry/Git mismatch rules: inspect reported mismatches with `awf wt doctor`.
+Unrelated root cached HEAD or dirty state is neither changed nor used as
+evidence, while every mismatch that affects the selected repository or branch
+remains a blocker. It rejects ambient `GIT_DIR`, `GIT_WORK_TREE`,
+`GIT_COMMON_DIR`, `GIT_NAMESPACE`, `GIT_INDEX_FILE`,
+`GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`,
+`GIT_CEILING_DIRECTORIES`, `GIT_DISCOVERY_ACROSS_FILESYSTEM`, and binding
+`GIT_CONFIG_*` overrides before reading or deleting. Credential-helper and
+ordinary HTTPS authentication settings remain available. JSON emits only safe
+status, branch, remote SHA, token, backup path, and bundle byte count; it never
+emits the bundle hash or manifest contents. Never use direct remote deletion,
+force, prune, or filesystem/registry edits to bypass a blocker.
+
+#### Commit-only local-branch discard
+
+`discard-local-branch` is a separate, narrow operation for an explicit,
+approved decision to delete exactly one direct local `refs/heads/<branch>` ref.
+It is neither `archive-discard` nor `discard-remote-branch`. The remote command
+deletes only an `origin` ref; this command does not fetch, push, change any
+remote ref or `refs/remotes/*`, or create, remove, or alter a worktree. It also
+leaves every worktree `HEAD`, the main `HEAD`, index, branch configuration,
+hooks, and working-tree file unchanged.
+
+The selected branch must pass Git's `check-ref-format --branch` validation.
+`--expected-sha` is required and is the approved 40- or 64-hex SHA of the
+direct local ref, not a symbolic alias or a name resolved later. Before preview,
+create an existing, canonical, operator-owned `0700` backup root outside the
+repository, AWF cache, and every managed worktree:
+
+```bash
+install -d -m 700 /absolute/private/awf-local-branch-backups
+
+awf wt discard-local-branch \
+  --branch <branch> \
+  --expected-sha <approved-40-or-64-hex-sha> \
+  --backup-root /absolute/private/awf-local-branch-backups \
+  --reason "approved local branch retirement" \
+  --repo-root <repo-root> --json
+```
+
+Preview is read-only. Review the exact branch, observed local SHA, private
+backup directory, and local-command token. Apply repeats every argument and
+uses that exact token:
+
+```bash
+awf wt discard-local-branch \
+  --branch <branch> \
+  --expected-sha <approved-40-or-64-hex-sha> \
+  --backup-root /absolute/private/awf-local-branch-backups \
+  --reason "approved local branch retirement" \
+  --preview-token <local-token-from-preview> --apply \
+  --repo-root <repo-root> --json
+```
+
+The token is scoped to this local operation. A token from
+`discard-remote-branch` cannot authorize local deletion, and a local token
+cannot authorize remote deletion.
+
+The local deletion decision uses a stable intent digest that is separate from
+mutable lease evidence. Its preview token remains bound to the complete current
+evidence, including lease state. A lease-only change for the same requested
+input cannot create a new intent or bypass an existing attempt or receipt
+marker. A new reason or approved SHA is an explicit new intent.
+
+
+Apply first creates and independently verifies a private, detached
+commit-only bundle containing history reachable from the selected branch's
+current HEAD. The bundle contains no worktree snapshot, uncommitted changes,
+index, local refs, reflogs, tags, or PR metadata. Before entering the Git
+deletion guard, AWF rechecks repository identity, protected branches, current
+checkouts, matching leases and cleanup reservations, active release state,
+open pull requests, the direct local SHA, and the unsafe Git environment.
+The guard then prepares a no-deref branch deletion and locks the HEAD or
+symref of each existing worktree. Under those locks it revalidates the
+inventory, fsyncs the attempt, revalidates again, and commits the CAS deletion.
+Protected/default/integration branches and names beginning
+`release/`, `release-archive-`, or `staging-archive-`; any checked-out
+worktree, non-removed or retained lease, reservation, active release, or open
+PR block the operation.
+
+Those locks cover the current worktree inventory, and AWF inventories and
+revalidates again immediately before commit. They do not absolutely serialize a
+raw Git worktree created outside AWF after that final check. Do not overlap a
+local discard with an external raw Git worktree creation targeting the selected
+branch.
+
+
+AWF fsyncs immutable `attempt.json` before the delete. It writes a completion
+receipt only after it observes the direct local ref absent. A receipt prevents
+another deletion: a recreated branch is reported untouched even at the same
+SHA. A present ref with an attempt but no receipt, including the approved SHA,
+is an unknown deletion outcome and fails closed. Do not retry it through direct
+Git, filesystem, or registry changes. If the ref is absent and its backup is
+valid, AWF can recover the missing receipt without deleting a ref. A new intent
+requires a new reason or approved SHA, a new preview, and its new local token.
+
+This command has selected-branch evidence scope. An unrelated root cached HEAD
+or dirty state is not changed and does not supply evidence, but every mismatch
+that affects the selected repository or branch remains a blocker. Ambient
+`GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_NAMESPACE`,
+`GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`,
+`GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_CEILING_DIRECTORIES`,
+`GIT_DISCOVERY_ACROSS_FILESYSTEM`, and binding `GIT_CONFIG_*` overrides block
+the command. JSON emits safe status, branch, local SHA, token, backup path, and
+bundle byte count only. Never bypass a blocker with direct ref deletion,
+filesystem edits, or registry edits.
 
 #### Out-of-order production promotion
 

@@ -58,6 +58,14 @@ def _fake_omp(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
         "set -eu\n"
         "state=\"$OMP_LOG.state\"\n"
         "printf '%s\\n' \"$*\" >> \"$OMP_LOG\"\n"
+        "case \"${3:-}\" in\n"
+        "  task.isolation.apply|task.isolation.merge|task.isolation.enabled)\n"
+        "    ;;\n"
+        "  *)\n"
+        "    printf 'Unknown setting: %s\\n' \"${3:-}\" >&2\n"
+        "    exit 1\n"
+        "    ;;\n"
+        "esac\n"
         "if [ \"${2:-}\" = get ]; then\n"
         "  value=$(grep \"^${3}=\" \"$state\" 2>/dev/null | tail -n 1 | cut -d= -f2- || true)\n"
         "  [ -n \"$value\" ] || exit 1\n"
@@ -142,11 +150,12 @@ def test_apply_is_idempotent_and_preserves_user_server_fields(monkeypatch: pytes
     )
 
     first = lsp_setup.setup_lsp(repository, apply=True)
+    assert first["decision"] == "applied"
     profile_directory = next((xdg / "awf" / "lsp").iterdir())
     first_user_lsp = user_lsp.read_text(encoding="utf-8")
     first_exclude = (repository / ".git" / "info" / "exclude").read_text(encoding="utf-8")
 
-    assert first["decision"] == "applied"
+    first_omp_state = (tmp_path / "omp.log.state").read_text(encoding="utf-8")
     assert (profile_directory / "profile.json").is_file()
     assert (profile_directory / "lsp.json").is_file()
     assert (repository / ".omp" / "lsp.json").is_symlink()
@@ -157,6 +166,14 @@ def test_apply_is_idempotent_and_preserves_user_server_fields(monkeypatch: pytes
     assert profile_lsp["pyright"]["fileTypes"] == [".py", ".pyi"]
     assert profile_lsp["pyright"]["rootMarkers"] == ["pyproject.toml"]
     assert "extensions" not in profile_lsp["pyright"]
+    assert dict(
+        line.split("=", maxsplit=1)
+        for line in first_omp_state.splitlines()
+    ) == {
+        "task.isolation.apply": "false",
+        "task.isolation.merge": "patch",
+        "task.isolation.enabled": "true",
+    }
     merged = json.loads(first_user_lsp)
     assert merged["pyright"]["command"] == "custom-pyright"
     assert merged["pyright"]["customSetting"] is True
@@ -172,16 +189,17 @@ def test_apply_is_idempotent_and_preserves_user_server_fields(monkeypatch: pytes
     assert user_lsp.read_text(encoding="utf-8") == first_user_lsp
     assert (repository / ".git" / "info" / "exclude").read_text(encoding="utf-8") == first_exclude
     assert (repository / ".git" / "info" / "exclude").read_text(encoding="utf-8").count(".omp/lsp.json") == 1
+    assert (tmp_path / "omp.log.state").read_text(encoding="utf-8") == first_omp_state
     assert omp_log.read_text(encoding="utf-8").splitlines() == [
         "config get task.isolation.apply",
         "config set task.isolation.apply false",
         "config get task.isolation.merge",
         "config set task.isolation.merge patch",
-        "config get task.isolation.mode",
-        "config set task.isolation.mode auto",
+        "config get task.isolation.enabled",
+        "config set task.isolation.enabled true",
         "config get task.isolation.apply",
         "config get task.isolation.merge",
-        "config get task.isolation.mode",
+        "config get task.isolation.enabled",
     ]
 
 

@@ -25,10 +25,15 @@ from awf.commands.wf_pr import run_wf_pr
 from awf.commands.wt import (
     run_wt_acquire,
     run_wt_adopt,
+    run_wt_archive_discard,
+    run_wt_archive_repack,
+    run_wt_archive_restore,
     run_wt_compact,
     run_wt_link_pr,
     run_wt_doctor,
     run_wt_discard_promotion,
+    run_wt_discard_remote_branch,
+    run_wt_discard_local_branch,
     run_wt_discard_sync,
     run_wt_import,
     run_wt_status,
@@ -1156,6 +1161,233 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print a versioned JSON result.",
     )
     wt_recover_promotion_parser.set_defaults(handler=run_wt_recover_promotion)
+
+    wt_archive_discard_parser = wt_subparsers.add_parser(
+        "archive-discard",
+        help="Preview or archive one explicitly abandoned managed worktree.",
+    )
+    wt_archive_discard_parser.add_argument(
+        "--lease",
+        required=True,
+        help="Exact managed lease id the user is abandoning.",
+    )
+    wt_archive_discard_parser.add_argument(
+        "--backup-root",
+        required=True,
+        help="Absolute private archive root outside repository and AWF worktree/cache roots.",
+    )
+    wt_archive_discard_parser.add_argument(
+        "--reason",
+        required=True,
+        help="Explicit abandonment reason stored in the private archive manifest.",
+    )
+    wt_archive_discard_parser.add_argument(
+        "--include-uncommitted",
+        action="store_true",
+        help=(
+            "Explicitly permit eligible dirty, untracked, conflicted, or "
+            "manual-retry worktree state to be archived; default remains clean-only."
+        ),
+    )
+    wt_archive_discard_parser.add_argument(
+        "--exclude-ignored-path",
+        action="append",
+        default=[],
+        help=(
+            "Omit the ignored root node_modules directory from the backup. "
+            "No other path is supported."
+        ),
+    )
+    wt_archive_discard_parser.add_argument(
+        "--preview-token",
+        help="SHA-256 token from the matching archive preview; required with --apply.",
+    )
+    wt_archive_discard_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to current or parent directories.",
+    )
+    wt_archive_discard_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Create a verified private archive, then remove the revalidated worktree.",
+    )
+    wt_archive_discard_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_archive_discard_parser.set_defaults(handler=run_wt_archive_discard)
+
+    wt_discard_remote_branch_parser = wt_subparsers.add_parser(
+        "discard-remote-branch",
+        help=(
+            "Back up one origin branch as a verified commit bundle, then delete "
+            "only that remote ref."
+        ),
+    )
+    wt_discard_remote_branch_parser.add_argument(
+        "--branch",
+        required=True,
+        help="Origin branch name without the refs/heads/ prefix.",
+    )
+    wt_discard_remote_branch_parser.add_argument(
+        "--expected-sha",
+        required=True,
+        help="Approved 40- or 64-hex origin branch HEAD expected during preview and apply.",
+    )
+    wt_discard_remote_branch_parser.add_argument(
+        "--backup-root",
+        required=True,
+        help="Existing operator-owned absolute private 0700 backup root.",
+    )
+    wt_discard_remote_branch_parser.add_argument(
+        "--reason",
+        required=True,
+        help="Explicit reason for this one remote-branch discard intent.",
+    )
+    wt_discard_remote_branch_parser.add_argument(
+        "--preview-token",
+        help="SHA-256 token from the matching remote-branch discard preview.",
+    )
+    wt_discard_remote_branch_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to current or parent directories.",
+    )
+    wt_discard_remote_branch_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Create or verify the backup, then CAS-delete only the remote branch.",
+    )
+    wt_discard_remote_branch_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_discard_remote_branch_parser.set_defaults(
+        handler=run_wt_discard_remote_branch
+    )
+
+    wt_discard_local_branch_parser = wt_subparsers.add_parser(
+        "discard-local-branch",
+        help=(
+            "Back up one local branch as a verified commit bundle, then delete "
+            "only that local ref."
+        ),
+    )
+    wt_discard_local_branch_parser.add_argument(
+        "--branch",
+        required=True,
+        help="Local branch name without the refs/heads/ prefix.",
+    )
+    wt_discard_local_branch_parser.add_argument(
+        "--expected-sha",
+        required=True,
+        help="Approved 40- or 64-hex local branch HEAD expected during preview and apply.",
+    )
+    wt_discard_local_branch_parser.add_argument(
+        "--backup-root",
+        required=True,
+        help="Existing operator-owned absolute private 0700 backup root.",
+    )
+    wt_discard_local_branch_parser.add_argument(
+        "--reason",
+        required=True,
+        help="Explicit reason for this one local-branch discard intent.",
+    )
+    wt_discard_local_branch_parser.add_argument(
+        "--preview-token",
+        help="SHA-256 token from the matching local-branch discard preview.",
+    )
+    wt_discard_local_branch_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to current or parent directories.",
+    )
+    wt_discard_local_branch_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Create or verify the backup, then CAS-delete only the local branch.",
+    )
+    wt_discard_local_branch_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_discard_local_branch_parser.set_defaults(
+        handler=run_wt_discard_local_branch
+    )
+
+    wt_archive_repack_parser = wt_subparsers.add_parser(
+        "archive-repack",
+        help=(
+            "Preview or replace one removed-worktree private archive with a "
+            "verified filtered archive."
+        ),
+    )
+    wt_archive_repack_parser.add_argument(
+        "--archive",
+        required=True,
+        help="Absolute private archive directory for one removed managed lease.",
+    )
+    wt_archive_repack_parser.add_argument(
+        "--exclude-ignored-path",
+        action="append",
+        default=[],
+        help=(
+            "Omit the ignored root node_modules directory from the replacement "
+            "archive. No other path is supported."
+        ),
+    )
+    wt_archive_repack_parser.add_argument(
+        "--preview-token",
+        help=(
+            "SHA-256 token from the matching archive repack preview; required "
+            "with --apply."
+        ),
+    )
+    wt_archive_repack_parser.add_argument(
+        "--repo-root",
+        help="Repository root. Defaults to current or parent directories.",
+    )
+    wt_archive_repack_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help=(
+            "Create, restore-verify, and atomically publish the revalidated "
+            "replacement archive."
+        ),
+    )
+    wt_archive_repack_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_archive_repack_parser.set_defaults(handler=run_wt_archive_repack)
+
+    wt_archive_restore_parser = wt_subparsers.add_parser(
+        "archive-restore",
+        help="Preview or restore one verified private archive into a new private path.",
+    )
+    wt_archive_restore_parser.add_argument(
+        "--archive",
+        required=True,
+        help="Absolute private archive directory to verify and restore.",
+    )
+    wt_archive_restore_parser.add_argument(
+        "--destination",
+        required=True,
+        help="Absent absolute direct child below an existing private restore parent.",
+    )
+    wt_archive_restore_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Restore the verified archive into the new destination.",
+    )
+    wt_archive_restore_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a versioned JSON result.",
+    )
+    wt_archive_restore_parser.set_defaults(handler=run_wt_archive_restore)
 
     wt_discard_promotion_parser = wt_subparsers.add_parser(
         "discard-promotion",

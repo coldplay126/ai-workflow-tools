@@ -89,7 +89,7 @@ config를 직접 복사하는 절차가 아닙니다.
 - 한 repository의 Python, TypeScript/JavaScript, PHP, Go, Rust, Java/Kotlin,
   Vue는 함께 감지될 수 있습니다. AI가 언어를 하나로 축소하거나 server 설정을
   수동으로 합치지 않습니다.
-- `task.isolation.mode=auto`, `task.isolation.apply=false`,
+- `task.isolation.enabled=true`, `task.isolation.apply=false`,
   `task.isolation.merge=patch`는 OMP isolated worker가 patch proposal만 반환하도록
   하는 parent-owned 안전 계약입니다. 이 스킬은 workflow gate, scope hash, approval,
   또는 patch apply를 바꾸지 않습니다.

@@ -507,6 +507,7 @@ def test_all_displayed_skill_awf_commands_parse_with_current_cli() -> None:
 
     assert invalid == []
 
+
 def test_lsp_worktree_setup_docs_keep_local_mutation_in_cli() -> None:
     reference_path = REPO_ROOT / "docs" / "reference" / "lsp-worktree-setup.md"
     skill_path = (
@@ -534,7 +535,7 @@ def test_lsp_worktree_setup_docs_keep_local_mutation_in_cli() -> None:
     ):
         assert f"`{field}`" in reference
 
-    assert "task.isolation.mode=auto" in reference
+    assert "task.isolation.enabled=true" in reference
     assert "task.isolation.apply=false" in reference
     assert "task.isolation.merge=patch" in reference
     assert "custom prepare" in reference
@@ -545,6 +546,7 @@ def test_lsp_worktree_setup_docs_keep_local_mutation_in_cli() -> None:
     assert _skill_command_template(skill_path) == (
         "awf lsp setup --repo-root <repo> --json"
     )
+
 
 PLANNING_OPTION_SELECTION_COMMAND = (
     'awf wf select-option --decision-id D-001 --option-id O-001 '
@@ -1126,6 +1128,8 @@ def test_core_skill_command_templates_are_current() -> None:
 
 
 
+
+
 def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
     path = REPO_ROOT / "claude" / "skills" / "release-worktree-lifecycle" / "SKILL.md"
     text = path.read_text(encoding="utf-8")
@@ -1153,8 +1157,26 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "out_of_order_promote_apply": ("wt", "promote"),
         "out_of_order_resolution_preview": ("wt", "promote"),
         "out_of_order_resolution_apply": ("wt", "promote"),
+        "release_open_preview": ("wt", "release"),
+        "release_open_apply": ("wt", "release"),
+        "release_add_preview": ("wt", "release"),
+        "release_add_apply": ("wt", "release"),
+        "release_seal_preview": ("wt", "release"),
+        "release_seal_apply": ("wt", "release"),
+        "release_publish_preview": ("wt", "release"),
+        "release_publish_apply": ("wt", "release"),
         "discard_promotion_preview": ("wt", "discard-promotion"),
         "discard_promotion_apply": ("wt", "discard-promotion"),
+        "archive_discard_preview": ("wt", "archive-discard"),
+        "archive_discard_apply": ("wt", "archive-discard"),
+        "discard_remote_branch_preview": ("wt", "discard-remote-branch"),
+        "discard_remote_branch_apply": ("wt", "discard-remote-branch"),
+        "discard_local_branch_preview": ("wt", "discard-local-branch"),
+        "discard_local_branch_apply": ("wt", "discard-local-branch"),
+        "archive_repack_preview": ("wt", "archive-repack"),
+        "archive_repack_apply": ("wt", "archive-repack"),
+        "archive_restore_preview": ("wt", "archive-restore"),
+        "archive_restore_apply": ("wt", "archive-restore"),
         "discard_sync_preview": ("wt", "discard-sync"),
         "discard_sync_apply": ("wt", "discard-sync"),
         "recover_sync_preview": ("wt", "recover-sync"),
@@ -1166,6 +1188,7 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "compact_preview": ("wt", "compact"),
         "compact_apply": ("wt", "compact"),
     }
+    assert set(commands) == set(expected_commands)
     parser = build_parser()
     for name, expected in expected_commands.items():
         argv = _argv_from_skill_command(commands[name])
@@ -1214,6 +1237,24 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
     assert "--apply" not in commands["discard_promotion_preview"]
     assert "--lease" in commands["discard_promotion_apply"]
     assert "--apply" in commands["discard_promotion_apply"]
+    for name in (
+        "archive_discard", "discard_remote_branch", "discard_local_branch",
+        "archive_repack", "archive_restore", "release_open", "release_add",
+        "release_seal", "release_publish",
+    ):
+        assert "--apply" not in commands[f"{name}_preview"]
+        assert "--apply" in commands[f"{name}_apply"]
+    for name in ("archive_discard", "discard_remote_branch", "discard_local_branch"):
+        assert "--backup-root" in commands[f"{name}_preview"]
+        assert "--reason" in commands[f"{name}_preview"]
+        assert "--preview-token" in commands[f"{name}_apply"]
+    for name in ("discard_remote_branch", "discard_local_branch"):
+        assert "--branch" in commands[f"{name}_preview"]
+        assert "--expected-sha" in commands[f"{name}_preview"]
+    assert "--exclude-ignored-path node_modules" in commands["archive_repack_preview"]
+    assert "--preview-token" in commands["archive_repack_apply"]
+    assert "--archive" in commands["archive_restore_preview"]
+    assert "--destination" in commands["archive_restore_preview"]
     assert "--lease" in commands["discard_sync_preview"]
     assert "--apply" not in commands["discard_sync_preview"]
     assert "--lease" in commands["discard_sync_apply"]
@@ -1255,6 +1296,43 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "apply": "lock_revalidate_reserve_hold_remove_complete_compare_delete_local",
         "remote_branch": "must_be_absent_and_never_deleted",
     }
+    assert safety["archive_discard"]["preview"] == (
+        "read_only_create_archive_action_with_token_destination_and_full_snapshot"
+    )
+    assert safety["archive_discard"]["apply"] == (
+        "matching_token_lock_revalidate_verified_private_backup_reserve_hold_nonforce_remove_complete_compare_delete_local"
+    )
+    assert safety["archive_discard"]["remote_branch"] == (
+        "preserved_remote_sha_evidence_remote_presence_not_alone_blocker"
+    )
+    assert safety["archive_discard"]["dirty_opt_in"] == (
+        "include_uncommitted_only_for_eligible_dirty_awf_feature_or_imported_scratch_or_registered_blocked_manual_legacy_retry_with_proven_ownership_and_path"
+    )
+    for name, scope in (
+        ("discard_remote_branch", "one_explicit_approved_origin_branch_remote_ref_only"),
+        ("discard_local_branch", "one_explicit_approved_direct_local_refs_heads_ref_only"),
+    ):
+        assert safety[name]["scope"] == scope
+        assert safety[name]["required_arguments"] == [
+            "branch", "expected_sha", "backup_root", "reason"
+        ]
+        assert safety[name]["unknown_delete_observation"].endswith("_fail_closed")
+        assert safety[name]["recreation_defense"].startswith("fsynced_attempt_before_delete")
+    assert safety["discard_remote_branch"]["apply"] == (
+        "matching_token_locked_revalidation_verified_detached_commit_bundle_then_remote_cas_delete_only"
+    )
+    assert safety["discard_local_branch"]["apply"] == (
+        "matching_local_token_branch_and_all_worktree_head_symref_locks_reinventory_revalidate_verified_current_head_reachable_commit_bundle_then_local_cas_delete_only"
+    )
+    assert safety["archive_repack"]["apply"] == (
+        "archive_specific_lock_revalidate_verified_sibling_create_atomic_publish"
+    )
+    assert safety["archive_restore"]["scope"] == (
+        "verified_private_archive_to_absent_private_destination_without_source_repository_or_registry"
+    )
+    assert safety["archive_restore"]["preview"] == (
+        "read_verified_archive_and_validate_absent_private_destination"
+    )
     assert safety["discard_sync"] == {
         "scope": "one_awf_owned_blocked_stale_unpublished_sync_target_conflict_only",
         "preview_actions": ["remove_worktree", "delete_local_branch"],
@@ -1296,19 +1374,11 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         "dependency": "allowed_when_prerequisite_precedes_dependent_source",
         "rename": "unsupported",
         "initial_preview_fields": [
-            "sources",
-            "source_base_sha",
-            "source_head_sha",
-            "target_base_sha",
-            "reviewed_paths",
+            "sources", "source_base_sha", "source_head_sha", "target_base_sha", "reviewed_paths",
         ],
         "resolution_preview_actions": [
-            "resolve_out_of_order_conflict",
-            "stage_paths",
-            "commit",
-            "verify_production",
-            "push_branch",
-            "open_pull_request",
+            "resolve_out_of_order_conflict", "stage_paths", "commit",
+            "verify_production", "push_branch", "open_pull_request",
         ],
         "operator_edit_scope": "unstaged_unmerged_subset_of_conflicted_paths",
         "final_indexed_delta": "non_empty_ordered_reviewed_path_union_subset",
@@ -1321,12 +1391,9 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
             "tamper": "promotion_resolution_scope_mismatch",
         },
         "blocker_codes": [
-            "invalid_out_of_order_promotion",
-            "unsupported_out_of_order_rename",
-            "out_of_order_conflict",
-            "promotion_provenance_changed",
-            "promotion_resolution_scope_mismatch",
-            "promotion_resolution_unmerged",
+            "invalid_out_of_order_promotion", "unsupported_out_of_order_rename",
+            "out_of_order_conflict", "promotion_provenance_changed",
+            "promotion_resolution_scope_mismatch", "promotion_resolution_unmerged",
         ],
     }
     linkage = safety["managed_feature_pr_link"]
@@ -1343,40 +1410,20 @@ def test_release_worktree_lifecycle_skill_encodes_operator_safety() -> None:
         ),
     }
     assert safety["preview_before_apply"] == [
-        "acquire",
-        "link-pr",
-        "sync",
-        "promote",
-        "source_branch_promote",
-        "release_open",
-        "release_add",
-        "release_seal",
-        "release_publish",
-        "out_of_order_promote",
-        "out_of_order_resolution",
-        "import",
-        "adopt",
-        "discard_promotion",
-        "discard_sync",
-        "recover_sync",
-        "finish",
-        "gc",
-        "compact",
+        "acquire", "link-pr", "sync", "promote", "source_branch_promote",
+        "release_open", "release_add", "release_seal", "release_publish",
+        "out_of_order_promote", "out_of_order_resolution", "import", "adopt",
+        "discard_promotion", "archive_discard", "discard_remote_branch",
+        "discard_local_branch", "archive_repack", "archive_restore",
+        "discard_sync", "recover_sync", "finish", "gc", "compact",
     ]
     assert safety["stop_conditions"] == [
-        "deployment_health_unknown",
-        "closed_unmerged",
-        "dirty_worktree",
+        "deployment_health_unknown", "closed_unmerged", "dirty_worktree",
     ]
     assert set(safety["forbidden_fallbacks"]) == {
-        "direct_worktree_mutation",
-        "staging_wholesale_merge",
-        "branch_merged_heuristic",
-        "direct_cherry_pick",
-        "stash",
-        "reset",
-        "force_delete",
-        "unmanaged_deletion",
+        "direct_worktree_mutation", "staging_wholesale_merge",
+        "branch_merged_heuristic", "direct_cherry_pick", "stash",
+        "reset", "force_delete", "unmanaged_deletion",
     }
 
 
@@ -1505,6 +1552,8 @@ def test_imported_pr_cleanup_raw_sequence_rejects_placeholder_role_swaps() -> No
             )
             == expected_commands
         )
+
+
 
 
 def test_release_worktree_lifecycle_shell_examples_match_contract() -> None:

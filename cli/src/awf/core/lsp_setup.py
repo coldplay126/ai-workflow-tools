@@ -1516,7 +1516,7 @@ def _configure_omp_isolation(action: dict[str, Any]) -> dict[str, str] | None:
     for key, value in (
         ("task.isolation.apply", "false"),
         ("task.isolation.merge", "patch"),
-        ("task.isolation.mode", "auto"),
+        ("task.isolation.enabled", "true"),
     ):
         try:
             current = subprocess.run(

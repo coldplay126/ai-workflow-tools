@@ -64,10 +64,18 @@ class GhClient:
         self.command_runner = command_runner or subprocess.run
         self.timeout = timeout
 
-    def view_pr(self, number: int) -> PullRequest:
+    def view_pr(self, number: int, *, repository: str | None = None) -> PullRequest:
         if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
             raise ValueError("pull request number must be a positive integer")
-        completed = self._run("pr", "view", str(number), "--json", _GH_VIEW_FIELDS)
+        if repository is not None and (
+            not isinstance(repository, str) or not repository.strip()
+        ):
+            raise ValueError("pull request repository must be a non-empty string")
+        arguments = ["pr", "view", str(number)]
+        if repository is not None:
+            arguments.extend(("--repo", repository))
+        arguments.extend(("--json", _GH_VIEW_FIELDS))
+        completed = self._run(*arguments)
         return _pull_request_from_json(completed.stdout)
 
     def find_open_pr(self, *, head: str, base: str) -> PullRequest | None:
@@ -104,6 +112,46 @@ class GhClient:
                 "gh pr list returned multiple open pull requests for the branch"
             )
         return matches[0] if matches else None
+
+    def find_open_prs(self, *, head: str, repository: str) -> tuple[PullRequest, ...]:
+        """Return every open pull request whose head exactly matches in one repository."""
+        if not isinstance(head, str) or not head:
+            raise ValueError("pull request head must be a non-empty string")
+        if not isinstance(repository, str) or not repository.strip():
+            raise ValueError("pull request repository must be a non-empty string")
+        completed = self._run(
+            "pr",
+            "list",
+            "--repo",
+            repository,
+            "--state",
+            "open",
+            "--head",
+            head,
+            "--json",
+            _GH_VIEW_FIELDS,
+            "--limit",
+            str(_MAX_OPEN_PULL_REQUESTS),
+        )
+        try:
+            payload = json.loads(completed.stdout)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ExternalServiceError("gh pr list returned malformed JSON") from error
+        if not isinstance(payload, list) or any(not isinstance(item, dict) for item in payload):
+            raise ExternalServiceError("gh pr list returned an invalid pull request list")
+        if len(payload) >= _MAX_OPEN_PULL_REQUESTS:
+            raise ExternalServiceError(
+                "gh pr list reached the fail-closed open pull request limit"
+            )
+        pull_requests = tuple(
+            pull_request
+            for item in payload
+            if (pull_request := _pull_request_from_json(json.dumps(item))).state == "OPEN"
+            and pull_request.head_ref == head
+        )
+        if len({pull_request.number for pull_request in pull_requests}) != len(pull_requests):
+            raise ExternalServiceError("gh pr list returned duplicate open pull requests")
+        return tuple(sorted(pull_requests, key=lambda pull_request: pull_request.number))
 
     def find_merged_prs(self, *, head: str, base: str) -> tuple[PullRequest, ...]:
         if not isinstance(head, str) or not head or not isinstance(base, str) or not base:

@@ -123,7 +123,7 @@ OMP isolated Impl의 기본 안전 설정은 다음 의미를 가집니다.
 
 | 설정 | 의미 |
 |---|---|
-| `task.isolation.mode=auto` | host가 지원하는 isolation mode를 선택 |
+| `task.isolation.enabled=true` | worker isolation을 활성화 |
 | `task.isolation.apply=false` | worker가 repository에 직접 apply하지 않음 |
 | `task.isolation.merge=patch` | worker 결과는 parent가 검토할 patch로 전달 |
 

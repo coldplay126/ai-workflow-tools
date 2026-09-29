@@ -2668,6 +2668,32 @@ def test_adopt_apply_reports_registry_transition_conflicts(
     assert harness.github.view_calls == ([] if pr_number is None else [pr_number, pr_number])
 
 
+def test_legacy_linked_root_lease_still_status_links_and_finishes(
+    harness: Harness,
+) -> None:
+    linked = harness.make_external_worktree("linked-lease-origin")
+    harness.service.git = GitClient(linked)
+    acquired = harness.acquire("legacy-linked-identity")
+    assert acquired.lease is not None
+    lease = acquired.lease
+    assert lease.repository_root == linked
+    assert lease.repository_id == GitClient(linked).repository_id()
+    assert lease.repository_id != harness.git.repository_id()
+    assert lease in harness.service.status().leases
+
+    harness.github.prs[131] = replace(
+        merged_pr(number=131, head_sha=lease.head_sha),
+        head_ref=lease.branch,
+    )
+    linked_pr = harness.service.link_pr(lease.id, pr_number=131, apply=True)
+    assert linked_pr.decision == "ready"
+    assert linked_pr.lease is not None
+    assert linked_pr.lease.repository_id == lease.repository_id
+    finish = harness.service.finish(pr_number=131, apply=False)
+    assert finish.decision == "preview"
+    assert any(action["lease_id"] == lease.id for action in finish.actions)
+
+
 def test_link_pr_preview_validates_developed_head_without_mutation(
     harness: Harness,
 ) -> None:
@@ -4158,7 +4184,7 @@ def test_promote_out_of_order_synthesizes_divergent_same_file_followup(
     )
     assert promotion_harness.github.create_calls[0]["body"] == expected_body
     assert promotion_harness.git.commit_message(result.lease.worktree_path) == "\n\n".join(
-        ("Promote PR #373 to main", expected_body)
+        ("chore: promote PR #373 to main", expected_body)
     )
     assert result.actions == (
         {
@@ -4476,7 +4502,7 @@ def test_promote_applies_only_source_pr_delta(
     assert promotion_harness.github.create_calls[0]["base"] == "main"
     assert promotion_harness.github.create_calls[0]["body"] == expected_body
     assert promotion_harness.git.commit_message(worktree) == "\n\n".join(
-        ("Promote PR #372 to main", expected_body)
+        ("chore: promote PR #372 to main", expected_body)
     )
     assert result.lease.state is LeaseState.PR_OPEN
     assert result.lease.target_pr == 900
@@ -4506,6 +4532,16 @@ def test_promote_applies_ordered_multi_source_delta(
     body = promotion_harness.github.create_calls[0]["body"]
     assert "AWF-Source-PR: 372" in body
     assert "AWF-Source-PR: 373" in body
+    assert (
+        promotion_harness.git.commit_message(worktree).splitlines()[0]
+        == "chore: promote PRs #372, #373 to main"
+    )
+    reused = promotion_harness.service.promote(
+        source_pr=(372, 373),
+        target_branch="main",
+        apply=True,
+    )
+    assert reused.decision == "reuse"
 
 
 def test_promote_accepts_multi_source_delta_with_no_net_path_change(
@@ -5563,7 +5599,7 @@ def test_promote_out_of_order_applies_manual_resolution_and_opens_one_pr(
     ) == "manually resolved  \n"
     assert promotion_harness.git.commit_message(resumed.lease.worktree_path) == "\n\n".join(
         (
-            "Promote PR #372 to main",
+            "chore: promote PR #372 to main",
             "\n".join(
                 (
                     "AWF-Source-PR: 372",
@@ -5616,6 +5652,95 @@ def _pending_out_of_order_conflict(promotion_harness: PromotionHarness) -> Lease
     assert first.lease.resolution_state is ResolutionState.PENDING
     return first.lease
 
+def test_promote_resumes_pending_out_of_order_conflict_under_commit_msg_hook(
+    promotion_harness: PromotionHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    promotion_harness.make_target_conflict()
+    hook = promotion_harness.repo / ".git" / "hooks" / "commit-msg"
+    rejected_hook = hook.with_name("commit-msg-rejected")
+    hook.write_text(
+        "#!/bin/sh\n"
+        "if ! grep -Eq '^[a-z]+(\\(.+\\))?: .+' \"$1\"; then\n"
+        "  printf rejected > \"$(dirname \"$0\")/commit-msg-rejected\"\n"
+        "  exit 1\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    hook.chmod(0o755)
+    first = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+    assert first.lease is not None
+    assert first.lease.state is LeaseState.BLOCKED
+    assert first.lease.resolution_state is ResolutionState.PENDING
+    (first.lease.worktree_path / "feature.txt").write_text(
+        "manually resolved\n",
+        encoding="utf-8",
+    )
+    with monkeypatch.context() as legacy_producer:
+        legacy_producer.setattr(
+            WorktreeService,
+            "_promotion_commit_subject",
+            staticmethod(WorktreeService._promotion_title),
+        )
+        rejected = promotion_harness.service.promote(
+            source_pr=372,
+            target_branch="main",
+            out_of_order=True,
+            apply=True,
+        )
+
+    assert rejected.status == "blocked"
+    assert rejected.blockers[0]["code"] == "promotion_incomplete"
+    assert rejected_hook.read_text(encoding="utf-8") == "rejected"
+    blocked = promotion_harness.registry.get_lease(first.lease.id)
+    assert blocked is not None
+    assert blocked.state is LeaseState.BLOCKED
+    assert blocked.resolution_state is ResolutionState.PENDING
+    assert promotion_harness.git.indexed_changed_paths(
+        blocked.worktree_path,
+        blocked.target_base_sha or "",
+    ) == ("feature.txt",)
+    assert [
+        event.event_type
+        for event in promotion_harness.registry.list_events(blocked.id)
+    ] == ["promotion_blocked"]
+    preview = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=False,
+    )
+    assert preview.decision == "preview"
+    assert preview.lease == blocked
+
+    resumed = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert resumed.decision == "ready", resumed.blockers
+    assert resumed.lease is not None
+    assert resumed.lease.id == blocked.id
+    assert resumed.lease.resolution_state is ResolutionState.MANUAL_REVIEWED
+    assert resumed.lease.target_pr == 900
+    assert (
+        promotion_harness.git.commit_message(
+            resumed.lease.worktree_path
+        ).splitlines()[0]
+        == "chore: promote PR #372 to main"
+    )
+    assert [
+        event.event_type
+        for event in promotion_harness.registry.list_events(resumed.lease.id)
+    ].count("promotion_manual_resolution_committed") == 1
+
 
 def _manual_reviewed_out_of_order_conflict(
     promotion_harness: PromotionHarness,
@@ -5641,6 +5766,127 @@ def _manual_reviewed_out_of_order_conflict(
         verify_production=((sys.executable, "-c", "pass"),)
     )
     return failed.lease
+
+def test_promote_resumes_legacy_subject_manual_resolution_without_rewrite(
+    promotion_harness: PromotionHarness,
+) -> None:
+    lease = _manual_reviewed_out_of_order_conflict(promotion_harness)
+    source = promotion_harness.github.prs[372]
+    legacy_message = promotion_harness.service._promotion_message(
+        sources=(source,),
+        excluded_paths=(),
+        target_sha=lease.target_base_sha or "",
+        lease=lease,
+        target_branch="main",
+        resolution_state=ResolutionState.MANUAL_REVIEWED,
+        legacy_subject=True,
+    )
+    assert legacy_message.splitlines()[0] == "Promote PR #372 to main"
+    git_command(
+        lease.worktree_path,
+        "commit",
+        "--amend",
+        "-q",
+        "-m",
+        legacy_message,
+    )
+    legacy_head = promotion_harness.git.head_sha(lease.worktree_path)
+    current = promotion_harness.registry.get_lease(lease.id)
+    assert current is not None
+    historical = promotion_harness.registry.transition(
+        current.id,
+        LeaseState.BLOCKED,
+        expected_version=current.version,
+        event_type="promotion_blocked",
+        summary="promotion_verification_failed: historical legacy subject fixture",
+        head_sha=legacy_head,
+    )
+    assert promotion_harness.git.commit_parents(legacy_head) == (
+        historical.target_base_sha,
+    )
+    assert promotion_harness.git.commit_message(historical.worktree_path) == (
+        legacy_message
+    )
+
+    resumed = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert resumed.decision == "ready", resumed.blockers
+    assert resumed.lease is not None
+    assert promotion_harness.git.head_sha(resumed.lease.worktree_path) == legacy_head
+    assert promotion_harness.git.commit_message(resumed.lease.worktree_path) == (
+        legacy_message
+    )
+    assert len(promotion_harness.github.create_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "forged_subject",
+    (
+        "chore: promote PR #999 to main",
+        "chore: promote PR #372 to master",
+        "chore(promote): promote PR #372 to main",
+        "chore: promote PR #372 to main\nuntrusted body",
+        "Promote PR #372 to master",
+        "chore: promote PRs #373, #372 to main",
+    ),
+)
+def test_promote_rejects_forged_promotion_subjects(
+    promotion_harness: PromotionHarness,
+    forged_subject: str,
+) -> None:
+    lease = _manual_reviewed_out_of_order_conflict(promotion_harness)
+    source = promotion_harness.github.prs[372]
+    canonical_message = promotion_harness.service._promotion_message(
+        sources=(source,),
+        excluded_paths=(),
+        target_sha=lease.target_base_sha or "",
+        lease=lease,
+        target_branch="main",
+        resolution_state=ResolutionState.MANUAL_REVIEWED,
+    )
+    _, separator, trailers = canonical_message.partition("\n")
+    assert separator
+    forged_message = forged_subject + separator + trailers
+    git_command(
+        lease.worktree_path,
+        "commit",
+        "--amend",
+        "-q",
+        "-m",
+        forged_message,
+    )
+    forged_head = promotion_harness.git.head_sha(lease.worktree_path)
+    current = promotion_harness.registry.get_lease(lease.id)
+    assert current is not None
+    forged_lease = promotion_harness.registry.transition(
+        current.id,
+        LeaseState.BLOCKED,
+        expected_version=current.version,
+        event_type="promotion_blocked",
+        summary="promotion_verification_failed: forged subject fixture",
+        head_sha=forged_head,
+    )
+    assert promotion_harness.git.commit_parents(forged_head) == (
+        forged_lease.target_base_sha,
+    )
+    assert promotion_harness.git.status_porcelain(forged_lease.worktree_path) == ()
+
+    rejected = promotion_harness.service.promote(
+        source_pr=372,
+        target_branch="main",
+        out_of_order=True,
+        apply=True,
+    )
+
+    assert rejected.status == "blocked"
+    assert rejected.blockers[0]["code"] == "promotion_incomplete"
+    assert promotion_harness.git.head_sha(forged_lease.worktree_path) == forged_head
+    assert promotion_harness.github.create_calls == []
 
 
 def test_recover_promotion_previews_allowed_post_commit_resolution(
@@ -5714,8 +5960,10 @@ def test_recover_promotion_accepts_verified_legacy_three_trailer_commit(
         lease=lease,
         target_branch="main",
         resolution_state=ResolutionState.MANUAL_REVIEWED,
+        legacy_subject=True,
         include_source_merge=False,
     )
+    assert legacy_message.splitlines()[0] == "Promote PR #372 to main"
     with sqlite3.connect(promotion_harness.registry.db_path) as connection:
         connection.execute(
             "DELETE FROM promotion_lease_sources WHERE lease_id = ?", (lease.id,)

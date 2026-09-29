@@ -30,7 +30,9 @@
   진입점인 `/wf init <기능 설명>`을 가리킵니다. 시작 매뉴얼, 두 세션 매뉴얼,
   Codex 이식성 문서와 `claude-md-wf-pipeline` snippet에 `--with-wf` 설치 전제와
   Codex CLI(`codex exec`) 기반 secondary provider를 반영했습니다.
-
+- `awf lsp setup`은 OMP의 `task.isolation.enabled=true`를 사용해
+  `Unknown setting: task.isolation.mode` 오류를 해결합니다. 기존
+  `apply=false`, `merge=patch` 안전 설정은 유지합니다.
 - staging PR을 연결한 managed feature는 `ACTIVE`와 검증 증거를 유지하며,
   최종 production PR 연결 후에만 정리 대상이 됩니다. 같은 feature의 반복
   staging 검증과 main에 이미 있는 동일 파일 변경도 불필요하게 차단하지 않습니다.
@@ -44,6 +46,10 @@
 - Review/Verify의 multi-LLM conflict 조건이 더 이상 자동 PASS하지 않고, malformed
   또는 grounded conflict evidence를 fail-closed로 판정합니다.
 - `awf wt sync`는 source-only patch 적용 뒤 index tree가 target과 같으면 commit·remote branch·PR 없이 managed worktree와 local branch를 정리하는 verified noop으로 끝냅니다. 정확한 source/target pin을 유지한 clean BLOCKED `sync_apply_failed` lease만 재실행으로 이 cleanup을 복구하며, drift·dirty·published lease는 fail-closed로 보존합니다. 실제 sync commit subject는 repository commitlint와 호환되는 `chore(sync): sync <source> to <target>` 형식입니다.
+- `awf wt promote`의 synthetic commit 제목을 `chore: promote ...` 형식으로 생성해
+  Conventional Commits 검사와 호환되도록 수정했습니다. 기존 `Promote PR ...` 제목의
+  커밋은 다시 쓰지 않고 재사용·복구하며, GitHub PR 제목과 source/target provenance
+  trailer의 개수·순서·값 검증은 유지합니다.
 - Git commit 실패 시 stderr가 비어 있으면 bounded·redacted stdout 진단을 함께 반환합니다.
 - `awf wt discard-sync`과 `awf wt recover-sync`는 모든 상태의 PR을 unpublished
   전제 위반으로 차단합니다. Discard는 reviewed conflict path만 target pin으로
@@ -77,6 +83,59 @@
   branch, and path all match; canonical cache leases require lowercase UUID IDs.
 
 ### Added
+- `awf wt discard-local-branch`는 승인한 direct local branch의 현재 HEAD 도달 가능
+  이력을 private commit-only bundle로 독립 검증한 뒤 해당 local `refs/heads`
+  ref만 CAS로 삭제합니다. remote와 `refs/remotes/*`, worktree, HEAD, index,
+  branch config는 변경하지 않습니다. branch와 모든 worktree HEAD/symref lock,
+  commit 직전 inventory 재검증, protected/default/release branch, 모든 checkout,
+  lease·reservation·active release·open PR·unsafe Git environment·SHA drift
+  guard를 적용하고, 분리된 preview token과 fsync attempt/receipt로 재삭제 및
+  불명 결과를 fail-closed로 처리합니다.
+- `awf wt discard-remote-branch`는 승인한 origin branch SHA를 detached
+  commit-only bundle로 독립 검증한 뒤 CAS로 remote ref만 삭제합니다. branch와
+  expected SHA, `0700` private backup root, reason, preview token이 필수이며,
+  local branch·worktree·HEAD·index·config는 변경하지 않습니다. protected/default/
+  release branch, live worktree, lease·reservation·active release, open PR,
+  unsafe Git environment, SHA drift와 관측 불명 삭제 결과는 fail-closed입니다.
+  완료 receipt가 있으면 재삭제하지 않고, 새 삭제 의도는 새 reason 또는 승인 SHA의
+  preview token을 요구합니다. 기존 `archive-discard`는 계속 remote ref를 보존합니다.
+  `delete_remote_branch_if_at`는 신규 명령에서만 `skip_hooks=True`로 pre-push hook을
+  건너뛰며, 기본값 `False`와 기존 finish/gc 동작은 변하지 않습니다.
+- `awf wt archive-discard`는 명시적으로 포기한 worktree를 백업한 뒤 정리한다.
+  기본은 clean-only이고 dirty·untracked·conflict·manual 상태는 명시적인
+  `--include-uncommitted`가 있어야 eligible dirty ACTIVE AWF feature lease,
+  imported scratch 또는 등록된 BLOCKED manual/legacy retry에서 보관한다.
+  root, protected ref, retained lease, open PR, canonical sync, active release,
+  foreign repository, 소유권·경로 증명 실패는 계속 차단한다. REMOVED 재시도에서
+  local branch가 이미 없다면 idempotent 결과를 반환하고 다른 worktree가 checkout
+  중이면 branch를 보존한다.
+- discard·archive 명령의 backup root는 본인 소유 `0700`이어야 하고, group/world-writable
+  조상은 root 또는 본인 소유의 sticky 디렉터리일 때만 허용한다. 백업은 discard 뒤
+  유일한 복구 수단이므로 `/tmp` 같은 자동 정리 경로가 아닌 영구 저장소에 둔다.
+- `--exclude-ignored-path node_modules`만 지원하며, 검증된 루트 ignored directory를 새 backup에서
+  의도적으로 제외한다. 해당 내부의 로컬 변경까지 복원되지 않지만 다른 ignored
+  파일(환경 파일 포함)은 보존하며, exclusion 정책은 preview token과 manifest에
+  결속된다.
+- Branch discard는 기존 경로별 `repository_id` 계산을 바꾸지 않는다. Root가 있는
+  lease는 origin URL 형식이 달라도 공통 Git 디렉터리로 같은 저장소인지 확인한다.
+  사라진 root는 같은 origin의 legacy identity일 때 보수적으로 보호하며, blocker에
+  lease id와 기록된 root를 표시한다. 물리적으로 다른 clone임이 확인된 lease만
+  local discard에서 무시한다. Remote discard는 같은 origin의 다른 clone에
+  활성·보존 lease가 있으면 차단한다. 두 명령은 origin/HEAD와 GitHub open PR을
+  확인한다.
+  Remote CAS 거부 또는 연결 이전 실패가 확정되거나 local ref transaction이
+  commit 전에 중단되면 attempt marker를 지워 동일 token 재시도를 허용한다.
+  삭제 결과가 불명확하면 marker를 보존하고 재시도를 차단한다.
+- 비 JSON preview에서도 모든 action의 `preview_token`과 `backup_directory`를
+  출력한다. `archive-restore` preview는 destination의 private 부모와 부재를
+  apply 전에 검사한다. 내부 restore의 미사용 제외 옵션을 제거했다.
+- `awf wt archive-repack`은 `REMOVED`이고 cleanup reservation이 없는 matching
+  archive만 경량 archive로 교체한다. 기존 archive는 새 sibling archive의 생성,
+  복원 검증, atomic publish가 끝날 때까지 보존한다.
+- `awf wt archive-restore`는 원본 repository나 registry 없이 verified private
+  archive를 absent private destination에 복원한다. 기존 경로나 symlink를
+  덮어쓰지 않으며 manifest, archived content, artifact hash, 비밀을 출력하지
+  않는다.
 - `awf wt promote --source-pr <staging-pr> --to main --source-branch`는 검증한
   원본 feature 브랜치와 HEAD를 그대로 사용해 production PR을 생성·재사용합니다.
   반복 staging은 같은 브랜치의 선행 PR 증거 체인을 자동 검증합니다. 합성
