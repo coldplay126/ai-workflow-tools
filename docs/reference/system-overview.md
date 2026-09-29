@@ -83,9 +83,14 @@ workflow 실행 자체를 막지는 않는다.
 | 4 | `~/.claude/skills/` |
 | 5 | `<repo>/claude/skills/` |
 | 6 | `<repo>/.claude/skills/` |
+| 7 | editable 설치된 `awf`의 source checkout `claude/skills/` (리소스 조회 전용) |
 
-동일한 skill 이름은 먼저 발견된 경로가 우선한다. `awf skills list --json`의
-`search_paths`에서 현재 해석 순서를 확인할 수 있다.
+동일한 skill 이름의 기본 경로는 먼저 발견된 항목이 우선하지만 prompt·리소스는
+파일이 실제 존재하는 첫 후보에서 읽는다. `awf wf init`의 템플릿 bootstrap은
+프로젝트 로컬 스킬을 먼저 확인한 후 runtime 경로, editable source 순서로 찾는다.
+non-editable 설치는 상위 checkout의 스킬/템플릿을 사용하지 않는다.
+7번 경로는 `awf skills list --json`의 `search_paths`와
+`awf ready`의 runtime `names/count` 집계에 포함되지 않는다.
 
 ---
 

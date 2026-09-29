@@ -5,7 +5,9 @@ import os
 from pathlib import Path
 from typing import Optional
 
+import awf
 from awf.core.paths import find_repo_root
+from awf.core.version_check import detect_source_root
 
 
 @dataclass
@@ -15,6 +17,15 @@ class SkillInfo:
     path: Path
     source_dir: Path
     manifest: Optional[SkillManifest] = None
+
+
+def installed_source_checkout() -> Path | None:
+    """Return the checkout only when the imported package is its editable source."""
+    installed_path = Path(awf.__file__).resolve().parent
+    source = detect_source_root(installed_path)
+    if source is None or source != installed_path:
+        return None
+    return source.parent.parent.parent
 
 
 def skill_search_paths(explicit_root: Optional[str] = None) -> list[Path]:
@@ -55,11 +66,11 @@ def _fallback_roots() -> list[Path]:
     return paths
 
 
-def find_skill_dir(skill_name: str, explicit_root: Optional[str] = None) -> Optional[Path]:
-    """Find a skill directory by name across all search paths.
+def iter_skill_dirs(skill_name: str, explicit_root: Optional[str] = None) -> list[Path]:
+    """Existing skill directories in runtime priority, with editable source last.
 
-    When explicit_root is provided but invalid, re-raises FileNotFoundError.
-    Fallback roots are only used when explicit_root is None and auto-detection fails.
+    An invalid explicit root still raises FileNotFoundError. Unlike
+    discover_skills, this includes source only for resource resolution.
     """
     try:
         roots = skill_search_paths(explicit_root)
@@ -67,11 +78,24 @@ def find_skill_dir(skill_name: str, explicit_root: Optional[str] = None) -> Opti
         if explicit_root is not None:
             raise
         roots = _fallback_roots()
+    checkout = installed_source_checkout()
+    if checkout is not None:
+        roots.append(checkout / "claude" / "skills")
+    seen: set[Path] = set()
+    candidates: list[Path] = []
     for base in roots:
         candidate = base / skill_name
-        if candidate.is_dir():
-            return candidate
-    return None
+        resolved = candidate.resolve()
+        if resolved not in seen and candidate.is_dir():
+            seen.add(resolved)
+            candidates.append(candidate)
+    return candidates
+
+
+def find_skill_dir(skill_name: str, explicit_root: Optional[str] = None) -> Optional[Path]:
+    """Find the highest-priority skill directory, including editable source."""
+    candidates = iter_skill_dirs(skill_name, explicit_root)
+    return candidates[0] if candidates else None
 
 
 @dataclass

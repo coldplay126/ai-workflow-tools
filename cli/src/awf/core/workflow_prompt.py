@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -278,6 +279,7 @@ def build_workflow_prompt(explicit_root: Optional[str], state: dict, provider_co
         artifact_instruction=artifact_instruction,
     )
     if not base_prompt:
+        print("warning: wf-orchestrator/prompts/base.md unavailable; using fallback prompt", file=sys.stderr)
         base_prompt = load_prompt_optional("wf-orchestrator", "phase-fallback",
             repo=state.get("repo", root.name),
             branch=state.get("branch", "-"),
@@ -285,6 +287,7 @@ def build_workflow_prompt(explicit_root: Optional[str], state: dict, provider_co
             task_description=agent_card.get("description", ""),
         )
     if not base_prompt:
+        print("warning: wf-orchestrator/prompts/phase-fallback.md unavailable; using inline prompt", file=sys.stderr)
         base_prompt = f"You are executing a workflow phase.\nphase: {phase}\n"
 
     parts: list[str] = [
@@ -385,11 +388,15 @@ def build_workflow_prompt(explicit_root: Optional[str], state: dict, provider_co
 
         # Load envelope schema instructions from external template
         envelope_instructions = load_prompt_optional("wf-orchestrator", "envelope-schema") or ""
+        if not envelope_instructions:
+            print("warning: wf-orchestrator/prompts/envelope-schema.md unavailable", file=sys.stderr)
 
         # Load gate-specific instructions if applicable
         gate_instructions = ""
         if phase in ("review", "verify"):
             gate_instructions = load_prompt_optional("wf-orchestrator", f"{phase}-gate") or ""
+            if not gate_instructions:
+                print(f"warning: wf-orchestrator/prompts/{phase}-gate.md unavailable", file=sys.stderr)
 
         parts.extend([
             "=== STRUCTURED RESULT ===",

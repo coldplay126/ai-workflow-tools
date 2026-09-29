@@ -4,12 +4,10 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-import awf
 from awf.core.config import load_awf_config, resolve_runtime_paths
 from awf.core.readiness import collect_doctor_report
 from awf.core.scanner import PYTHON_PROJECT_MARKERS, scan_repo, scan_result_to_dict
-from awf.core.skills import discover_skills
-from awf.core.version_check import detect_source_root
+from awf.core.skills import discover_skills, installed_source_checkout as _installed_source_checkout
 
 
 _PROJECT_MARKERS = (
@@ -105,14 +103,6 @@ def _provider_status(doctor: dict[str, Any]) -> dict[str, Any]:
         "configured": configured,
     }
 
-
-def _installed_source_checkout() -> Path | None:
-    installed_path = Path(awf.__file__).resolve().parent
-    source = detect_source_root(installed_path)
-    # Match version_check's editable condition; a wheel inside a checkout is not its source.
-    if source is None or source != installed_path:
-        return None
-    return source.parent.parent.parent
 
 
 def _skill_status(skills: list[Any]) -> dict[str, Any]:

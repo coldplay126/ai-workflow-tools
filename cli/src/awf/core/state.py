@@ -7,6 +7,7 @@ import secrets
 import shutil
 import stat
 import subprocess
+import sys
 import uuid
 import threading
 from contextlib import contextmanager
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 from awf.core.paths import find_repo_root
+from awf.core.skills import iter_skill_dirs
 from awf.core.workflow_loop import (
     abort_workflow,
     continue_workflow,
@@ -605,18 +607,23 @@ def resolve_repo_root(explicit_root: Optional[str] = None) -> Path:
 
 def _find_workflow_template_root(root: Path) -> Path | None:
     env_dir = os.environ.get("AWF_WORKFLOW_TEMPLATE_DIR", "").strip()
-    candidates: list[Path] = []
     if env_dir:
-        candidates.append(Path(env_dir).expanduser())
-    candidates.append(root / "claude" / "skills" / "wf-orchestrator" / "templates")
-    candidates.extend(
-        base / "claude" / "skills" / "wf-orchestrator" / "templates"
-        for base in Path(__file__).resolve().parents
-    )
-    for candidate in candidates:
-        resolved = candidate.resolve()
-        if (resolved / "agent-cards").is_dir() and (resolved / "provider-config.default.json").is_file():
-            return resolved
+        override = Path(env_dir).expanduser().resolve()
+        if (override / "agent-cards").is_dir() and (override / "provider-config.default.json").is_file():
+            return override
+    # Preserve the original bootstrap priority for project-local templates.
+    local = [
+        root / "claude" / "skills" / "wf-orchestrator",
+        root / ".claude" / "skills" / "wf-orchestrator",
+    ]
+    seen: set[Path] = set()
+    for skill_dir in [*local, *iter_skill_dirs("wf-orchestrator", str(root))]:
+        candidate = (skill_dir / "templates").resolve()
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if (candidate / "agent-cards").is_dir() and (candidate / "provider-config.default.json").is_file():
+            return candidate
     return None
 
 
@@ -634,6 +641,7 @@ def _copy_missing_tree(source: Path, target: Path) -> None:
 def _bootstrap_workflow_runtime(root: Path, wf_dir: Path) -> None:
     template_root = _find_workflow_template_root(root)
     if template_root is None:
+        print("warning: workflow templates unavailable; agent cards and provider config were not installed", file=sys.stderr)
         return
     _copy_missing_tree(template_root / "agent-cards", wf_dir / "agent-cards")
     provider_config = wf_dir / "provider-config.json"
