@@ -1452,15 +1452,15 @@ def test_repository_identity_hashes_invalid_repository_root_bytes(
 ) -> None:
     repo = make_repository(tmp_path)
     root_bytes = os.fsencode(tmp_path) + b"/repository-\xff"
-    root_output = root_bytes + b"\n"
+    common_dir_output = root_bytes + b"/.git\n"
     _install_fake_git(
         monkeypatch,
         tmp_path,
         "import sys\n"
         "if sys.argv[1:] == ['remote', 'get-url', 'origin']:\n"
         "    sys.stdout.write('https://example.com/owner/repository.git\\n')\n"
-        "elif sys.argv[1:] == ['rev-parse', '--show-toplevel']:\n"
-        f"    sys.stdout.buffer.write({root_output!r})\n"
+        "elif sys.argv[1:] == ['rev-parse', '--path-format=absolute', '--git-common-dir']:\n"
+        f"    sys.stdout.buffer.write({common_dir_output!r})\n"
         "else:\n"
         "    raise SystemExit(2)\n",
     )
