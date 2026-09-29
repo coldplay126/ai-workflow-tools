@@ -30,7 +30,7 @@ deploy 권한과 분리되며, 승격·배포·branch/worktree 삭제는
 plan → review → approve → impl → verify → test → done
 
 ### Dual Mode
-review/verify Phase에서 Codex MCP를 secondary worker로 사용 가능.
+review/verify Phase에서 Codex CLI (`codex exec`)를 secondary worker로 사용 가능.
 impl Phase에서 `implement_then_review`로 post-impl 코드 리뷰 가능.
 프로젝트별 `.workflow/provider-config.json`으로 설정.
 

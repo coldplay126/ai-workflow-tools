@@ -11,7 +11,7 @@ capabilities:
   - agent_team
 
 conditions:
-  trigger: "parent 조율자가 기획·구현·검토 역할을 위임할 때"
+  trigger: "parent 조율자가 기획·구현·검토 역할을 위임하거나 --mode/#cross 교차 검증을 요청할 때"
   skip: "위임받은 worker(implementer, code-reviewer, spec-verifier 등)로 실행 중일 때, 단순 파일 읽기, 짧은 질문-답변"
 
 subagent_modes:

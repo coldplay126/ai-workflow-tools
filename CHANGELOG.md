@@ -12,8 +12,10 @@
 
 - 기본 `setup.sh`는 CORE 스킬 5개만 설치합니다. 7단계 `/wf` 스킬 11개는
   `--with-wf` 또는 `AWF_WITH_WF=1`로 명시적으로 설치하며, 기본 재실행 시
-  이 체크아웃 소유의 기존 WF 링크만 세 runtime에서 제거합니다. `analysis`와
-  `multi-agent` 트리거를 좁히고 ready 게이트에 opt-in 설치 안내를 추가했습니다.
+  이 체크아웃 소유의 기존 WF 링크만 세 runtime에서 제거합니다. Claude
+  Code의 `/wf` 슬래시 스킬은 opt-in이 필요하지만 editable 설치된
+  `awf wf init/next` CLI는 source checkout의 스킬을 사용해 계속 동작합니다.
+  `analysis`와 `multi-agent` 트리거를 좁히고 ready 게이트 안내를 갱신했습니다.
 
 ### Fixed
 

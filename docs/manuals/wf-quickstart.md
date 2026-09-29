@@ -111,7 +111,8 @@ Gate에서 실패하면 오케스트레이터가 자동으로 적절한 Phase로
 
 | 커맨드 | 설명 |
 |--------|------|
-| `/wf-orchestrator '기능'` | 워크플로우 초기화 + 시작 |
+| `/wf init '기능'` | 워크플로우 초기화 + 시작 (`--with-wf` 필요) |
+| `/wf-orchestrator` | 시작된 워크플로우의 phase 실행 (`--with-wf` 필요) |
 | `/wf-status` | 상태 조회 |
 | `/wf-discovery` | 프로젝트 디스커버리 |
 | `/wf-reset` | 워크플로우 초기화/폐기 |

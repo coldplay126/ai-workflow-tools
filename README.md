@@ -96,12 +96,16 @@ agent)과 `awf wt`를 사용합니다. 7단계 `/wf` 스킬 11개가 필요하�
 체크아웃에서 `./setup.sh --with-wf` 또는 `AWF_WITH_WF=1 ./setup.sh`를
 실행하세요. 기본 setup 재실행은 세 루트에서 이 체크아웃이 소유한 기존 WF
 링크만 제거하고 사용자 파일·디렉터리·다른 대상 링크는 유지합니다.
-`CLAUDE_DIR`, `AGENTS_SKILLS_DIR`, `OMP_SKILLS_DIR`로 각 설치 루트를 바꿀 수
-있습니다 (`CLAUDE_DIR`은 `skills`의 상위 디렉터리). 설치 대상에 동명 사용자
-파일이나 디렉터리가 있으면 덮어쓰지 않고 `AWF_SKILL_INSTALL_RESULT`에
+`AGENTS_SKILLS_DIR`, `OMP_SKILLS_DIR`로 해당 두 설치 루트를 바꿀 수 있습니다.
+설치 대상에 동명 사용자 파일이나 디렉터리가 있으면 덮어쓰지 않고
+`AWF_SKILL_INSTALL_RESULT`에
 `user_owned`를 기록하며 exit `3`으로 종료합니다. Claude agents와 생성된
 AWF용 OMP task agents도 사용자 설정에 연결됩니다. 이후 일반 사용자는 이
 저장소 안에서 `uv run`을 사용할 필요가 없습니다.
+
+`awf wf init/next` CLI는 editable 설치된 source checkout의 WF 스킬을
+읽으므로 기본 설치에서도 계속 사용할 수 있습니다. Claude Code의 `/wf`
+슬래시 스킬을 사용하려면 `--with-wf`가 필요합니다.
 
 릴리스 작업에서 `release-worktree-lifecycle` 스킬은 agent가 어떤 `awf wt`
 명령을 호출할지 안내하고, 안전 판정·상태 기록·변경은 CLI가 수행합니다.
@@ -448,13 +452,19 @@ The Python package is `awf-cli`, and the console entrypoint is `awf`.
 For release work, the `release-worktree-lifecycle` skill tells an agent which
 `awf wt` command to call; the CLI makes the safety decisions, records state,
 and performs mutations. Its installable source is packaged at
-`cli/src/awf/resources/release-worktree-lifecycle/`. `setup.sh` links every
-bundled AWF skill into `~/.claude/skills`, `~/.agents/skills`, and
-`~/.omp/agent/skills`. Override the latter two roots with
-`AGENTS_SKILLS_DIR` and `OMP_SKILLS_DIR`. User-owned files or directories are
-preserved; a collision emits `AWF_SKILL_INSTALL_RESULT ... user_owned` and
+`cli/src/awf/resources/release-worktree-lifecycle/`. By default, `setup.sh`
+links the five CORE skills into `~/.claude/skills`, `~/.agents/skills`, and
+`~/.omp/agent/skills`; opt in to the eleven `/wf` lifecycle skills with
+`./setup.sh --with-wf`. A default rerun removes only WF links owned by this
+checkout. Override the latter two roots with `AGENTS_SKILLS_DIR` and
+`OMP_SKILLS_DIR`. User-owned files, directories, and foreign links are
+preserved; a collision while installing emits
+`AWF_SKILL_INSTALL_RESULT ... user_owned` and
 exits with code `3`. A worktree registered by `awf wt import` remains unmanaged
 until `awf wt adopt`.
+
+The editable `awf wf init/next` CLI can still use skills in its source checkout
+after the default setup; the Claude Code `/wf` slash skill requires `--with-wf`.
 
 For solo development, use **a main-based feature → staging validation → a main
 PR from that same feature**. Configure `worktree.feature_base`, then preview
@@ -755,7 +765,7 @@ See `snippets/claude-md-multi-agent.md` for the full protocol.
 ./setup.sh
 ```
 
-The setup script installs the editable `awf` tool, links every bundled skill into the Claude, Agent Skills, and OMP skill roots, links Claude agents, and generates/links AWF OMP agents. It preserves user-owned skill paths and does not register any company-specific MCP server.
+The setup script installs the editable `awf` tool, links the five CORE skills into the Claude, Agent Skills, and OMP roots, links Claude agents, and generates/links AWF OMP agents. Use `./setup.sh --with-wf` for `/wf` slash skills. The `awf wf` CLI can still read lifecycle skills from its editable source checkout after a default installation. User-owned skill paths are preserved; no company-specific MCP server is registered.
 
 Optional snippets:
 

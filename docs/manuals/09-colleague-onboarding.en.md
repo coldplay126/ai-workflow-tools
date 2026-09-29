@@ -141,18 +141,19 @@ Answer:
 
 ## Using Claude Code
 
-Install the skills with:
+`./setup.sh` installs the CORE skills by default. To use the `/wf` seven-phase
+slash skill, run `./setup.sh --with-wf` from the ai-workflow-tools checkout.
 
 ```bash
 ./setup.sh
 ```
 
-Common entrypoints:
+Common entrypoints (`/analysis` alone is available by default):
 
 ```text
 /analysis
-/wf-status
-/wf-orchestrator
+/wf init <feature>    # after --with-wf
+/wf-status            # after --with-wf
 ```
 
 Claude skills follow the same rule: read `awf ready` and dry-run JSON before
@@ -161,6 +162,9 @@ provider-backed execution.
 ## Using Codex CLI
 
 Codex does not replicate Claude's skill UX. Use the `awf` CLI and Codex adapter.
+
+The Codex adapter and `awf wf` CLI still find WF skills in an editable
+installation's source checkout after a default setup.
 
 ```bash
 ../ai-workflow-tools/codex/run-wf.sh preflight review codex

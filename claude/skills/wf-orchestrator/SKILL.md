@@ -297,36 +297,13 @@ OMP native coordinator는 내부 task를 병렬 실행할 수 있지만 parent A
 모든 task가 settle될 때까지 기다린 뒤 result envelope, judge, gate 순서로
 결정론적으로 처리합니다.
 
-**[Step B3: 응답 수신 + 파싱 + Format Retry]**
+**[Step B3: 응답 수신과 재실행]**
 
-```
-응답 수신 → JSON 파싱 시도
-├── 성공 → structured_result 스키마 검증 → "✓ <Provider> 완료"
-│
-├── 파싱 실패 (1차) → Format Correction 재시도 (max 1회):
-│   │
-│   │  FORMAT_CORRECTION_PROMPT 구성:
-│   │  "Your previous response could not be parsed as valid JSON.
-│   │   Respond ONLY with a JSON object matching this schema:
-│   │   {output_schema}
-│   │   Previous response (first 500 chars): {truncated}"
-│   │
-│   ├── Codex CLI: codex exec --sandbox workspace-write (교정 프롬프트를 stdin으로 전달)
-│   ├── Claude CLI: claude --print --permission-mode default (교정 프롬프트를 stdin으로 전달)
-│   │
-│   ├── 재시도 성공 → "✓ <Provider> 완료 (format retry)"
-│   │                  provider_status: "format_retry"
-│   └── 재시도 실패 → "⚠ <Provider> format retry 실패" → 명시된 fallback_chain 다음 시도
-│
-├── 타임아웃 → "⏱ <Provider> 타임아웃" → 명시된 fallback_chain 다음 시도 (재시도 없음)
-│
-└── 전체 실패 → "✗ 위임 실패: <provider>" 보고 후 중단. 사용자가 명시적으로 지시할 때만 Step 5A 인라인 실행
-```
-
-응답 파싱:
-- Claude CLI: stdout의 응답 텍스트
-- Codex CLI: stdout의 응답 텍스트
-- **공통**: 응답에서 JSON 블록 추출 시도 — `{` 로 시작하는 줄 ~ 마지막 `}` 사이를 파싱
+`awf wf next`가 provider 응답, 오류 및 결과를 처리합니다. 응답 형식 오류나
+provider 실패 시 수동으로 provider CLI를 조합하거나 format-retry 상태를
+기록하지 않습니다. 필요하면 `awf wf next`를 다시 실행하고 결과와 gate를
+확인합니다. 재실행의 sandbox·입출력은 CLI가 결정하며 review/verify는
+read-only입니다.
 
 **[Step B4: Gate 평가]**
 
@@ -512,91 +489,16 @@ approve와 done의 `inline` 표기는 parent HIL 요약을 뜻할 뿐 provider �
 두 Phase는 provider-config와 fallback chain을 무시하고 각각 `awf wf approve`, `awf wf confirm`
 명령으로만 기록한다.
 
-### provider-config.json 스키마
+### provider-config.json 예시
 
-```json
-{
-  "version": "2.3.0",
-  "team_selection": { "enabled": true },
-  "phase_routing": {
-    "plan":    { "mode": "inline" },
-    "review":  { "mode": "dual", "primary": "inline", "secondary": "codex" },
-    "approve": { "mode": "inline" },
-    "impl":    { "mode": "inline" },
-    "verify":  { "mode": "dual", "primary": "inline", "secondary": "claude:sonnet" },
-    "test":    { "mode": "inline" },
-    "done":    { "mode": "inline" }
-  },
-  "dispatch": {
-    "surface_preference": "omp",
-    "routing": {
-      "required_capabilities": [],
-      "estimated_cost": {},
-      "max_cost_budget": null,
-      "priority": ["omp", "inline", "cmux", "pi"]
-    },
-    "omp": {
-      "command": "omp",
-      "no_session": false,
-      "coordination_surface": "native",
-      "execution_mode": "external_host",
-      "capacity": 8,
-      "role_models": {}
-    }
-  },
-  "providers": {
-    "codex": {
-      "type": "cli",
-      "command": "codex exec --sandbox workspace-write",
-      "file_access": true,
-      "timeout_seconds": 300
-    },
-    "claude:sonnet": {
-      "type": "cli",
-      "command": "claude --print --permission-mode default",
-      "file_access": false,
-      "timeout_seconds": 180,
-      "budget_usd": 0.50
-    }
-  },
-  "fallback_chain": [],
-  "phase_models": {
-    "plan":   { "effort": "max",  "codex_reasoning": "xhigh" },
-    "review": { "effort": "max",  "codex_reasoning": "xhigh" },
-    "impl":   { "effort": "high", "codex_reasoning": "xhigh" },
-    "verify": { "effort": "max",  "codex_reasoning": "xhigh" },
-    "test":   { "effort": "high", "codex_reasoning": "xhigh" }
-  },
-  "defaults": { "mode": "inline", "timeout_seconds": 300 }
-}
-```
+실제 초기화에 쓰이는 [기본 템플릿](templates/provider-config.default.json)을
+참조하세요. Codex host 구성은
+[Codex 기본 템플릿](../../../codex/templates/provider-config.codex-primary.json)에
+있습니다. provider CLI와 phase별 sandbox는 `awf wf next`가 결정합니다.
 
 `dispatch.omp.role_models`는 기본 비어 있다. OMP worker의 모델은 생성된 agent
 frontmatter의 `@plan`/`@task` alias가 정하며, 사용자가 role_models를 명시한 경우만
 그 역할을 덮어쓴다.
-
-### state.json gate 확장
-
-```json
-{
-  "gates": {
-    "G2": {
-      "passed": true,
-      "provider": "codex|claude:sonnet|null",
-      "provider_status": "success|format_retry|fallback|timeout|parse_error|skipped",
-      "format_retries": 0
-    }
-  }
-}
-```
-
-`provider_status` 값:
-- `success`: 첫 응답에서 정상 파싱
-- `format_retry`: 첫 파싱 실패 후 포맷 교정 재시도로 성공
-- `fallback`: fallback_chain의 다음 프로바이더로 성공
-- `timeout`: 프로바이더 타임아웃
-- `parse_error`: 모든 재시도 + fallback 실패
-- `skipped`: 위임 없이 인라인 실행
 
 ### fallback 동작
 

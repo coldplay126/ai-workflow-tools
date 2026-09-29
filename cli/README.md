@@ -150,11 +150,14 @@ awf wf seal-plan --repo-root . --json
 agent)과 `awf wt`로 진행한다. `/wf` 7단계 스킬 11개는 이 체크아웃에서
 `../setup.sh --with-wf` 또는 `AWF_WITH_WF=1 ../setup.sh`를 실행할 때만
 추가한다. 기본 재실행은 이전에 설치한 WF 링크 중 이 체크아웃이 소유한 것만
-`~/.claude/skills`, `~/.agents/skills`, `~/.omp/agent/skills`에서 제거한다.
-`CLAUDE_DIR`, `AGENTS_SKILLS_DIR`, `OMP_SKILLS_DIR`로 각 root를 재지정할 수
-있으며 사용자 파일·디렉터리·다른 대상 링크는 제거하지 않는다. CORE 설치
-대상에 동명 사용자 파일이나 디렉터리가 있으면
+세 스킬 루트에서 제거한다.
+
+`AGENTS_SKILLS_DIR`, `OMP_SKILLS_DIR`로 후자의 두 root를 재지정할 수 있다.
+사용자 파일·디렉터리·다른 대상 링크는 제거하지 않는다. 설치 대상(CORE 및
+opt-in 시 WF)에 동명 사용자 파일이나 디렉터리가 있으면
 `AWF_SKILL_INSTALL_RESULT ... user_owned`를 출력한 뒤 exit `3`으로 종료한다.
+editable 설치된 `awf wf init/next` CLI는 기본 설치에서도 source checkout의
+WF 스킬을 읽는다. Claude Code의 `/wf` 슬래시 스킬은 `--with-wf`가 필요하다.
 
 `release-worktree-lifecycle`의 installable source는
 `src/awf/resources/release-worktree-lifecycle/`이다. 이 디렉터리는 wheel

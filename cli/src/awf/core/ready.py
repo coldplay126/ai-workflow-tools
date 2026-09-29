@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 from typing import Any
 
+import awf
 from awf.core.config import load_awf_config, resolve_runtime_paths
 from awf.core.readiness import collect_doctor_report
 from awf.core.scanner import PYTHON_PROJECT_MARKERS, scan_repo, scan_result_to_dict
 from awf.core.skills import discover_skills
+from awf.core.version_check import detect_source_root
 
 
 _PROJECT_MARKERS = (
@@ -103,8 +106,19 @@ def _provider_status(doctor: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _skill_status(skills: list[Any]) -> dict[str, Any]:
-    names = sorted(str(skill.name) for skill in skills)
+def _installed_source_checkout() -> Path | None:
+    source = detect_source_root(Path(awf.__file__))
+    return source.parent.parent.parent if source is not None else None
+
+
+def _skill_status(skills: list[Any], source_checkout: Path | None = None) -> dict[str, Any]:
+    names = {str(skill.name) for skill in skills}
+    if source_checkout is not None:
+        names.update(
+            path.parent.name
+            for path in (source_checkout / "claude" / "skills").glob("*/SKILL.md")
+        )
+    sorted_names = sorted(names)
     required_for_wf = {
         "wf-orchestrator",
         "wf-status",
@@ -115,11 +129,11 @@ def _skill_status(skills: list[Any]) -> dict[str, Any]:
         "phase-test",
         "phase-done",
     }
-    missing = sorted(required_for_wf - set(names))
+    missing = sorted(required_for_wf - names)
     return {
         "status": "ready" if not missing else "caution",
-        "count": len(names),
-        "names": names,
+        "count": len(sorted_names),
+        "names": sorted_names,
         "missing_workflow_skills": missing,
     }
 
@@ -504,6 +518,28 @@ def _first_recommendation(report: dict[str, Any], command_prefix: str | None = N
     return list(items[:1])
 
 
+def _missing_workflow_recommendations(
+    report: dict[str, Any], *, context: str
+) -> list[dict[str, str]]:
+    inspect = {
+        "command": "awf skills list --repo-root .",
+        "why": f"inspect installed workflow skills before {context}",
+    }
+    source_checkout = report.get("source_checkout")
+    if source_checkout is not None:
+        setup = Path(source_checkout) / "setup.sh"
+        if setup.is_file():
+            return [
+                {
+                    "command": f"{shlex.quote(str(setup))} --with-wf",
+                    "why": "install the opt-in /wf lifecycle skills from the ai-workflow-tools checkout",
+                },
+                inspect,
+            ]
+    inspect["why"] += "; install the opt-in /wf skills from the ai-workflow-tools checkout"
+    return [inspect]
+
+
 def evaluate_ready_gate(report: dict[str, Any], gate: str) -> dict[str, Any]:
     """Return a deterministic allow/block decision for automation entrypoints."""
     if gate not in READY_GATES:
@@ -563,16 +599,9 @@ def evaluate_ready_gate(report: dict[str, Any], gate: str) -> dict[str, Any]:
                 decision="block",
                 reason="required workflow skills are missing",
                 required_capabilities=["workflow"],
-                recommended_next=[
-                    {
-                        "command": "setup.sh --with-wf",
-                        "why": "install the opt-in /wf lifecycle skills from the ai-workflow-tools checkout",
-                    },
-                    {
-                        "command": "awf skills list --repo-root .",
-                        "why": "inspect installed workflow skills before initializing .workflow",
-                    },
-                ],
+                recommended_next=_missing_workflow_recommendations(
+                    report, context="initializing .workflow"
+                ),
             )
         return _gate_payload(
             gate=gate,
@@ -614,16 +643,9 @@ def evaluate_ready_gate(report: dict[str, Any], gate: str) -> dict[str, Any]:
                 decision="block",
                 reason="required workflow skills are missing",
                 required_capabilities=["workflow"],
-                recommended_next=[
-                    {
-                        "command": "setup.sh --with-wf",
-                        "why": "install the opt-in /wf lifecycle skills from the ai-workflow-tools checkout",
-                    },
-                    {
-                        "command": "awf skills list --repo-root .",
-                        "why": "inspect installed workflow skills before running phases",
-                    },
-                ],
+                recommended_next=_missing_workflow_recommendations(
+                    report, context="running phases"
+                ),
             )
         if provider_status == "blocked":
             return _gate_payload(
@@ -681,6 +703,7 @@ def collect_ready_report(repo_root: str | None = None, *, probe: bool = False) -
     resolved_root = Path(paths["repo_root"])
     doctor = collect_doctor_report(config, str(resolved_root), probe=probe)
     skills = discover_skills(str(resolved_root))
+    source_checkout = _installed_source_checkout()
     scan = scan_result_to_dict(scan_repo(resolved_root, use_ai=False))
 
     report: dict[str, Any] = {
@@ -688,8 +711,9 @@ def collect_ready_report(repo_root: str | None = None, *, probe: bool = False) -
         "paths": paths,
         "probe_enabled": probe,
         "config": _config_status(paths),
+        "source_checkout": str(source_checkout) if source_checkout is not None else None,
         "provider": _provider_status(doctor),
-        "skills": _skill_status(skills),
+        "skills": _skill_status(skills, source_checkout),
         "scan": _scan_status(scan, repo_root=resolved_root),
         "workflow": _workflow_status(resolved_root),
         "operations": _operations_status(resolved_root),

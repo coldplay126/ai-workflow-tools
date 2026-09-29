@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 from pathlib import Path
+
 import pytest
 
 from awf.commands.ready import run_ready
@@ -326,22 +328,65 @@ def test_evaluate_analysis_gate_blocks_without_scan_unit(tmp_path: Path, monkeyp
     ("gate_name", "workflow_started"),
     [("workflow-init", False), ("workflow-run", True)],
 )
-def test_workflow_gate_recommends_opt_in_for_missing_skill(
+def test_default_core_links_keep_editable_cli_workflow_available(
     tmp_path: Path, monkeypatch, gate_name: str, workflow_started: bool
+) -> None:
+    repo, _ = _prepare_repo(tmp_path, workflow_started=workflow_started)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("AWF_SKILLS_DIR", raising=False)
+    core = tmp_path / "home" / ".claude" / "skills"
+    for name in (
+        "analysis",
+        "lsp-worktree-setup",
+        "multi-agent",
+        "release-worktree-lifecycle",
+        "wf-discovery",
+    ):
+        _write_skill(core, name)
+
+    report = collect_ready_report(str(repo))
+    gate = evaluate_ready_gate(report, gate_name)
+
+    assert report["source_checkout"] is not None
+    assert gate["decision"] == "allow"
+
+
+@pytest.mark.parametrize(
+    ("gate_name", "workflow_started", "has_setup"),
+    [
+        ("workflow-init", False, True),
+        ("workflow-run", True, True),
+        ("workflow-init", False, False),
+        ("workflow-run", True, False),
+    ],
+)
+def test_workflow_gate_recommends_opt_in_for_missing_skill(
+    tmp_path: Path, monkeypatch, gate_name: str, workflow_started: bool, has_setup: bool
 ) -> None:
     repo, skills = _prepare_repo(tmp_path, workflow_started=workflow_started)
     (skills / "phase-test" / "SKILL.md").unlink()
     monkeypatch.setenv("AWF_SKILLS_DIR", str(skills))
     monkeypatch.setattr("awf.core.skills.skill_search_paths", lambda _root: [skills])
+    fake_checkout = tmp_path / "source checkout"
+    if has_setup:
+        fake_checkout.mkdir()
+        (fake_checkout / "setup.sh").write_text("#!/bin/sh\n")
+    monkeypatch.setattr(
+        "awf.core.ready._installed_source_checkout",
+        lambda: fake_checkout if has_setup else None,
+    )
 
     gate = evaluate_ready_gate(collect_ready_report(str(repo)), gate_name)
 
     assert gate["decision"] == "block"
-    assert gate["recommended_next"][0] == {
-        "command": "setup.sh --with-wf",
-        "why": "install the opt-in /wf lifecycle skills from the ai-workflow-tools checkout",
-    }
-    assert gate["recommended_next"][1]["command"] == "awf skills list --repo-root ."
+    if has_setup:
+        assert shlex.split(gate["recommended_next"][0]["command"]) == [
+            str(fake_checkout / "setup.sh"), "--with-wf",
+        ]
+        assert gate["recommended_next"][1]["command"] == "awf skills list --repo-root ."
+    else:
+        assert gate["recommended_next"][0]["command"] == "awf skills list --repo-root ."
+        assert "opt-in" in gate["recommended_next"][0]["why"]
 
 
 def test_run_ready_gate_json_returns_gate_exit(tmp_path: Path, monkeypatch, capsys) -> None:

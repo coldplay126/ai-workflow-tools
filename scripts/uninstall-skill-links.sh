@@ -8,17 +8,27 @@ fi
 
 source_input=$1
 shift
+skill_name=${source_input##*/}
 if ! source_dir=$(CDPATH= cd "$source_input" 2>/dev/null && pwd -P); then
-  printf 'error: source skill directory does not exist: %s\n' "$source_input" >&2
-  exit 1
+  repo_root=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
+  source_dir=$repo_root/claude/skills/$skill_name
+  printf 'warning: source skill directory does not exist; checking owned link to %s\n' "$source_dir" >&2
+else
+  skill_name=${source_dir##*/}
 fi
-skill_name=${source_dir##*/}
 
 for skill_root in "$@"; do
   target=$skill_root/$skill_name
   if [ -L "$target" ]; then
     link_target=$(readlink "$target")
+    owned=0
     if [ "$link_target" = "$source_dir" ]; then
+      owned=1
+    elif resolved=$(CDPATH= cd -P "$target" 2>/dev/null && pwd -P) &&
+      [ "$resolved" = "$source_dir" ]; then
+      owned=1
+    fi
+    if [ "$owned" -eq 1 ]; then
       rm "$target"
       printf 'removed: %s\n' "$target"
     else

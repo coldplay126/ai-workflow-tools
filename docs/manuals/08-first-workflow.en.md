@@ -7,6 +7,10 @@ dry-run, then move into gated workflow execution.
 
 Korean version: [첫 ai-workflow-tools 작업 흐름](./08-first-workflow.ko.md)
 
+The default `./setup.sh` links only CORE skills, but `awf wf` in an editable
+installation still reads lifecycle skills from its source checkout for the CLI
+sequence below. The Claude Code `/wf` slash skill requires `./setup.sh --with-wf`.
+
 ## Recommended Order
 
 1. Run `awf ready` to see the current safe automation level and next commands.

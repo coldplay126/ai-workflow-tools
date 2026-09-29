@@ -23,8 +23,7 @@
   "execution_hints": {
     "sandbox": "read-only|workspace-write",
     "cwd": "{project_root}",
-    "timeout_seconds": 300,
-    "budget_usd": 0.50
+    "timeout_seconds": 300
   }
 }
 ```
@@ -54,13 +53,13 @@
 - `output_schema`: agent card의 `output.structured_result` 스키마 (워커가 이 형식으로 JSON 응답)
 
 ### artifact
-파일 전문을 임베드. `file_access: false`인 워커 (Claude `--bare`)용.
+파일 전문을 임베드. `file_access: false`인 워커 (Claude CLI `claude --print`)용.
 - `key`: agent card의 `input.required_artifacts[].key`
 - `content`: 파일 전체 내용
 - `content_type`: `text/markdown` 또는 `application/json`
 
 ### file_ref
-파일 경로만 전달. `file_access: true`인 워커 (Codex MCP, cwd 접근 가능)용.
+파일 경로만 전달. `file_access: true`인 워커 (Codex CLI `codex exec`, cwd 접근 가능)용.
 - `key`: agent card의 `input.required_artifacts[].key`
 - `path`: `.workflow/` 기준 상대 경로
 
@@ -201,27 +200,10 @@ Schema:
 === END ===
 ```
 
-## Format Correction Prompt (재시도용)
+## 형식 오류 시 재실행
 
-워커가 유효한 JSON을 반환하지 않았을 때 사용하는 교정 프롬프트.
-오케스트레이터의 Step B3에서 파싱 실패 시 **1회** 재시도에 사용.
-
-```
-Your previous response could not be parsed as valid JSON.
-
-IMPORTANT: Respond ONLY with a valid JSON object matching this exact schema.
-No markdown fences (```), no explanation, no text before or after the JSON.
-The response must start with { and end with }.
-
-Required schema:
-{output_schema}
-
-Your previous response (first 500 chars for reference):
-{truncated_response}
-```
-
-**재시도 방식**:
-- Codex MCP: `mcp__codex__codex-reply(threadId, FORMAT_CORRECTION_PROMPT)` — 스레드 유지로 컨텍스트 보존
-- Claude CLI: 새 호출 `claude --print --bare ... "FORMAT_CORRECTION_PROMPT"` — stateless이므로 스키마 + 이전 응답 포함 필수
-- 재시도 성공 시: `provider_status: "format_retry"`로 기록
-- 재시도 실패 시: fallback_chain 다음 프로바이더로 이동
+응답 파싱 실패나 provider 오류는 `awf wf next`가 보고합니다. 별도의
+Codex MCP reply나 Claude CLI 직접 호출로 format correction을 시도하지
+않습니다. 재실행이 필요한 경우 `awf wf next`를 다시 사용하고,
+review/verify의 read-only sandbox를 포함한 phase별 권한과 입출력은 CLI가
+결정하도록 합니다.

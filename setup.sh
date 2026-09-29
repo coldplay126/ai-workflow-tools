@@ -2,20 +2,28 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# 테스트/격리 스모크용 override: awf ready의 runtime 검색 경로에는 적용되지 않습니다.
 CLAUDE_DIR="${CLAUDE_DIR:-$HOME/.claude}"
 OMP_AGENT_DIR="${OMP_AGENT_DIR:-$HOME/.omp/agent/agents}"
 AGENTS_SKILLS_DIR="${AGENTS_SKILLS_DIR:-$HOME/.agents/skills}"
 OMP_SKILLS_DIR="${OMP_SKILLS_DIR:-$HOME/.omp/agent/skills}"
+usage() {
+  printf 'usage: %s [--with-wf]\n' "$0"
+}
+
 with_wf=0
-if [ "${AWF_WITH_WF:-}" = "1" ]; then
-  with_wf=1
-fi
 for arg in "$@"; do
   case "$arg" in
     --with-wf) with_wf=1 ;;
-    *) printf 'usage: %s [--with-wf]\n' "$0" >&2; exit 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
   esac
 done
+case "${AWF_WITH_WF:-}" in
+  1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]) with_wf=1 ;;
+  0|[Ff][Aa][Ll][Ss][Ee]|[Nn][Oo]|"") ;;
+  *) usage >&2; exit 2 ;;
+esac
 
 if ! command -v uv >/dev/null 2>&1; then
   echo "error: uv가 필요합니다: https://docs.astral.sh/uv/getting-started/installation/" >&2
@@ -93,16 +101,16 @@ for skill in "${skills[@]}"; do
   done
 done
 
+if [ "$install_blocked" -ne 0 ]; then
+  printf 'AWF Skill installation is BLOCKED; inspect AWF_SKILL_INSTALL_RESULT lines above.\n' >&2
+  exit 3
+fi
+
 if [ "$with_wf" -eq 0 ]; then
   for skill in "${WF_SKILLS[@]}"; do
     "$SCRIPT_DIR/scripts/uninstall-skill-links.sh" \
       "$SCRIPT_DIR/claude/skills/$skill" "${runtime_roots[@]}"
   done
-fi
-
-if [ "$install_blocked" -ne 0 ]; then
-  printf 'AWF Skill installation is BLOCKED; inspect AWF_SKILL_INSTALL_RESULT lines above.\n' >&2
-  exit 3
 fi
 
 # 1b. Agents 심링크
@@ -191,9 +199,7 @@ echo "    → $SCRIPT_DIR/snippets/claude-md-multi-agent.md"
 if [ "$with_wf" -eq 1 ]; then
   echo "    → $SCRIPT_DIR/snippets/claude-md-wf-pipeline.md"
   echo ""
-  echo "  ── Codex MCP 설치 (선택) ──"
-  echo "  WF Dual Mode를 사용하려면:"
-  echo "    claude mcp add --scope user codex -- codex mcp-server"
+  echo "  WF 위임은 설치된 Codex CLI (codex exec)를 사용합니다."
 else
   echo "  /wf 7단계 워크플로우가 필요하면 ./setup.sh --with-wf"
 fi

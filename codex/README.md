@@ -19,6 +19,11 @@
 | `run-wf.sh` | Codex host용 최소 runner |
 | `templates/provider-config.codex-primary.json` | Codex host 기본 provider 예시 |
 
+기본 `./setup.sh`는 CORE 스킬만 링크합니다. 이 adapter와 `awf wf` CLI는
+editable 설치된 ai-workflow-tools source checkout의 WF 스킬을 사용하므로
+`--with-wf` 없이도 실행됩니다. Claude Code의 `/wf` 슬래시 스킬만
+`./setup.sh --with-wf` 설치가 필요합니다.
+
 ## 사용 예시
 
 ```bash

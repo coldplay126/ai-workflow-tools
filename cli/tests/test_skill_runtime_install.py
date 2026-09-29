@@ -160,9 +160,30 @@ def test_unlinker_requires_source_and_root(tmp_path: Path) -> None:
     missing_args = run_unlinker(SKILLS_ROOT / "wf")
     assert missing_args.returncode == 2
     assert "usage:" in missing_args.stderr
-    missing_source = run_unlinker(tmp_path / "missing", tmp_path / "root")
-    assert missing_source.returncode == 1
-    assert "source skill directory does not exist" in missing_source.stderr
+    missing_source = REPO_ROOT / "claude" / "skills" / "missing-skill"
+    root = tmp_path / "root"
+    root.mkdir()
+    dangling = root / "missing-skill"
+    dangling.symlink_to(missing_source)
+    removed = run_unlinker(missing_source, root)
+    assert removed.returncode == 0, removed.stderr
+    assert not dangling.is_symlink()
+    assert f"removed: {dangling}" in removed.stdout
+
+
+def test_unlinker_resolves_logical_checkout_alias(tmp_path: Path) -> None:
+    alias = tmp_path / "checkout-alias"
+    alias.symlink_to(REPO_ROOT, target_is_directory=True)
+    root = tmp_path / "skills"
+    root.mkdir()
+    target = root / "wf"
+    target.symlink_to(alias / "claude" / "skills" / "wf")
+
+    removed = run_unlinker(alias / "claude" / "skills" / "wf", root)
+
+    assert removed.returncode == 0, removed.stderr
+    assert not target.is_symlink()
+    assert (SKILLS_ROOT / "wf" / "SKILL.md").is_file()
 
 
 def runtime_roots(home: Path) -> list[Path]:
@@ -174,7 +195,10 @@ def runtime_roots(home: Path) -> list[Path]:
 
 
 def run_setup(
-    tmp_path: Path, *args: str, extra_env: dict[str, str] | None = None
+    tmp_path: Path,
+    *args: str,
+    extra_env: dict[str, str] | None = None,
+    setup_path: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     home = tmp_path / "home"
     fake_bin = tmp_path / "bin"
@@ -202,7 +226,7 @@ def run_setup(
     env.pop("AWF_WITH_WF", None)
     env.update(extra_env or {})
     return subprocess.run(
-        ["bash", str(REPO_ROOT / "setup.sh"), *args],
+        ["bash", str(setup_path or REPO_ROOT / "setup.sh"), *args],
         cwd=REPO_ROOT,
         env=env,
         text=True,
@@ -215,7 +239,6 @@ def test_setup_installs_only_core_into_three_runtime_roots(tmp_path: Path) -> No
     completed = run_setup(tmp_path)
     assert completed.returncode == 0, completed.stderr
     assert "setup.sh --with-wf" in completed.stdout
-    assert "WF Dual Mode" not in completed.stdout
     for root in runtime_roots(tmp_path / "home"):
         assert sorted(path.name for path in root.iterdir()) == CORE_SKILLS
         assert all((root / skill / "SKILL.md").is_file() for skill in CORE_SKILLS)
@@ -231,15 +254,18 @@ def test_setup_installs_only_core_into_three_runtime_roots(tmp_path: Path) -> No
 
 @pytest.mark.parametrize(
     ("args", "extra_env"),
-    [(("--with-wf",), {}), ((), {"AWF_WITH_WF": "1"})],
+    [
+        (("--with-wf",), {}),
+        ((), {"AWF_WITH_WF": "1"}),
+        ((), {"AWF_WITH_WF": "true"}),
+        ((), {"AWF_WITH_WF": "YES"}),
+    ],
 )
 def test_setup_opt_in_installs_all_skills(
     tmp_path: Path, args: tuple[str, ...], extra_env: dict[str, str]
 ) -> None:
     completed = run_setup(tmp_path, *args, extra_env=extra_env)
     assert completed.returncode == 0, completed.stderr
-    assert len(EXPECTED_SKILLS) == 16
-    assert "WF Dual Mode" in completed.stdout
     for root in runtime_roots(tmp_path / "home"):
         assert sorted(path.name for path in root.iterdir()) == EXPECTED_SKILLS
 
@@ -272,6 +298,44 @@ def test_setup_opt_in_default_opt_in_transition_across_overridden_roots(tmp_path
         assert sorted(path.name for path in root.iterdir()) == EXPECTED_SKILLS
 
 
+def test_setup_alias_removes_old_logical_checkout_links(tmp_path: Path) -> None:
+    alias = tmp_path / "checkout-alias"
+    alias.symlink_to(REPO_ROOT, target_is_directory=True)
+    setup = alias / "setup.sh"
+    first = run_setup(tmp_path, "--with-wf", setup_path=setup)
+    assert first.returncode == 0, first.stderr
+    roots = runtime_roots(tmp_path / "home")
+    for root in roots:
+        for skill in WF_SKILLS:
+            target = root / skill
+            target.unlink()
+            target.symlink_to(alias / "claude" / "skills" / skill)
+
+    second = run_setup(tmp_path, setup_path=setup)
+
+    assert second.returncode == 0, second.stderr
+    for root in roots:
+        assert sorted(path.name for path in root.iterdir()) == CORE_SKILLS
+        assert all(f"removed: {root / skill}" in second.stdout for skill in WF_SKILLS)
+
+
+def test_setup_blocked_core_does_not_uninstall_wf(tmp_path: Path) -> None:
+    first = run_setup(tmp_path, "--with-wf")
+    assert first.returncode == 0, first.stderr
+    roots = runtime_roots(tmp_path / "home")
+    owned = roots[1] / "multi-agent"
+    owned.unlink()
+    owned.write_text("keep")
+
+    blocked = run_setup(tmp_path)
+
+    assert blocked.returncode == 3
+    assert owned.read_text() == "keep"
+    for root in roots:
+        assert all((root / skill).is_symlink() for skill in WF_SKILLS)
+    assert "removed:" not in blocked.stdout
+
+
 def test_setup_keeps_unowned_wf_paths_in_default_mode(tmp_path: Path) -> None:
     claude, agents, omp = runtime_roots(tmp_path / "home")
     for root in (claude, agents, omp):
@@ -296,6 +360,22 @@ def test_setup_rejects_unknown_argument(tmp_path: Path) -> None:
     completed = run_setup(tmp_path, "--unexpected")
     assert completed.returncode == 2
     assert "usage:" in completed.stderr
+
+
+@pytest.mark.parametrize("value", ["maybe", "10"])
+def test_setup_rejects_unknown_opt_in_value(tmp_path: Path, value: str) -> None:
+    completed = run_setup(tmp_path, extra_env={"AWF_WITH_WF": value})
+    assert completed.returncode == 2
+    assert "usage:" in completed.stderr
+    assert not runtime_roots(tmp_path / "home")[0].exists()
+
+
+@pytest.mark.parametrize("flag", ["-h", "--help"])
+def test_setup_help_exits_without_installing(tmp_path: Path, flag: str) -> None:
+    completed = run_setup(tmp_path, flag)
+    assert completed.returncode == 0
+    assert "usage:" in completed.stdout
+    assert not runtime_roots(tmp_path / "home")[0].exists()
 
 
 def test_setup_ignores_unrelated_command_files(tmp_path: Path) -> None:
